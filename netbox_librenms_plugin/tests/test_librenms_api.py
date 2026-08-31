@@ -7,16 +7,11 @@ with particular focus on HTTP method correctness to prevent regression bugs.
 
 import inspect
 import re
-from unittest.mock import MagicMock, patch
+import time
+from types import SimpleNamespace
 
 import pytest
 import requests
-
-from netbox_librenms_plugin.tests import test_librenms_api_helpers
-
-# Bind the helper's autouse fixture into this module so it patches the config here only.
-# `pytest_plugins` would register it session-wide and shadow PLUGINS_CONFIG for later tests.
-mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
 
 
 class TestApiTokenStaysOnItsHost:
@@ -99,36 +94,38 @@ class TestApiTokenStaysOnItsHost:
 
 
 # =============================================================================
-# Test Class 1: Initialization (3 tests)
+# Initialization
 # =============================================================================
 
 
 class TestLibreNMSAPIInit:
     """Test LibreNMSAPI initialization and configuration loading."""
 
-    def test_init_allows_cleartext_non_loopback_server(self, mock_librenms_config):
+    def test_init_allows_cleartext_non_loopback_server(self, configure_librenms):
         """An operator may choose HTTP for a remote LibreNMS server."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {
-            "default": {
-                "librenms_url": "http://librenms.example.test",
-                "api_token": "test-token",
+        configure_librenms(
+            {
+                "default": {
+                    "librenms_url": "http://librenms.example.test",
+                    "api_token": "test-token",
+                }
             }
-        }
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         assert LibreNMSAPI(server_key="default").librenms_url == "http://librenms.example.test"
 
-    def test_init_allows_cleartext_loopback_server(self, mock_librenms_config):
+    def test_init_allows_cleartext_loopback_server(self, configure_librenms):
         """Local test and development servers may use HTTP without crossing a network."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {
-            "default": {
-                "librenms_url": "http://127.0.0.1:8000",
-                "api_token": "test-token",
+        configure_librenms(
+            {
+                "default": {
+                    "librenms_url": "http://127.0.0.1:8000",
+                    "api_token": "test-token",
+                }
             }
-        }
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -143,9 +140,9 @@ class TestLibreNMSAPIInit:
             "https://librenms.example.test#",
         ],
     )
-    def test_init_rejects_query_and_fragment_in_base_url(self, mock_librenms_config, url):
+    def test_init_rejects_query_and_fragment_in_base_url(self, configure_librenms, url):
         """A query or fragment must not absorb the API path appended to the base URL."""
-        mock_librenms_config["mock_config"].return_value = {"default": {"librenms_url": url, "api_token": "test-token"}}
+        configure_librenms({"default": {"librenms_url": url, "api_token": "test-token"}})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -159,9 +156,9 @@ class TestLibreNMSAPIInit:
             "https://librenms.example.test:99999",
         ],
     )
-    def test_a_server_with_an_unusable_port_is_neither_offered_nor_built(self, mock_librenms_config, url, caplog):
+    def test_a_server_with_an_unusable_port_is_neither_offered_nor_built(self, configure_librenms, url, caplog):
         """The picker must not offer a server the constructor then refuses to bind."""
-        mock_librenms_config["mock_config"].return_value = {"default": {"librenms_url": url, "api_token": "test-token"}}
+        configure_librenms({"default": {"librenms_url": url, "api_token": "test-token"}})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -172,7 +169,7 @@ class TestLibreNMSAPIInit:
         with pytest.raises(ValueError, match="must use a valid port"):
             LibreNMSAPI(server_key="default")
 
-    def test_init_with_multi_server_config(self, mock_librenms_config):
+    def test_init_with_multi_server_config(self, configure_librenms):
         """Verify initialization with multi-server configuration."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -183,23 +180,15 @@ class TestLibreNMSAPIInit:
         assert api.cache_timeout == 300
         assert api.verify_ssl is True
 
-    def test_init_with_legacy_config(self, mock_librenms_config):
+    def test_init_with_legacy_config(self, configure_librenms):
         """Verify initialization with legacy single-server config."""
-        mock_config = mock_librenms_config["mock_config"]
-
-        # Return None for 'servers' to trigger legacy path
-        def config_side_effect(plugin, key, default=None):
-            if key == "servers":
-                return None
-            legacy = {
-                "librenms_url": "https://legacy.example.com",
-                "api_token": "legacy-token",
-                "cache_timeout": 600,
-                "verify_ssl": False,
-            }
-            return legacy.get(key, default)
-
-        mock_config.side_effect = config_side_effect
+        configure_librenms(
+            None,
+            librenms_url="https://legacy.example.com",
+            api_token="legacy-token",
+            cache_timeout=600,
+            verify_ssl=False,
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -207,17 +196,13 @@ class TestLibreNMSAPIInit:
 
         assert api.librenms_url == "https://legacy.example.com"
 
-    def test_legacy_mode_normalizes_server_key_to_default(self, mock_librenms_config):
+    def test_legacy_mode_normalizes_server_key_to_default(self, configure_librenms):
         """In legacy single-server mode a posted/stale server_key must not survive as api.server_key (it would become a bogus cache/redirect discriminator)."""
-        mock_config = mock_librenms_config["mock_config"]
-
-        def config_side_effect(plugin, key, default=None):
-            if key == "servers":
-                return None  # legacy single-server mode
-            legacy = {"librenms_url": "https://legacy.example.com", "api_token": "legacy-token"}
-            return legacy.get(key, default)
-
-        mock_config.side_effect = config_side_effect
+        configure_librenms(
+            None,
+            librenms_url="https://legacy.example.com",
+            api_token="legacy-token",
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -226,7 +211,7 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "default"
 
     @pytest.mark.django_db  # an unset key falls back to the stored selected_server, which is a DB read
-    def test_init_non_string_server_key_falls_back_cleanly(self, mock_librenms_config):
+    def test_init_non_string_server_key_falls_back_cleanly(self, configure_librenms):
         """An unhashable non-string server_key (e.g. a list) is treated as unset, not raised on at the dict membership check."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -236,17 +221,9 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "default"
         assert api.librenms_url == "https://librenms.example.com"
 
-    def test_init_fallback_skips_incomplete_server_entry(self, mock_librenms_config):
+    def test_init_fallback_skips_incomplete_server_entry(self, configure_librenms):
         """The auto-default fallback skips a structurally incomplete entry (dict without url/token) and picks the first usable server."""
-        mock_config = mock_librenms_config["mock_config"]
-
-        def config_side_effect(plugin, key, default=None):
-            if key == "servers":
-                # 'bad' is a dict but carries no url/token; 'prod' is usable.
-                return {"bad": {}, "prod": {"librenms_url": "https://prod.example.com", "api_token": "prod-token"}}
-            return default
-
-        mock_config.side_effect = config_side_effect
+        configure_librenms({"bad": {}, "prod": {"librenms_url": "https://prod.example.com", "api_token": "prod-token"}})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -256,10 +233,9 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "prod"
         assert api.librenms_url == "https://prod.example.com"
 
-    def test_init_missing_config_raises_valueerror(self, mock_librenms_config):
+    def test_init_missing_config_raises_valueerror(self, configure_librenms):
         """Verify ValueError raised when configuration is missing."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = None
+        configure_librenms(None)
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -269,24 +245,20 @@ class TestLibreNMSAPIInit:
         with pytest.raises(ValueError, match=r"URL or API token is not configured for server 'default'"):
             LibreNMSAPI(server_key="default")
 
-    def test_init_nonexistent_server_key_raises_keyerror(self, mock_librenms_config):
+    def test_init_nonexistent_server_key_raises_keyerror(self, configure_librenms):
         """Verify KeyError raised when specific server_key doesn't exist."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         with pytest.raises(KeyError, match="nonexistent"):
             LibreNMSAPI(server_key="nonexistent")
 
-    def test_init_legacy_mode_binds_single_server_for_non_default_key(self, mock_librenms_config):
+    def test_init_legacy_mode_binds_single_server_for_non_default_key(self, configure_librenms):
         """Legacy single-server mode has only the implicit 'default' server, bound to the single configured URL/token."""
-        mock_config = mock_librenms_config["mock_config"]
-
-        def config_side_effect(plugin, key, default=None):
-            if key == "servers":
-                return None  # legacy single-server mode (no multi-server dict)
-            legacy = {"librenms_url": "https://legacy.example.com", "api_token": "legacy-token"}
-            return legacy.get(key, default)
-
-        mock_config.side_effect = config_side_effect
+        configure_librenms(
+            None,
+            librenms_url="https://legacy.example.com",
+            api_token="legacy-token",
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -296,15 +268,16 @@ class TestLibreNMSAPIInit:
         # The default key must still work in legacy mode.
         assert LibreNMSAPI(server_key="default").librenms_url == "https://legacy.example.com"
 
-    def test_init_default_falls_back_to_first_server(self, mock_librenms_config):
+    def test_init_default_falls_back_to_first_server(self, configure_librenms):
         """Verify 'default' key falls back to first configured server."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {
-            "primary": {
-                "librenms_url": "https://primary.example.com",
-                "api_token": "primary-token",
+        configure_librenms(
+            {
+                "primary": {
+                    "librenms_url": "https://primary.example.com",
+                    "api_token": "primary-token",
+                }
             }
-        }
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -313,12 +286,9 @@ class TestLibreNMSAPIInit:
         assert api.librenms_url == "https://primary.example.com"
 
     @pytest.mark.django_db
-    def test_init_stale_auto_selected_server_falls_back(self, mock_librenms_config):
+    def test_init_stale_auto_selected_server_falls_back(self, configure_librenms):
         """Issue #110: a stale LibreNMSSettings.selected_server (no longer configured) must fall back to the first server rather than hard-fail — it was auto-resolved, not explicitly requested, so the KeyError guard must not fire."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {
-            "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
-        }
+        configure_librenms({"primary": {"librenms_url": "https://primary.example.com", "api_token": "t"}})
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "gone-server"})
@@ -329,12 +299,9 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "primary"
 
     @pytest.mark.django_db
-    def test_init_blank_server_key_treated_as_non_explicit_falls_back(self, mock_librenms_config):
+    def test_init_blank_server_key_treated_as_non_explicit_falls_back(self, configure_librenms):
         """A blank/whitespace server_key is 'no key': a stale selected_server must still fall back, not hard-fail. Treating '' as explicit would mark the auto-resolved key explicit and defeat the issue #110 fallback (KeyError)."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {
-            "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
-        }
+        configure_librenms({"primary": {"librenms_url": "https://primary.example.com", "api_token": "t"}})
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "gone-server"})
@@ -345,13 +312,14 @@ class TestLibreNMSAPIInit:
             api = LibreNMSAPI(server_key=blank)  # blank → auto-resolved from the (stale) settings
             assert api.server_key == "primary"
 
-    def test_init_skips_leading_malformed_server_entry(self, mock_librenms_config):
+    def test_init_skips_leading_malformed_server_entry(self, configure_librenms):
         """Issue #110: the first-entry fallback must pick the first *valid* mapping, skipping a malformed (non-dict) leading entry that would otherwise raise at the config read."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {
-            "broken": "not-a-dict",
-            "good": {"librenms_url": "https://good.example.com", "api_token": "t"},
-        }
+        configure_librenms(
+            {
+                "broken": "not-a-dict",
+                "good": {"librenms_url": "https://good.example.com", "api_token": "t"},
+            }
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -359,33 +327,36 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "good"
         assert api.librenms_url == "https://good.example.com"
 
-    def test_init_all_malformed_server_entries_raise_valueerror(self, mock_librenms_config):
+    def test_init_all_malformed_server_entries_raise_valueerror(self, configure_librenms):
         """Issue #110: when no configured entry is a valid mapping, raise a clear ValueError instead of crashing on the malformed entry's config read."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {"broken": "not-a-dict", "also-bad": 123}
+        configure_librenms({"broken": "not-a-dict", "also-bad": 123})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         with pytest.raises(ValueError):
             LibreNMSAPI(server_key="default")
 
-    def test_init_selected_key_malformed_raises_valueerror_not_typeerror(self, mock_librenms_config):
+    def test_init_selected_key_malformed_raises_valueerror_not_typeerror(self, configure_librenms):
         """Issue #110: an explicitly requested key that *exists* but maps to a non-dict must raise a clear ValueError, not an opaque TypeError from indexing the string at the config read."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {"broken": "not-a-dict"}
+        configure_librenms({"broken": "not-a-dict"})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         with pytest.raises(ValueError, match="expected a mapping"):
             LibreNMSAPI(server_key="broken")
 
-    def test_get_available_servers_skips_malformed_entry(self, mock_librenms_config):
+    def test_get_available_servers_skips_malformed_entry(self, configure_librenms):
         """get_available_servers() powers the sync-POST server-key membership check."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {
-            "good": {"librenms_url": "https://good.example.com", "api_token": "t", "display_name": "Good"},
-            "broken": "not-a-dict",
-        }
+        configure_librenms(
+            {
+                "good": {
+                    "librenms_url": "https://good.example.com",
+                    "api_token": "t",
+                    "display_name": "Good",
+                },
+                "broken": "not-a-dict",
+            }
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -394,24 +365,28 @@ class TestLibreNMSAPIInit:
         assert servers == {"good": "Good"}
         assert "broken" not in servers
 
-    def test_init_incomplete_dict_entry_raises_valueerror_not_keyerror(self, mock_librenms_config):
+    def test_init_incomplete_dict_entry_raises_valueerror_not_keyerror(self, configure_librenms):
         """A dict-shaped but incomplete entry ({"bad": {}}) passes the isinstance check, so the config read must fail with ValueError, not an opaque KeyError on config['librenms_url']."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {"bad": {}}
+        configure_librenms({"bad": {}})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         with pytest.raises(ValueError):
             LibreNMSAPI(server_key="bad")
 
-    def test_get_available_servers_skips_incomplete_dict_entry(self, mock_librenms_config):
+    def test_get_available_servers_skips_incomplete_dict_entry(self, configure_librenms):
         """An incomplete dict entry (no librenms_url/api_token) must not be selectable — it would pass the membership check and then crash LibreNMSAPI construction."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {
-            "good": {"librenms_url": "https://good.example.com", "api_token": "t", "display_name": "Good"},
-            "bad": {},  # dict-shaped but unusable
-            "tokenless": {"librenms_url": "https://x.example.com"},  # url but no token
-        }
+        configure_librenms(
+            {
+                "good": {
+                    "librenms_url": "https://good.example.com",
+                    "api_token": "t",
+                    "display_name": "Good",
+                },
+                "bad": {},
+                "tokenless": {"librenms_url": "https://x.example.com"},
+            }
+        )
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -421,10 +396,9 @@ class TestLibreNMSAPIInit:
         assert "bad" not in servers
         assert "tokenless" not in servers
 
-    def test_init_non_mapping_server_config_raises_valueerror(self, mock_librenms_config):
+    def test_init_non_mapping_server_config_raises_valueerror(self, configure_librenms):
         """A structurally invalid (non-mapping) server entry must raise ValueError, not leak a TypeError from the dict access — so build_librenms_api falls back to None."""
-        mock_config = mock_librenms_config["mock_config"]
-        mock_config.return_value = {"badserver": None}
+        configure_librenms({"badserver": None})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI, build_librenms_api
 
@@ -435,462 +409,137 @@ class TestLibreNMSAPIInit:
 
 
 # =============================================================================
-# Test Class 2: Connection Testing (4 tests)
+# Connection testing
 # =============================================================================
 
 
 class TestLibreNMSAPIConnection:
     """Test connection testing functionality."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_connection_success(self, mock_get, mock_librenms_config):
+    PATH = "/api/v0/system"
+
+    def test_connection_success(self, local_librenms_api, librenms_server):
         """Verify successful connection test."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "system": [{"local_ver": "24.1.0"}],
-        }
+        librenms_server.register(
+            self.PATH,
+            {"status": "ok", "system": [{"local_ver": "24.1.0"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        result = local_librenms_api.test_connection()
 
-        api = LibreNMSAPI(server_key="default")
-        result = api.test_connection()
+        assert result == {"local_ver": "24.1.0"}
+        assert [(request["method"], request["path"]) for request in librenms_server.requests] == [("GET", self.PATH)]
 
-        assert result is not None
-        assert "error" not in result
-        mock_get.assert_called_once()
-        assert "/api/v0/system" in mock_get.call_args[0][0]
-
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_connection_auth_failure_401(self, mock_get, mock_librenms_config):
+    def test_connection_auth_failure_401(self, local_librenms_api, librenms_server):
         """Verify 401 unauthorized handling."""
-        mock_get.return_value.status_code = 401
+        librenms_server.register(self.PATH, {"status": "error"}, status=401, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.test_connection()
+        result = local_librenms_api.test_connection()
 
         assert result.get("error") is True
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_connection_auth_failure_403(self, mock_get, mock_librenms_config):
+    def test_connection_auth_failure_403(self, local_librenms_api, librenms_server):
         """Verify 403 forbidden handling."""
-        mock_get.return_value.status_code = 403
+        librenms_server.register(self.PATH, {"status": "error"}, status=403, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.test_connection()
+        result = local_librenms_api.test_connection()
 
         assert result.get("error") is True
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_connection_timeout(self, mock_get, mock_librenms_config):
+    def test_connection_timeout(self, local_librenms_api, librenms_server, monkeypatch):
         """Verify timeout exception handling."""
-        mock_get.side_effect = requests.exceptions.Timeout("Connection timed out")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        def delayed_response(**request):
+            time.sleep(0.05)
+            return 200, {"status": "ok", "system": [{"local_ver": "late"}]}
 
-        api = LibreNMSAPI(server_key="default")
-        result = api.test_connection()
+        librenms_server.register(self.PATH, delayed_response, method="GET")
+        monkeypatch.setattr("netbox_librenms_plugin.librenms_api.DEFAULT_API_TIMEOUT", 0.01)
+
+        result = local_librenms_api.test_connection()
 
         assert result.get("error") is True
         assert "timeout" in result.get("message", "").lower()
 
 
-# =============================================================================
-# Test Class 3: HTTP Methods - CRITICAL (18 tests)
-# =============================================================================
-
-
-class TestLibreNMSAPIHttpMethods:
-    """Verify that each API method keeps its required HTTP verb during refactoring."""
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_info_uses_get(self, mock_get, mock_post, mock_delete, mock_librenms_config):
-        """Verify get_device_info uses GET, never DELETE."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 1}],
-        }
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_device_info(device_id=1)
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-        mock_post.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_add_device_uses_post(self, mock_post, mock_get, mock_delete, mock_librenms_config):
-        """Verify add_device uses POST."""
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"status": "ok", "device_id": 42}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.add_device(
-            data={
-                "hostname": "test.example.com",
-                "snmp_version": "v2c",
-                "community": "public",
-            }
-        )
-
-        mock_post.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.patch")
-    def test_update_device_field_uses_patch(self, mock_patch, mock_delete, mock_librenms_config):
-        """Verify update_device_field uses PATCH."""
-        mock_patch.return_value.status_code = 200
-        mock_patch.return_value.json.return_value = {"status": "ok"}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.update_device_field(device_id=1, field_data={"field": ["location"], "data": ["DC1"]})
-
-        mock_patch.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_id_by_ip_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_device_id_by_ip uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 10}],
-        }
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_device_id_by_ip("192.168.1.1")
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_id_by_hostname_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_device_id_by_hostname uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 20}],
-        }
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_device_id_by_hostname("test-host")
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_ports_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_ports uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "ports": []}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_ports(device_id=1)
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_locations_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_locations uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "locations": []}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_locations()
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_add_location_uses_post(self, mock_post, mock_delete, mock_librenms_config):
-        """Verify add_location uses POST."""
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {
-            "status": "ok",
-            "message": "Location created #1",
-        }
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.add_location(location_data={"location": "DC1"})
-
-        mock_post.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.patch")
-    def test_update_location_uses_patch(self, mock_patch, mock_delete, mock_librenms_config):
-        """Verify update_location uses PATCH."""
-        mock_patch.return_value.status_code = 200
-        mock_patch.return_value.json.return_value = {
-            "status": "ok",
-            "message": "Location updated",
-        }
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.update_location(location_name="DC1", location_data={"location": "DC1-Updated"})
-
-        mock_patch.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_links_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_device_links uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "links": []}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_device_links(device_id=1)
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_ips_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_device_ips uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "addresses": []}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_device_ips(device_id=1)
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_port_by_id_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_port_by_id uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "port": [{}]}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_port_by_id(port_id=1)
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_inventory_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_device_inventory uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "inventory": []}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_device_inventory(device_id=1)
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_poller_groups_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_poller_groups uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "groups": []}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_poller_groups()
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_inventory_filtered_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify get_inventory_filtered uses GET."""
-        mock_get.return_value.status_code = 200
-        # Return non-empty inventory so it doesn't fall back to get_device_inventory
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "inventory": [{"entPhysicalClass": "chassis"}],
-        }
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.get_inventory_filtered(device_id=1, ent_physical_class="chassis")
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.delete")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_list_devices_uses_get(self, mock_get, mock_delete, mock_librenms_config):
-        """Verify list_devices uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "devices": []}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.list_devices()
-
-        mock_get.assert_called_once()
-        mock_delete.assert_not_called()
-
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_test_connection_uses_get(self, mock_get, mock_librenms_config):
-        """Verify test_connection uses GET."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok"}
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        api.test_connection()
-
-        mock_get.assert_called_once()
-
-
 # ====================================================================================
-# Test Class 4: Device Lookup (6 tests)
+# Device lookup
 # ====================================================================================
 
 
 class TestLibreNMSAPIDeviceLookup:
     """Test device lookup functionality."""
 
-    def test_get_librenms_id_from_custom_field(self, mock_librenms_config):
+    @staticmethod
+    def _device(*, stored_id=None, ip_address=None, name="test-device"):
+        primary_ip = None
+        if ip_address is not None:
+            primary_ip = SimpleNamespace(address=SimpleNamespace(ip=ip_address), dns_name="")
+        custom_field_data = {} if stored_id is None else {"librenms_id": stored_id}
+        return SimpleNamespace(
+            name=name,
+            cf=dict(custom_field_data),
+            custom_field_data=custom_field_data,
+            primary_ip=primary_ip,
+            _meta=SimpleNamespace(model_name="device"),
+            pk=123,
+        )
+
+    def test_get_librenms_id_from_custom_field(self, mock_librenms_api):
         """Returns ID when already stored in cf['librenms_id']."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        device = self._device(stored_id=42)
 
-        api = LibreNMSAPI(server_key="default")
-
-        device = MagicMock()
-        device.name = "test-device"
-        device.cf = {"librenms_id": 42}
-
-        result = api.get_librenms_id(device)
+        result = mock_librenms_api.get_librenms_id(device)
         assert result == 42
 
-    def test_get_librenms_id_normalizes_string_to_int(self, mock_librenms_config):
+    def test_get_librenms_id_normalizes_string_to_int(self, mock_librenms_api):
         """Returns int for string-stored librenms_id; read path uses auto_save=False so no write-back."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        device = self._device(stored_id="42")
 
-        api = LibreNMSAPI(server_key="default")
-
-        device = MagicMock()
-        device.name = "test-device"
-        device.cf = {"librenms_id": "42"}
-        device.custom_field_data = {"librenms_id": "42"}
-
-        result = api.get_librenms_id(device)
+        result = mock_librenms_api.get_librenms_id(device)
         assert result == 42
-        # auto_save=False in this read path — normalization is NOT written back
-        device.save.assert_not_called()
+        assert device.custom_field_data == {"librenms_id": "42"}
 
-    def test_get_librenms_id_empty_string_falls_through_to_discovery(self, mock_librenms_config):
+    def test_get_librenms_id_empty_string_falls_through_to_discovery(
+        self,
+        local_librenms_api,
+        librenms_server,
+    ):
         """An empty-string librenms_id is treated as not set (falls through to API discovery)."""
-        from unittest.mock import patch
+        device = self._device(stored_id="")
+        path = "/api/v0/devices/test-device"
+        librenms_server.register(path, {"status": "ok", "devices": []}, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        result = local_librenms_api.get_librenms_id(device)
 
-        api = LibreNMSAPI(server_key="default")
-
-        device = MagicMock()
-        device.name = "test-device"
-        device.cf = {"librenms_id": ""}
-        device.primary_ip = None
-
-        with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
-            mock_cache.get.return_value = None
-            with patch.object(api, "get_device_id_by_hostname", return_value=None):
-                result = api.get_librenms_id(device)
         assert result is None
+        assert [request["path"] for request in librenms_server.requests] == [path]
 
-    @patch("netbox_librenms_plugin.librenms_api.cache")
-    def test_get_librenms_id_from_cache(self, mock_cache, mock_librenms_config):
+    def test_get_librenms_id_from_cache(self, mock_librenms_api):
         """Returns ID from Django cache when not in custom field."""
-        mock_cache.get.return_value = 99
+        from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        device = self._device()
+        cache.set(mock_librenms_api._get_cache_key(device), 99)
 
-        api = LibreNMSAPI(server_key="default")
-
-        device = MagicMock()
-        device.name = "test-device"
-        device.cf = {}
-
-        result = api.get_librenms_id(device)
+        result = mock_librenms_api.get_librenms_id(device)
         assert result == 99
 
-    @patch("netbox_librenms_plugin.librenms_api.cache")
-    def test_get_librenms_id_handles_objects_without_device_identity_attrs(self, mock_cache, mock_librenms_config):
+    def test_get_librenms_id_handles_objects_without_device_identity_attrs(self, mock_librenms_api):
         """Objects like interfaces should return None cleanly when they have no stored or cached ID."""
-        from types import SimpleNamespace
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-
         interface = SimpleNamespace(
             cf={},
             _meta=SimpleNamespace(model_name="interface"),
             pk=123,
         )
 
-        mock_cache.get.return_value = None
-
-        result = api.get_librenms_id(interface)
+        result = mock_librenms_api.get_librenms_id(interface)
 
         assert result is None
 
-    @patch("netbox_librenms_plugin.librenms_api.cache")
-    def test_get_stored_librenms_id_skips_hostname_lookup(self, mock_cache, mock_librenms_config):
+    def test_get_stored_librenms_id_skips_hostname_lookup(self, local_librenms_api, librenms_server):
         """Stored-only helper must not trigger discovery lookups for interface-like objects."""
-        from types import SimpleNamespace
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-
         interface = SimpleNamespace(
             cf={},
             name="GigabitEthernet1/0/1",
@@ -898,126 +547,86 @@ class TestLibreNMSAPIDeviceLookup:
             pk=123,
         )
 
-        mock_cache.get.return_value = None
-
-        with patch.object(api, "get_device_id_by_hostname") as mock_hostname_lookup:
-            result = api.get_stored_librenms_id(interface)
+        result = local_librenms_api.get_stored_librenms_id(interface)
 
         assert result is None
-        mock_hostname_lookup.assert_not_called()
+        assert librenms_server.requests == []
 
-    @patch("netbox_librenms_plugin.librenms_api.cache")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_librenms_id_by_ip_lookup(self, mock_get, mock_cache, mock_librenms_config):
+    def test_get_librenms_id_by_ip_lookup(self, local_librenms_api, librenms_server):
         """Performs IP lookup and caches result."""
-        mock_cache.get.return_value = None
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 55}],
-        }
+        from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        device = self._device(ip_address="192.0.2.1")
+        path = "/api/v0/devices/192.0.2.1"
+        librenms_server.register(
+            path,
+            {"status": "ok", "devices": [{"device_id": 55}]},
+            method="GET",
+        )
 
-        api = LibreNMSAPI(server_key="default")
+        result = local_librenms_api.get_librenms_id(device)
 
-        device = MagicMock()
-        device.name = "test-device"
-        device.cf = {}
-        device.primary_ip4 = MagicMock()
-        device.primary_ip4.address = MagicMock()
-        device.primary_ip4.address.ip = "10.0.0.1"
-
-        result = api.get_librenms_id(device)
         assert result == 55
-        mock_cache.set.assert_called_once()
+        assert cache.get(local_librenms_api._get_cache_key(device)) == 55
+        assert [request["path"] for request in librenms_server.requests] == [path]
 
-    @patch("netbox_librenms_plugin.librenms_api.cache")
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_librenms_id_by_hostname_lookup(self, mock_get, mock_cache, mock_librenms_config):
+    def test_get_librenms_id_by_hostname_lookup(self, local_librenms_api, librenms_server):
         """Falls back to hostname lookup."""
-        mock_cache.get.return_value = None
+        device = self._device(ip_address="192.0.2.1")
+        ip_path = "/api/v0/devices/192.0.2.1"
+        hostname_path = "/api/v0/devices/test-device"
+        librenms_server.register(ip_path, {"status": "ok", "devices": []}, method="GET")
+        librenms_server.register(
+            hostname_path,
+            {"status": "ok", "devices": [{"device_id": 77}]},
+            method="GET",
+        )
 
-        # First call (IP lookup) returns empty, second call (hostname lookup) returns device
-        call_count = [0]
+        result = local_librenms_api.get_librenms_id(device)
 
-        def side_effect(*args, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            call_count[0] += 1
-            if call_count[0] == 2:  # Second call is hostname lookup
-                resp.json.return_value = {
-                    "status": "ok",
-                    "devices": [{"device_id": 77}],
-                }
-            else:
-                resp.json.return_value = {"status": "ok", "devices": []}
-            return resp
-
-        mock_get.side_effect = side_effect
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-
-        device = MagicMock()
-        device.name = "test-device"
-        device.cf = {}
-        device.primary_ip4 = MagicMock()
-        device.primary_ip4.address = MagicMock()
-        device.primary_ip4.address.ip = "10.0.0.1"
-
-        result = api.get_librenms_id(device)
         assert result == 77
+        assert [request["path"] for request in librenms_server.requests] == [ip_path, hostname_path]
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_id_by_ip_not_found(self, mock_get, mock_librenms_config):
+    def test_get_device_id_by_ip_not_found(self, local_librenms_api, librenms_server):
         """Returns None when IP not found in LibreNMS."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "devices": []}
+        path = "/api/v0/devices/192.0.2.99"
+        librenms_server.register(path, {"status": "ok", "devices": []}, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.get_device_id_by_ip("192.168.99.99")
+        result = local_librenms_api.get_device_id_by_ip("192.0.2.99")
 
         assert result is None
+        assert librenms_server.requests[-1]["method"] == "GET"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_id_by_hostname_not_found(self, mock_get, mock_librenms_config):
+    def test_get_device_id_by_hostname_not_found(self, local_librenms_api, librenms_server):
         """Returns None when hostname not found."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "devices": []}
+        path = "/api/v0/devices/nonexistent.example.com"
+        librenms_server.register(path, {"status": "ok", "devices": []}, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.get_device_id_by_hostname("nonexistent-host")
+        result = local_librenms_api.get_device_id_by_hostname("nonexistent.example.com")
 
         assert result is None
+        assert librenms_server.requests[-1]["method"] == "GET"
 
 
 # =============================================================================
-# Test Class 5: Device Operations (6 tests)
+# Device operations
 # =============================================================================
 
 
 class TestLibreNMSAPIDeviceOperations:
     """Test device CRUD operations."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_add_device_success(self, mock_post, mock_librenms_config):
+    DEVICES_PATH = "/api/v0/devices"
+
+    def test_add_device_success(self, local_librenms_api, librenms_server):
         """Verify successful device addition."""
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {
-            "status": "ok",
-            "message": "Device added successfully",
-        }
+        librenms_server.register(
+            self.DEVICES_PATH,
+            {"status": "ok", "message": "Device added successfully"},
+            method="POST",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.add_device(
+        result = local_librenms_api.add_device(
             data={
                 "hostname": "test-device.example.com",
                 "snmp_version": "v2c",
@@ -1027,20 +636,19 @@ class TestLibreNMSAPIDeviceOperations:
 
         assert result[0] is True
         assert result[1] == "Device added successfully."
+        assert [(request["method"], request["path"]) for request in librenms_server.requests] == [
+            ("POST", self.DEVICES_PATH)
+        ]
 
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_add_device_snmpv1_success(self, mock_post, mock_librenms_config):
+    def test_add_device_snmpv1_success(self, local_librenms_api, librenms_server):
         """Verify successful device addition using SNMPv1."""
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {
-            "status": "ok",
-            "message": "Device added successfully",
-        }
+        librenms_server.register(
+            self.DEVICES_PATH,
+            {"status": "ok", "message": "Device added successfully"},
+            method="POST",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.add_device(
+        result = local_librenms_api.add_device(
             data={
                 "hostname": "legacy-device.example.com",
                 "snmp_version": "v1",
@@ -1050,25 +658,19 @@ class TestLibreNMSAPIDeviceOperations:
 
         assert result[0] is True
         assert result[1] == "Device added successfully."
-        # Verify the payload includes correct snmpver and community
-        call_args = mock_post.call_args
-        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        payload = librenms_server.requests[-1]["body"]
         assert payload["snmpver"] == "v1"
         assert payload["community"] == "public"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_add_device_duplicate_error(self, mock_post, mock_librenms_config):
+    def test_add_device_duplicate_error(self, local_librenms_api, librenms_server):
         """Verify duplicate device handling."""
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {
-            "status": "error",
-            "message": "Device already exists",
-        }
+        librenms_server.register(
+            self.DEVICES_PATH,
+            {"status": "error", "message": "Device already exists"},
+            method="POST",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.add_device(
+        result = local_librenms_api.add_device(
             data={
                 "hostname": "duplicate-device.example.com",
                 "snmp_version": "v2c",
@@ -1079,19 +681,15 @@ class TestLibreNMSAPIDeviceOperations:
         assert result[0] is False
         assert "Device already exists" in result[1]
 
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_add_device_snmpv3_success(self, mock_post, mock_librenms_config):
+    def test_add_device_snmpv3_success(self, local_librenms_api, librenms_server):
         """Verify successful device addition using SNMPv3 with all required fields."""
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {
-            "status": "ok",
-            "message": "Device added successfully",
-        }
+        librenms_server.register(
+            self.DEVICES_PATH,
+            {"status": "ok", "message": "Device added successfully"},
+            method="POST",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.add_device(
+        result = local_librenms_api.add_device(
             data={
                 "hostname": "secure-device.example.com",
                 "snmp_version": "v3",
@@ -1106,9 +704,7 @@ class TestLibreNMSAPIDeviceOperations:
 
         assert result[0] is True
         assert result[1] == "Device added successfully."
-        # Verify the payload includes correct snmpver and all v3 fields
-        call_args = mock_post.call_args
-        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        payload = librenms_server.requests[-1]["body"]
         assert payload["snmpver"] == "v3"
         assert payload["authlevel"] == "authPriv"
         assert payload["authname"] == "snmpuser"
@@ -1119,270 +715,258 @@ class TestLibreNMSAPIDeviceOperations:
         # Ensure community is NOT included for v3
         assert "community" not in payload
 
-    @patch("netbox_librenms_plugin.librenms_api._session.patch")
-    def test_update_device_field_success(self, mock_patch, mock_librenms_config):
+    def test_update_device_field_success(self, local_librenms_api, librenms_server):
         """Verify successful device field update."""
-        mock_patch.return_value.status_code = 200
-        mock_patch.return_value.json.return_value = {
-            "status": "ok",
-            "message": "Device field updated",
-        }
+        path = "/api/v0/devices/123"
+        librenms_server.register(
+            path,
+            {"status": "ok", "message": "Device field updated"},
+            method="PATCH",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, message = api.update_device_field(device_id=123, field_data={"field": "notes", "data": "Updated note"})
+        success, message = local_librenms_api.update_device_field(
+            device_id=123,
+            field_data={"field": "notes", "data": "Updated note"},
+        )
 
         assert success is True
         assert "updated" in message.lower()
+        assert librenms_server.requests[-1]["method"] == "PATCH"
+        assert librenms_server.requests[-1]["body"] == {"field": "notes", "data": "Updated note"}
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_info_success(self, mock_get, mock_librenms_config):
+    def test_get_device_info_success(self, local_librenms_api, librenms_server):
         """Verify retrieving device info."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 123, "hostname": "test-device"}],
-        }
+        librenms_server.register(
+            "/api/v0/devices/123",
+            {"status": "ok", "devices": [{"device_id": 123, "hostname": "test-device"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, device_data = api.get_device_info(device_id=123)
+        success, device_data = local_librenms_api.get_device_info(device_id=123)
 
         assert success is True
         assert device_data is not None
         assert device_data["device_id"] == 123
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_info_not_found(self, mock_get, mock_librenms_config):
+    def test_get_device_info_not_found(self, local_librenms_api, librenms_server):
         """Empty devices list returns (False, None) without raising."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "devices": []}
+        librenms_server.register(
+            "/api/v0/devices/1",
+            {"status": "ok", "devices": []},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-
-        success, result = api.get_device_info(1)
+        success, result = local_librenms_api.get_device_info(1)
         assert success is False
         assert result is None
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_info_caches_success(self, mock_get, mock_librenms_config):
+    def test_get_device_info_caches_success(self, local_librenms_api, librenms_server):
         """A successful lookup is cached: a second call within the TTL skips the HTTP request."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 7777, "hostname": "cached-device"}],
-        }
+        path = "/api/v0/devices/7777"
+        librenms_server.register(
+            path,
+            {"status": "ok", "devices": [{"device_id": 7777, "hostname": "cached-device"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        first = api.get_device_info(device_id=7777)
-        second = api.get_device_info(device_id=7777)
+        first = local_librenms_api.get_device_info(device_id=7777)
+        second = local_librenms_api.get_device_info(device_id=7777)
 
         assert first == second == (True, {"device_id": 7777, "hostname": "cached-device"})
-        assert mock_get.call_count == 1  # second call served from cache, not re-fetched
+        assert [request["path"] for request in librenms_server.requests] == [path]
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_info_does_not_cache_failure(self, mock_get, mock_librenms_config):
+    def test_get_device_info_does_not_cache_failure(self, local_librenms_api, librenms_server):
         """Failures are never cached, so a transient error doesn't persist for the cache window."""
-        mock_get.side_effect = requests.exceptions.Timeout("boom")
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
+        path = "/api/v0/devices/7778"
+        librenms_server.register_disconnect(path, method="GET")
 
-        api = LibreNMSAPI(server_key="default")
-        first_success, first_failure = api.get_device_info(device_id=7778)
-        second_success, _second_failure = api.get_device_info(device_id=7778)
+        first_success, first_failure = local_librenms_api.get_device_info(device_id=7778)
+        second_success, _second_failure = local_librenms_api.get_device_info(device_id=7778)
 
         assert (first_success, second_success) == (False, False)
         # A timeout says nothing about whether the device exists, so it is not "not found".
         assert isinstance(first_failure, LibreNMSLookupError)
         assert first_failure.status_code is None
-        assert mock_get.call_count == 2  # not cached → re-attempted on the next call
+        assert [request["path"] for request in librenms_server.requests] == [path, path]
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_info_use_cache_false_bypasses_stale_cache(self, mock_get, mock_librenms_config):
+    def test_get_device_info_use_cache_false_bypasses_stale_cache(self, local_librenms_api, librenms_server):
         """use_cache=False refetches live data instead of returning a stale cached payload, and refreshes the cache."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        path = "/api/v0/devices/424242"
+        responses = iter(
+            [
+                {"status": "ok", "devices": [{"device_id": 424242, "hostname": "stale"}]},
+                {"status": "ok", "devices": [{"device_id": 424242, "hostname": "fresh"}]},
+            ]
+        )
 
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 424242, "hostname": "stale"}],
-        }
+        def next_response(**request):
+            return 200, next(responses)
 
-        api = LibreNMSAPI(server_key="default")
+        librenms_server.register(path, next_response, method="GET")
+
         # First call populates the 60s cache with the (soon-to-be-stale) value.
-        assert api.get_device_info(device_id=424242) == (True, {"device_id": 424242, "hostname": "stale"})
-
-        # The hostname is corrected in LibreNMS within the cache window.
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 424242, "hostname": "fresh"}],
-        }
+        assert local_librenms_api.get_device_info(device_id=424242) == (
+            True,
+            {"device_id": 424242, "hostname": "stale"},
+        )
 
         # A normal (cached) read still returns the stale value...
-        assert api.get_device_info(device_id=424242) == (True, {"device_id": 424242, "hostname": "stale"})
+        assert local_librenms_api.get_device_info(device_id=424242) == (
+            True,
+            {"device_id": 424242, "hostname": "stale"},
+        )
         # ...but the import path (use_cache=False) fetches live data...
-        assert api.get_device_info(device_id=424242, use_cache=False) == (
+        assert local_librenms_api.get_device_info(device_id=424242, use_cache=False) == (
             True,
             {"device_id": 424242, "hostname": "fresh"},
         )
         # ...and that live fetch refreshes the cache, so subsequent cached reads see the correction.
-        assert api.get_device_info(device_id=424242) == (True, {"device_id": 424242, "hostname": "fresh"})
+        assert local_librenms_api.get_device_info(device_id=424242) == (
+            True,
+            {"device_id": 424242, "hostname": "fresh"},
+        )
+        assert [request["path"] for request in librenms_server.requests] == [path, path]
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_cache_only_reads_a_snapshot_even_when_live_cache_is_disabled(self, mock_get, mock_librenms_config):
+    def test_cache_only_reads_a_snapshot_even_when_live_cache_is_disabled(
+        self,
+        local_librenms_api,
+        librenms_server,
+    ):
         """A cache-only read must use an existing snapshot regardless of the live-read flag."""
         from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         # Start from a cold fixed key, so the cache-only assertion cannot pass on another
         # test's snapshot instead of the one this test creates.
         cache.delete("librenms_device_info_default_424243")
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 424243, "hostname": "cached-device"}],
-        }
-        api = LibreNMSAPI(server_key="default")
+        path = "/api/v0/devices/424243"
+        librenms_server.register(
+            path,
+            {"status": "ok", "devices": [{"device_id": 424243, "hostname": "cached-device"}]},
+            method="GET",
+        )
         expected = (True, {"device_id": 424243, "hostname": "cached-device"})
-        assert api.get_device_info(device_id=424243) == expected
-        mock_get.assert_called_once()
+        assert local_librenms_api.get_device_info(device_id=424243) == expected
 
-        mock_get.side_effect = AssertionError("cache-only lookup contacted LibreNMS")
-        assert api.get_device_info(device_id=424243, use_cache=False, cache_only=True) == expected
+        assert local_librenms_api.get_device_info(device_id=424243, use_cache=False, cache_only=True) == expected
+        assert [request["path"] for request in librenms_server.requests] == [path]
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_cache_only_miss_does_not_contact_librenms(self, mock_get, mock_librenms_config):
+    def test_cache_only_miss_does_not_contact_librenms(self, local_librenms_api, librenms_server):
         """A cache-only miss returns a miss without crossing the HTTP boundary."""
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
         cache.delete("librenms_device_info_default_424244")
-        api = LibreNMSAPI(server_key="default")
 
-        assert api.get_device_info(device_id=424244, use_cache=False, cache_only=True) == (False, None)
-        mock_get.assert_not_called()
+        assert local_librenms_api.get_device_info(device_id=424244, use_cache=False, cache_only=True) == (False, None)
+        assert librenms_server.requests == []
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_list_devices_with_filters(self, mock_get, mock_librenms_config):
+    def test_list_devices_with_filters(self, local_librenms_api, librenms_server):
         """Verify listing devices with filter parameter."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 1}, {"device_id": 2}],
-        }
+        librenms_server.register(
+            self.DEVICES_PATH,
+            {"status": "ok", "devices": [{"device_id": 1}, {"device_id": 2}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, devices = api.list_devices(filters={"type": "network"})
+        success, devices = local_librenms_api.list_devices(filters={"type": "network"})
 
         assert success is True
         assert len(devices) == 2
+        assert librenms_server.requests[-1]["query"] == {"type": ["network"]}
 
 
 # =============================================================================
-# Test Class 6: Location Operations (4 tests)
+# Location operations
 # =============================================================================
 
 
 class TestLibreNMSAPILocationOperations:
     """Test location CRUD operations."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_locations_success(self, mock_get, mock_librenms_config):
+    RESOURCE_PATH = "/api/v0/resources/locations"
+    MUTATION_PATH = "/api/v0/locations"
+
+    def test_get_locations_success(self, local_librenms_api, librenms_server):
         """Verify retrieving all locations."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "locations": [{"id": 1, "location": "DC1"}],
-        }
+        librenms_server.register(
+            self.RESOURCE_PATH,
+            {"status": "ok", "locations": [{"id": 1, "location": "DC1"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, locations = api.get_locations()
+        success, locations = local_librenms_api.get_locations()
 
         assert success is True
         assert len(locations) == 1
+        assert librenms_server.requests[-1]["method"] == "GET"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_add_location_success(self, mock_post, mock_librenms_config):
+    def test_add_location_success(self, local_librenms_api, librenms_server):
         """Verify successful location addition."""
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {
-            "status": "ok",
-            "message": "Location created #5",
-        }
+        librenms_server.register(
+            self.MUTATION_PATH,
+            {"status": "ok", "message": "Location created #5"},
+            method="POST",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, result_dict = api.add_location(location_data={"location": "DC2"})
+        success, result_dict = local_librenms_api.add_location(location_data={"location": "DC2"})
 
         assert success is True
         assert result_dict["id"] == "5"
         assert "message" in result_dict
+        assert librenms_server.requests[-1]["method"] == "POST"
+        assert librenms_server.requests[-1]["body"] == {"location": "DC2"}
 
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_add_location_error(self, mock_post, mock_librenms_config):
+    def test_add_location_error(self, local_librenms_api, librenms_server):
         """Verify location addition error handling."""
-        mock_post.return_value.status_code = 500
-        mock_post.return_value.json.return_value = {
-            "status": "error",
-            "message": "Invalid location data",
-        }
+        librenms_server.register(
+            self.MUTATION_PATH,
+            {"status": "error", "message": "Invalid location data"},
+            status=500,
+            method="POST",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, error_msg = api.add_location(location_data={})
+        success, error_msg = local_librenms_api.add_location(location_data={})
 
         assert success is False
         assert "Invalid location data" in error_msg
 
-    @patch("netbox_librenms_plugin.librenms_api._session.patch")
-    def test_update_location_success(self, mock_patch, mock_librenms_config):
+    def test_update_location_success(self, local_librenms_api, librenms_server):
         """Verify successful location update."""
-        mock_patch.return_value.status_code = 200
-        mock_patch.return_value.json.return_value = {
-            "status": "ok",
-            "message": "Location updated",
-        }
+        path = f"{self.MUTATION_PATH}/DC1"
+        librenms_server.register(
+            path,
+            {"status": "ok", "message": "Location updated"},
+            method="PATCH",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, message = api.update_location(location_name="DC1", location_data={"location": "DC1-Updated"})
+        success, message = local_librenms_api.update_location(
+            location_name="DC1",
+            location_data={"location": "DC1-Updated"},
+        )
 
         assert success is True
+        assert message == "Location updated"
+        assert librenms_server.requests[-1]["method"] == "PATCH"
+        assert librenms_server.requests[-1]["body"] == {"location": "DC1-Updated"}
 
-    @patch("netbox_librenms_plugin.librenms_api._session.patch")
-    def test_update_location_not_found(self, mock_patch, mock_librenms_config):
+    def test_update_location_not_found(self, local_librenms_api, librenms_server):
         """Verify updating non-existent location."""
-        mock_patch.return_value.status_code = 404
-        mock_patch.return_value.json.return_value = {
-            "status": "error",
-            "message": "Location not found",
-        }
+        librenms_server.register(
+            f"{self.MUTATION_PATH}/NonExistent",
+            {"status": "error", "message": "Location not found"},
+            status=404,
+            method="PATCH",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, message = api.update_location(location_name="NonExistent", location_data={})
+        success, message = local_librenms_api.update_location(location_name="NonExistent", location_data={})
 
         assert success is False
+        assert message == "Location not found"
 
 
 # =============================================================================
-# Test Class 7: Ports and Inventory (9 tests)
+# Ports and inventory
 # =============================================================================
 
 
@@ -1405,447 +989,386 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert "ifVrf" in seen["columns"].split(",")
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_ports_all(self, mock_get, mock_librenms_config):
+    def test_get_ports_all(self, local_librenms_api, librenms_server):
         """Verify retrieving all ports for a device."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "ports": [{"port_id": 1}, {"port_id": 2}],
-        }
+        path = "/api/v0/devices/123/ports"
+        librenms_server.register(
+            path,
+            {"status": "ok", "ports": [{"port_id": 1}, {"port_id": 2}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, data = api.get_ports(device_id=123)
+        success, data = local_librenms_api.get_ports(device_id=123)
 
         assert success is True
         assert "ports" in data
         assert len(data["ports"]) == 2
+        assert librenms_server.requests[-1]["method"] == "GET"
+        assert librenms_server.requests[-1]["path"] == path
+        assert librenms_server.requests[-1]["query"]["with"] == ["vlans"]
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_port_by_id_success(self, mock_get, mock_librenms_config):
+    def test_get_port_by_id_success(self, local_librenms_api, librenms_server):
         """Verify retrieving port by ID."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "port": [{"port_id": 1, "ifName": "GigabitEthernet0/1"}],
-        }
+        path = "/api/v0/ports/1"
+        librenms_server.register(
+            path,
+            {"status": "ok", "port": [{"port_id": 1, "ifName": "GigabitEthernet0/1"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, port_data = api.get_port_by_id(port_id=1)
+        success, port_data = local_librenms_api.get_port_by_id(port_id=1)
 
         assert success is True
         assert port_data is not None
+        assert librenms_server.requests[-1]["method"] == "GET"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_port_by_id_error(self, mock_get, mock_librenms_config):
+    def test_get_port_by_id_error(self, local_librenms_api, librenms_server):
         """Verify handling of port retrieval error."""
-        mock_get.side_effect = requests.exceptions.RequestException("Connection error")
+        librenms_server.register_disconnect("/api/v0/ports/999", method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, error_msg = api.get_port_by_id(port_id=999)
+        success, error_msg = local_librenms_api.get_port_by_id(port_id=999)
 
         assert success is False
         assert isinstance(error_msg, str)
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_inventory_success(self, mock_get, mock_librenms_config):
+    def test_get_device_inventory_success(self, local_librenms_api, librenms_server):
         """Verify retrieving device inventory."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "inventory": [{"entPhysicalClass": "chassis"}],
-        }
+        path = "/api/v0/inventory/123/all"
+        librenms_server.register(
+            path,
+            {"status": "ok", "inventory": [{"entPhysicalClass": "chassis"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, inventory = api.get_device_inventory(device_id=123)
+        success, inventory = local_librenms_api.get_device_inventory(device_id=123)
 
         assert success is True
         assert len(inventory) == 1
+        assert librenms_server.requests[-1]["method"] == "GET"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_inventory_filtered_by_class(self, mock_get, mock_librenms_config):
+    def test_get_inventory_filtered_by_class(self, local_librenms_api, librenms_server):
         """Verify filtering inventory by physical class."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "inventory": [{"entPhysicalClass": "chassis", "entPhysicalName": "Chassis"}],
-        }
+        path = "/api/v0/inventory/123"
+        librenms_server.register(
+            path,
+            {"status": "ok", "inventory": [{"entPhysicalClass": "chassis", "entPhysicalName": "Chassis"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, inventory = api.get_inventory_filtered(device_id=123, ent_physical_class="chassis")
+        success, inventory = local_librenms_api.get_inventory_filtered(
+            device_id=123,
+            ent_physical_class="chassis",
+        )
 
         assert success is True
         assert len(inventory) == 1
+        assert librenms_server.requests[-1]["query"] == {"entPhysicalClass": ["chassis"]}
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_inventory_filtered_by_container(self, mock_get, mock_librenms_config):
+    def test_get_inventory_filtered_by_container(self, local_librenms_api, librenms_server):
         """Verify filtering inventory by container."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "inventory": [{"entPhysicalContainedIn": "0"}],
-        }
+        path = "/api/v0/inventory/123"
+        librenms_server.register(
+            path,
+            {"status": "ok", "inventory": [{"entPhysicalContainedIn": "0"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, inventory = api.get_inventory_filtered(device_id=123, ent_physical_contained_in=0)
+        success, inventory = local_librenms_api.get_inventory_filtered(
+            device_id=123,
+            ent_physical_contained_in=0,
+        )
 
         assert success is True
+        assert inventory == [{"entPhysicalContainedIn": "0"}]
+        assert librenms_server.requests[-1]["query"] == {"entPhysicalContainedIn": ["0"]}
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_links_success(self, mock_get, mock_librenms_config):
+    def test_get_device_links_success(self, local_librenms_api, librenms_server):
         """Verify retrieving device links."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "links": [{"id": 1, "local_port_id": 10, "remote_port_id": 20}],
-        }
+        path = "/api/v0/devices/123/links"
+        librenms_server.register(
+            path,
+            {"status": "ok", "links": [{"id": 1, "local_port_id": 10, "remote_port_id": 20}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, links_dict = api.get_device_links(device_id=123)
+        success, links_dict = local_librenms_api.get_device_links(device_id=123)
 
         assert success is True
         assert "links" in links_dict
         assert len(links_dict["links"]) == 1
+        assert librenms_server.requests[-1]["method"] == "GET"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_links_no_links_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
+    def test_get_device_links_no_links_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
         """Verify a no-links 404 returns an empty success so serial cable sync retains the cache snapshot."""
-        import requests as _requests
+        path = "/api/v0/devices/13/links"
+        librenms_server.register(
+            path,
+            {"status": "error", "message": "Device does not have any links"},
+            status=404,
+            method="GET",
+        )
 
-        resp = _requests.models.Response()
-        resp.status_code = 404
-        resp._content = b'{"status":"error","message":"Device does not have any links"}'
-        resp.url = "https://example/api/v0/devices/13/links"
-        mock_get.return_value = resp
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, data = api.get_device_links(device_id=13)
+        success, data = local_librenms_api.get_device_links(device_id=13)
 
         assert success is True
         assert data == {"status": "ok", "links": []}
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_links_missing_device_404_is_a_failure(self, mock_get, mock_librenms_config):
+    def test_get_device_links_missing_device_404_is_a_failure(self, local_librenms_api, librenms_server):
         """A 404 for an unknown device must not be converted to an empty link list."""
-        import requests as _requests
+        path = "/api/v0/devices/13/links"
+        librenms_server.register(
+            path,
+            {"status": "error", "message": "Device not found"},
+            status=404,
+            method="GET",
+        )
 
-        resp = _requests.models.Response()
-        resp.status_code = 404
-        resp._content = b'{"status":"error","message":"Device not found"}'
-        resp.url = "https://example/api/v0/devices/13/links"
-        mock_get.return_value = resp
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, data = api.get_device_links(device_id=13)
+        success, data = local_librenms_api.get_device_links(device_id=13)
 
         assert success is False
         assert data == "Device not found"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_links_librenms_no_links_message_is_empty_success(self, mock_get, mock_librenms_config):
+    def test_get_device_links_librenms_no_links_message_is_empty_success(
+        self,
+        local_librenms_api,
+        librenms_server,
+    ):
         """LibreNMS also reports an empty link set as ``Links do not exist``."""
-        import requests as _requests
+        path = "/api/v0/devices/13/links"
+        librenms_server.register(
+            path,
+            {"status": "error", "message": "Links do not exist"},
+            status=404,
+            method="GET",
+        )
 
-        resp = _requests.models.Response()
-        resp.status_code = 404
-        resp._content = b'{"status":"error","message":"Links do not exist"}'
-        resp.url = "https://example/api/v0/devices/13/links"
-        mock_get.return_value = resp
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, data = api.get_device_links(device_id=13)
+        success, data = local_librenms_api.get_device_links(device_id=13)
 
         assert success is True
         assert data == {"status": "ok", "links": []}
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_links_non_404_http_error_still_fails(self, mock_get, mock_librenms_config):
+    def test_get_device_links_non_404_http_error_still_fails(self, local_librenms_api, librenms_server):
         """A genuine server error (500) must still surface as a failure — only a 404 means 'no links'."""
-        import requests as _requests
+        path = "/api/v0/devices/13/links"
+        librenms_server.register(
+            path,
+            {"status": "error", "message": "boom"},
+            status=500,
+            method="GET",
+        )
 
-        resp = _requests.models.Response()
-        resp.status_code = 500
-        resp._content = b'{"status":"error","message":"boom"}'
-        resp.url = "https://example/api/v0/devices/13/links"
-        mock_get.return_value = resp
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, data = api.get_device_links(device_id=13)
+        success, data = local_librenms_api.get_device_links(device_id=13)
 
         assert success is False
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_ips_success(self, mock_get, mock_librenms_config):
+    def test_get_device_ips_success(self, local_librenms_api, librenms_server):
         """Verify retrieving device IP addresses."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "addresses": [{"ipv4_address": "10.0.0.1"}],
-        }
+        path = "/api/v0/devices/123/ip"
+        librenms_server.register(
+            path,
+            {"status": "ok", "addresses": [{"ipv4_address": "192.0.2.1"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, ips = api.get_device_ips(device_id=123)
+        success, ips = local_librenms_api.get_device_ips(device_id=123)
 
         assert success is True
         assert len(ips) == 1
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_ips_empty(self, mock_get, mock_librenms_config):
+    def test_get_device_ips_empty(self, local_librenms_api, librenms_server):
         """Verify handling device with no IPs."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "addresses": []}
+        path = "/api/v0/devices/123/ip"
+        librenms_server.register(path, {"status": "ok", "addresses": []}, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, ips = api.get_device_ips(device_id=123)
+        success, ips = local_librenms_api.get_device_ips(device_id=123)
 
         assert success is True
         assert len(ips) == 0
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_ips_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
+    def test_get_device_ips_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
         """LibreNMS 404s /devices/{id}/ip for a device with no IPs — a successful empty result, not a fetch failure."""
-        import requests
+        path = "/api/v0/devices/123/ip"
+        librenms_server.register(
+            path,
+            {"status": "error", "message": "The device does not have any IP addresses"},
+            status=404,
+            method="GET",
+        )
 
-        response = mock_get.return_value
-        response.status_code = 404
-        error = requests.exceptions.HTTPError("404 Client Error: Not Found")
-        error.response = response
-        response.raise_for_status.side_effect = error
-        response.json.return_value = {
-            "status": "error",
-            "message": "The device does not have any IP addresses",
-        }
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, ips = api.get_device_ips(device_id=123)
+        success, ips = local_librenms_api.get_device_ips(device_id=123)
 
         # A device with no IPs must surface as an empty success so the IP tab shows an empty
         # table, not a red "Failed to fetch IP addresses" error (mirrors get_device_links).
         assert success is True
         assert ips == []
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_ips_404_empty_message_is_case_insensitive(self, mock_get, mock_librenms_config):
+    def test_get_device_ips_404_empty_message_is_case_insensitive(self, local_librenms_api, librenms_server):
         """LibreNMS capitalization changes do not turn its stable no-address response into a failure."""
-        response = mock_get.return_value
-        response.status_code = 404
-        error = requests.exceptions.HTTPError("404 Client Error: Not Found")
-        error.response = response
-        response.raise_for_status.side_effect = error
-        response.json.return_value = {
-            "status": "error",
-            "message": "Device 123 Does Not Have Any IP Addresses",
-        }
+        path = "/api/v0/devices/123/ip"
+        librenms_server.register(
+            path,
+            {"status": "error", "message": "Device 123 Does Not Have Any IP Addresses"},
+            status=404,
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        success, ips = LibreNMSAPI(server_key="default").get_device_ips(device_id=123)
+        success, ips = local_librenms_api.get_device_ips(device_id=123)
 
         assert success is True
         assert ips == []
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_device_ips_404_for_missing_device_remains_a_failure(self, mock_get, mock_librenms_config):
+    def test_get_device_ips_404_for_missing_device_remains_a_failure(self, local_librenms_api, librenms_server):
         """Only LibreNMS's explicit empty-IP response is an empty success; a stale device id stays visible."""
-        import requests
+        path = "/api/v0/devices/123/ip"
+        librenms_server.register(
+            path,
+            {"status": "error", "message": "Device 123 does not exist"},
+            status=404,
+            method="GET",
+        )
 
-        response = mock_get.return_value
-        response.status_code = 404
-        response.json.return_value = {"status": "error", "message": "Device 123 does not exist"}
-        error = requests.exceptions.HTTPError("404 Client Error: Not Found")
-        error.response = response
-        response.raise_for_status.side_effect = error
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, message = api.get_device_ips(device_id=123)
+        success, message = local_librenms_api.get_device_ips(device_id=123)
 
         assert success is False
         assert message == "Device 123 does not exist"
 
 
 # =============================================================================
-# Test Class 8: Poller and Devices (4 tests)
+# Poller groups and devices
 # =============================================================================
 
 
 class TestLibreNMSAPIPollerAndDevices:
     """Test poller groups and device listing operations."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_poller_groups_success(self, mock_get, mock_librenms_config):
+    POLLER_PATH = "/api/v0/poller_group"
+    DEVICES_PATH = "/api/v0/devices"
+
+    def test_get_poller_groups_success(self, local_librenms_api, librenms_server):
         """Verify retrieving poller groups."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "get_poller_group": [{"id": 1, "group_name": "primary"}],
-        }
+        librenms_server.register(
+            self.POLLER_PATH,
+            {"status": "ok", "get_poller_group": [{"id": 1, "group_name": "primary"}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, groups = api.get_poller_groups()
+        success, groups = local_librenms_api.get_poller_groups()
 
         assert success is True
         assert len(groups) == 1
+        assert librenms_server.requests[-1]["method"] == "GET"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_get_poller_groups_empty(self, mock_get, mock_librenms_config):
+    def test_get_poller_groups_empty(self, local_librenms_api, librenms_server):
         """Verify handling empty poller groups."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "get_poller_group": [],
-        }
+        librenms_server.register(
+            self.POLLER_PATH,
+            {"status": "ok", "get_poller_group": []},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, groups = api.get_poller_groups()
+        success, groups = local_librenms_api.get_poller_groups()
 
         assert success is True
         assert len(groups) == 0
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_list_devices_all(self, mock_get, mock_librenms_config):
+    def test_list_devices_all(self, local_librenms_api, librenms_server):
         """Verify listing all devices."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "devices": [{"device_id": 1}, {"device_id": 2}, {"device_id": 3}],
-        }
+        librenms_server.register(
+            self.DEVICES_PATH,
+            {"status": "ok", "devices": [{"device_id": 1}, {"device_id": 2}, {"device_id": 3}]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, devices = api.list_devices()
+        success, devices = local_librenms_api.list_devices()
 
         assert success is True
         assert len(devices) == 3
+        assert librenms_server.requests[-1]["method"] == "GET"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_list_devices_empty(self, mock_get, mock_librenms_config):
+    def test_list_devices_empty(self, local_librenms_api, librenms_server):
         """Verify handling empty device list."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "devices": []}
+        librenms_server.register(
+            self.DEVICES_PATH,
+            {"status": "ok", "devices": []},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, devices = api.list_devices()
+        success, devices = local_librenms_api.list_devices()
 
         assert success is True
         assert len(devices) == 0
 
 
 # =============================================================================
-# Test Class 9: Error Handling (6 tests)
+# Error handling
 # =============================================================================
 
 
 class TestLibreNMSAPIErrorHandling:
     """Test error handling and edge cases."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_network_error_handling(self, mock_get, mock_librenms_config):
+    DEVICE_PATH = "/api/v0/devices/123"
+
+    def test_network_error_handling(self, local_librenms_api, librenms_server):
         """Verify handling of network errors."""
-        mock_get.side_effect = requests.exceptions.ConnectionError("Network unreachable")
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
+        librenms_server.register_disconnect(self.DEVICE_PATH, method="GET")
 
-        api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123, use_cache=False)
+        success, result = local_librenms_api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
         assert isinstance(result, LibreNMSLookupError)
         assert result.status_code is None
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_timeout_error_handling(self, mock_get, mock_librenms_config):
+    def test_timeout_error_handling(self, local_librenms_api, librenms_server, monkeypatch):
         """Verify handling of timeout errors."""
-        mock_get.side_effect = requests.exceptions.Timeout("Request timed out")
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
+        def delayed_response(**request):
+            time.sleep(0.05)
+            return 200, {"status": "ok", "devices": [{"device_id": 123}]}
 
-        api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123, use_cache=False)
+        librenms_server.register(self.DEVICE_PATH, delayed_response, method="GET")
+        monkeypatch.setattr("netbox_librenms_plugin.librenms_api.DEFAULT_API_TIMEOUT", 0.01)
+
+        success, result = local_librenms_api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
         assert isinstance(result, LibreNMSLookupError)
         assert result.status_code is None
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_invalid_json_response(self, mock_get, mock_librenms_config):
+    def test_invalid_json_response(self, local_librenms_api, librenms_server):
         """Verify handling of invalid JSON responses — ValueError is now caught gracefully."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.side_effect = ValueError("Invalid JSON")
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
+        librenms_server.register_raw(self.DEVICE_PATH, "not-json", method="GET")
 
         # ValueError is now caught, returning (False, None) instead of propagating
-        success, result = api.get_device_info(device_id=123, use_cache=False)
+        success, result = local_librenms_api.get_device_info(device_id=123, use_cache=False)
         assert success is False
         assert result is None
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_http_500_error_handling(self, mock_get, mock_librenms_config):
+    def test_http_500_error_handling(self, local_librenms_api, librenms_server):
         """Verify that direct status handling classifies a 500 as server failure, not a missing device or malformed payload."""
-        mock_get.return_value.status_code = 500
-        mock_get.return_value.json.return_value = {
-            "status": "error",
-            "message": "Internal server error",
-        }
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
+        librenms_server.register(
+            self.DEVICE_PATH,
+            {"status": "error", "message": "Internal server error"},
+            status=500,
+            method="GET",
+        )
 
-        api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123, use_cache=False)
+        success, result = local_librenms_api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
         assert isinstance(result, LibreNMSLookupError)
         assert result.status_code == 500
 
-    @patch("netbox_librenms_plugin.librenms_api._session.post")
-    def test_malformed_api_response(self, mock_post, mock_librenms_config):
+    def test_malformed_api_response(self, local_librenms_api, librenms_server):
         """Verify handling of malformed API responses."""
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {}  # Missing expected fields
+        librenms_server.register("/api/v0/devices", {}, method="POST")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.add_device(
+        result = local_librenms_api.add_device(
             data={
                 "hostname": "test.example.com",
                 "snmp_version": "v2c",
@@ -1856,23 +1379,14 @@ class TestLibreNMSAPIErrorHandling:
         # Should handle missing fields gracefully
         assert result[0] is False
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_ssl_verification_error(self, mock_get, mock_librenms_config):
+    def test_ssl_verification_error(self, local_librenms_api, librenms_server):
         """Verify handling of SSL verification errors."""
-        mock_get.side_effect = requests.exceptions.SSLError("SSL certificate verification failed")
+        local_librenms_api.librenms_url = librenms_server.url.replace("http://", "https://", 1)
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        result = api.test_connection()
+        result = local_librenms_api.test_connection()
 
         assert result.get("error") is True
-
-
-# ====================================================================================
-# Test Class 5-9 continuing in next part due to length...
-# Run `make unittest` to execute all tests
-# ====================================================================================
+        assert "SSL certificate verification failed" in result["message"]
 
 
 # ====================================================================================
@@ -1883,66 +1397,49 @@ class TestLibreNMSAPIErrorHandling:
 class TestGetLibreNMSIdIntGuard:
     """Tests for the int conversion guard in get_librenms_id."""
 
-    def test_non_integer_string_from_ip_returns_none(self, mock_librenms_config):
+    def test_non_integer_string_from_ip_returns_none(self, local_librenms_api, librenms_server):
         """When get_device_id_by_ip returns a non-int string, _store_librenms_id must not be called."""
-        from unittest.mock import MagicMock, patch
+        from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        obj = TestLibreNMSAPIDeviceLookup._device(ip_address="192.0.2.1")
+        ip_path = "/api/v0/devices/192.0.2.1"
+        hostname_path = "/api/v0/devices/test-device"
+        librenms_server.register(
+            ip_path,
+            {"status": "ok", "devices": [{"device_id": "not-an-int"}]},
+            method="GET",
+        )
+        librenms_server.register(hostname_path, {"status": "ok", "devices": []}, method="GET")
 
-        api = LibreNMSAPI(server_key="default")
-
-        obj = MagicMock()
-        obj.primary_ip.address.ip = "192.168.1.1"
-        obj.primary_ip.dns_name = ""
-        obj.name = "test-device"
-        obj._meta.model_name = "device"
-        obj.pk = 1
-
-        with (
-            patch.object(api, "_get_cache_key", return_value="test_cache_key"),
-            patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache,
-            patch.object(api, "get_device_id_by_ip", return_value="not-an-int"),
-            patch.object(api, "get_device_id_by_hostname", return_value=None),
-            patch.object(api, "_store_librenms_id") as mock_store,
-        ):
-            mock_cache.get.return_value = None
-            result = api.get_librenms_id(obj)
+        result = local_librenms_api.get_librenms_id(obj)
 
         assert result is None
-        mock_store.assert_not_called()
+        assert cache.get(local_librenms_api._get_cache_key(obj)) is None
+        assert [request["path"] for request in librenms_server.requests] == [ip_path, hostname_path]
 
-    def test_valid_integer_string_stores_and_returns(self, mock_librenms_config):
+    def test_valid_integer_string_stores_and_returns(self, local_librenms_api, librenms_server):
         """When get_device_id_by_ip returns a valid int string, it should be stored and returned."""
-        from unittest.mock import MagicMock, patch
+        from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        obj = TestLibreNMSAPIDeviceLookup._device(ip_address="192.0.2.1")
+        path = "/api/v0/devices/192.0.2.1"
+        librenms_server.register(
+            path,
+            {"status": "ok", "devices": [{"device_id": "42"}]},
+            method="GET",
+        )
 
-        api = LibreNMSAPI(server_key="default")
-
-        obj = MagicMock()
-        obj.primary_ip.address.ip = "192.168.1.1"
-        obj.primary_ip.dns_name = ""
-        obj.name = "test-device"
-        obj._meta.model_name = "device"
-        obj.pk = 1
-
-        with (
-            patch.object(api, "_get_cache_key", return_value="test_cache_key"),
-            patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache,
-            patch.object(api, "get_device_id_by_ip", return_value="42"),
-            patch.object(api, "_store_librenms_id") as mock_store,
-        ):
-            mock_cache.get.return_value = None
-            result = api.get_librenms_id(obj)
+        result = local_librenms_api.get_librenms_id(obj)
 
         assert result == 42
-        mock_store.assert_called_once_with(obj, 42)
+        assert cache.get(local_librenms_api._get_cache_key(obj)) == 42
+        assert [request["path"] for request in librenms_server.requests] == [path]
 
 
 class TestVlanEntryDictGuard:
     """Tests for the isinstance(vlan_entry, dict) guard in _parse_port_vlan_info."""
 
-    def test_non_dict_entry_is_skipped(self, mock_librenms_config):
+    def test_non_dict_entry_is_skipped(self, configure_librenms):
         """Non-dict entries in vlans_data should be skipped without error."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -1963,7 +1460,7 @@ class TestVlanEntryDictGuard:
         assert 20 in result["tagged_vlans"]
         assert len(result["tagged_vlans"]) == 1
 
-    def test_mixed_bad_entries_no_exception(self, mock_librenms_config):
+    def test_mixed_bad_entries_no_exception(self, configure_librenms):
         """Multiple non-dict entries mixed with valid dicts should not raise."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -1990,33 +1487,34 @@ class TestVlanEntryDictGuard:
 # ====================================================================================
 
 
+@pytest.fixture
+def local_librenms_api(mock_librenms_api, librenms_server):
+    """Return the real API client pointed at the loopback LibreNMS server."""
+    mock_librenms_api.librenms_url = librenms_server.url
+    return mock_librenms_api
+
+
 class TestGetDeviceInfoResponseShape:
     """Cover response-shape branches in get_device_info()."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_non_dict_device_entry_returns_failure(self, mock_get, mock_librenms_config):
+    def test_non_dict_device_entry_returns_failure(self, local_librenms_api, librenms_server):
         """A non-dict entry in the devices list must not propagate as truthy data."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "devices": ["not-a-dict"]}
+        librenms_server.register(
+            "/api/v0/devices/1",
+            {"status": "ok", "devices": ["not-a-dict"]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, data = api.get_device_info(device_id=1)
+        success, data = local_librenms_api.get_device_info(device_id=1)
 
         assert success is False
         assert data is None
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_missing_devices_key_returns_failure(self, mock_get, mock_librenms_config):
+    def test_missing_devices_key_returns_failure(self, local_librenms_api, librenms_server):
         """KeyError on missing 'devices' must be caught and return (False, None)."""
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok"}
+        librenms_server.register("/api/v0/devices/1", {"status": "ok"}, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, data = api.get_device_info(device_id=1)
+        success, data = local_librenms_api.get_device_info(device_id=1)
 
         assert success is False
         assert data is None
@@ -2025,126 +1523,99 @@ class TestGetDeviceInfoResponseShape:
 class TestGetDeviceTransceiversResponseShape:
     """Cover response-shape branches in get_device_transceivers()."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_success_returns_transceiver_list(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "transceivers": [
-                {"port_id": 1, "type": "QSFP28", "serial": "SN1"},
-                {"port_id": 2, "type": "SFP+", "serial": "SN2"},
-            ],
-        }
+    PATH = "/api/v0/devices/123/transceivers"
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    def test_success_returns_transceiver_list(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {
+                "status": "ok",
+                "transceivers": [
+                    {"port_id": 1, "type": "QSFP28", "serial": "SN1"},
+                    {"port_id": 2, "type": "SFP+", "serial": "SN2"},
+                ],
+            },
+            method="GET",
+        )
 
-        api = LibreNMSAPI(server_key="default")
-        success, data = api.get_device_transceivers(device_id=123)
+        success, data = local_librenms_api.get_device_transceivers(device_id=123)
 
         assert success is True
         assert len(data) == 2
         assert data[0]["serial"] == "SN1"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_invalid_json_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.side_effect = ValueError("bad json")
+    def test_invalid_json_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register_raw(self.PATH, "not-json", method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_transceivers(device_id=123)
+        success, msg = local_librenms_api.get_device_transceivers(device_id=123)
 
         assert success is False
         assert "Invalid JSON" in msg
         assert "Error connecting" not in msg
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = ["unexpected", "list"]
+    def test_non_dict_response_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(self.PATH, ["unexpected", "list"], method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_transceivers(device_id=123)
+        success, msg = local_librenms_api.get_device_transceivers(device_id=123)
 
         assert success is False
         assert "Unexpected" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_missing_transceivers_key_uses_server_message(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "message": "no transceivers MIB"}
+    def test_missing_transceivers_key_uses_server_message(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "ok", "message": "no transceivers MIB"},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_transceivers(device_id=123)
+        success, msg = local_librenms_api.get_device_transceivers(device_id=123)
 
         assert success is False
         assert msg == "no transceivers MIB"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_status_not_ok_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "error",
-            "transceivers": [],
-            "message": "device offline",
-        }
+    def test_status_not_ok_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "error", "transceivers": [], "message": "device offline"},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_transceivers(device_id=123)
+        success, msg = local_librenms_api.get_device_transceivers(device_id=123)
 
         assert success is False
         assert msg == "device offline"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_transceivers_not_list_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "transceivers": {"port_id": 1},
-        }
+    def test_transceivers_not_list_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "ok", "transceivers": {"port_id": 1}},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_transceivers(device_id=123)
+        success, msg = local_librenms_api.get_device_transceivers(device_id=123)
 
         assert success is False
         assert "Unexpected" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_malformed_transceiver_entry_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "transceivers": [{"port_id": 1}, None],
-        }
+    def test_malformed_transceiver_entry_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "ok", "transceivers": [{"port_id": 1}, None]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_transceivers(device_id=123)
+        success, msg = local_librenms_api.get_device_transceivers(device_id=123)
 
         assert success is False
         assert "Malformed" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_request_exception_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.side_effect = requests.exceptions.ConnectionError("boom")
+    def test_request_exception_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register_disconnect(self.PATH, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_transceivers(device_id=123)
+        success, msg = local_librenms_api.get_device_transceivers(device_id=123)
 
         assert success is False
-        assert "boom" in msg
+        assert msg
 
 
 class TestGetDeviceVrfs:
@@ -2263,107 +1734,88 @@ class TestGetDeviceVrfs:
 class TestGetDeviceVlansResponseShape:
     """Cover response-shape branches in get_device_vlans()."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_success_filters_by_device_id(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "vlans": [
-                {"vlan_id": 1, "device_id": 7, "vlan_vlan": 10, "vlan_name": "DATA"},
-                {"vlan_id": 2, "device_id": 8, "vlan_vlan": 20, "vlan_name": "VOICE"},
-            ],
-        }
+    PATH = "/api/v0/resources/vlans"
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    def test_success_filters_by_device_id(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {
+                "status": "ok",
+                "vlans": [
+                    {"vlan_id": 1, "device_id": 7, "vlan_vlan": 10, "vlan_name": "DATA"},
+                    {"vlan_id": 2, "device_id": 8, "vlan_vlan": 20, "vlan_name": "VOICE"},
+                ],
+            },
+            method="GET",
+        )
 
-        api = LibreNMSAPI(server_key="default")
-        success, vlans = api.get_device_vlans(device_id=7)
+        success, vlans = local_librenms_api.get_device_vlans(device_id=7)
 
         assert success is True
         assert len(vlans) == 1
         assert vlans[0]["vlan_vlan"] == 10
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_vlans_not_list_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "vlans": "oops",
-            "message": "bad payload",
-        }
+    def test_vlans_not_list_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "ok", "vlans": "oops", "message": "bad payload"},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_vlans(device_id=7)
+        success, msg = local_librenms_api.get_device_vlans(device_id=7)
 
         assert success is False
         assert msg == "bad payload"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_non_dict_item_in_vlans_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "vlans": [{"vlan_id": 1, "device_id": 7}, "not-a-dict"],
-        }
+    def test_non_dict_item_in_vlans_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "ok", "vlans": [{"vlan_id": 1, "device_id": 7}, "not-a-dict"]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_vlans(device_id=7)
+        success, msg = local_librenms_api.get_device_vlans(device_id=7)
 
         assert success is False
         assert "invalid item shape" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_status_not_ok_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "error", "message": "nope"}
+    def test_status_not_ok_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "error", "message": "nope"},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_vlans(device_id=7)
+        success, msg = local_librenms_api.get_device_vlans(device_id=7)
 
         assert success is False
         assert msg == "nope"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = ["unexpected"]
+    def test_non_dict_response_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(self.PATH, ["unexpected"], method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_vlans(device_id=7)
+        success, msg = local_librenms_api.get_device_vlans(device_id=7)
 
         assert success is False
         assert msg == "Unexpected response format"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_http_404_returns_dedicated_message(self, mock_get, mock_librenms_config):
-        response = MagicMock(status_code=404)
-        mock_get.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError(response=response)
+    def test_http_404_returns_dedicated_message(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "error", "message": "not found"},
+            status=404,
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_vlans(device_id=7)
+        success, msg = local_librenms_api.get_device_vlans(device_id=7)
 
         assert success is False
         assert msg == "VLANs resource not found"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_value_error_returns_connection_message(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.side_effect = ValueError("bad json")
+    def test_value_error_returns_connection_message(self, local_librenms_api, librenms_server):
+        librenms_server.register_raw(self.PATH, "not-json", method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_device_vlans(device_id=7)
+        success, msg = local_librenms_api.get_device_vlans(device_id=7)
 
         assert success is False
         assert "Error connecting to LibreNMS" in msg
@@ -2372,98 +1824,82 @@ class TestGetDeviceVlansResponseShape:
 class TestGetPortVlanDetailsResponseShape:
     """Cover response-shape branches in get_port_vlan_details()."""
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_success_returns_port_dict(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "status": "ok",
-            "port": [{"port_id": 11, "ifName": "Te1/1/1", "vlans": [{"vlan": 10, "untagged": 1}]}],
-        }
+    PATH = "/api/v0/ports/11"
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    def test_success_returns_port_dict(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {
+                "status": "ok",
+                "port": [{"port_id": 11, "ifName": "Te1/1/1", "vlans": [{"vlan": 10, "untagged": 1}]}],
+            },
+            method="GET",
+        )
 
-        api = LibreNMSAPI(server_key="default")
-        success, port = api.get_port_vlan_details(port_id=11)
+        success, port = local_librenms_api.get_port_vlan_details(port_id=11)
 
         assert success is True
         assert port["port_id"] == 11
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = ["unexpected"]
+    def test_non_dict_response_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(self.PATH, ["unexpected"], method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_port_vlan_details(port_id=11)
+        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
 
         assert success is False
         assert msg == "Unexpected response format"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_status_not_ok_uses_server_message(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "error", "message": "no port"}
+    def test_status_not_ok_uses_server_message(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "error", "message": "no port"},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_port_vlan_details(port_id=11)
+        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
 
         assert success is False
         assert msg == "no port"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_missing_port_list_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "port": {"port_id": 11}}
+    def test_missing_port_list_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "ok", "port": {"port_id": 11}},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_port_vlan_details(port_id=11)
+        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
 
         assert success is False
         assert "missing 'port' list" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_empty_port_list_returns_not_found(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "port": []}
+    def test_empty_port_list_returns_not_found(self, local_librenms_api, librenms_server):
+        librenms_server.register(self.PATH, {"status": "ok", "port": []}, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_port_vlan_details(port_id=11)
+        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
 
         assert success is False
         assert msg == "Port not found"
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_non_dict_port_entry_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok", "port": ["bad-entry"]}
+    def test_non_dict_port_entry_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.PATH,
+            {"status": "ok", "port": ["bad-entry"]},
+            method="GET",
+        )
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_port_vlan_details(port_id=11)
+        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
 
         assert success is False
         assert "invalid 'port' entry" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api._session.get")
-    def test_request_exception_returns_failure(self, mock_get, mock_librenms_config):
-        mock_get.side_effect = requests.exceptions.ConnectionError("net down")
+    def test_request_exception_returns_failure(self, local_librenms_api, librenms_server):
+        librenms_server.register_disconnect(self.PATH, method="GET")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-        success, msg = api.get_port_vlan_details(port_id=11)
+        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
 
         assert success is False
-        assert "net down" in msg
+        assert "Error connecting to LibreNMS" in msg
 
 
 # =============================================================================
@@ -2585,30 +2021,12 @@ class TestGetPortStack:
         assert success is False
         assert "LibreNMS reported an error fetching port stack" in data
 
-    def test_returns_error_on_invalid_json(self, mock_librenms_api):
-        """A non-JSON body (response.json() raises ValueError) must surface as (False, error) instead of letting the exception escape."""
-        from unittest.mock import MagicMock, patch
-
-        fake_response = MagicMock()
-        fake_response.raise_for_status = MagicMock()
-        fake_response.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
-        with patch("netbox_librenms_plugin.librenms_api._session.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
-
-        assert success is False
-        assert "Invalid JSON" in data
-
-    def test_json_decode_error_reports_invalid_json_not_connection_error(self, mock_librenms_api):
+    def test_json_decode_error_reports_invalid_json_not_connection_error(self, mock_librenms_api, librenms_server):
         """requests.exceptions.JSONDecodeError subclasses BOTH ValueError and RequestException, so the ValueError handler must precede the RequestException handler — otherwise a JSON decode failure is swallowed by the broad handler and mislabeled 'Error connecting to LibreNMS'."""
-        from unittest.mock import MagicMock, patch
+        librenms_server.register_raw("/api/v0/devices/5/port_stack", "not-json", method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        import requests as _requests
-
-        fake_response = MagicMock()
-        fake_response.raise_for_status = MagicMock()
-        fake_response.json.side_effect = _requests.exceptions.JSONDecodeError("Expecting value", "", 0)
-        with patch("netbox_librenms_plugin.librenms_api._session.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert "Invalid JSON" in data
@@ -3853,19 +3271,17 @@ class TestGetSerialPortSensors:
         assert success is False
         assert "not found" in msg.lower()
 
-    def test_connection_error_returns_error(self, mock_librenms_api):
-        import unittest.mock as mock
-        import requests as req
+    def test_connection_error_returns_error(self, mock_librenms_api, librenms_server):
+        librenms_server.register_disconnect("/api/v0/resources/sensors", method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        with mock.patch(
-            "netbox_librenms_plugin.librenms_api._session.get", side_effect=req.exceptions.ConnectionError("refused")
-        ):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
-        # "or error in msg" also accepted "Invalid JSON ... refused", so a connection error
-        # routed through the JSON branch would have passed. Pin the classification instead.
-        assert "refused" in msg
+        # This suite drives a real loopback refusal, so the message wording is the client's, not a
+        # fixture's. Keep the classification pinned: a connection failure must not be reported
+        # through the JSON branch (review finding on #104).
+        assert "error" in msg.lower()
         assert "Invalid JSON" not in msg
 
     def test_recognized_type_change_applies_on_the_next_fetch(self, mock_librenms_api, librenms_server):

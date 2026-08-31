@@ -690,6 +690,45 @@ def recording_server(monkeypatch):
 
 
 @pytest.fixture
+def configure_librenms(settings):
+    """Configure the real NetBox plugin-settings boundary for one test."""
+
+    def _configure(
+        servers,
+        *,
+        librenms_url=None,
+        api_token=None,
+        cache_timeout=300,
+        verify_ssl=True,
+    ):
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        librenms_config = dict(plugin_config.get("netbox_librenms_plugin", {}))
+        librenms_config.update(
+            {
+                "servers": servers,
+                "librenms_url": librenms_url,
+                "api_token": api_token,
+                "cache_timeout": cache_timeout,
+                "verify_ssl": verify_ssl,
+            }
+        )
+        plugin_config["netbox_librenms_plugin"] = librenms_config
+        settings.PLUGINS_CONFIG = plugin_config
+
+    _configure(
+        {
+            "default": {
+                "librenms_url": "https://librenms.example.com",
+                "api_token": "test-token",
+                "cache_timeout": 300,
+                "verify_ssl": True,
+            }
+        }
+    )
+    return _configure
+
+
+@pytest.fixture
 def mock_multi_server_config():
     """Multi-server configuration dict."""
     return {
