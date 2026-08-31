@@ -1896,6 +1896,35 @@ def test_cleanup_failure_does_not_mark_tabs_without_cache_state(
 
 
 @pytest.mark.django_db
+def test_cleanup_failure_before_affected_tabs_are_known_invalidates_all_tabs(
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """An early cleanup failure must publish fail-closed states for every dependent tab."""
+    _configure_servers(settings)
+    device = make_device("cache-cleanup-early-failure", librenms_cf={"primary": {"id": 653}})
+    coordinator = SyncCacheConsistency(device)
+
+    with (
+        patch(
+            "netbox_librenms_plugin.sync_cache.mapped_server_keys",
+            side_effect=[{"primary"}, RuntimeError("mapping lookup failed"), {"primary"}],
+        ),
+        django_capture_on_commit_callbacks(execute=True),
+    ):
+        transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
+
+    assert transition.error is not None
+    source_state = cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary"))
+    assert source_state is not None
+    assert source_state["state"] == SyncTabState.LOCALLY_CHANGED.value
+    for tab in (SyncTab.CABLES, SyncTab.IP_ADDRESSES, SyncTab.MODULES, SyncTab.VLANS):
+        state = cache.get(coordinator.state_key(tab, "primary"))
+        assert state is not None
+        assert state["state"] == SyncTabState.INVALIDATED.value
+
+
+@pytest.mark.django_db
 def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings):
     """A cache-only fragment must not upgrade an old IP snapshot through live HTTP."""
     _configure_servers(settings)

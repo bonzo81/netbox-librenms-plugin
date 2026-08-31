@@ -676,7 +676,7 @@ class SyncCacheConsistency:
                     state = SyncTabState.LOCALLY_CHANGED
                     reason = None
                 else:
-                    if (server_key, tab) not in transition.affected_tabs:
+                    if transition.affected_tabs and (server_key, tab) not in transition.affected_tabs:
                         continue
                     state = SyncTabState.INVALIDATED
                     reason = (
