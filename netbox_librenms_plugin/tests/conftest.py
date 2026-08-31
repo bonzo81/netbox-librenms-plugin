@@ -1,12 +1,14 @@
 """Shared pytest fixtures for NetBox LibreNMS Plugin tests."""
 
+import json
 import os
 from copy import deepcopy
 from itertools import chain
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import requests
 
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
@@ -553,14 +555,14 @@ def mock_legacy_config():
 
 
 @pytest.fixture
-def mock_librenms_api(mock_multi_server_config):
-    """Pre-configured LibreNMSAPI instance with mocked dependencies."""
-    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config:
-        mock_config.return_value = mock_multi_server_config
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+def mock_librenms_api(settings, mock_multi_server_config):
+    """Return a real LibreNMSAPI configured through the plugin settings."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        api = LibreNMSAPI(server_key="default")
-        yield api
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = mock_multi_server_config
+    settings.PLUGINS_CONFIG = plugin_config
+    return LibreNMSAPI(server_key="default")
 
 
 # =============================================================================
@@ -570,31 +572,19 @@ def mock_librenms_api(mock_multi_server_config):
 
 @pytest.fixture
 def mock_netbox_device():
-    """Mock NetBox Device object without database."""
-    device = MagicMock()
-    device.name = "test-device"
-    device.cf = {}  # Custom fields
-    device.primary_ip4 = MagicMock()
-    device.primary_ip4.address = MagicMock()
-    device.primary_ip4.address.ip = "192.168.1.1"
-    device.primary_ip4.__str__ = lambda self: "192.168.1.1/24"
-    device.primary_ip6 = None
-    device._meta.model_name = "device"
-    return device
+    """Return the minimal explicit device shape required by non-DB helper tests."""
 
+    class _PrimaryIP(SimpleNamespace):
+        def __str__(self):
+            return "192.168.1.1/24"
 
-@pytest.fixture
-def mock_netbox_vm():
-    """Mock NetBox VirtualMachine object without database."""
-    vm = MagicMock()
-    vm.name = "test-vm"
-    vm.cf = {}
-    vm.primary_ip4 = MagicMock()
-    vm.primary_ip4.address = MagicMock()
-    vm.primary_ip4.address.ip = "10.0.0.1"
-    vm.primary_ip6 = None
-    vm._meta.model_name = "virtualmachine"
-    return vm
+    return SimpleNamespace(
+        name="test-device",
+        cf={},
+        primary_ip4=_PrimaryIP(address=SimpleNamespace(ip="192.168.1.1")),
+        primary_ip6=None,
+        _meta=SimpleNamespace(model_name="device"),
+    )
 
 
 # =============================================================================
@@ -604,60 +594,16 @@ def mock_netbox_vm():
 
 @pytest.fixture
 def mock_response_factory():
-    """Factory for creating mock HTTP responses."""
+    """Factory for creating real requests responses without network I/O."""
 
-    def _create_response(status_code=200, json_data=None, raise_for_status=None):
-        response = MagicMock()
+    def _create_response(status_code=200, json_data=None):
+        response = requests.Response()
         response.status_code = status_code
-        response.json.return_value = json_data or {}
-        response.ok = 200 <= status_code < 300
-        if raise_for_status:
-            response.raise_for_status.side_effect = raise_for_status
+        response.headers["Content-Type"] = "application/json"
+        response._content = json.dumps(json_data or {}).encode()
         return response
 
     return _create_response
-
-
-@pytest.fixture
-def mock_success_response(mock_response_factory):
-    """Standard successful API response."""
-    return mock_response_factory(status_code=200, json_data={"status": "ok", "message": "Success"})
-
-
-@pytest.fixture
-def mock_device_response(mock_response_factory):
-    """Mock response for device info endpoint."""
-    return mock_response_factory(
-        status_code=200,
-        json_data={
-            "status": "ok",
-            "devices": [
-                {
-                    "device_id": 42,
-                    "hostname": "test-device.example.com",
-                    "sysName": "test-device",
-                    "ip": "192.168.1.1",
-                    "status": 1,
-                    "location": "Data Center 1",
-                }
-            ],
-        },
-    )
-
-
-@pytest.fixture
-def mock_error_response(mock_response_factory):
-    """Standard error API response."""
-    return mock_response_factory(
-        status_code=500,
-        json_data={"status": "error", "message": "Internal server error"},
-    )
-
-
-@pytest.fixture
-def mock_auth_error_response(mock_response_factory):
-    """Authentication error response (401)."""
-    return mock_response_factory(status_code=401, json_data={"status": "error", "message": "Unauthorized"})
 
 
 # =============================================================================
@@ -689,114 +635,6 @@ def sample_librenms_device_minimal():
         "hostname": "10.0.0.1",
         "status": 1,
     }
-
-
-@pytest.fixture
-def sample_validation_state():
-    """Sample validation state for testing updates."""
-    return {
-        "device_id": 1,
-        "hostname": "switch-01",
-        "is_ready": False,
-        "can_import": False,
-        "import_as_vm": False,
-        "existing_device": None,
-        "issues": ["Device role must be manually selected before import"],
-        "warnings": [],
-        "site": {
-            "found": True,
-            "site": MagicMock(id=1, name="DC1"),
-            "match_type": "exact",
-        },
-        "device_type": {
-            "found": True,
-            "device_type": MagicMock(id=1, model="C9300-48P"),
-            "match_type": "exact",
-        },
-        "device_role": {"found": False, "role": None, "available_roles": []},
-        "cluster": {"found": False, "cluster": None, "available_clusters": []},
-        "platform": {
-            "found": True,
-            "platform": MagicMock(id=1, name="ios"),
-            "match_type": "exact",
-        },
-    }
-
-
-@pytest.fixture
-def sample_validation_state_vm():
-    """Sample validation state for VM import testing."""
-    return {
-        "device_id": 1,
-        "hostname": "vm-01",
-        "is_ready": False,
-        "can_import": False,
-        "import_as_vm": True,
-        "existing_device": None,
-        "issues": ["Cluster must be manually selected before import"],
-        "warnings": [],
-        "cluster": {"found": False, "cluster": None, "available_clusters": []},
-        "device_role": {"found": False, "role": None, "available_roles": []},
-    }
-
-
-@pytest.fixture
-def mock_netbox_site():
-    """Mock NetBox Site object."""
-    site = MagicMock()
-    site.id = 1
-    site.name = "DC1"
-    site.slug = "dc1"
-    return site
-
-
-@pytest.fixture
-def mock_netbox_platform():
-    """Mock NetBox Platform object."""
-    platform = MagicMock()
-    platform.id = 1
-    platform.name = "Cisco IOS"
-    platform.slug = "cisco_ios"
-    return platform
-
-
-@pytest.fixture
-def mock_netbox_device_type():
-    """Mock NetBox DeviceType object."""
-    dt = MagicMock()
-    dt.id = 1
-    dt.model = "C9300-48P"
-    dt.manufacturer = MagicMock(name="Cisco")
-    return dt
-
-
-@pytest.fixture
-def mock_netbox_device_role():
-    """Mock NetBox DeviceRole object."""
-    role = MagicMock()
-    role.id = 1
-    role.name = "Access Switch"
-    role.slug = "access-switch"
-    return role
-
-
-@pytest.fixture
-def mock_netbox_cluster():
-    """Mock NetBox Cluster object."""
-    cluster = MagicMock()
-    cluster.id = 1
-    cluster.name = "VMware Cluster 1"
-    return cluster
-
-
-@pytest.fixture
-def mock_netbox_rack():
-    """Mock NetBox Rack object."""
-    rack = MagicMock()
-    rack.id = 1
-    rack.name = "Rack A1"
-    rack.site = MagicMock(id=1, name="DC1")
-    return rack
 
 
 # =============================================================================

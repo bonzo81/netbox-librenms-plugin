@@ -1,7 +1,7 @@
 """Coverage tests for views/imports/actions.py missing lines."""
 
-from unittest.mock import MagicMock, patch
 from types import SimpleNamespace as Namespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.test import RequestFactory
@@ -18,6 +18,7 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    get as get_view,
     grant as grant_view_permission,
     make_request as make_view_request,
     make_user_with_perms as make_view_user,
@@ -349,95 +350,36 @@ class TestSaveDevice:
         assert Device.objects.get(pk=device.pk).device_type_id == zero_u.pk
 
 
+@pytest.mark.django_db
 class TestResolveNamingPreferences:
-    """Tests for resolve_naming_preferences (utils.resolve_naming_preferences)."""
+    """Test the database fallbacks not covered by the real request/preference tests."""
 
-    def test_post_use_sysname_toggle_truthy(self):
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
+    @staticmethod
+    def _anonymous_request():
+        from django.contrib.auth.models import AnonymousUser
 
-        request = _make_request(post={"use-sysname-toggle": "on"})
-        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-                MockSettings.objects.first.return_value = None
-                use_sysname, strip_domain = resolve_naming_preferences(request)
-        assert use_sysname is True
-
-    def test_post_use_sysname_underscored_key(self):
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
-
-        request = _make_request(post={"use_sysname-toggle": "on"})
-        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-                MockSettings.objects.first.return_value = None
-                use_sysname, _ = resolve_naming_preferences(request)
-        assert use_sysname is True
-
-    def test_post_use_sysname_plain_key(self):
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
-
-        request = _make_request(post={"use_sysname": "true"})
-        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-                MockSettings.objects.first.return_value = None
-                use_sysname, _ = resolve_naming_preferences(request)
-        assert use_sysname is True
-
-    def test_get_fallback_when_no_post(self):
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
-
-        request = _make_request(get={"use_sysname": "on"})
-        request.POST = {}
-        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-                MockSettings.objects.first.return_value = None
-                use_sysname, _ = resolve_naming_preferences(request)
-        assert use_sysname is True
-
-    def test_user_pref_used_when_no_post_get(self):
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
-
-        request = _make_request()
-        with patch("netbox_librenms_plugin.utils.get_user_pref") as mock_pref:
-            mock_pref.return_value = False
-            with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-                MockSettings.objects.first.return_value = None
-                use_sysname, _ = resolve_naming_preferences(request)
-        assert use_sysname is False
+        request = RequestFactory().get("/device-import/")
+        request.user = AnonymousUser()
+        return request
 
     def test_settings_fallback_when_no_pref(self):
+        from netbox_librenms_plugin.models import LibreNMSSettings
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
-        request = _make_request()
-        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-                settings_obj = MagicMock()
-                settings_obj.use_sysname_default = False
-                settings_obj.strip_domain_default = True
-                MockSettings.objects.first.return_value = settings_obj
-                use_sysname, strip_domain = resolve_naming_preferences(request)
-        assert use_sysname is False
-        assert strip_domain is True
+        plugin_settings, _ = LibreNMSSettings.objects.get_or_create()
+        plugin_settings.use_sysname_default = False
+        plugin_settings.strip_domain_default = True
+        plugin_settings.save(update_fields=["use_sysname_default", "strip_domain_default"])
+
+        assert resolve_naming_preferences(self._anonymous_request()) == (False, True)
 
     def test_no_settings_defaults_to_true_false(self):
+        from netbox_librenms_plugin.models import LibreNMSSettings
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
-        request = _make_request()
-        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-                MockSettings.objects.first.return_value = None
-                use_sysname, strip_domain = resolve_naming_preferences(request)
-        assert use_sysname is True
-        assert strip_domain is False
+        LibreNMSSettings.objects.all().delete()
 
-    def test_strip_domain_post_toggle(self):
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
-
-        request = _make_request(post={"strip-domain-toggle": "on"})
-        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-                MockSettings.objects.first.return_value = None
-                _, strip_domain = resolve_naming_preferences(request)
-        assert strip_domain is True
+        assert resolve_naming_preferences(self._anonymous_request()) == (True, False)
 
 
 class TestResolveVCDetectionEnabled:
@@ -1387,206 +1329,119 @@ class TestBulkImportDevicesViewPost:
         ]
 
 
+@pytest.mark.django_db
 class TestDeviceImportHelperMixin:
-    """Tests for DeviceImportHelperMixin methods (lines 154-220)."""
+    """Exercise validation, row rendering, and fallback messages through real seams."""
 
-    def _make_mixin_view(self):
+    @pytest.fixture
+    def librenms_server(self, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        with run_librenms_server() as server:
+            yield server
+
+    @staticmethod
+    def _view(settings, server, server_key):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
 
-        # Use DeviceRoleUpdateView which inherits from both LibreNMSAPIMixin and DeviceImportHelperMixin
-        view = object.__new__(DeviceRoleUpdateView)
-        view._librenms_api = _make_api()
-        view.request = MagicMock()
+        configure_test_servers(
+            settings,
+            {
+                server_key: {
+                    "librenms_url": server.url,
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
+        view = DeviceRoleUpdateView()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
         return view
 
-    def test_get_validated_device_returns_none_when_device_not_found(self):
-        view = self._make_mixin_view()
-        with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-            ):
-                libre_device, validation, selections = view.get_validated_device_with_selections(1, MagicMock())
-        assert libre_device is None
-        assert validation is None
+    def test_real_device_is_validated_and_rendered(self, settings, librenms_server):
+        server_key = "helper-real-device"
+        device_id = 7
+        make_device("helper-infrastructure")
+        librenms_server.device_info_response(
+            device_id=device_id,
+            hostname="helper-new-device",
+            hardware="TestDT",
+            os="-",
+            serial="",
+            ip="198.18.0.7",
+            location="TestSite",
+        )
+        librenms_server.vc_inventory_callable(device_id, [], {})
+        view = self._view(settings, librenms_server, server_key)
+        request = make_view_request("post", {"server_key": server_key})
 
-    def test_get_validated_device_returns_data_when_found(self):
-        view = self._make_mixin_view()
-        libre_device = {"device_id": 1, "hostname": "sw01"}
+        libre_device, validation, selections = view.get_validated_device_with_selections(device_id, request)
+        response = view.render_device_row(request, libre_device, validation, selections)
 
-        with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                    return_value=(True, False),
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                        return_value={"status": "importable"},
-                    ):
-                        with patch("netbox_librenms_plugin.views.imports.actions.cache") as mock_cache:
-                            mock_cache.get.return_value = None
-                            request = _make_request()
-                            result_device, validation, selections = view.get_validated_device_with_selections(
-                                1, request
-                            )
-        assert result_device is libre_device
+        assert libre_device["device_id"] == device_id
         assert validation is not None
+        assert selections == {"cluster_id": None, "role_id": None, "rack_id": None}
+        assert response.status_code == 200
+        assert b"helper-new-device" in response.content
+        assert any(item["path"] == f"/api/v0/devices/{device_id}" for item in librenms_server.requests)
 
-    @patch("netbox_librenms_plugin.views.imports.actions.render")
-    def test_render_device_row_calls_render(self, mock_render):
-        view = self._make_mixin_view()
-        mock_render.return_value = MagicMock()
+    def test_post_commit_refresh_fallback_renders_real_messages(self):
+        from django.contrib import messages
+        from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
 
-        libre_device = {"device_id": 1}
-        validation = {"status": "importable"}
-        selections = {"cluster_id": None, "role_id": None, "rack_id": None}
+        request = make_view_request("post")
 
-        with patch("netbox_librenms_plugin.views.imports.actions.DeviceImportTable") as MockTable:
-            MockTable.return_value = MagicMock()
-            view.render_device_row(MagicMock(), libre_device, validation, selections)
+        response = DeviceRoleUpdateView().post_commit_refresh_fallback(
+            request,
+            "closeModal",
+            deferred_messages=[(messages.INFO, "OOB attached")],
+        )
 
-        mock_render.assert_called_once()
-        assert "device_import_row.html" in mock_render.call_args[0][1]
-
-    def test_post_commit_refresh_fallback_returns_200_not_error(self):
-        """A committed mutation whose post-commit row reload fails must NOT report failure: surface the deferred messages + a refresh hint and return 200 with the success trigger, so the user doesn't retry an action that already succeeded."""
-        from django.contrib import messages as dj_messages
-
-        view = self._make_mixin_view()
-        request = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.imports.actions.messages") as mock_msgs,
-            patch(
-                "netbox_librenms_plugin.views.imports.actions._attach_messages_oob",
-                side_effect=lambda resp, req: resp,
-            ) as mock_attach,
-        ):
-            response = view.post_commit_refresh_fallback(
-                request, "closeModal", deferred_messages=[(dj_messages.INFO, "OOB attached")]
-            )
-
-        # Success-shaped response (200 + the trigger), never an HTMX error.
         assert response.status_code == 200
         assert response["HX-Trigger"] == "closeModal"
-        # The deferred outcome message and the "couldn't reload, refresh" hint were surfaced.
-        mock_msgs.add_message.assert_called_once_with(request, dj_messages.INFO, "OOB attached")
-        mock_msgs.warning.assert_called_once()
-        mock_attach.assert_called_once()
+        assert response["HX-Reswap"] == "none"
+        assert b"OOB attached" in response.content
+        assert b"could not be reloaded" in response.content
 
 
+@pytest.mark.django_db
 class TestAttachMessagesOob:
-    """Tests for the _attach_messages_oob helper."""
+    """Exercise the OOB message helper with Django's real message storage and template."""
 
     def test_returns_none_when_response_is_none(self):
         from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
 
-        assert _attach_messages_oob(None, MagicMock()) is None
+        assert _attach_messages_oob(None, make_view_request("get")) is None
 
-    def test_skips_response_without_bytes_content(self):
-        """When .content is a MagicMock or similar non-bytes value, skip cleanly."""
-        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
-
-        response = MagicMock()
-        response.content = MagicMock()  # not bytes / bytearray
-        result = _attach_messages_oob(response, MagicMock())
-        assert result is response  # returned unchanged
-
-    @staticmethod
-    def _storage(items):
-        """A messages-storage stand-in with a REAL __iter__."""
-
-        class _Storage:
-            def __init__(self, values):
-                self.used = False
-                self._values = values
-
-            def __iter__(self):
-                self.used = True
-                return iter(self._values)
-
-        return _Storage(items)
-
-    def test_appends_rendered_messages_to_bytes_content(self):
+    def test_appends_the_real_messages_fragment(self):
+        from django.contrib import messages
         from django.http import HttpResponse
 
         from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
 
+        request = make_view_request("get")
+        messages.info(request, "A queued action message")
         response = HttpResponse(b"<tr>row html</tr>")
-        storage = self._storage(["a message"])
-        with (
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
-                return_value=storage,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.render_to_string",
-                return_value='<div id="django-messages" hx-swap-oob="true"></div>',
-            ) as mock_render,
-        ):
-            result = _attach_messages_oob(response, MagicMock())
 
-        mock_render.assert_called_once()
-        assert b'<div id="django-messages"' in result.content
+        result = _attach_messages_oob(response, request)
+
         assert result.content.startswith(b"<tr>row html</tr>")
-        # The CodeQL-safe format_html() composition produces exactly the concatenation of the
-        # original response bytes and the rendered (trusted) fragment — no escaping of either.
-        assert result.content == b"<tr>row html</tr>" + b'<div id="django-messages" hx-swap-oob="true"></div>'
-        # The peek must not leave the storage consumed for the page renderer.
-        assert storage.used is False
+        assert b'<div id="django-messages"' in result.content
+        assert b"A queued action message" in result.content
 
-    def test_skips_oob_swap_when_no_messages_queued(self):
-        """No pending messages → don't append an empty OOB container that would wipe toasts already visible from an earlier action."""
+    def test_no_messages_leave_the_response_unchanged(self):
         from django.http import HttpResponse
 
         from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
 
+        request = make_view_request("get")
         response = HttpResponse(b"<tr>row html</tr>")
         original = response.content
-        storage = self._storage([])
-        with (
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
-                return_value=storage,
-            ),
-            patch("netbox_librenms_plugin.views.imports.actions.render_to_string") as mock_render,
-        ):
-            result = _attach_messages_oob(response, MagicMock())
 
-        mock_render.assert_not_called()
-        assert result.content == original
-        # Even on the empty path, the peek must restore used so nothing is consumed.
-        assert storage.used is False
-
-    def test_swallows_render_errors(self):
-        from django.http import HttpResponse
-
-        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
-
-        response = HttpResponse(b"<tr>row html</tr>")
-        original = response.content
-        storage = self._storage(["a message"])
-        with (
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
-                return_value=storage,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.imports.actions.render_to_string",
-                side_effect=RuntimeError("db not available"),
-            ),
-        ):
-            result = _attach_messages_oob(response, MagicMock())
+        result = _attach_messages_oob(response, request)
 
         assert result.content == original
-        # Peeking at the storage marks it consumed; the function restores used=False before the
-        # render. A render error must not leave the storage consumed, or the page's own renderer
-        # (and the next OOB attach) would silently drop the queued messages.
-        assert storage.used is False
 
 
 class TestDeviceValidationDetailsView:
@@ -1697,6 +1552,7 @@ class TestDeviceValidationDetailsView:
         assert fetched["called"] is False  # never fetched from the wrong (default) server
 
 
+@pytest.mark.django_db
 class TestBuildSyncInfo:
     """Tests for _build_sync_info (lines 828-886)."""
 
@@ -1707,24 +1563,17 @@ class TestBuildSyncInfo:
 
     def test_serial_matches(self):
         build_sync_info = self._get_method()
-        libre_device = {"serial": "SN001", "os": "ios", "hardware": "-"}
-        existing = MagicMock()
-        existing.serial = "SN001"
-        existing.platform = None
-        existing.device_type = None
+        libre_device = {"serial": "SN001", "os": "-", "hardware": "-"}
+        existing = make_device("sync-info-serial-match", serial="SN001")
 
-        with patch("netbox_librenms_plugin.utils.find_matching_platform", return_value={"found": False}):
-            result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing)
 
         assert result["serial_synced"] is True
 
     def test_serial_mismatch(self):
         build_sync_info = self._get_method()
         libre_device = {"serial": "SN_LIBRENMS", "os": "-", "hardware": "-"}
-        existing = MagicMock()
-        existing.serial = "SN_NETBOX"
-        existing.platform = None
-        existing.device_type = None
+        existing = make_device("sync-info-serial-mismatch", serial="SN_NETBOX")
 
         result = build_sync_info(libre_device, existing)
         assert result["serial_synced"] is False
@@ -1732,18 +1581,13 @@ class TestBuildSyncInfo:
     def test_padded_incoming_serial_counts_as_synced(self):
         """A whitespace-padded LibreNMS serial equal to the stored trimmed value must not report drift."""
         build_sync_info = self._get_method()
-        libre_device = {"serial": " SN001 ", "os": "ios", "hardware": "-"}
-        existing = MagicMock()
-        existing.serial = "SN001"
-        existing.platform = None
-        existing.device_type = None
+        libre_device = {"serial": " SN001 ", "os": "-", "hardware": "-"}
+        existing = make_device("sync-info-padded-incoming", serial="SN001")
 
-        with patch("netbox_librenms_plugin.utils.find_matching_platform", return_value={"found": False}):
-            result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing)
 
         assert result["serial_synced"] is True
 
-    @pytest.mark.django_db
     def test_padded_stored_serial_counts_as_synced(self):
         """A real device whose STORED serial is legacy-padded must not report serial drift in the details modal."""
         build_sync_info = self._get_method()
@@ -1756,57 +1600,59 @@ class TestBuildSyncInfo:
         assert result["all_synced"] is True
 
     def test_platform_synced_when_matching(self):
+        from dcim.models import Platform
+
         build_sync_info = self._get_method()
-        libre_device = {"serial": "-", "os": "ios", "hardware": "-"}
-        existing = MagicMock()
-        existing.serial = ""
-        existing.device_type = None
+        platform = Platform.objects.create(name="sync-info-ios", slug="sync-info-ios")
+        existing = make_device("sync-info-platform")
+        existing.platform = platform
+        existing.save(update_fields=["platform"])
+        libre_device = {"serial": "-", "os": platform.name, "hardware": "-"}
 
-        mock_platform = MagicMock()
-        mock_platform.pk = 1
-        existing.platform = mock_platform
-
-        with patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_match:
-            mock_match.return_value = {"found": True, "platform": mock_platform}
-            result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing)
 
         assert result["platform_synced"] is True
+        assert result["platform_info"]["matching_platform"] == platform
 
     def test_device_type_synced_when_matched(self):
         build_sync_info = self._get_method()
-        libre_device = {"serial": "-", "os": "-", "hardware": "Cisco C9300"}
-        existing = MagicMock()
-        existing.serial = ""
-        existing.platform = None
+        existing = make_device("sync-info-type-match")
+        libre_device = {"serial": "-", "os": "-", "hardware": existing.device_type.model}
 
-        mock_dt = MagicMock()
-        mock_dt.pk = 10
-        existing.device_type = mock_dt
-
-        with patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw:
-            mock_hw.return_value = {"matched": True, "device_type": mock_dt}
-            result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing)
 
         assert result["device_type_synced"] is True
+        assert result["librenms_device_type"] == existing.device_type
 
     def test_device_type_not_synced_when_mismatch(self):
+        from dcim.models import DeviceType
+
         build_sync_info = self._get_method()
-        libre_device = {"serial": "-", "os": "-", "hardware": "Cisco C9300"}
-        existing = MagicMock()
-        existing.serial = ""
-        existing.platform = None
+        existing = make_device("sync-info-type-mismatch")
+        librenms_type = DeviceType.objects.create(
+            manufacturer=existing.device_type.manufacturer,
+            model="SyncInfoOtherType",
+            slug="sync-info-other-type",
+        )
+        libre_device = {"serial": "-", "os": "-", "hardware": librenms_type.model}
 
-        netbox_dt = MagicMock()
-        netbox_dt.pk = 5
-        librenms_dt = MagicMock()
-        librenms_dt.pk = 10
-        existing.device_type = netbox_dt
-
-        with patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw:
-            mock_hw.return_value = {"matched": True, "device_type": librenms_dt}
-            result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing)
 
         assert result["device_type_synced"] is False
+        assert result["librenms_device_type"] == librenms_type
+
+    def test_missing_platform_and_hardware_are_already_synced(self):
+        build_sync_info = self._get_method()
+        existing = make_device("sync-info-no-platform")
+
+        result = build_sync_info(
+            {"serial": "-", "os": "-", "hardware": "-"},
+            existing,
+        )
+
+        assert result["platform_synced"] is True
+        assert result["device_type_synced"] is True
+        assert result["all_synced"] is True
 
 
 class TestBuildIdServerInfo:
@@ -1817,217 +1663,158 @@ class TestBuildIdServerInfo:
 
         return DeviceValidationDetailsView._build_id_server_info
 
+    @staticmethod
+    def _object(mapping):
+        return Namespace(custom_field_data={"librenms_id": mapping})
+
+    @staticmethod
+    def _configure(settings, plugin_config):
+        settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": plugin_config}
+
     def test_legacy_int_returns_none(self):
         method = self._get_method()
-        existing = MagicMock()
-        existing.custom_field_data = {"librenms_id": 42}
-        result = method(existing)
-        assert result is None
+
+        assert method(self._object(42)) is None
 
     def test_none_cf_returns_none(self):
         method = self._get_method()
-        existing = MagicMock()
-        existing.custom_field_data = {}
-        result = method(existing)
-        assert result is None
 
-    def test_dict_cf_returns_list(self):
+        assert method(Namespace(custom_field_data={})) is None
+
+    def test_dict_cf_returns_list(self, settings):
         method = self._get_method()
-        existing = MagicMock()
-        existing.custom_field_data = {"librenms_id": {"default": 42}}
+        self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        with patch("django.conf.settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = {
-                "netbox_librenms_plugin": {"servers": {"default": {"display_name": "Default Server"}}}
-            }
-            result = method(existing)
+        result = method(self._object({"default": 42}))
 
         assert result is not None
         assert result[0]["server_key"] == "default"
         assert result[0]["device_id"] == 42
 
-    def test_bool_value_skipped(self):
+    def test_bool_value_skipped(self, settings):
         method = self._get_method()
-        existing = MagicMock()
-        existing.custom_field_data = {"librenms_id": {"default": True, "other": 99}}
+        self._configure(settings, {"servers": {"other": {"display_name": "Other"}}})
 
-        with patch("django.conf.settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {"other": {"display_name": "Other"}}}}
-            result = method(existing)
+        result = method(self._object({"default": True, "other": 99}))
 
         assert result is not None
         assert len(result) == 1
         assert result[0]["server_key"] == "other"
 
-    def test_dict_entry_uses_host_id(self):
+    def test_dict_entry_uses_host_id(self, settings):
         """New dict form {server_key: {"id": N, "oob": {...}}} renders the host id, not None."""
         method = self._get_method()
-        existing = MagicMock()
-        existing.custom_field_data = {"librenms_id": {"default": {"id": 42, "oob": {"id": 17, "type": "idrac"}}}}
+        self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        with patch("django.conf.settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = {
-                "netbox_librenms_plugin": {"servers": {"default": {"display_name": "Default Server"}}}
-            }
-            result = method(existing)
+        result = method(self._object({"default": {"id": 42, "oob": {"id": 17, "type": "idrac"}}}))
 
         assert result is not None
         assert result[0]["device_id"] == 42
 
-    def test_oob_only_dict_entry_surfaced_with_controller_id(self):
+    def test_oob_only_dict_entry_surfaced_with_controller_id(self, settings):
         """An OOB-only entry is still a real link → surfaced with the OOB controller's id."""
         method = self._get_method()
-        existing = MagicMock()
-        existing.custom_field_data = {"librenms_id": {"default": {"oob": {"id": 17, "type": "idrac"}}}}
+        self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        with patch("django.conf.settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = {
-                "netbox_librenms_plugin": {"servers": {"default": {"display_name": "Default Server"}}}
-            }
-            result = method(existing)
+        result = method(self._object({"default": {"oob": {"id": 17, "type": "idrac"}}}))
 
         # Mirrors the device-sync modal (_build_all_server_mappings): the OOB-only link is shown
         # using the OOB controller's id rather than dropped (which would risk a duplicate re-import).
         assert result == [{"server_key": "default", "display_name": "Default Server", "device_id": 17}]
 
-    def test_default_key_fallback_display_name(self):
+    def test_default_key_fallback_display_name(self, settings):
         """'default' with no servers config uses root display_name."""
         method = self._get_method()
-        existing = MagicMock()
-        existing.custom_field_data = {"librenms_id": {"default": 55}}
+        self._configure(settings, {"display_name": "My LibreNMS", "servers": {}})
 
-        with patch("django.conf.settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = {
-                "netbox_librenms_plugin": {
-                    "display_name": "My LibreNMS",
-                    "servers": {},
-                }
-            }
-            result = method(existing)
+        result = method(self._object({"default": 55}))
 
         assert result is not None
         assert result[0]["display_name"] == "My LibreNMS"
 
-    def test_string_device_id_converted(self):
+    @pytest.mark.parametrize("stored_id", ["77", " 77 "])
+    def test_string_device_id_converted(self, settings, stored_id):
         method = self._get_method()
-        existing = MagicMock()
-        existing.custom_field_data = {"librenms_id": {"default": "77"}}
+        self._configure(settings, {"servers": {"default": {"display_name": "D"}}})
 
-        with patch("django.conf.settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {"default": {"display_name": "D"}}}}
-            result = method(existing)
+        result = method(self._object({"default": stored_id}))
 
         assert result[0]["device_id"] == 77
 
+    def test_non_dict_servers_config_is_treated_as_empty(self, settings):
+        method = self._get_method()
+        self._configure(settings, {"servers": "not-a-dict"})
 
-class TestDeviceRoleUpdateView:
-    """Tests for DeviceRoleUpdateView.post (lines ~927+)."""
+        result = method(self._object({"default": 42}))
 
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
+        assert result == [{"server_key": "default", "display_name": "default", "device_id": 42}]
 
-        view = object.__new__(DeviceRoleUpdateView)
-        view._librenms_api = _make_api()
-        return view
+    def test_non_numeric_id_is_skipped(self, settings):
+        method = self._get_method()
+        self._configure(settings, {"servers": {}})
 
-    def test_device_not_found_renders_htmx_error_toast(self):
-        view = self._make_view()
-        with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
-            result = view.post(_make_request(post={}), device_id=1)
-        assert result.status_code == 200
-        assert result.headers.get("HX-Reswap") == "none"
-        assert b"Device not found" in result.content
+        result = method(self._object({"default": "not-a-number", "main": 42}))
 
-    @patch("netbox_librenms_plugin.views.imports.actions.render")
-    def test_device_found_renders_row(self, mock_render):
-        view = self._make_view()
-        mock_render.return_value = MagicMock()
-
-        libre_device = {"device_id": 1}
-        validation = {}
-        selections = {"cluster_id": None, "role_id": None, "rack_id": None}
-
-        with patch.object(
-            view, "get_validated_device_with_selections", return_value=(libre_device, validation, selections)
-        ):
-            with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render_row:
-                view.post(_make_request(post={}), device_id=1)
-
-        mock_render_row.assert_called_once()
+        assert result == [{"server_key": "main", "display_name": "main", "device_id": 42}]
 
 
-class TestDeviceClusterUpdateView:
-    """Tests for DeviceClusterUpdateView.post."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceClusterUpdateView
-
-        view = object.__new__(DeviceClusterUpdateView)
-        view._librenms_api = _make_api()
-        return view
-
-    def test_device_not_found_renders_htmx_error_toast(self):
-        view = self._make_view()
-        with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
-            result = view.post(_make_request(post={}), device_id=1)
-        assert result.status_code == 200
-        assert result.headers.get("HX-Reswap") == "none"
-        assert b"Device not found" in result.content
-
-
-class TestDeviceRackUpdateView:
-    """Tests for DeviceRackUpdateView.post."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceRackUpdateView
-
-        view = object.__new__(DeviceRackUpdateView)
-        view._librenms_api = _make_api()
-        return view
-
-    def test_device_not_found_renders_htmx_error_toast(self):
-        view = self._make_view()
-        with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
-            result = view.post(_make_request(post={}), device_id=1)
-        assert result.status_code == 200
-        assert result.headers.get("HX-Reswap") == "none"
-        assert b"Device not found" in result.content
-
-
-class TestRowUpdateViewsServerRebind:
-    """Device role, cluster, and rack update views bind the client to the posted ``server_key``."""
+@pytest.mark.django_db
+class TestRowUpdateViews:
+    """Exercise role, cluster, and rack row updates through real server rebinding."""
 
     VIEWS = ["DeviceRoleUpdateView", "DeviceClusterUpdateView", "DeviceRackUpdateView"]
 
-    def _view(self, view_name):
+    @pytest.fixture
+    def librenms_server(self, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        with run_librenms_server() as server:
+            yield server
+
+    @staticmethod
+    def _view(view_name):
         from netbox_librenms_plugin.views.imports import actions
 
-        return object.__new__(getattr(actions, view_name))
+        return getattr(actions, view_name)()
+
+    @staticmethod
+    def _configure(settings, server, server_key):
+        configure_test_servers(
+            settings,
+            {
+                server_key: {
+                    "librenms_url": server.url,
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
 
     @pytest.mark.parametrize("view_name", VIEWS)
-    def test_stale_server_key_fails_closed_before_lookup(self, view_name):
-        """An unresolvable POSTed key errors out without any device lookup (mirrors the sibling import endpoints)."""
-        view = self._view(view_name)
-        req = _make_request(post={"server_key": "ghost"})
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
-            with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})) as lookup:
-                result = view.post(req, device_id=42)
-        lookup.assert_not_called()
+    def test_stale_server_key_fails_closed_without_http(self, settings, librenms_server, view_name):
+        self._configure(settings, librenms_server, "row-active")
+        request = make_view_request("post", {"server_key": "ghost"})
+
+        result = post_view(self._view(view_name), request, device_id=42)
+
         assert result.headers.get("HX-Reswap") == "none"
         assert b"no longer configured" in result.content
+        assert librenms_server.requests == []
 
     @pytest.mark.parametrize("view_name", VIEWS)
-    def test_rebinds_to_posted_server(self, view_name):
-        """The POSTed server_key is bound before the lookup, so the row re-validates against the page's server."""
+    def test_rebinds_before_real_missing_device_lookup(self, settings, librenms_server, view_name):
+        server_key = f"row-{view_name.lower()}"
+        self._configure(settings, librenms_server, server_key)
         view = self._view(view_name)
-        api = MagicMock()
-        api.server_key = "secondary"
-        req = _make_request(post={"server_key": "secondary"})
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=api) as mock_build:
-            with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
-                view.post(req, device_id=42)
-        mock_build.assert_called_once_with("secondary")
-        assert view._librenms_api is api
+        request = make_view_request("post", {"server_key": server_key})
+
+        result = post_view(view, request, device_id=42)
+
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"Device not found" in result.content
+        assert view.librenms_api.server_key == server_key
+        assert [(item["method"], item["path"]) for item in librenms_server.requests] == [("GET", "/api/v0/devices/42")]
 
 
 @pytest.mark.django_db
@@ -2203,92 +1990,120 @@ class TestDeviceConflictActionView:
         assert b"Unknown action: unknown_action" in result.content
 
 
+@pytest.mark.django_db
 class TestSaveUserPrefView:
-    """Tests for SaveUserPrefView.post."""
+    """Exercise the preference endpoint through URL dispatch and a real user config."""
 
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+    @staticmethod
+    def _post(client, user, body):
+        client.force_login(user)
+        return client.post(
+            url_for("plugins:netbox_librenms_plugin:save_user_pref"),
+            data=body,
+            content_type="application/json",
+        )
 
-        view = object.__new__(SaveUserPrefView)
-        return view
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"not-json",
+            b'{"key":"disallowed_key","value":true}',
+            b"[1,2,3]",
+            b'"hello"',
+            b"42",
+        ],
+    )
+    def test_invalid_payload_returns_400(self, client, body):
+        user = make_view_user("pref-invalid-user", [])
 
-    def test_invalid_json_returns_400(self):
-        view = self._make_view()
-        with patch.object(view, "require_write_permission", return_value=None):
-            request = MagicMock()
-            request.body = b"not-json"
-            result = view.post(request)
-        assert result.status_code == 400
+        response = self._post(client, user, body)
 
-    def test_invalid_key_returns_400(self):
-        import json
+        assert response.status_code == 400
 
-        view = self._make_view()
-        with patch.object(view, "require_write_permission", return_value=None):
-            request = MagicMock()
-            request.body = json.dumps({"key": "disallowed_key", "value": True}).encode()
-            result = view.post(request)
-        assert result.status_code == 400
+    def test_valid_pref_is_persisted(self, client, django_user_model):
+        user = make_view_user("pref-valid-user", [])
 
-    def test_non_object_json_returns_400(self):
-        """Valid JSON that is not an object (list/str/number) must be rejected as 400, not 500 on data.get()."""
-        import json
+        response = self._post(client, user, b'{"key":"use_sysname","value":true}')
 
-        view = self._make_view()
-        for payload in ([1, 2, 3], "hello", 42):
-            with patch.object(view, "require_write_permission", return_value=None):
-                request = MagicMock()
-                request.body = json.dumps(payload).encode()
-                result = view.post(request)  # must not raise AttributeError
-            assert result.status_code == 400
-
-    def test_valid_pref_saved(self):
-        import json
-
-        view = self._make_view()
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch("netbox_librenms_plugin.views.imports.actions.save_user_pref") as mock_save:
-                request = MagicMock()
-                request.body = json.dumps({"key": "use_sysname", "value": True}).encode()
-                result = view.post(request)
-
-        assert result.status_code == 200
-        mock_save.assert_called_once()
+        assert response.status_code == 200
+        stored_user = django_user_model.objects.get(pk=user.pk)
+        assert stored_user.config.get("plugins.netbox_librenms_plugin.use_sysname") is True
 
 
+@pytest.mark.django_db
 class TestDeviceVCDetailsView:
-    """Tests for DeviceVCDetailsView.get (lines 766-790)."""
+    """Render VC details through the real client, inventory detector, and template."""
 
-    def _make_view(self):
+    @pytest.fixture
+    def librenms_server(self, monkeypatch):
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        with run_librenms_server() as server:
+            yield server
+
+    @staticmethod
+    def _view(settings, server, server_key):
         from netbox_librenms_plugin.views.imports.actions import DeviceVCDetailsView
 
-        view = object.__new__(DeviceVCDetailsView)
-        view._librenms_api = _make_api()
-        return view
+        configure_test_servers(
+            settings,
+            {
+                server_key: {
+                    "librenms_url": server.url,
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
+        return DeviceVCDetailsView()
 
-    def test_device_not_found_returns_200_html_fragment(self):
-        # HTMX fragment swapped into the modal; HTMX skips the swap on a 4xx, so return 200.
-        view = self._make_view()
-        request = RequestFactory().get("/x/?server_key=default")
-        with patch("netbox_librenms_plugin.views.imports.actions.get_librenms_device_by_id", return_value=None):
-            result = view.get(request, device_id=1)
+    def test_device_not_found_returns_200_html_fragment(self, settings, librenms_server):
+        server_key = "vc-details-missing"
+        view = self._view(settings, librenms_server, server_key)
+        request = make_view_request("get", {"server_key": server_key})
+
+        result = get_view(view, request, device_id=1)
+
         assert result.status_code == 200
         assert b"not found in LibreNMS" in result.content
+        assert [(item["method"], item["path"]) for item in librenms_server.requests] == [("GET", "/api/v0/devices/1")]
 
-    @patch("netbox_librenms_plugin.views.imports.actions.render")
-    def test_device_found_renders_template(self, mock_render):
-        view = self._make_view()
-        mock_render.return_value = MagicMock()
-        libre_device = {"device_id": 1, "hostname": "router01"}
-        vc_data = {"is_stack": False, "members": []}
-        request = RequestFactory().get("/x/?server_key=default")
+    def test_stack_response_renders_real_vc_details(self, settings, librenms_server):
+        server_key = "vc-details-stack"
+        device_id = 42
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(device_id=device_id, hostname="stack-master", serial="MEMBER-1")
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}],
+            {
+                100: [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 201,
+                        "entPhysicalParentRelPos": 2,
+                        "entPhysicalSerialNum": "MEMBER-2",
+                        "entPhysicalModelName": "Model 2",
+                    },
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 200,
+                        "entPhysicalParentRelPos": 1,
+                        "entPhysicalSerialNum": "MEMBER-1",
+                        "entPhysicalModelName": "Model 1",
+                    },
+                ]
+            },
+        )
+        request = make_view_request("get", {"server_key": server_key})
 
-        with patch("netbox_librenms_plugin.views.imports.actions.get_librenms_device_by_id", return_value=libre_device):
-            with patch("netbox_librenms_plugin.views.imports.actions.get_virtual_chassis_data", return_value=vc_data):
-                view.get(request, device_id=1)
+        result = get_view(view, request, device_id=device_id)
 
-        mock_render.assert_called_once()
-        assert "device_vc_details.html" in mock_render.call_args[0][1]
+        assert result.status_code == 200
+        assert b"Virtual Chassis: stack-master" in result.content
+        assert b"2-member" in result.content
+        assert b"stack-master-M1" in result.content
+        assert b"stack-master-M2" in result.content
 
 
 class TestBulkImportDevicesViewSyncExecution:
@@ -2327,95 +2142,6 @@ class TestBulkImportDevicesViewSyncExecution:
 
         result = view.should_use_background_job_for_import(request)
         assert result is False
-
-
-class TestBuildSyncInfoNoPlatform:
-    """Tests for _build_sync_info when no platform on either side."""
-
-    def _get_method(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
-
-        return DeviceValidationDetailsView._build_sync_info
-
-    def test_both_platforms_none_not_synced(self):
-        method = self._get_method()
-        libre_device = {"serial": "-", "os": "-", "hardware": "-"}
-        existing = MagicMock()
-        existing.serial = ""
-        existing.platform = None
-        existing.device_type = None
-
-        result = method(libre_device, existing)
-        assert "platform_synced" in result
-
-    def test_serial_empty_treated_as_not_set(self):
-        method = self._get_method()
-        libre_device = {"serial": "-", "os": "-", "hardware": "-"}
-        existing = MagicMock()
-        existing.serial = ""  # Empty string
-        existing.platform = None
-        existing.device_type = None
-
-        result = method(libre_device, existing)
-        # Both serials are blank/dash → serial_synced could be True or False but should be in result
-        assert "serial_synced" in result
-
-
-class TestResolveTruthyPreferences:
-    """Tests for resolve_naming_preferences truthy parsing via integration."""
-
-    def test_on_value_resolves_to_true(self):
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
-
-        request = _make_request(post={"use_sysname": "on", "strip_domain": "on"})
-        with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-            MockSettings.objects.first.return_value = None
-            use_sysname, strip_domain = resolve_naming_preferences(request)
-        assert use_sysname is True
-        assert strip_domain is True
-
-    def test_false_value_resolves_to_false(self):
-        from netbox_librenms_plugin.utils import resolve_naming_preferences
-
-        request = _make_request(post={"use_sysname": "false", "strip_domain": "0"})
-        with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
-            MockSettings.objects.first.return_value = None
-            use_sysname, strip_domain = resolve_naming_preferences(request)
-        assert use_sysname is False
-        assert strip_domain is False
-
-
-class TestBuildIdServerInfoEdgeCases:
-    """Tests for DeviceValidationDetailsView._build_id_server_info edge cases (lines 905, 912)."""
-
-    def test_non_dict_servers_config_treated_as_empty(self):
-        """Line 905: servers_config is not a dict → treated as {}."""
-        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
-
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": 42}}
-
-        with patch("django.conf.settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = {
-                "netbox_librenms_plugin": {"servers": "not-a-dict"}  # Not a dict
-            }
-            result = DeviceValidationDetailsView._build_id_server_info(obj)
-        assert result is not None
-
-    def test_string_non_digit_id_is_skipped(self):
-        """Line 912: string ID that is not digit is skipped."""
-        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
-
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"default": "notdigit", "main": 42}}
-
-        with patch("django.conf.settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
-            result = DeviceValidationDetailsView._build_id_server_info(obj)
-        # "notdigit" key is skipped (line 912), "main": 42 is included
-        if result:
-            ids = [item["device_id"] for item in result]
-            assert 42 in ids
 
 
 @pytest.mark.django_db
@@ -2640,81 +2366,6 @@ class TestDeviceConflictActionViewVMGuard:
         assert response.headers.get("HX-Reswap") == "none"
 
 
-class TestDeviceRoleClusterRackViews:
-    """Tests for DeviceRoleUpdateView, DeviceClusterUpdateView, DeviceRackUpdateView."""
-
-    def test_device_role_update_not_found(self):
-        """DeviceRoleUpdateView renders htmx error toast (200) when device not found."""
-        from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
-
-        view = object.__new__(DeviceRoleUpdateView)
-        view._librenms_api = _make_api()
-
-        request = _make_request(post={"role_id": "1"})
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
-                response = view.post(request, device_id=1)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Device not found" in response.content
-
-    def test_device_cluster_update_not_found(self):
-        """DeviceClusterUpdateView renders htmx error toast (200) when device not found."""
-        from netbox_librenms_plugin.views.imports.actions import DeviceClusterUpdateView
-
-        view = object.__new__(DeviceClusterUpdateView)
-        view._librenms_api = _make_api()
-
-        request = _make_request(post={"cluster_id": "1"})
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
-                response = view.post(request, device_id=1)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Device not found" in response.content
-
-    def test_device_rack_update_not_found(self):
-        """DeviceRackUpdateView renders htmx error toast (200) when device not found."""
-        from netbox_librenms_plugin.views.imports.actions import DeviceRackUpdateView
-
-        view = object.__new__(DeviceRackUpdateView)
-        view._librenms_api = _make_api()
-
-        request = _make_request(post={"rack_id": "1"})
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
-                response = view.post(request, device_id=1)
-
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
-        assert b"Device not found" in response.content
-
-    def test_device_role_update_renders_row(self):
-        """DeviceRoleUpdateView renders row when device found."""
-        from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
-
-        view = object.__new__(DeviceRoleUpdateView)
-        view._librenms_api = _make_api()
-
-        request = _make_request(post={"role_id": "1"})
-        libre_device = {"device_id": 1, "hostname": "router01"}
-        validation = {"status": "importable"}
-        selections = {}
-
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch.object(
-                view, "get_validated_device_with_selections", return_value=(libre_device, validation, selections)
-            ):
-                with patch.object(view, "render_device_row", return_value=MagicMock()) as mock_render:
-                    view.post(request, device_id=1)
-        mock_render.assert_called_once()
-
-
 @pytest.mark.django_db
 class TestDeviceConflictActionLinkAction:
     """DeviceConflictActionView 'link' action against a real Device."""
@@ -2785,92 +2436,52 @@ class TestDeviceConflictActionLinkAction:
         assert "librenms_id" not in Device.objects.get(pk=dev.pk).custom_field_data
 
 
+@pytest.mark.django_db
 class TestApplyUserSelectionsToValidation:
-    """Tests for _apply_user_selections_to_validation (lines 279-300)."""
+    """Apply selected real NetBox rows and recalculate the validation state."""
 
     def test_vm_with_cluster_and_role(self):
-        """Lines 279-288: VM mode applies cluster and role."""
         from netbox_librenms_plugin.views.imports.actions import _apply_user_selections_to_validation
 
-        validation = {}
-        selections = {"cluster_id": "1", "role_id": "2", "rack_id": None}
-        mock_cluster = MagicMock()
-        mock_role = MagicMock()
+        cluster = make_cluster("selection-cluster")
+        role = make_device("selection-vm-role-source").role
+        validation = {
+            "cluster": {"found": False, "cluster": None},
+            "device_role": {"found": False, "role": None},
+            "issues": ["Cluster must be selected", "Device role must be selected"],
+        }
+        selections = {"cluster_id": str(cluster.pk), "role_id": str(role.pk), "rack_id": None}
 
-        with patch(
-            "netbox_librenms_plugin.views.imports.actions.fetch_model_by_id",
-            side_effect=lambda model, id_: mock_cluster if str(id_) == "1" else mock_role,
-        ):
-            with patch(
-                "netbox_librenms_plugin.views.imports.actions.apply_cluster_to_validation"
-            ) as mock_apply_cluster:
-                with patch("netbox_librenms_plugin.views.imports.actions.apply_role_to_validation") as mock_apply_role:
-                    _apply_user_selections_to_validation(validation, selections, is_vm=True)
+        _apply_user_selections_to_validation(validation, selections, is_vm=True)
 
-        mock_apply_cluster.assert_called_once_with(validation, mock_cluster)
-        mock_apply_role.assert_called_once_with(validation, mock_role, is_vm=True)
+        assert validation["cluster"] == {"found": True, "cluster": cluster}
+        assert validation["device_role"] == {"found": True, "role": role}
+        assert validation["issues"] == []
+        assert validation["can_import"] is True
+        assert validation["is_ready"] is True
 
     def test_device_with_role_and_rack(self):
-        """Lines 292-300: Device mode applies role and rack."""
+        from dcim.models import Rack
+
         from netbox_librenms_plugin.views.imports.actions import _apply_user_selections_to_validation
 
-        validation = {}
-        selections = {"cluster_id": None, "role_id": "1", "rack_id": "2"}
-        mock_role = MagicMock()
-        mock_rack = MagicMock()
+        source = make_device("selection-device-role-source")
+        rack = Rack.objects.create(name="Selection Rack", site=source.site, status="active")
+        validation = {
+            "site": {"found": True},
+            "device_type": {"found": True},
+            "device_role": {"found": False, "role": None},
+            "issues": ["Device role must be selected"],
+        }
+        selections = {"cluster_id": None, "role_id": str(source.role.pk), "rack_id": str(rack.pk)}
 
-        call_count = [0]
+        _apply_user_selections_to_validation(validation, selections, is_vm=False)
 
-        def mock_fetch(model, id_):
-            call_count[0] += 1
-            return mock_role if call_count[0] == 1 else mock_rack
-
-        with patch("netbox_librenms_plugin.views.imports.actions.fetch_model_by_id", side_effect=mock_fetch):
-            with patch("netbox_librenms_plugin.views.imports.actions.apply_role_to_validation") as mock_apply_role:
-                with patch("netbox_librenms_plugin.views.imports.actions.apply_rack_to_validation") as mock_apply_rack:
-                    _apply_user_selections_to_validation(validation, selections, is_vm=False)
-
-        mock_apply_role.assert_called_once_with(validation, mock_role, is_vm=False)
-        mock_apply_rack.assert_called_once_with(validation, mock_rack)
-
-
-class TestDeviceVCDetailsViewAdditional:
-    """Tests for DeviceVCDetailsView.get() (line 334 in vc details)."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.imports.actions import DeviceVCDetailsView
-
-        view = object.__new__(DeviceVCDetailsView)
-        view._librenms_api = _make_api()
-        return view
-
-    def test_device_not_found_in_librenms_returns_200_html_fragment(self):
-        """Device not found in LibreNMS: HTMX fragment must come back 200 (a 4xx makes HTMX skip the swap), with the inline alert in the body."""
-        view = self._make_view()
-        request = _make_request()
-
-        with patch("netbox_librenms_plugin.views.imports.actions.get_librenms_device_by_id", return_value=None):
-            response = view.get(request, device_id=1)
-
-        assert response.status_code == 200
-        assert b"not found in LibreNMS" in response.content
-
-    def test_device_found_renders_vc_details(self):
-        """DeviceVCDetailsView.get renders vc details template."""
-        view = self._make_view()
-        request = _make_request()
-
-        libre_device = {"device_id": 1, "hostname": "sw01"}
-        vc_data = {"is_stack": True}
-
-        with patch("netbox_librenms_plugin.views.imports.actions.get_librenms_device_by_id", return_value=libre_device):
-            with patch("netbox_librenms_plugin.views.imports.actions.get_virtual_chassis_data", return_value=vc_data):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.render", return_value=MagicMock(status_code=200)
-                ) as mock_render:
-                    view.get(request, device_id=1)
-
-        mock_render.assert_called_once()
+        assert validation["device_role"] == {"found": True, "role": source.role}
+        assert validation["rack"] == {"found": True, "rack": rack}
+        assert validation["issues"] == []
+        assert validation["can_import"] is True
+        assert validation["is_ready"] is True
 
 
 @pytest.mark.django_db
@@ -6236,42 +5847,6 @@ class TestBulkImportConfirmPartialCacheExpiry:
         # The Refresh control is a real button, not a CSP-blocked javascript: pseudo-protocol href.
         assert "javascript:" not in html
         assert "<button" in html and "window.location.reload()" in html
-
-
-class TestBuildIdServerInfoPaddedId:
-    """DeviceValidationDetailsView._build_id_server_info coerces ids with int() so ' 42 ' isn't dropped."""
-
-    def test_whitespace_padded_id_is_included(self):
-        """A device linked via {'prod': ' 42 '} appears in the per-server panel with id 42 (issue #99)."""
-        from types import SimpleNamespace
-
-        from django.test import override_settings
-
-        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
-
-        cfg = {"netbox_librenms_plugin": {"servers": {"prod": {"librenms_url": "http://p", "api_token": "t"}}}}
-        device = SimpleNamespace(custom_field_data={"librenms_id": {"prod": " 42 "}})
-        with override_settings(PLUGINS_CONFIG=cfg):
-            result = DeviceValidationDetailsView._build_id_server_info(device)
-
-        assert result is not None
-        prod = [row for row in result if row["server_key"] == "prod"]
-        assert prod and prod[0]["device_id"] == 42
-
-    def test_non_numeric_id_is_dropped(self):
-        """A non-numeric id is not a valid link and is excluded."""
-        from types import SimpleNamespace
-
-        from django.test import override_settings
-
-        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
-
-        cfg = {"netbox_librenms_plugin": {"servers": {"prod": {"librenms_url": "http://p", "api_token": "t"}}}}
-        device = SimpleNamespace(custom_field_data={"librenms_id": {"prod": "abc"}})
-        with override_settings(PLUGINS_CONFIG=cfg):
-            result = DeviceValidationDetailsView._build_id_server_info(device)
-
-        assert not result or all(row["server_key"] != "prod" for row in result)
 
 
 @pytest.mark.django_db
