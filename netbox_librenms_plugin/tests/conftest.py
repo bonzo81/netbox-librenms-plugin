@@ -600,7 +600,7 @@ def mock_response_factory():
         response = requests.Response()
         response.status_code = status_code
         response.headers["Content-Type"] = "application/json"
-        response._content = json.dumps(json_data or {}).encode()
+        response._content = json.dumps({} if json_data is None else json_data).encode()
         return response
 
     return _create_response
