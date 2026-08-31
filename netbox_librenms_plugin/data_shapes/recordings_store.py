@@ -19,6 +19,16 @@ from pathlib import Path
 RECORDINGS_DIR = Path(__file__).resolve().parent / "recordings"
 MANIFEST_PATH = RECORDINGS_DIR / "manifest.json"
 MANIFEST_NAME = MANIFEST_PATH.name
+SUPPORTED_EXPECTED_OUTCOMES = frozenset(
+    {
+        "virtual_chassis",
+        "lag_members",
+        "sub_interfaces",
+        "transceivers",
+        "serial_ports",
+        "oob",
+    }
+)
 
 
 def iter_recording_paths():
@@ -105,4 +115,12 @@ def recording_schema_errors(recording):
     responses = recording.get("responses")
     if not isinstance(responses, dict) or not responses:
         errors.append("responses must be a non-empty object")
+    expected = recording.get("expected")
+    if "expected" in recording:
+        if not isinstance(expected, dict) or not expected:
+            errors.append("expected must be a non-empty object when present")
+        else:
+            unknown_outcomes = sorted(set(expected) - SUPPORTED_EXPECTED_OUTCOMES)
+            if unknown_outcomes:
+                errors.append(f"expected contains unknown outcome keys: {', '.join(unknown_outcomes)}")
     return errors

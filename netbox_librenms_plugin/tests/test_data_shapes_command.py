@@ -30,6 +30,18 @@ def test_validate_clean_recording_reports_novelty(tmp_path):
     assert "Novelty: likely-covered" in output
 
 
+def test_validate_accepts_capture_before_outcome_promotion(tmp_path):
+    """Captured submissions have no expected outcomes until a maintainer promotes them."""
+    rec = anonymize_recording(load_recording("cisco-stackwise-3member"))
+    rec.pop("expected")
+    path = tmp_path / "captured.json"
+    path.write_text(json.dumps(rec))
+
+    output = _run(validate=str(path))
+
+    assert "schema-valid and PII-clean" in output
+
+
 def test_validate_uses_shipped_manifest_not_bundled_recordings(tmp_path, monkeypatch):
     """Wheel installs ship manifest.json but NOT the recordings, so novelty must classify against the shipped manifest (load_manifest), not a manifest rebuilt from load_bundled_recordings — which is empty in a wheel and would mark every submission new."""
     rec = anonymize_recording(load_recording("cisco-stackwise-3member"))

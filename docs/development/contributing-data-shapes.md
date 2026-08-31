@@ -57,7 +57,10 @@ modal surfaces its findings; **review them before submitting.**
    }
    ```
 
-   All three keys are optional — include only what the shape exercises.
+   Supported keys are `virtual_chassis`, `lag_members`, `sub_interfaces`, `transceivers`,
+   `serial_ports`, and `oob`. Include only what the shape exercises. The validator rejects
+   unknown keys so a typo cannot silently skip the outcome assertion. Capture submissions can
+   omit `expected`; every recording promoted into the bundled test set must include it.
 3. Validate and refresh the novelty manifest:
 
    ```console

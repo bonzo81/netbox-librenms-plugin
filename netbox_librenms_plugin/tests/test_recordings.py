@@ -63,6 +63,44 @@ def test_recording_schema_errors_rejects_bool_int_fields():
     assert any("device_id must be an integer" in e for e in errors)
 
 
+@pytest.mark.parametrize(
+    "expected",
+    [
+        {"lag_member": {"302": "301"}},
+        {"virtual_chassis": None, "lag_member": {"302": "301"}},
+    ],
+)
+def test_recording_schema_errors_rejects_unknown_expected_outcomes(expected):
+    """Unknown outcome names must not let a recording pass without a matching assertion."""
+    from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+    recording = {
+        "schema_version": 1,
+        "name": "unknown-outcome",
+        "device_id": 1,
+        "responses": {"GET /api/v0/devices/1": {"status": "ok"}},
+        "expected": expected,
+    }
+
+    assert any("unknown" in error for error in recording_schema_errors(recording))
+
+
+@pytest.mark.parametrize("expected", [None, {}, []])
+def test_recording_schema_errors_rejects_malformed_present_expected(expected):
+    """An explicitly present expected field must contain at least one outcome object."""
+    from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+    recording = {
+        "schema_version": 1,
+        "name": "malformed-outcomes",
+        "device_id": 1,
+        "responses": {"GET /api/v0/devices/1": {"status": "ok"}},
+        "expected": expected,
+    }
+
+    assert any("non-empty object" in error for error in recording_schema_errors(recording))
+
+
 def test_recording_variant_handler_requires_exact_query():
     """The replay matcher must require EXACT query equality: a request carrying an extra unexpected param must NOT subset-match a recorded variant (which would let a request-shape regression false-pass) — it must fail closed with 404."""
     from netbox_librenms_plugin.tests.mock_librenms_server import _recording_variant_handler
@@ -244,20 +282,19 @@ def test_bundled_recording_transceivers_reference_present_ports(recording):
 
 
 def test_make_recording_api_delegates_non_servers_config_to_real():
-    """make_recording_api patches ONLY the 'servers' lookup: other keys (including a 3-arg defaulted call) must delegate to the real config — never returning None or raising a TypeError on the extra arg."""
+    """The recording API override must preserve every non-server plugin setting."""
     import netbox_librenms_plugin.librenms_api as api_mod
     from netbox_librenms_plugin.tests.conftest import make_recording_api
 
-    # What the real config returns for a non-'servers' key (computed outside the patch).
+    # Read the expected non-server value outside the temporary settings override.
     expected_other = api_mod.get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
 
     captured = {}
     real_init = api_mod.LibreNMSAPI.__init__
 
     def spy_init(self, *args, **kwargs):
-        # While make_recording_api's patch is active, exercise the patched get_plugin_config the
-        # way a construction-time read would: the 'servers' key (mocked) and another key with a
-        # default 3rd arg (must delegate to the real config, not return None or raise).
+        # Exercise both the overridden server map and an unchanged defaulted lookup while the
+        # constructor reads Django's temporary plugin settings.
         captured["servers"] = api_mod.get_plugin_config("netbox_librenms_plugin", "servers")
         captured["other"] = api_mod.get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
         return real_init(self, *args, **kwargs)
@@ -265,7 +302,7 @@ def test_make_recording_api_delegates_non_servers_config_to_real():
     with patch.object(api_mod.LibreNMSAPI, "__init__", spy_init):
         make_recording_api("http://127.0.0.1:9", server_key="test")
 
-    # 'servers' is the injected mock; every other key faithfully delegates to the real config.
+    # Only the server map changes. Every other plugin setting retains its real value.
     assert "test" in captured["servers"]
     assert captured["other"] == expected_other
 
@@ -326,16 +363,12 @@ def test_load_manifest_fails_when_file_is_missing(tmp_path):
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_recording_has_required_schema(recording):
     """Every recording declares the keys the replay harness depends on."""
-    # Reject booleans the same way recording_schema_errors() does: bool is a subclass of int, so
-    # `== 1` / `isinstance(..., int)` alone would let True/False pass this contract check.
-    assert isinstance(recording.get("schema_version"), int) and not isinstance(recording.get("schema_version"), bool)
-    assert recording.get("schema_version") == 1
-    assert recording.get("name")
-    assert isinstance(recording.get("device_id"), int) and not isinstance(recording.get("device_id"), bool)
-    assert isinstance(recording.get("responses"), dict) and recording["responses"]
+    from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
     assert isinstance(recording.get("expected"), dict) and recording["expected"], (
         f"{recording.get('name')} has no expected outcomes to assert"
     )
+    assert not (errors := recording_schema_errors(recording)), f"{recording.get('name')}: {errors}"
 
 
 def _assert_virtual_chassis(api, device_id, expected):
