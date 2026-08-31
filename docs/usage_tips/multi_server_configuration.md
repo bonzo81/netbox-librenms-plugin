@@ -107,7 +107,7 @@ Each server configuration supports the following options:
 - `verify_ssl`: Whether to verify SSL certificates (optional, default: True)
 - `interface_name_field`: LibreNMS field for interface names (optional, default: 'ifDescr')
 
-The `_preferred_server` key is reserved for object metadata. Do not use it as a configured server key. NetBox rejects a configuration that uses this key.
+The `_preferred_server` key is reserved for object metadata. Do not use it as a configured server key. `LibreNMSSyncConfig` rejects a configuration that uses this key during plugin startup.
 
 ## Migration from Single to Multi-Server
 

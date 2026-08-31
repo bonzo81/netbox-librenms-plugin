@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_superuser,
+    make_vm,
 )
 
 ABSENT_DEVICE_ID = 4041
@@ -200,6 +201,106 @@ def test_device_status_reports_a_discovered_id_conflict(client, librenms_server,
 
     assert response.status_code == 200
     assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("object_type", "object_label", "url_name"),
+    [("device", "device", "device_status_list"), ("virtualmachine", "VM", "vm_status_list")],
+)
+def test_status_lists_report_each_discovery_conflict_once(
+    client,
+    librenms_server,
+    settings,
+    object_type,
+    object_label,
+    url_name,
+):
+    """Two rows with the same conflict must produce one actionable alert."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    prefix = f"duplicate-{object_type}-conflict"
+    if object_type == "device":
+        owner = make_device("duplicate-device-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+        targets = [make_device(f"{prefix}-{suffix}", librenms_cf={server_key: None}) for suffix in ("a", "b")]
+    else:
+        owner = make_vm("duplicate-vm-owner")
+        owner.custom_field_data["librenms_id"] = {server_key: CONFLICTING_DEVICE_ID}
+        owner.save()
+        targets = [make_vm(f"{prefix}-{suffix}") for suffix in ("a", "b")]
+        for target in targets:
+            target.custom_field_data["librenms_id"] = {server_key: None}
+            target.save()
+
+    for target in targets:
+        librenms_server.register(
+            f"/api/v0/devices/{target.name}",
+            {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+            method="GET",
+        )
+    client.force_login(make_superuser(f"{prefix}-user"))
+
+    response = client.get(reverse(f"plugins:netbox_librenms_plugin:{url_name}"), {"q": prefix})
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+    expected = f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to {object_label} '{owner.name}'"
+
+    assert response.status_code == 200
+    assert rendered_messages.count(expected) == 1
+
+
+@pytest.mark.django_db
+def test_cable_refresh_fails_closed_when_host_discovery_conflicts(
+    client,
+    librenms_server,
+    settings,
+):
+    """Valid OOB rows must not hide an unresolved host identity."""
+    oob_id = 1277
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    make_device("cable-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device(
+        "cable-conflict-target.example.test",
+        librenms_cf={server_key: {"oob": {"id": oob_id, "type": "bmc"}}},
+    )
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    librenms_server.register(
+        f"/api/v0/devices/{oob_id}/links",
+        {
+            "status": "ok",
+            "links": [
+                {
+                    "local_port_id": 71,
+                    "local_port": "console0",
+                    "remote_port": "console1",
+                    "remote_hostname": "peer.example.test",
+                    "remote_port_id": 72,
+                    "remote_device_id": 1278,
+                }
+            ],
+        },
+        method="GET",
+    )
+    librenms_server.register(
+        f"/api/v0/devices/{oob_id}/ports",
+        {"status": "ok", "ports": [{"port_id": 71, "ifName": "console0", "ifDescr": "console0"}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("cable-conflict-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[target.pk]),
+        {"server_key": server_key},
+        headers={"HX-Request": "true"},
+    )
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+
+    assert response.status_code == 200
+    assert "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again." in rendered_messages
+    assert "Cable data refreshed successfully." not in rendered_messages
+    assert cache.get(sync_snapshot_key(target, TAB_SPECS[SyncTab.CABLES].data_type, server_key)) is None
 
 
 @pytest.mark.django_db

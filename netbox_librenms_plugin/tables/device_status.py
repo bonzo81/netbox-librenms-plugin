@@ -175,8 +175,9 @@ class DeviceImportTable(tables.Table):
         attrs={
             "th": {"class": "w-1", "aria-label": "Select all"},
             "td": {"class": "w-1"},
-            "input": {
-                "name": lambda record: "select" if record.get("_validation", {}).get("can_import", False) else None,
+            "input": {"name": "select"},
+            "td__input": {
+                "name": "select",
                 "class": lambda record: (
                     "form-check-input device-select"
                     if record.get("_validation", {}).get("can_import", False)
@@ -830,6 +831,9 @@ class DeviceImportTable(tables.Table):
         # Add row attributes to give each row a unique ID for HTMX targeting
         row_attrs = {
             "id": lambda record: f"device-row-{record.get('device_id')}",
+            "data-device-id": lambda record: record.get("device_id"),
+            "data-hostname": lambda record: record.get("hostname", ""),
+            "data-sysname": lambda record: record.get("sysName", ""),
         }
 
         fields = (

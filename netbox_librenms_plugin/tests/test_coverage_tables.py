@@ -1,5 +1,6 @@
 """Behavior tests for LibreNMS device and interface tables."""
 
+import re
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -175,13 +176,13 @@ class TestDeviceImportTable:
         assert "<script>" not in hostname
         assert "&lt;script&gt;" in hostname
 
-    def test_disabled_selection_has_no_submitted_value(self):
+    def test_disabled_selection_keeps_its_static_name(self):
         table = self._table([_import_record(can_import=False)])
 
         html = str(table.rows[0].get_cell("selection"))
 
         assert "disabled" in html
-        assert 'name="select"' not in html
+        assert 'name="select"' in html
 
     def test_cluster_cells_use_real_vm_device_and_cluster_rows(self):
         cluster = make_cluster("Import table cluster")
@@ -482,6 +483,22 @@ class TestDeviceImportTable:
             )
             in html
         )
+
+    def test_full_table_render_keeps_row_metadata_off_the_header_checkbox(self):
+        record = _import_record(can_import=True, is_ready=True)
+        table = self._table([record], server_key="secondary")
+
+        html = table.as_html(RequestFactory().get("/"))
+        header = html[html.index("<thead") : html.index("</thead>")]
+        row_tag = re.search(r'<tr[^>]*id="device-row-4101"[^>]*>', html)
+
+        assert row_tag is not None
+        assert 'data-device-id="4101"' in row_tag.group()
+        assert 'data-hostname="edge-4101.example.test"' in row_tag.group()
+        assert 'data-sysname="edge-4101"' in row_tag.group()
+        assert "data-device-id" not in header
+        assert "data-hostname" not in header
+        assert "data-sysname" not in header
 
 
 @pytest.mark.django_db

@@ -4,12 +4,9 @@ import re
 from copy import deepcopy
 
 import pytest
-from django.core import signing
 
 from netbox_librenms_plugin.identity_replacement import (
     INTENT_FIELD,
-    INTENT_MAX_AGE_SECONDS,
-    INTENT_SALT,
     IdentityReplacementIntent,
     load_identity_replacement_intent,
     sign_identity_replacement_intent,
@@ -75,15 +72,6 @@ def _serve_secondary(server, librenms_device_id, hostname, *, serial="", reporte
             {"status": "ok", "inventory": []},
         )
     return server
-
-
-def _expired_intent(token):
-    """Return the same valid intent with a real timestamp older than its lifetime."""
-    payload, timestamp, _signature = token.rsplit(":", 2)
-    old_timestamp = signing.b62_encode(signing.b62_decode(timestamp) - INTENT_MAX_AGE_SECONDS - 1)
-    unsigned = f"{payload}:{old_timestamp}"
-    signer = signing.TimestampSigner(salt=INTENT_SALT)
-    return f"{unsigned}:{signer.signature(unsigned)}"
 
 
 def _post_action(client, librenms_device_id, obj, action, *, server, object_type="device", **extra):
@@ -348,14 +336,17 @@ def test_a_tampered_confirmation_is_refused(client, secondary_server):
 
 
 @pytest.mark.django_db
-def test_an_expired_confirmation_is_refused(client, secondary_server):
+def test_an_expired_confirmation_is_refused(client, secondary_server, monkeypatch):
     """A confirmation older than its lifetime is refused."""
+    from netbox_librenms_plugin import identity_replacement
+
     device = make_device("replace-expired-device", librenms_cf={"secondary": 53501})
     client.force_login(make_superuser("identity-replacement-expired"))
     server = _serve_secondary(secondary_server, 53601, device.name)
     token = _offered_token(_post_action(client, 53601, device, "link", server=server))
+    monkeypatch.setattr(identity_replacement, "INTENT_MAX_AGE_SECONDS", -1)
 
-    response = _post_confirmation(client, 53601, _expired_intent(token), server=server)
+    response = _post_confirmation(client, 53601, token, server=server)
 
     assert response.status_code == 200
     assert b"has expired" in response.content

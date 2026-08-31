@@ -699,6 +699,53 @@ class TestRemoveServerMappingView:
 
         assert any("No mapping found" in text for text in _messages(response, "warning"))
 
+    @pytest.mark.parametrize(
+        ("failure_type", "expected_message"),
+        [
+            ("validation", "Validation error removing LibreNMS mapping"),
+            ("unexpected", "Unexpected error removing LibreNMS mapping"),
+        ],
+    )
+    def test_save_failures_roll_back_the_mapping(
+        self,
+        logged_in_client,
+        librenms_server,
+        failure_type,
+        expected_message,
+    ):
+        from dcim.models import Device
+        from django.core.exceptions import ValidationError
+        from django.db.models.signals import pre_save
+
+        device = make_device(
+            f"mapping-{failure_type}-failure",
+            librenms_cf={SERVER_KEY: 6546, "retired": 9003},
+        )
+
+        def reject_save(sender, instance, **kwargs):
+            if instance.pk != device.pk:
+                return
+            if failure_type == "validation":
+                raise ValidationError({"custom_field_data": ["mapping rejected"]})
+            raise RuntimeError("database write failed")
+
+        pre_save.connect(reject_save, sender=Device, weak=False)
+        try:
+            response = _post(
+                logged_in_client,
+                "remove_server_mapping",
+                device,
+                {"object_type": "device", "server_key": "retired"},
+            )
+        finally:
+            pre_save.disconnect(reject_save, sender=Device)
+
+        device.refresh_from_db()
+        rendered_messages = _messages(response)
+        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6546, "retired": 9003}
+        assert any(expected_message in text for text in rendered_messages)
+        assert not any("Removed LibreNMS mapping" in text for text in rendered_messages)
+
 
 @pytest.mark.django_db
 class TestSetPreferredServerView:

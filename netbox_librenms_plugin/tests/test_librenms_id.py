@@ -213,10 +213,12 @@ class TestFindByLibreNMSId:
         from netbox_librenms_plugin.utils import build_librenms_id_qs
 
         corrupt = _dev({"invalid__server": 42})
+        nested = _dev({"invalid": {"server": 42}})
         host_q, oob_q = build_librenms_id_qs("invalid__server", 42)
 
         assert Device.objects.filter(host_q).first() is None
         assert Device.objects.filter(oob_q).first() is None
+        nested.delete()
         corrupt.delete()
 
     def test_returns_matching_object(self):
