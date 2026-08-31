@@ -701,23 +701,32 @@ class LibreNMSStubServer(MockLibreNMSServer):
 
         hostname = body["hostname"].strip()
         with self._lock:
-            device_id = self._next_device_id
-            device = self._normalise_device(
-                {
-                    "hostname": hostname,
-                    "sysName": hostname.split(".", 1)[0],
-                    "os": "stub-os",
-                    "hardware": "MODEL-STUB",
-                    "location": "Lab",
-                    "status": 1,
-                    "type": "network",
-                },
-                device_id,
-            )
-            aliases = (device_id, device.get("hostname"), device.get("sysName"), device.get("ip"))
-            if any(str(alias) in self._aliases for alias in aliases if alias not in (None, "")):
+            requested_aliases = (hostname, hostname.split(".", 1)[0])
+            if any(str(alias) in self._aliases for alias in requested_aliases):
                 return 409, {"status": "error", "message": "Device lookup alias already exists"}
-            self._next_device_id += 1
+
+            device_id = self._next_device_id
+            for _ in range(254):
+                device = self._normalise_device(
+                    {
+                        "hostname": hostname,
+                        "sysName": hostname.split(".", 1)[0],
+                        "os": "stub-os",
+                        "hardware": "MODEL-STUB",
+                        "location": "Lab",
+                        "status": 1,
+                        "type": "network",
+                    },
+                    device_id,
+                )
+                generated_aliases = (device_id, device["ip"])
+                if not any(str(alias) in self._aliases for alias in generated_aliases):
+                    break
+                device_id += 1
+            else:
+                return 409, {"status": "error", "message": "No generated device address is available"}
+
+            self._next_device_id = device_id + 1
             self.devices[device_id] = device
             self.ports_by_device[device_id] = []
             self.inventory_by_device[device_id] = []
