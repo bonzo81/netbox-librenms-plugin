@@ -35,6 +35,13 @@ class _RawResponse:
         self.content_type = content_type
 
 
+class _DisconnectResponse:
+    """Close the HTTP connection without sending a response."""
+
+
+_DISCONNECT_RESPONSE = _DisconnectResponse()
+
+
 class _LibreNMSHandler(BaseHTTPRequestHandler):
     """Request handler that dispatches to registered route responses."""
 
@@ -92,6 +99,9 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         for key in candidates:
             if key in routes:
                 entry = routes[key]
+                if entry is _DISCONNECT_RESPONSE:
+                    self.close_connection = True
+                    return
                 if isinstance(entry, _RawResponse):
                     self._send_body(entry.status, entry.body, entry.content_type)
                     return
@@ -187,6 +197,11 @@ class MockLibreNMSServer:
         """Register a response body without JSON encoding it."""
         key = f"{method} {path}" if method else path
         self._server.routes[key] = _RawResponse(status, body, content_type)
+
+    def register_disconnect(self, path: str, method: str | None = None):
+        """Register a route that closes the connection before sending a response."""
+        key = f"{method} {path}" if method else path
+        self._server.routes[key] = _DISCONNECT_RESPONSE
 
     def start(self):
         self._thread.start()

@@ -1,10 +1,9 @@
 """Usable-server-config filtering for LibreNMSAPI, driven by real plugin settings.
 
-Unlike the mock-based suite in ``test_librenms_api.py`` (which patches
-``get_plugin_config``), these tests drive the real
+These focused tests drive the
 ``netbox.plugins.get_plugin_config`` -> ``settings.PLUGINS_CONFIG`` path via
-``override_settings``. That exercises the usable-config predicate end to end,
-from configuration through to server selection.
+``override_settings``. They cross-check the reusable settings fixture in
+``test_librenms_api.py`` and exercise the usable-config predicate end to end.
 """
 
 import copy
