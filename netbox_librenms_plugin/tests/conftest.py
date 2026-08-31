@@ -729,6 +729,31 @@ def configure_librenms(settings):
 
 
 @pytest.fixture
+def live_librenms(configure_librenms, monkeypatch):
+    """Run a controllable loopback LibreNMS and return its real API client."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    server = MockLibreNMSServer().start()
+    configure_librenms(
+        {
+            "default": {
+                "librenms_url": server.url,
+                "api_token": "test-token",
+                "cache_timeout": 0,
+                "verify_ssl": False,
+            }
+        }
+    )
+    try:
+        yield SimpleNamespace(server=server, api=LibreNMSAPI(server_key="default"))
+    finally:
+        server.stop()
+
+
+@pytest.fixture
 def mock_multi_server_config():
     """Multi-server configuration dict."""
     return {
