@@ -2128,6 +2128,27 @@ def librenms_server(monkeypatch):
         yield server
 
 
+def test_invalid_utf8_json_body_reaches_the_registered_route(librenms_server):
+    """Malformed UTF-8 must be replacement-decoded instead of closing the connection."""
+    received = []
+
+    def respond(**request):
+        received.append(request["body"])
+        return 200, {"status": "ok"}
+
+    librenms_server.register("/invalid-json", respond, method="POST")
+
+    response = requests.post(
+        f"{librenms_server.url}/invalid-json",
+        data=b"\xff",
+        headers={"Content-Type": "application/json"},
+        timeout=2,
+    )
+
+    assert response.status_code == 200
+    assert received == ["\ufffd"]
+
+
 class TestGetPortStack:
     """Tests for LibreNMSAPI.get_port_stack()."""
 
