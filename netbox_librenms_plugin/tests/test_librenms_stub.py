@@ -442,6 +442,27 @@ def test_stub_device_and_location_writes_are_visible_until_restart():
         restarted.stop()
 
 
+def test_stub_skips_a_generated_ip_collision_when_adding_devices():
+    """A generated-IP collision must not wedge this or every later device creation."""
+    server = _start_stub()
+    try:
+        for index in range(58):
+            response = _request(
+                server,
+                "POST",
+                "/api/v0/devices",
+                json={"hostname": f"generated-{index}.example.test"},
+            )
+            assert response.status_code == 200, f"add {index}: {response.text}"
+
+        assert 2057 not in server.devices
+        assert server.devices[2058]["hostname"] == "generated-56.example.test"
+        assert server.devices[2059]["hostname"] == "generated-57.example.test"
+        assert server._next_device_id == 2060
+    finally:
+        server.stop()
+
+
 def test_stub_rejects_duplicate_recording_device_ids():
     recording = load_recording("cisco-stackwise-3member")
 
@@ -497,24 +518,12 @@ def test_stub_rejects_device_id_update_without_mutating_the_device():
         server.stop()
 
 
-@pytest.mark.parametrize("alias_kind", ["sysName", "ip"])
-def test_stub_rejects_derived_alias_collision_before_creating_device(alias_kind):
-    """A derived lookup alias collision must return 409 without changing stub state."""
+def test_stub_rejects_derived_sysname_collision_before_creating_device():
+    """A caller-derived sysName collision must return 409 without changing stub state."""
     server = _start_stub()
     try:
         existing = server.devices[1]
-        if alias_kind == "sysName":
-            hostname = f"{existing['sysName']}.other.example.test"
-        else:
-            candidate_ip = f"198.51.100.{server._next_device_id % 254 + 1}"
-            update = _request(
-                server,
-                "PATCH",
-                "/api/v0/devices/1",
-                json={"field": ["ip"], "data": [candidate_ip]},
-            )
-            assert update.status_code == 200
-            hostname = "unique-ip-collision.example.test"
+        hostname = f"{existing['sysName']}.other.example.test"
 
         devices_before = copy.deepcopy(server.devices)
         next_device_id_before = server._next_device_id
