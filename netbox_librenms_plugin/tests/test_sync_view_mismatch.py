@@ -1,561 +1,288 @@
-"""
-Tests for device mismatch detection in get_librenms_device_info.
+"""Real HTTP and ORM tests for sync-page identity matching."""
 
-Covers the identity cross-matching logic that determines whether a
-mismatched_device warning banner is shown on the LibreNMS Sync page.
+import pytest
 
-Match rule: mismatch is False when ANY NetBox identity (device name,
-primary IP, DNS name) matches ANY LibreNMS identity (sysName, hostname, ip).
-"""
-
-from unittest.mock import MagicMock, patch
-
-from django.test import RequestFactory
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_virtual_chassis
 
 
-def _make_view(librenms_id, device_info, librenms_url="https://librenms.example.com"):
-    """Create a minimal BaseLibreNMSSyncView instance with mocked dependencies."""
+pytestmark = pytest.mark.django_db
+
+
+def _register_device_info(live_librenms, device_info, *, status=200):
+    body = {"status": "ok", "devices": [device_info]} if status == 200 else {"status": "error"}
+    live_librenms.server.register(
+        "/api/v0/devices/42",
+        body,
+        status=status,
+        method="GET",
+    )
+
+
+def _netbox_device(tag, *, name=None, primary_ip="198.18.0.1", dns_name=""):
+    device = make_device(f"device-{tag}"[:64])
+    if name is not None:
+        device.name = name
+        device.save(update_fields=["name"])
+    if primary_ip:
+        interface = make_interface(device, f"management-{device.pk}")
+        address = make_ip(f"{primary_ip}/24", assigned_object=interface)
+        address.dns_name = dns_name
+        address.save(update_fields=["dns_name"])
+        device.primary_ip4 = address
+        device.save(update_fields=["primary_ip4"])
+        device.refresh_from_db()
+    return device
+
+
+def _device_info(view, device):
+    return view.get_librenms_device_info(device)
+
+
+def _view(live_librenms, librenms_id=42):
     from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
     view = object.__new__(BaseLibreNMSSyncView)
     view.librenms_id = librenms_id
-    api = MagicMock()
-    api.librenms_url = librenms_url
-    api.get_device_info.return_value = (True, device_info)
-    api.get_device_inventory.return_value = (True, [])
-    view._librenms_api = api
+    view._librenms_api = live_librenms.api
     return view
 
 
-def _make_obj(name, primary_ip=None, dns_name=None, virtual_chassis=None, cf=None):
-    """Create a mock NetBox device object."""
-    obj = MagicMock()
-    obj.name = name
-    obj.cf = cf or {}
-    if primary_ip:
-        obj.primary_ip = MagicMock()
-        obj.primary_ip.address.ip = primary_ip
-        obj.primary_ip.dns_name = dns_name or ""
-    else:
-        obj.primary_ip = None
-    obj.virtual_chassis = virtual_chassis
-    return obj
-
-
 class TestMismatchDetection:
-    """Tests for identity cross-matching logic."""
-
-    # -- No device / API failure -------------------------------------------
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_no_librenms_id_returns_not_found(self, mock_hw):
-        """No librenms_id means device is not found."""
-        view = _make_view(librenms_id=None, device_info=None)
-        result = view.get_librenms_device_info(_make_obj("sw01"))
+    def test_missing_mapping_does_not_contact_librenms(self, live_librenms):
+        result = _device_info(_view(live_librenms, None), _netbox_device("missing"))
 
         assert result["found_in_librenms"] is False
         assert result["mismatched_device"] is False
+        assert live_librenms.server.requests == []
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_api_failure_returns_not_found(self, mock_hw):
-        """API failure (success=False) means device is not found."""
-        view = _make_view(librenms_id=42, device_info=None)
-        view.librenms_api.get_device_info.return_value = (False, None)
-        result = view.get_librenms_device_info(_make_obj("sw01"))
+    def test_failed_real_http_lookup_is_not_reported_as_a_match(self, live_librenms):
+        _register_device_info(live_librenms, {}, status=500)
+
+        result = _device_info(_view(live_librenms), _netbox_device("failure"))
 
         assert result["found_in_librenms"] is False
         assert result["mismatched_device"] is False
+        assert live_librenms.server.requests[0]["path"] == "/api/v0/devices/42"
 
-    # -- Name matches ------------------------------------------------------
+    @pytest.mark.parametrize(
+        ("netbox_name", "netbox_ip", "dns_name", "librenms", "mismatch"),
+        [
+            ("switch-01", "198.18.0.1", "", {"sysName": "SWITCH-01", "ip": "198.18.0.2"}, False),
+            (
+                "switch-01",
+                "198.18.0.1",
+                "",
+                {"sysName": "different", "hostname": "switch-01", "ip": "198.18.0.2"},
+                False,
+            ),
+            ("switch-01.example", "198.18.0.1", "", {"sysName": "switch-01.example", "ip": "198.18.0.2"}, False),
+            ("switch-01", "198.18.0.1", "", {"sysName": "different", "ip": "198.18.0.1"}, False),
+            (
+                "switch-01",
+                "198.18.0.1",
+                "",
+                {"sysName": "different", "hostname": "198.18.0.1", "ip": "198.18.0.2"},
+                False,
+            ),
+            (
+                "switch-01",
+                "198.18.0.1",
+                "switch-01.example",
+                {"sysName": "switch-01.example", "ip": "198.18.0.2"},
+                False,
+            ),
+            (
+                "switch-01",
+                "198.18.0.1",
+                "switch-01.example",
+                {"sysName": "other", "hostname": "switch-01.example", "ip": "198.18.0.2"},
+                False,
+            ),
+            (
+                "switch-05",
+                "198.18.0.1",
+                "switch-05.example",
+                {"sysName": "router-01", "hostname": "router-01.example", "ip": "198.18.0.2"},
+                True,
+            ),
+            ("switch-01", "198.18.0.1", "", {"sysName": "switch-01.example", "ip": "198.18.0.2"}, False),
+            (
+                "switch-01.example",
+                "198.18.0.1",
+                "",
+                {"sysName": "switch-01.other", "ip": "198.18.0.2"},
+                True,
+            ),
+            ("switch-01", "198.18.0.1", "", {"sysName": None, "hostname": None, "ip": "198.18.0.2"}, True),
+            ("switch-01", None, "", {"sysName": None, "hostname": None, "ip": None}, True),
+            ("switch-01", "198.18.0.1", "", {"sysName": "router-01.example", "ip": "198.18.0.2"}, True),
+        ],
+    )
+    def test_identity_matching_uses_real_device_and_http_response(
+        self,
+        live_librenms,
+        netbox_name,
+        netbox_ip,
+        dns_name,
+        librenms,
+        mismatch,
+        request,
+    ):
+        _register_device_info(
+            live_librenms,
+            {
+                "device_id": 42,
+                "hardware": "-",
+                "serial": "",
+                "os": "linux",
+                "version": "1",
+                "features": "-",
+                "location": "Lab",
+                **librenms,
+            },
+        )
+        device = _netbox_device(request.node.callspec.id, name=netbox_name, primary_ip=netbox_ip, dns_name=dns_name)
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_exact_sysname_match(self, mock_hw):
-        """NetBox name matches LibreNMS sysName (case-insensitive)."""
-        view = _make_view(42, {"sysName": "SW01", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_netbox_name_matches_librenms_hostname(self, mock_hw):
-        """NetBox name matches LibreNMS hostname field."""
-        view = _make_view(42, {"sysName": "something-else", "hostname": "sw01", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_fqdn_match(self, mock_hw):
-        """Full FQDN match -- no mismatch."""
-        view = _make_view(42, {"sysName": "sw01.example.net", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01.example.net", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    # -- IP matches --------------------------------------------------------
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_netbox_ip_matches_librenms_ip(self, mock_hw):
-        """NetBox primary IP matches LibreNMS IP -- no mismatch."""
-        view = _make_view(42, {"sysName": "different", "ip": "10.0.0.1"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_netbox_ip_matches_librenms_hostname_ip(self, mock_hw):
-        """LibreNMS hostname is an IP that matches NetBox primary IP."""
-        view = _make_view(42, {"sysName": "different", "hostname": "10.0.0.1", "ip": "10.0.0.1"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    # -- DNS name matches --------------------------------------------------
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_dns_name_matches_sysname(self, mock_hw):
-        """NetBox DNS name matches LibreNMS sysName."""
-        view = _make_view(42, {"sysName": "sw01.example.net", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1", dns_name="sw01.example.net")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_dns_name_matches_librenms_hostname(self, mock_hw):
-        """NetBox DNS name matches LibreNMS hostname field."""
-        view = _make_view(42, {"sysName": "something", "hostname": "sw01.example.net", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1", dns_name="sw01.example.net")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    # -- Mismatches --------------------------------------------------------
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_completely_different_is_mismatch(self, mock_hw):
-        """No identities overlap -- mismatch."""
-        view = _make_view(42, {"sysName": "router-01", "hostname": "router-01.corp", "ip": "10.0.0.2"})
-        obj = _make_obj("switch-05", primary_ip="10.0.0.1", dns_name="switch-05.corp")
-        result = view.get_librenms_device_info(obj)
+        result = _device_info(_view(live_librenms), device)
 
         assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
+        assert result["mismatched_device"] is mismatch
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_short_vs_fqdn_matches_via_domain_strip(self, mock_hw):
-        """Short name vs FQDN -- matches after domain stripping."""
-        view = _make_view(42, {"sysName": "sw01.example.net", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
+    def test_parenthesized_virtual_chassis_suffix_is_ignored(self, live_librenms):
+        _register_device_info(live_librenms, {"device_id": 42, "sysName": "switch-01", "ip": "198.18.0.2"})
+        live_librenms.server.inventory_response(42, [])
+        device = _netbox_device("parenthesized", name="switch-01 (1)")
+        make_virtual_chassis("mismatch-parenthesized", device)
 
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_fqdn_domain_differs_matches_via_domain_strip(self, mock_hw):
-        """
-        Different FQDN domains -- matches because domain-stripped
-        LibreNMS short name 'sw01' matches NetBox FQDN split 'sw01'.
-
-        NetBox name 'sw01.example.net' is compared as-is (no stripping),
-        but the LibreNMS domain-stripped 'sw01' does NOT appear in the
-        NetBox identities since NetBox names are not domain-stripped.
-        However, both sides share the short name via NetBox raw name
-        normalization — actually NetBox keeps the full name.
-        """
-        view = _make_view(42, {"sysName": "sw01.other.net", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01.example.net", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        # NetBox identities: {"sw01.example.net", "10.0.0.1"}
-        # LibreNMS identities: {"sw01.other.net", "sw01", "10.0.0.2"}
-        # No overlap → mismatch
-        assert result["mismatched_device"] is True
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_no_netbox_name_no_ip_match(self, mock_hw):
-        """No NetBox name and IPs differ -- mismatch."""
-        view = _make_view(42, {"sysName": "sw01", "ip": "10.0.0.2"})
-        obj = _make_obj(None, primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_no_librenms_sysname_no_match(self, mock_hw):
-        """No sysName, no hostname, IPs differ -- mismatch."""
-        view = _make_view(42, {"sysName": None, "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_no_identities_at_all(self, mock_hw):
-        """Both sides have no identities -- mismatch (cannot confirm)."""
-        view = _make_view(42, {"sysName": None, "ip": None})
-        obj = _make_obj(None, primary_ip=None)
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
-
-    # -- Virtual Chassis ---------------------------------------------------
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_vc_suffix_stripped(self, mock_hw):
-        """VC member suffix ' (1)' is stripped before comparison."""
-        view = _make_view(42, {"sysName": "switch-1", "ip": "10.0.0.2"})
-        obj = _make_obj("switch-1 (1)", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_vc_different_name_is_mismatch(self, mock_hw):
-        """VC member with different name after suffix strip -- mismatch."""
-        vc = MagicMock()
-        view = _make_view(42, {"sysName": "switch-1", "ip": "10.0.0.2"})
-        obj = _make_obj("switch-2 (2)", primary_ip="10.0.0.1", virtual_chassis=vc, cf={"librenms_id": 42})
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
-
-    # -- found_in_librenms always True with valid ID -----------------------
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_found_in_librenms_always_true_with_valid_id(self, mock_hw):
-        """found_in_librenms is True even when identities mismatch."""
-        view = _make_view(42, {"sysName": "totally-different", "ip": "10.0.0.2"})
-        obj = _make_obj("my-device", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-
-    # -- Domain stripping --------------------------------------------------
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_domain_strip_hostname(self, mock_hw):
-        """LibreNMS hostname FQDN stripped to short name matches NetBox name."""
-        view = _make_view(42, {"sysName": "other", "hostname": "sw01.example.net", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
+        result = _device_info(_view(live_librenms), device)
 
         assert result["mismatched_device"] is False
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_domain_strip_sysname(self, mock_hw):
-        """LibreNMS sysName FQDN stripped to short name matches NetBox name."""
-        view = _make_view(42, {"sysName": "sw01.corp.local", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
+    @pytest.mark.parametrize(
+        ("pattern", "netbox_name", "librenms_name", "mismatch"),
+        [
+            ("-M{position}", "switch-01-M2", "switch-01", False),
+            ("-SW{position}", "switch-01-SW3", "switch-01", False),
+            ("-M{position}", "switch-99", "switch-01", True),
+        ],
+    )
+    def test_database_backed_vc_name_pattern(self, live_librenms, pattern, netbox_name, librenms_name, mismatch):
+        from netbox_librenms_plugin.models import LibreNMSSettings
 
-        assert result["mismatched_device"] is False
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": pattern})
+        _register_device_info(live_librenms, {"device_id": 42, "sysName": librenms_name, "ip": "198.18.0.2"})
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_domain_strip_no_false_positive(self, mock_hw):
-        """Domain stripping doesn't cause false match when short names differ."""
-        view = _make_view(42, {"sysName": "router01.example.net", "ip": "10.0.0.2"})
-        obj = _make_obj("switch01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
+        result = _device_info(_view(live_librenms), _netbox_device(pattern, name=netbox_name))
 
-        assert result["mismatched_device"] is True
-
-    # -- VC pattern stripping ----------------------------------------------
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.models.LibreNMSSettings.objects")
-    def test_vc_pattern_strip_default(self, mock_settings_qs, mock_hw):
-        """Default VC pattern '-M{position}' is stripped from NetBox name."""
-        settings_obj = MagicMock()
-        settings_obj.vc_member_name_pattern = "-M{position}"
-        mock_settings_qs.first.return_value = settings_obj
-
-        view = _make_view(42, {"sysName": "switch01", "ip": "10.0.0.2"})
-        obj = _make_obj("switch01-M2", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["mismatched_device"] is False
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.models.LibreNMSSettings.objects")
-    def test_vc_pattern_strip_custom(self, mock_settings_qs, mock_hw):
-        """Custom VC pattern '-SW{position}' is stripped from NetBox name."""
-        settings_obj = MagicMock()
-        settings_obj.vc_member_name_pattern = "-SW{position}"
-        mock_settings_qs.first.return_value = settings_obj
-
-        view = _make_view(42, {"sysName": "switch01", "ip": "10.0.0.2"})
-        obj = _make_obj("switch01-SW3", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["mismatched_device"] is False
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.models.LibreNMSSettings.objects")
-    def test_vc_pattern_no_match_leaves_name(self, mock_settings_qs, mock_hw):
-        """VC pattern doesn't match -- name unchanged, still mismatched."""
-        settings_obj = MagicMock()
-        settings_obj.vc_member_name_pattern = "-M{position}"
-        mock_settings_qs.first.return_value = settings_obj
-
-        view = _make_view(42, {"sysName": "switch01", "ip": "10.0.0.2"})
-        obj = _make_obj("switch99", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["mismatched_device"] is True
-
-
-# ---------------------------------------------------------------------------
-# Tests for _build_all_server_mappings
-# ---------------------------------------------------------------------------
+        assert result["mismatched_device"] is mismatch
 
 
 class TestBuildAllServerMappings:
-    """Tests for BaseLibreNMSSyncView._build_all_server_mappings."""
-
-    def test_returns_none_for_legacy_int(self, mock_netbox_device):
+    @staticmethod
+    def _mappings(device, active="production"):
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
-        mock_netbox_device.custom_field_data = {"librenms_id": 42}
-        result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
-        assert result is None
+        return BaseLibreNMSSyncView._build_all_server_mappings(device, active)
 
-    def test_returns_none_for_missing_cf(self, mock_netbox_device):
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+    @pytest.mark.parametrize("stored", [42, None])
+    def test_legacy_or_missing_mapping_has_no_server_rows(self, stored):
+        device = _netbox_device(f"legacy-{stored}")
+        device.custom_field_data["librenms_id"] = stored
 
-        mock_netbox_device.custom_field_data = {"librenms_id": None}
-        result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
-        assert result is None
+        assert self._mappings(device) is None
 
-    def test_dict_form_entry_uses_host_id(self, mock_netbox_device, mock_plugins_config_single_server):
-        """New {server_key: {"id": N, "oob": {...}}} shape must still produce a row."""
-        from unittest.mock import patch
+    def test_host_id_is_extracted_from_the_nested_mapping(self, configure_librenms):
+        configure_librenms({"production": {"librenms_url": "https://production.example", "api_token": "token"}})
+        device = _netbox_device("nested")
+        device.custom_field_data["librenms_id"] = {"production": {"id": 42, "oob": {"id": 99, "type": "controller"}}}
 
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+        assert self._mappings(device)[0]["device_id"] == 42
 
-        mock_netbox_device.custom_field_data = {
-            "librenms_id": {"production": {"id": 42, "oob": {"id": 99, "type": "drac"}}}
+    def test_migrated_only_mapping_has_no_server_row(self, configure_librenms):
+        configure_librenms({"production": {"librenms_url": "https://production.example", "api_token": "token"}})
+        device = _netbox_device("migrated")
+        device.custom_field_data["librenms_id"] = {
+            "production": {"_migrated_to": {"device_id": 7, "server_key": "production"}}
         }
-        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
-            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
 
-        assert result is not None and len(result) == 1
-        assert result[0]["server_key"] == "production"
-        assert result[0]["device_id"] == 42  # host id extracted from the dict form
+        assert self._mappings(device) is None
 
-    def test_migrated_only_entry_is_skipped(self, mock_netbox_device, mock_plugins_config_single_server):
-        """A {server_key: {"_migrated_to": ...}} entry has no host id → no row."""
-        from unittest.mock import patch
+    def test_configured_active_mapping_contains_navigation_metadata(self, configure_librenms):
+        configure_librenms(
+            {
+                "production": {
+                    "display_name": "Production LibreNMS",
+                    "librenms_url": "https://production.example",
+                    "api_token": "token",
+                }
+            }
+        )
+        device = _netbox_device("configured")
+        device.custom_field_data["librenms_id"] = {"production": " 42 "}
 
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+        mapping = self._mappings(device)[0]
 
-        mock_netbox_device.custom_field_data = {
-            "librenms_id": {"production": {"_migrated_to": {"device_id": 7, "server_key": "production"}}}
+        assert mapping["server_key"] == "production"
+        assert mapping["device_id"] == 42
+        assert mapping["display_name"] == "Production LibreNMS"
+        assert mapping["is_configured"] is True
+        assert mapping["is_active"] is True
+        assert mapping["device_url"] == "https://production.example/device/device=42/"
+
+    def test_invalid_float_is_dropped_and_orphan_is_not_selectable(self, configure_librenms):
+        configure_librenms({"production": {"librenms_url": "https://production.example", "api_token": "token"}})
+        device = _netbox_device("invalid")
+        device.custom_field_data["librenms_id"] = {
+            "production": 42,
+            "staging": 1.9,
+            "deleted-server": 77,
         }
-        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
-            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
 
-        # Pin the "no mappings => None" contract (matches the sibling tests in this
-        # class); `assert not result` would also pass on a [] regression.
-        assert result is None  # no mapping row for a migrated-only entry
+        mappings = self._mappings(device)
 
-    def test_single_configured_server(self, mock_netbox_device, mock_plugins_config_single_server):
-        from unittest.mock import patch
+        assert [mapping["server_key"] for mapping in mappings] == ["production", "deleted-server"]
+        assert mappings[1]["is_configured"] is False
+        assert mappings[1]["is_active"] is False
+        assert mappings[1]["device_url"] is None
 
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+    def test_active_then_configured_then_orphaned_sort_order(self, configure_librenms):
+        configure_librenms(
+            {
+                "production": {"librenms_url": "https://production.example", "api_token": "token"},
+                "development": {"librenms_url": "https://development.example", "api_token": "token"},
+            }
+        )
+        device = _netbox_device("sort")
+        device.custom_field_data["librenms_id"] = {
+            "development": 99,
+            "production": 42,
+            "old-server": 11,
+        }
 
-        mock_netbox_device.custom_field_data = {"librenms_id": {"production": 42}}
-        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
-            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
-
-        assert result is not None
-        assert len(result) == 1
-        entry = result[0]
-        assert entry["server_key"] == "production"
-        assert entry["device_id"] == 42
-        assert entry["display_name"] == "Production LibreNMS"
-        assert entry["is_configured"] is True
-        assert entry["is_active"] is True
-        assert entry["device_url"] == "https://librenms.example.com/device/device=42/"
-
-    def test_whitespace_padded_string_id_is_included(self, mock_netbox_device, mock_plugins_config_single_server):
-        """Issue #99: a per-server id stored as a whitespace-padded string (" 42 ") resolves fine elsewhere (int() strips whitespace) but str.isdigit() wrongly rejected it here, hiding a valid link from the mappings UI."""
-        from unittest.mock import patch
-
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        mock_netbox_device.custom_field_data = {"librenms_id": {"production": " 42 "}}
-        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
-            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
-
-        assert result is not None
-        assert len(result) == 1
-        assert result[0]["server_key"] == "production"
-        assert result[0]["device_id"] == 42
-
-    def test_float_id_is_rejected_not_truncated(self, mock_netbox_device, mock_plugins_config_single_server):
-        """Issue #99: a float id must be rejected, never silently truncated."""
-        from unittest.mock import patch
-
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        mock_netbox_device.custom_field_data = {"librenms_id": {"production": 42, "staging": 1.9}}
-        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
-            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
-
-        assert result is not None
-        # Only the valid int entry survives; the float is dropped, not coerced to 1.
-        assert [e["server_key"] for e in result] == ["production"]
-        assert all(e["device_id"] != 1 for e in result)
-
-    def test_orphaned_server_is_not_configured(self, mock_netbox_device, mock_plugins_config_empty_servers):
-        from unittest.mock import patch
-
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        mock_netbox_device.custom_field_data = {"librenms_id": {"deleted-server": 77}}
-        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = mock_plugins_config_empty_servers
-            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
-
-        assert result is not None
-        assert len(result) == 1
-        entry = result[0]
-        assert entry["server_key"] == "deleted-server"
-        assert entry["device_id"] == 77
-        assert entry["is_configured"] is False
-        assert entry["is_active"] is False
-        assert entry["device_url"] is None
-
-    def test_multiple_servers_sorted_active_first(self, mock_netbox_device, mock_plugins_config_multi_server_mapping):
-        from unittest.mock import patch
-
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        mock_netbox_device.custom_field_data = {"librenms_id": {"mock-dev": 99, "production": 42, "old-server": 11}}
-        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
-            mock_settings.PLUGINS_CONFIG = mock_plugins_config_multi_server_mapping
-            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
-
-        assert result is not None
-        assert len(result) == 3
-        # Active (production) first
-        assert result[0]["server_key"] == "production"
-        assert result[0]["is_active"] is True
-        # Configured (mock-dev) second
-        assert result[1]["server_key"] == "mock-dev"
-        assert result[1]["is_configured"] is True
-        assert result[1]["is_active"] is False
-        # Orphaned last
-        assert result[2]["server_key"] == "old-server"
-        assert result[2]["is_configured"] is False
+        assert [mapping["server_key"] for mapping in self._mappings(device)] == [
+            "production",
+            "development",
+            "old-server",
+        ]
 
 
-# ---------------------------------------------------------------------------
-# Tests for VC lookup delegation in get()
-# ---------------------------------------------------------------------------
+class TestVirtualChassisLookup:
+    def test_explicit_server_mapping_on_another_member_wins_over_legacy_id(self):
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
 
+        viewed = _netbox_device("vc-viewed")
+        sync_member = _netbox_device("vc-sync")
+        make_virtual_chassis("mismatch-lookup", viewed, sync_member)
+        viewed.custom_field_data["librenms_id"] = 41
+        viewed.save(update_fields=["custom_field_data"])
+        sync_member.custom_field_data["librenms_id"] = {"default": 42}
+        sync_member.save(update_fields=["custom_field_data"])
 
-class TestVCLookupDelegation:
-    """
-    Verify that BaseLibreNMSSyncView.get() always delegates VC device
-    resolution to get_librenms_sync_device(), even when the viewed member
-    has its own librenms_id."""
+        assert get_librenms_sync_device(viewed, server_key="default") == sync_member
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
-    def test_vc_member_with_own_id_delegates_to_sync_device(self, mock_sync_device, mock_get_object, mock_render):
-        """
-        A VC member with its own librenms_id should still delegate to
-        get_librenms_sync_device, which may return a different member."""
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+    def test_non_vc_device_is_its_own_lookup_device(self):
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        # Viewed device: member A with its own librenms_id
-        member_a = MagicMock()
-        member_a.pk = 1
-        member_a.cf = {"librenms_id": {"default": 42}}
-        member_a.virtual_chassis = MagicMock()
+        device = _netbox_device("standalone")
 
-        # Sync device: member B (returned by get_librenms_sync_device)
-        member_b = MagicMock()
-        member_b.pk = 2
-
-        mock_get_object.return_value = member_a
-        mock_sync_device.return_value = member_b
-
-        view = object.__new__(BaseLibreNMSSyncView)
-        view.model = MagicMock()
-        api = MagicMock()
-        api.server_key = "default"
-        api.get_librenms_id.return_value = 42
-        view._librenms_api = api
-        view.tab = MagicMock()
-        view.get_context_data = MagicMock(return_value={})
-        mock_render.return_value = MagicMock()
-
-        # Real request with no ?server_key: resolve_get_render_server_key falls back to the bound
-        # default server (unresolved=False), so VC delegation runs. A MagicMock() request would make
-        # ?server_key a truthy mock that fails to resolve, spuriously tripping the fail-closed path.
-        request = RequestFactory().get("/")
-        view.get(request, pk=1)
-
-        # get_librenms_sync_device must be called unconditionally for VC members
-        mock_sync_device.assert_called_once_with(member_a, server_key="default")
-        # get_librenms_id should be called on the sync device (member_b)
-        api.get_librenms_id.assert_called_once_with(member_b)
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView.get_object")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
-    def test_non_vc_device_skips_sync_device_lookup(self, mock_sync_device, mock_get_object, mock_render):
-        """
-        A device without a virtual chassis should not call
-        get_librenms_sync_device at all."""
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        device = MagicMock()
-        device.pk = 1
-        device.virtual_chassis = None
-
-        mock_get_object.return_value = device
-
-        view = object.__new__(BaseLibreNMSSyncView)
-        view.model = MagicMock()
-        api = MagicMock()
-        api.server_key = "default"
-        api.get_librenms_id.return_value = 42
-        view._librenms_api = api
-        view.tab = MagicMock()
-        view.get_context_data = MagicMock(return_value={})
-        mock_render.return_value = MagicMock()
-
-        request = RequestFactory().get("/")
-        view.get(request, pk=1)
-
-        mock_sync_device.assert_not_called()
-        assert view._librenms_lookup_device == device
+        assert get_librenms_sync_device(device, server_key="default") == device

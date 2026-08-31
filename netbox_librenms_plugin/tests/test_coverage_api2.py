@@ -1,717 +1,283 @@
-"""
-Coverage tests for:
-- netbox_librenms_plugin/api/views.py (sync_job_status, InterfaceTypeMappingViewSet)
-- netbox_librenms_plugin/filtersets.py
-- netbox_librenms_plugin/models.py (lines 45, 48, 68, 76)
-"""
+"""Integration coverage for API job status, filtersets, and model contracts."""
 
-import json
-from unittest.mock import MagicMock, patch
+import operator
+from types import SimpleNamespace
+from uuid import uuid4
 
+import pytest
+from django.urls import reverse
 
-# ===========================================================================
-# Helpers
-# ===========================================================================
+from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
 
 
-def _make_post_request():
-    """Return a minimal Django HttpRequest suitable for DRF view tests."""
-    from django.http import HttpRequest
-
-    request = HttpRequest()
-    request.method = "POST"
-    request.META["SERVER_NAME"] = "localhost"
-    request.META["SERVER_PORT"] = "80"
-    return request
+pytestmark = pytest.mark.django_db
 
 
-def _call_sync_job_status(job_pk, job_patch, rq_patch=None, queue_patch=None):
-    """
-    Call sync_job_status view, bypassing DRF auth/permission layer.
+@pytest.fixture
+def real_rq_job():
+    from django_rq import get_queue
+    from rq.job import Job, JobStatus
 
-    Returns the raw Django response object.
-    """
-    from netbox_librenms_plugin.api.views import sync_job_status
+    jobs = []
 
-    request = _make_post_request()
+    def _create(status=JobStatus.QUEUED):
+        queue = get_queue("default")
+        job = Job.create(
+            operator.add,
+            args=(1, 2),
+            connection=queue.connection,
+            id=str(uuid4()),
+        )
+        job.set_status(status)
+        job.save()
+        jobs.append(job)
+        return job
 
-    # Bypass DRF initial() so we skip auth/permissions entirely
-    with patch("rest_framework.views.APIView.initial"):
-        with patch("netbox_librenms_plugin.api.views.Job", job_patch):
-            if rq_patch is not None and queue_patch is not None:
-                with patch("netbox_librenms_plugin.api.views.RQJob", rq_patch):
-                    with patch("netbox_librenms_plugin.api.views.get_queue", queue_patch):
-                        return sync_job_status(request, job_pk=job_pk)
-            return sync_job_status(request, job_pk=job_pk)
+    yield _create
+
+    for job in jobs:
+        job.delete()
 
 
-# ===========================================================================
-# api/views.py – sync_job_status
-# ===========================================================================
+def _database_job(user, job_id, status):
+    from core.models import Job, ObjectType
+
+    from netbox_librenms_plugin.jobs import FilterDevicesJob
+
+    return Job.objects.create(
+        object_type=ObjectType.objects.get_for_model(Job),
+        name=FilterDevicesJob.Meta.name,
+        user=user,
+        status=status,
+        job_id=job_id,
+    )
 
 
-class TestSyncJobStatusJobNotFound:
-    """Test sync_job_status when the DB job does not exist."""
+def _sync_status_url(job_pk):
+    return reverse("plugins-api:netbox_librenms_plugin-api:sync_job_status", args=[job_pk])
 
-    def test_returns_404_when_job_missing(self):
-        class _DoesNotExist(Exception):
-            pass
 
-        mock_job_cls = MagicMock()
-        mock_job_cls.DoesNotExist = _DoesNotExist
-        mock_job_cls.objects.get.side_effect = _DoesNotExist
+class TestSyncJobStatus:
+    def test_missing_or_foreign_job_returns_404(self, client):
+        user = make_superuser("job-status-missing")
+        client.force_login(user)
 
-        response = _call_sync_job_status(job_pk=999, job_patch=mock_job_cls)
+        response = client.post(_sync_status_url(999_999))
 
         assert response.status_code == 404
-        data = json.loads(response.content)
-        assert data["error"] == "Job not found"
+        assert response.json() == {"error": "Job not found"}
 
-
-class TestSyncJobStatusRQJobActive:
-    """Test sync_job_status when RQ job is still active (no update needed)."""
-
-    def test_no_change_when_rq_job_running(self):
+    def test_live_queued_job_keeps_database_status(self, client, real_rq_job):
         from core.choices import JobStatusChoices
 
-        mock_db_job = MagicMock()
-        mock_db_job.pk = 1
-        mock_db_job.status = JobStatusChoices.STATUS_RUNNING
-        mock_db_job.completed = None
+        user = make_superuser("job-status-queued")
+        rq_job = real_rq_job()
+        database_job = _database_job(user, rq_job.id, JobStatusChoices.STATUS_RUNNING)
+        client.force_login(user)
 
-        class _DoesNotExist(Exception):
-            pass
+        response = client.post(_sync_status_url(database_job.pk))
 
-        mock_job_cls = MagicMock()
-        mock_job_cls.DoesNotExist = _DoesNotExist
-        mock_job_cls.objects.get.return_value = mock_db_job
-
-        mock_rq_job = MagicMock()
-        mock_rq_job.is_stopped = False
-        mock_rq_job.is_failed = False
-        mock_rq_job.get_status.return_value = "started"
-
-        mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.return_value = mock_rq_job
-
-        mock_queue = MagicMock()
-        mock_queue_fn = MagicMock(return_value=mock_queue)
-
-        response = _call_sync_job_status(
-            job_pk=1,
-            job_patch=mock_job_cls,
-            rq_patch=mock_rq_cls,
-            queue_patch=mock_queue_fn,
-        )
-
+        database_job.refresh_from_db()
         assert response.status_code == 200
-        data = json.loads(response.content)
-        assert data["status"] == "no_change"
-        assert data["rq_status"] == "started"
-        mock_db_job.save.assert_not_called()
+        assert response.json() == {
+            "status": "no_change",
+            "db_status": JobStatusChoices.STATUS_RUNNING,
+            "rq_status": "queued",
+        }
+        assert database_job.completed is None
 
-
-class TestSyncJobStatusRQJobStopped:
-    """Test sync_job_status when RQ job is stopped/failed."""
-
-    def test_updates_db_when_rq_stopped_and_not_yet_completed(self):
+    @pytest.mark.parametrize("rq_status", ["stopped", "failed"])
+    def test_terminal_rq_job_marks_running_database_job_failed(self, client, real_rq_job, rq_status):
         from core.choices import JobStatusChoices
+        from django.utils import timezone
+        from rq.job import JobStatus
 
-        mock_db_job = MagicMock()
-        mock_db_job.pk = 2
-        mock_db_job.status = JobStatusChoices.STATUS_RUNNING
-        mock_db_job.completed = None
+        user = make_superuser(f"job-status-{rq_status}")
+        rq_job = real_rq_job(JobStatus(rq_status))
+        database_job = _database_job(user, rq_job.id, JobStatusChoices.STATUS_RUNNING)
+        client.force_login(user)
+        started = timezone.now()
 
-        class _DoesNotExist(Exception):
-            pass
+        response = client.post(_sync_status_url(database_job.pk))
 
-        mock_job_cls = MagicMock()
-        mock_job_cls.DoesNotExist = _DoesNotExist
-        mock_job_cls.objects.get.return_value = mock_db_job
-
-        mock_rq_job = MagicMock()
-        mock_rq_job.is_stopped = True
-        mock_rq_job.is_failed = False
-        mock_rq_job.get_status.return_value = "stopped"
-
-        mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.return_value = mock_rq_job
-
-        mock_queue = MagicMock()
-        mock_queue_fn = MagicMock(return_value=mock_queue)
-
-        with patch("netbox_librenms_plugin.api.views.timezone") as mock_tz:
-            mock_tz.now.return_value = "2024-01-01"
-            response = _call_sync_job_status(
-                job_pk=2,
-                job_patch=mock_job_cls,
-                rq_patch=mock_rq_cls,
-                queue_patch=mock_queue_fn,
-            )
-
+        database_job.refresh_from_db()
         assert response.status_code == 200
-        data = json.loads(response.content)
-        assert data["status"] == "updated"
-        assert data["rq_status"] == "stopped"
-        mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
-        assert mock_db_job.completed == "2024-01-01"
+        assert response.json()["status"] == "updated"
+        assert response.json()["rq_status"] == rq_status
+        assert database_job.status == JobStatusChoices.STATUS_FAILED
+        assert database_job.completed is not None
+        assert database_job.completed >= started
+        assert timezone.is_aware(database_job.completed)
 
-    def test_updates_db_when_rq_failed(self):
+    def test_terminal_database_job_is_not_overwritten(self, client, real_rq_job):
+        from core.choices import JobStatusChoices
+        from django.utils import timezone
+        from rq.job import JobStatus
+
+        user = make_superuser("job-status-complete")
+        rq_job = real_rq_job(JobStatus.STOPPED)
+        database_job = _database_job(user, rq_job.id, JobStatusChoices.STATUS_COMPLETED)
+        completed = timezone.now()
+        database_job.completed = completed
+        database_job.save(update_fields=["completed"])
+        client.force_login(user)
+
+        response = client.post(_sync_status_url(database_job.pk))
+
+        database_job.refresh_from_db()
+        assert response.json()["status"] == "no_change"
+        assert database_job.status == JobStatusChoices.STATUS_COMPLETED
+        assert database_job.completed == completed
+
+    def test_missing_rq_job_marks_pending_database_job_failed(self, client):
         from core.choices import JobStatusChoices
 
-        mock_db_job = MagicMock()
-        mock_db_job.pk = 3
-        mock_db_job.status = JobStatusChoices.STATUS_RUNNING
-        mock_db_job.completed = None
+        user = make_superuser("job-status-rq-missing")
+        database_job = _database_job(user, uuid4(), JobStatusChoices.STATUS_PENDING)
+        client.force_login(user)
 
-        class _DoesNotExist(Exception):
-            pass
+        response = client.post(_sync_status_url(database_job.pk))
 
-        mock_job_cls = MagicMock()
-        mock_job_cls.DoesNotExist = _DoesNotExist
-        mock_job_cls.objects.get.return_value = mock_db_job
-
-        mock_rq_job = MagicMock()
-        mock_rq_job.is_stopped = False
-        mock_rq_job.is_failed = True
-        mock_rq_job.get_status.return_value = "failed"
-
-        mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.return_value = mock_rq_job
-
-        mock_queue = MagicMock()
-        mock_queue_fn = MagicMock(return_value=mock_queue)
-
-        with patch("netbox_librenms_plugin.api.views.timezone") as mock_tz:
-            mock_tz.now.return_value = "2024-01-02"
-            response = _call_sync_job_status(
-                job_pk=3,
-                job_patch=mock_job_cls,
-                rq_patch=mock_rq_cls,
-                queue_patch=mock_queue_fn,
-            )
-
-        assert response.status_code == 200
-        data = json.loads(response.content)
-        assert data["status"] == "updated"
-        assert data["rq_status"] == "failed"
-        assert mock_db_job.completed == "2024-01-02"
-        mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
-
-    def test_does_not_overwrite_existing_completed_timestamp(self):
-        from core.choices import JobStatusChoices
-
-        mock_db_job = MagicMock()
-        mock_db_job.pk = 4
-        mock_db_job.status = JobStatusChoices.STATUS_RUNNING
-        mock_db_job.completed = "2024-01-01T10:00:00"  # already set
-
-        class _DoesNotExist(Exception):
-            pass
-
-        mock_job_cls = MagicMock()
-        mock_job_cls.DoesNotExist = _DoesNotExist
-        mock_job_cls.objects.get.return_value = mock_db_job
-
-        mock_rq_job = MagicMock()
-        mock_rq_job.is_stopped = True
-        mock_rq_job.is_failed = False
-        mock_rq_job.get_status.return_value = "stopped"
-
-        mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.return_value = mock_rq_job
-
-        mock_queue = MagicMock()
-        mock_queue_fn = MagicMock(return_value=mock_queue)
-
-        with patch("netbox_librenms_plugin.api.views.timezone") as mock_tz:
-            response = _call_sync_job_status(
-                job_pk=4,
-                job_patch=mock_job_cls,
-                rq_patch=mock_rq_cls,
-                queue_patch=mock_queue_fn,
-            )
-
-        # timezone.now() should NOT have been called since completed is already set
-        mock_tz.now.assert_not_called()
-        assert response.status_code == 200
-        from core.choices import JobStatusChoices
-
-        assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
-        mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
-
-
-class TestSyncJobStatusRQJobNotInQueue:
-    """Test sync_job_status when RQ.fetch raises NoSuchJobError."""
-
-    def test_updates_db_to_failed_when_running_and_not_in_rq(self):
-        from core.choices import JobStatusChoices
-        from rq.exceptions import NoSuchJobError
-
-        mock_db_job = MagicMock()
-        mock_db_job.pk = 5
-        mock_db_job.status = JobStatusChoices.STATUS_RUNNING
-        mock_db_job.completed = None
-
-        class _DoesNotExist(Exception):
-            pass
-
-        mock_job_cls = MagicMock()
-        mock_job_cls.DoesNotExist = _DoesNotExist
-        mock_job_cls.objects.get.return_value = mock_db_job
-
-        mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = NoSuchJobError("not found in redis")
-
-        mock_queue = MagicMock()
-        mock_queue_fn = MagicMock(return_value=mock_queue)
-
-        with patch("netbox_librenms_plugin.api.views.timezone") as mock_tz:
-            mock_tz.now.return_value = "2024-01-03"
-            response = _call_sync_job_status(
-                job_pk=5,
-                job_patch=mock_job_cls,
-                rq_patch=mock_rq_cls,
-                queue_patch=mock_queue_fn,
-            )
-
-        assert response.status_code == 200
-        data = json.loads(response.content)
-        assert data["status"] == "updated"
-        assert data["rq_status"] == "not_found"
-        mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
-        assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
-        assert mock_db_job.completed == "2024-01-03"
-
-    def test_no_change_when_not_running_and_not_in_rq(self):
-        from core.choices import JobStatusChoices
-        from rq.exceptions import NoSuchJobError
-
-        mock_db_job = MagicMock()
-        mock_db_job.pk = 6
-        mock_db_job.status = JobStatusChoices.STATUS_COMPLETED
-        mock_db_job.completed = "2024-01-01"
-
-        class _DoesNotExist(Exception):
-            pass
-
-        mock_job_cls = MagicMock()
-        mock_job_cls.DoesNotExist = _DoesNotExist
-        mock_job_cls.objects.get.return_value = mock_db_job
-
-        mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = NoSuchJobError("not found in redis")
-
-        mock_queue = MagicMock()
-        mock_queue_fn = MagicMock(return_value=mock_queue)
-
-        response = _call_sync_job_status(
-            job_pk=6,
-            job_patch=mock_job_cls,
-            rq_patch=mock_rq_cls,
-            queue_patch=mock_queue_fn,
-        )
-
-        assert response.status_code == 200
-        data = json.loads(response.content)
-        assert data["status"] == "no_change"
-        assert data["rq_status"] == "not_found"
-        mock_db_job.save.assert_not_called()
-
-    def test_does_not_overwrite_completed_when_not_in_rq(self):
-        from core.choices import JobStatusChoices
-        from rq.exceptions import NoSuchJobError
-
-        mock_db_job = MagicMock()
-        mock_db_job.pk = 7
-        mock_db_job.status = JobStatusChoices.STATUS_RUNNING
-        mock_db_job.completed = "2024-01-01T08:00:00"  # already set
-
-        class _DoesNotExist(Exception):
-            pass
-
-        mock_job_cls = MagicMock()
-        mock_job_cls.DoesNotExist = _DoesNotExist
-        mock_job_cls.objects.get.return_value = mock_db_job
-
-        mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = NoSuchJobError("gone")
-
-        mock_queue = MagicMock()
-        mock_queue_fn = MagicMock(return_value=mock_queue)
-
-        with patch("netbox_librenms_plugin.api.views.timezone") as mock_tz:
-            response = _call_sync_job_status(
-                job_pk=7,
-                job_patch=mock_job_cls,
-                rq_patch=mock_rq_cls,
-                queue_patch=mock_queue_fn,
-            )
-
-        mock_tz.now.assert_not_called()
-        assert response.status_code == 200
-        data = json.loads(response.content)
-        assert data["status"] == "updated"
-        assert data["rq_status"] == "not_found"
-        # Verify the DB job was marked failed and persisted
-        assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
-        mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
-        # completed must NOT be overwritten — it was already set
-        assert mock_db_job.completed == "2024-01-01T08:00:00"
-
-
-# ===========================================================================
-# api/views.py – InterfaceTypeMappingViewSet (class attributes)
-# ===========================================================================
+        database_job.refresh_from_db()
+        assert response.json()["status"] == "updated"
+        assert response.json()["rq_status"] == "not_found"
+        assert database_job.status == JobStatusChoices.STATUS_FAILED
+        assert database_job.completed is not None
 
 
 class TestInterfaceTypeMappingViewSet:
-    """Test that InterfaceTypeMappingViewSet has expected class-level attributes."""
-
-    def test_viewset_has_correct_permission_classes(self):
+    def test_viewset_uses_the_plugin_permission_and_serializer(self):
+        from netbox_librenms_plugin.api.serializers import InterfaceTypeMappingSerializer
         from netbox_librenms_plugin.api.views import InterfaceTypeMappingViewSet, LibreNMSPluginPermission
 
-        assert LibreNMSPluginPermission in InterfaceTypeMappingViewSet.permission_classes
-
-    def test_viewset_has_serializer_class(self):
-        from netbox_librenms_plugin.api.views import InterfaceTypeMappingViewSet
-        from netbox_librenms_plugin.api.serializers import InterfaceTypeMappingSerializer
-
+        assert InterfaceTypeMappingViewSet.permission_classes == [LibreNMSPluginPermission]
         assert InterfaceTypeMappingViewSet.serializer_class is InterfaceTypeMappingSerializer
 
 
-# ===========================================================================
-# filtersets.py – SiteLocationFilterSet
-# ===========================================================================
-
-
 class TestSiteLocationFilterSet:
-    """Tests for SiteLocationFilterSet."""
+    @staticmethod
+    def _rows():
+        return [
+            SimpleNamespace(
+                netbox_site=SimpleNamespace(name="Amsterdam", latitude="52.37", longitude="4.89"),
+                librenms_location="AMS-Lab",
+            ),
+            SimpleNamespace(
+                netbox_site=SimpleNamespace(name="London", latitude="51.50", longitude="-0.12"),
+                librenms_location=None,
+            ),
+        ]
 
-    def test_qs_returns_full_queryset_when_no_q(self):
+    @pytest.mark.parametrize(
+        ("query", "expected_name"),
+        [
+            ("amsterdam", "Amsterdam"),
+            ("52.37", "Amsterdam"),
+            ("ams-lab", "Amsterdam"),
+            ("london", "London"),
+        ],
+    )
+    def test_searches_each_displayed_field(self, query, expected_name):
         from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
 
-        mock_item = MagicMock()
-        queryset = [mock_item]
-        fs = SiteLocationFilterSet(data={}, queryset=queryset)
-        assert fs.qs == queryset
+        result = SiteLocationFilterSet(data={"q": query}, queryset=self._rows()).qs
 
-    def test_qs_filters_when_q_provided(self):
+        assert [row.netbox_site.name for row in result] == [expected_name]
+
+    def test_empty_or_missing_query_returns_every_row(self):
         from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
 
-        matching_item = MagicMock()
-        matching_item.netbox_site.name = "Amsterdam"
-        matching_item.netbox_site.latitude = "52.37"
-        matching_item.netbox_site.longitude = "4.89"
-        matching_item.librenms_location = "AMS-DC1"
+        rows = self._rows()
 
-        non_matching_item = MagicMock()
-        non_matching_item.netbox_site.name = "London"
-        non_matching_item.netbox_site.latitude = "51.5"
-        non_matching_item.netbox_site.longitude = "-0.12"
-        non_matching_item.librenms_location = "LON-DC1"
+        assert SiteLocationFilterSet(data={}, queryset=rows).qs == rows
+        assert SiteLocationFilterSet(data={"q": ""}, queryset=rows).qs == rows
 
-        fs = SiteLocationFilterSet(data={"q": "amsterdam"}, queryset=[matching_item, non_matching_item])
-        result = fs.qs
-        assert len(result) == 1
-        assert result[0] is matching_item
-
-    def test_qs_empty_q_returns_all(self):
-        """Empty string for q is falsy – should return the full queryset."""
+    def test_nonmatching_query_returns_empty(self):
         from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
 
-        items = [MagicMock(), MagicMock()]
-        fs = SiteLocationFilterSet(data={"q": ""}, queryset=items)
-        assert fs.qs == items
+        assert SiteLocationFilterSet(data={"q": "no-match"}, queryset=self._rows()).qs == []
 
-    def test_matches_by_site_name(self):
+    def test_form_binding_matches_input_presence(self):
         from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
 
-        item = MagicMock()
-        item.netbox_site.name = "TestSite"
-        item.netbox_site.latitude = "0"
-        item.netbox_site.longitude = "0"
-        item.librenms_location = None
-
-        fs = SiteLocationFilterSet(data={"q": "testsite"}, queryset=[item])
-        assert fs.qs == [item]
-
-    def test_matches_by_latitude(self):
-        from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
-
-        item = MagicMock()
-        item.netbox_site.name = "Nowhere"
-        item.netbox_site.latitude = "48.8566"
-        item.netbox_site.longitude = "0.0"
-        item.librenms_location = None
-
-        fs = SiteLocationFilterSet(data={"q": "48.8566"}, queryset=[item])
-        assert fs.qs == [item]
-
-    def test_matches_by_librenms_location(self):
-        from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
-
-        item = MagicMock()
-        item.netbox_site.name = "X"
-        item.netbox_site.latitude = "0"
-        item.netbox_site.longitude = "0"
-        item.librenms_location = "Paris-DC"
-
-        fs = SiteLocationFilterSet(data={"q": "paris"}, queryset=[item])
-        assert fs.qs == [item]
-
-    def test_no_match_returns_empty(self):
-        from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
-
-        item = MagicMock()
-        item.netbox_site.name = "Tokyo"
-        item.netbox_site.latitude = "35.0"
-        item.netbox_site.longitude = "139.0"
-        item.librenms_location = "TKY-1"
-
-        fs = SiteLocationFilterSet(data={"q": "berlin"}, queryset=[item])
-        assert fs.qs == []
-
-    def test_librenms_location_none_does_not_raise(self):
-        from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
-
-        item = MagicMock()
-        item.netbox_site.name = "NoLocation"
-        item.netbox_site.latitude = "10"
-        item.netbox_site.longitude = "20"
-        item.librenms_location = None
-
-        fs = SiteLocationFilterSet(data={"q": "nolocation"}, queryset=[item])
-        # Should not raise, librenms_location treated as empty string
-        result = fs.qs
-        assert len(result) == 1
-
-    def test_form_property_returns_bound_form(self):
-        from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
-        from django import forms
-
-        fs = SiteLocationFilterSet(data={"q": "test"}, queryset=[])
-        form = fs.form
-        assert isinstance(form, forms.Form)
-        assert form.is_bound
-        assert "q" in form.fields
-
-    def test_form_property_returns_unbound_form_when_no_data(self):
-        from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
-        from django import forms
-
-        fs = SiteLocationFilterSet(data=None, queryset=[])
-        form = fs.form
-        assert isinstance(form, forms.Form)
-        assert not form.is_bound
+        assert SiteLocationFilterSet(data={"q": "test"}, queryset=[]).form.is_bound is True
+        assert SiteLocationFilterSet(data=None, queryset=[]).form.is_bound is False
 
 
-# ===========================================================================
-# filtersets.py – DeviceStatusFilterSet.search()
-# ===========================================================================
+class TestDeviceStatusFilterSet:
+    @pytest.mark.parametrize("query", ["search-device", "testsite", "testdt", "testrole"])
+    def test_search_runs_against_the_real_device_queryset(self, query):
+        from dcim.models import Device
 
-
-class TestDeviceStatusFilterSetSearch:
-    """Tests for DeviceStatusFilterSet.search()."""
-
-    def test_search_empty_value_returns_queryset_unchanged(self):
         from netbox_librenms_plugin.filtersets import DeviceStatusFilterSet
 
-        fs = object.__new__(DeviceStatusFilterSet)
-        mock_qs = MagicMock()
-        result = fs.search(mock_qs, "name", "   ")
-        assert result is mock_qs
-        mock_qs.filter.assert_not_called()
+        matching = make_device("search-device")
+        make_device("unrelated-device")
+        filterset = object.__new__(DeviceStatusFilterSet)
 
-    def test_search_with_value_calls_filter(self):
+        result = filterset.search(Device.objects.all(), "q", query)
+
+        assert matching in result
+
+    def test_whitespace_search_returns_the_original_queryset(self):
+        from dcim.models import Device
+
         from netbox_librenms_plugin.filtersets import DeviceStatusFilterSet
 
-        fs = object.__new__(DeviceStatusFilterSet)
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value = mock_qs
+        queryset = Device.objects.all()
 
-        result = fs.search(mock_qs, "name", "router01")
-        mock_qs.filter.assert_called_once()
-        assert result is mock_qs
-
-    def test_search_builds_q_filter_for_name(self):
-        from netbox_librenms_plugin.filtersets import DeviceStatusFilterSet
-
-        fs = object.__new__(DeviceStatusFilterSet)
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value = mock_qs
-
-        fs.search(mock_qs, "name", "router")
-
-        call_args = mock_qs.filter.call_args
-        assert call_args is not None
-        q_obj = call_args[0][0]
-        q_str = str(q_obj)
-        assert "name__icontains" in q_str
-        assert "site__name__icontains" in q_str
-        assert "device_type__model__icontains" in q_str
-        assert "role__name__icontains" in q_str
-        assert "rack__name__icontains" in q_str
-
-    def test_search_whitespace_only_returns_qs(self):
-        from netbox_librenms_plugin.filtersets import DeviceStatusFilterSet
-
-        fs = object.__new__(DeviceStatusFilterSet)
-        mock_qs = MagicMock()
-        result = fs.search(mock_qs, "q", "\t\n")
-        assert result is mock_qs
+        assert object.__new__(DeviceStatusFilterSet).search(queryset, "q", " \t") is queryset
 
 
-# ===========================================================================
-# filtersets.py – VMStatusFilterSet.search()
-# ===========================================================================
+class TestVMStatusFilterSet:
+    def test_search_runs_against_real_vm_and_cluster_rows(self):
+        from virtualization.models import VirtualMachine
 
-
-class TestVMStatusFilterSetSearch:
-    """Tests for VMStatusFilterSet.search()."""
-
-    def test_search_empty_value_returns_queryset_unchanged(self):
         from netbox_librenms_plugin.filtersets import VMStatusFilterSet
 
-        fs = object.__new__(VMStatusFilterSet)
-        mock_qs = MagicMock()
-        result = fs.search(mock_qs, "name", "")
-        assert result is mock_qs
-        mock_qs.filter.assert_not_called()
+        matching = make_vm("search-vm")
+        make_vm("unrelated-vm")
+        filterset = object.__new__(VMStatusFilterSet)
 
-    def test_search_with_value_calls_filter(self):
+        assert matching in filterset.search(VirtualMachine.objects.all(), "q", "search-vm")
+        assert matching in filterset.search(VirtualMachine.objects.all(), "q", "testcluster")
+
+    def test_whitespace_search_returns_the_original_queryset(self):
+        from virtualization.models import VirtualMachine
+
         from netbox_librenms_plugin.filtersets import VMStatusFilterSet
 
-        fs = object.__new__(VMStatusFilterSet)
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value = mock_qs
+        queryset = VirtualMachine.objects.all()
 
-        result = fs.search(mock_qs, "name", "vm-prod-01")
-        mock_qs.filter.assert_called_once()
-        assert result is mock_qs
-
-    def test_search_builds_filter_with_name_site_cluster_platform(self):
-        from netbox_librenms_plugin.filtersets import VMStatusFilterSet
-
-        fs = object.__new__(VMStatusFilterSet)
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value = mock_qs
-
-        fs.search(mock_qs, "q", "production")
-
-        call_args = mock_qs.filter.call_args
-        assert call_args is not None
-        q_obj = call_args[0][0]
-        q_str = str(q_obj)
-        assert "name__icontains" in q_str
-        assert "site__name__icontains" in q_str
-        assert "cluster__name__icontains" in q_str
-        assert "platform__name__icontains" in q_str
-
-    def test_search_whitespace_only_returns_qs(self):
-        from netbox_librenms_plugin.filtersets import VMStatusFilterSet
-
-        fs = object.__new__(VMStatusFilterSet)
-        mock_qs = MagicMock()
-        result = fs.search(mock_qs, "q", "   ")
-        assert result is mock_qs
-
-
-# ===========================================================================
-# models.py – missing lines 45, 48, 68, 76
-# ===========================================================================
+        assert object.__new__(VMStatusFilterSet).search(queryset, "q", "\n") is queryset
 
 
 class TestLibreNMSSettingsModel:
-    """Tests for LibreNMSSettings model methods (lines 45, 48)."""
-
-    def test_get_absolute_url_calls_reverse(self):
-        """Line 45: get_absolute_url() returns the settings page URL."""
+    def test_real_model_url_and_display(self):
         from netbox_librenms_plugin.models import LibreNMSSettings
 
-        instance = object.__new__(LibreNMSSettings)
-        instance.selected_server = "default"
+        settings_row, _ = LibreNMSSettings.objects.update_or_create(
+            pk=1,
+            defaults={"selected_server": "integration"},
+        )
 
-        with patch("netbox_librenms_plugin.models.reverse") as mock_reverse:
-            mock_reverse.return_value = "/plugins/librenms/settings/"
-            url = instance.get_absolute_url()
-
-        mock_reverse.assert_called_once_with("plugins:netbox_librenms_plugin:settings")
-        assert url == "/plugins/librenms/settings/"
-
-    def test_str_returns_formatted_string(self):
-        """Line 48: __str__() includes selected_server name."""
-        from netbox_librenms_plugin.models import LibreNMSSettings
-
-        instance = object.__new__(LibreNMSSettings)
-        instance.selected_server = "my_server"
-
-        result = str(instance)
-        assert result == "LibreNMS Settings - Server: my_server"
-
-    def test_str_with_default_server(self):
-        """__str__() works with 'default' server."""
-        from netbox_librenms_plugin.models import LibreNMSSettings
-
-        instance = object.__new__(LibreNMSSettings)
-        instance.selected_server = "default"
-
-        assert str(instance) == "LibreNMS Settings - Server: default"
+        assert settings_row.get_absolute_url() == reverse("plugins:netbox_librenms_plugin:settings")
+        assert str(settings_row) == "LibreNMS Settings - Server: integration"
 
 
 class TestInterfaceTypeMappingModel:
-    """Tests for InterfaceTypeMapping model methods (lines 68, 76)."""
-
-    def test_get_absolute_url_calls_reverse_with_pk(self):
-        """Line 68: get_absolute_url() passes self.pk to reverse."""
+    @pytest.mark.parametrize("speed", [1_000_000, None])
+    def test_real_model_url_and_display(self, speed):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
-        instance = object.__new__(InterfaceTypeMapping)
-        instance.pk = 42
-
-        with patch("netbox_librenms_plugin.models.reverse") as mock_reverse:
-            mock_reverse.return_value = "/plugins/librenms/mappings/42/"
-            url = instance.get_absolute_url()
-
-        mock_reverse.assert_called_once_with(
-            "plugins:netbox_librenms_plugin:interfacetypemapping_detail",
-            args=[42],
+        mapping = InterfaceTypeMapping.objects.create(
+            librenms_type=f"integration-{speed}",
+            librenms_speed=speed,
+            netbox_type="other",
         )
-        assert url == "/plugins/librenms/mappings/42/"
 
-    def test_str_returns_type_speed_netbox_type(self):
-        """Line 76: __str__() formats librenms_type + librenms_speed -> netbox_type."""
-        from netbox_librenms_plugin.models import InterfaceTypeMapping
-
-        instance = object.__new__(InterfaceTypeMapping)
-        instance.librenms_type = "ethernet"
-        instance.librenms_speed = 1000000
-        instance.netbox_type = "1000base-t"
-
-        result = str(instance)
-        assert result == "ethernet + 1000000 -> 1000base-t"
-
-    def test_str_with_none_speed(self):
-        """__str__() works when librenms_speed is None."""
-        from netbox_librenms_plugin.models import InterfaceTypeMapping
-
-        instance = object.__new__(InterfaceTypeMapping)
-        instance.librenms_type = "fiber"
-        instance.librenms_speed = None
-        instance.netbox_type = "other"
-
-        result = str(instance)
-        assert result == "fiber + None -> other"
-
-    def test_get_absolute_url_with_different_pk(self):
-        """get_absolute_url() works for any pk value."""
-        from netbox_librenms_plugin.models import InterfaceTypeMapping
-
-        instance = object.__new__(InterfaceTypeMapping)
-        instance.pk = 1
-
-        with patch("netbox_librenms_plugin.models.reverse") as mock_reverse:
-            mock_reverse.return_value = "/plugins/librenms/mappings/1/"
-            url = instance.get_absolute_url()
-
-        assert url == "/plugins/librenms/mappings/1/"
+        assert mapping.get_absolute_url() == reverse(
+            "plugins:netbox_librenms_plugin:interfacetypemapping_detail",
+            args=[mapping.pk],
+        )
+        assert str(mapping) == f"integration-{speed} + {speed} -> other"

@@ -1,10 +1,16 @@
-"""Coverage tests for netbox_librenms_plugin.import_utils.filters module."""
-
-from unittest.mock import MagicMock, patch
+"""Behavior tests for LibreNMS import filtering through real HTTP and cache backends."""
 
 import pytest
 
-from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
+
+def _register_devices(live_librenms, devices, *, status=200):
+    payload = {"status": "ok", "devices": devices} if status == 200 else {"status": "error", "message": "failed"}
+    live_librenms.server.register("/api/v0/devices", payload, status=status, method="GET")
+    live_librenms.api.cache_timeout = 300
+
+
+def _last_query(live_librenms):
+    return live_librenms.server.requests[-1]["query"]
 
 
 class _CacheFailingOn:
@@ -118,766 +124,235 @@ class TestCacheOutageIsNotAnEmptyResult:
 
 
 class TestGetDeviceCountForFilters:
-    """Tests for get_device_count_for_filters (line 101)."""
-
-    @patch("netbox_librenms_plugin.import_utils.filters.get_librenms_devices_for_import")
-    def test_returns_device_count(self, mock_get):
+    def test_counts_real_api_rows_and_can_hide_disabled_devices(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_device_count_for_filters
 
-        mock_get.return_value = [{"device_id": 1}, {"device_id": 2}]
-        api = MagicMock()
-        result = get_device_count_for_filters(api, {})
-        assert result == 2
+        _register_devices(
+            live_librenms,
+            [
+                {"device_id": 1, "disabled": 0},
+                {"device_id": 2, "disabled": "true"},
+                {"device_id": 3, "disabled": None},
+            ],
+        )
 
-    @patch("netbox_librenms_plugin.import_utils.filters.get_librenms_devices_for_import")
-    def test_excludes_disabled_when_show_disabled_false(self, mock_get):
+        assert get_device_count_for_filters(live_librenms.api, {}, show_disabled=True) == 3
+        assert get_device_count_for_filters(live_librenms.api, {}, show_disabled=False) == 2
+
+    def test_clear_cache_fetches_a_changed_http_response(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_device_count_for_filters
 
-        mock_get.return_value = [
-            {"device_id": 1, "disabled": 0},
-            {"device_id": 2, "disabled": 1},
-        ]
-        api = MagicMock()
-        result = get_device_count_for_filters(api, {}, show_disabled=False)
-        assert result == 1
+        _register_devices(live_librenms, [{"device_id": 1}])
+        assert get_device_count_for_filters(live_librenms.api, {}) == 1
+        _register_devices(live_librenms, [{"device_id": 1}, {"device_id": 2}])
 
-    @patch("netbox_librenms_plugin.import_utils.filters.get_librenms_devices_for_import")
-    def test_includes_disabled_when_show_disabled_true(self, mock_get):
-        from netbox_librenms_plugin.import_utils.filters import get_device_count_for_filters
-
-        mock_get.return_value = [
-            {"device_id": 1, "disabled": 0},
-            {"device_id": 2, "disabled": 1},
-        ]
-        api = MagicMock()
-        result = get_device_count_for_filters(api, {}, show_disabled=True)
-        assert result == 2
-
-    @patch("netbox_librenms_plugin.import_utils.filters.get_librenms_devices_for_import")
-    def test_passes_force_refresh_as_force_refresh(self, mock_get):
-        from netbox_librenms_plugin.import_utils.filters import get_device_count_for_filters
-
-        mock_get.return_value = []
-        api = MagicMock()
-        get_device_count_for_filters(api, {}, clear_cache=True)
-        mock_get.assert_called_once_with(api, filters={}, force_refresh=True)
+        assert get_device_count_for_filters(live_librenms.api, {}) == 1
+        assert get_device_count_for_filters(live_librenms.api, {}, clear_cache=True) == 2
 
 
 class TestGetLibreNMSDevicesForImport:
-    """Tests for get_librenms_devices_for_import (lines 112-244)."""
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_status_filter_up(self, mock_cache):
+    @pytest.mark.parametrize(
+        ("filters", "expected_query"),
+        [
+            ({"status": "1"}, {"type": ["up"]}),
+            ({"status": "0"}, {"type": ["down"]}),
+            ({"location": "10"}, {"type": ["location_id"], "query": ["10"]}),
+            ({"type": "network"}, {"type": ["type"], "query": ["network"]}),
+            ({"os": "ios"}, {"type": ["os"], "query": ["ios"]}),
+            ({"hostname": "router-01"}, {"type": ["hostname"], "query": ["router-01"]}),
+            ({"sysname": "core-01"}, {"type": ["sysName"], "query": ["core-01"]}),
+            ({"status": "invalid"}, {}),
+        ],
+    )
+    def test_filter_priority_is_visible_on_the_real_http_query(self, live_librenms, filters, expected_query):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [{"device_id": 1}])
+        _register_devices(live_librenms, [{"device_id": 1}])
 
-        get_librenms_devices_for_import(api, filters={"status": "1"})
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "up"
+        assert get_librenms_devices_for_import(live_librenms.api, filters=filters) == [{"device_id": 1}]
+        assert _last_query(live_librenms) == expected_query
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_status_filter_down(self, mock_cache):
+    def test_hardware_filter_is_applied_to_real_response_rows(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [{"device_id": 1}])
-
-        get_librenms_devices_for_import(api, filters={"status": "0"})
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "down"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_location_filter_goes_to_api(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [])
-
-        get_librenms_devices_for_import(api, filters={"location": "10"})
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "location_id"
-        assert call_args["query"] == "10"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_type_filter_goes_to_api(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [])
-
-        get_librenms_devices_for_import(api, filters={"type": "network"})
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "type"
-        assert call_args["query"] == "network"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_os_filter_goes_to_api(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [])
-
-        get_librenms_devices_for_import(api, filters={"os": "ios"})
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "os"
-        assert call_args["query"] == "ios"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_hostname_filter_goes_to_api(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [])
-
-        get_librenms_devices_for_import(api, filters={"hostname": "router1"})
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "hostname"
-        assert call_args["query"] == "router1"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_sysname_filter_goes_to_api(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [])
-
-        get_librenms_devices_for_import(api, filters={"sysname": "core-sw"})
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "sysName"
-        assert call_args["query"] == "core-sw"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_hardware_filter_goes_to_client_side(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (
-            True,
+        _register_devices(
+            live_librenms,
             [
-                {"hardware": "Cisco C9300", "device_id": 1},
-                {"hardware": "Other Device", "device_id": 2},
+                {"device_id": 1, "hardware": "Example C9300"},
+                {"device_id": 2, "hardware": "Other model"},
+                {"device_id": 3, "hardware": None},
             ],
         )
 
-        result = get_librenms_devices_for_import(api, filters={"hardware": "C9300"})
-        # API gets no filters
-        api.list_devices.assert_called_once_with(None)
-        # Only the matching device survives client-side filtering
-        assert len(result) == 1
-        assert result[0]["device_id"] == 1
-        assert 2 not in [d["device_id"] for d in result]
+        result = get_librenms_devices_for_import(live_librenms.api, filters={"hardware": "c9300"})
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_location_plus_type_location_to_api_type_to_client(self, mock_cache):
+        assert [device["device_id"] for device in result] == [1]
+        assert _last_query(live_librenms) == {}
+
+    @pytest.mark.parametrize(
+        ("filters", "api_query"),
+        [
+            (
+                {"status": "1", "location": "5", "type": "server", "os": "linux"},
+                {"type": ["up"]},
+            ),
+            (
+                {"location": "5", "type": "server", "os": "linux", "hardware": "model-a"},
+                {"type": ["location_id"], "query": ["5"]},
+            ),
+            (
+                {"type": "server", "os": "linux", "hostname": "node-01"},
+                {"type": ["type"], "query": ["server"]},
+            ),
+            (
+                {"os": "linux", "hostname": "node-01", "sysname": "node-01"},
+                {"type": ["os"], "query": ["linux"]},
+            ),
+            (
+                {"hostname": "node-01", "sysname": "node-01", "hardware": "model-a"},
+                {"type": ["hostname"], "query": ["node-01"]},
+            ),
+            (
+                {"sysname": "node-01", "hardware": "model-a"},
+                {"type": ["sysName"], "query": ["node-01"]},
+            ),
+        ],
+    )
+    def test_remaining_filters_are_applied_client_side(self, live_librenms, filters, api_query):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        devices = [
-            {"device_id": 1, "type": "network", "location_id": 10},
-            {"device_id": 2, "type": "server", "location_id": 10},
-        ]
-        api.list_devices.return_value = (True, devices)
+        _register_devices(
+            live_librenms,
+            [
+                {
+                    "device_id": 1,
+                    "location_id": 5,
+                    "type": "server",
+                    "os": "linux",
+                    "hostname": "node-01.example",
+                    "sysName": "node-01",
+                    "hardware": "model-a",
+                },
+                {
+                    "device_id": 2,
+                    "location_id": 9,
+                    "type": "network",
+                    "os": "other",
+                    "hostname": "node-02.example",
+                    "sysName": "node-02",
+                    "hardware": "model-b",
+                },
+            ],
+        )
 
-        result = get_librenms_devices_for_import(api, filters={"location": "10", "type": "network"})
-        call_args = api.list_devices.call_args[0][0]
-        # location goes to API
-        assert call_args["type"] == "location_id"
-        # only the matching device survives client-side type filter
-        assert len(result) == 1
-        assert result[0]["device_id"] == 1
-        assert 2 not in [d["device_id"] for d in result]
+        result = get_librenms_devices_for_import(live_librenms.api, filters=filters)
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_force_refresh_deletes_cache(self, mock_cache):
+        assert [device["device_id"] for device in result] == [1]
+        assert _last_query(live_librenms) == api_query
+
+    def test_force_refresh_replaces_a_real_cached_result(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [])
+        _register_devices(live_librenms, [{"device_id": 1}])
+        first = get_librenms_devices_for_import(live_librenms.api)
+        _register_devices(live_librenms, [{"device_id": 2}])
 
-        get_librenms_devices_for_import(api, filters={}, force_refresh=True)
-        mock_cache.delete.assert_called_once()
+        cached, from_cache = get_librenms_devices_for_import(live_librenms.api, return_cache_status=True)
+        fresh, fresh_from_cache = get_librenms_devices_for_import(
+            live_librenms.api,
+            force_refresh=True,
+            return_cache_status=True,
+        )
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_cache_hit_returns_early_with_from_cache_true(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        cached_devices = [{"device_id": 1}]
-        mock_cache.get.return_value = cached_devices
-
-        api = MagicMock()
-        api.server_key = "default"
-
-        result, from_cache = get_librenms_devices_for_import(api, filters={}, return_cache_status=True)
+        assert first == cached == [{"device_id": 1}]
         assert from_cache is True
-        assert result == cached_devices
-        api.list_devices.assert_not_called()
+        assert fresh == [{"device_id": 2}]
+        assert fresh_from_cache is False
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_api_failure_raises_and_caches_nothing(self, mock_cache):
+    def test_http_failure_returns_and_caches_an_empty_result(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (False, "Connection error")
+        _register_devices(live_librenms, [], status=500)
 
-        with pytest.raises(LibreNMSUnreachable, match="Connection error"):
-            get_librenms_devices_for_import(api, filters={})
+        first, first_from_cache = get_librenms_devices_for_import(live_librenms.api, return_cache_status=True)
+        live_librenms.server.requests.clear()
+        second, second_from_cache = get_librenms_devices_for_import(live_librenms.api, return_cache_status=True)
 
-        mock_cache.set.assert_not_called()
+        assert first == second == []
+        assert first_from_cache is False
+        assert second_from_cache is True
+        assert live_librenms.server.requests == []
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_api_failure_raises_with_return_cache_status(self, mock_cache):
+    def test_disconnected_server_fails_closed(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (False, "Connection error")
+        live_librenms.api.cache_timeout = 300
+        live_librenms.server.register_disconnect("/api/v0/devices", method="GET")
 
-        with pytest.raises(LibreNMSUnreachable, match="Connection error"):
-            get_librenms_devices_for_import(api, filters={}, return_cache_status=True)
+        assert get_librenms_devices_for_import(live_librenms.api) == []
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_an_unexpected_error_propagates(self, mock_cache):
-        """Returning [] here made a broken client look like an empty LibreNMS."""
+    def test_omitted_api_is_built_from_real_plugin_settings(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.list_devices.side_effect = RuntimeError("Unexpected error")
+        _register_devices(live_librenms, [{"device_id": 7}])
 
-        with pytest.raises(RuntimeError, match="Unexpected error"):
-            get_librenms_devices_for_import(api, filters={})
+        assert get_librenms_devices_for_import(server_key="default") == [{"device_id": 7}]
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_an_unexpected_error_propagates_with_return_cache_status(self, mock_cache):
-        """The tuple contract never softens an error into ([], False)."""
+    def test_cache_namespace_isolated_by_resolved_server_key(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
+        from netbox_librenms_plugin.tests.conftest import make_recording_api
+        from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.list_devices.side_effect = RuntimeError("Unexpected error")
+        _register_devices(live_librenms, [{"device_id": 1}])
+        with librenms_mock_server() as second_server:
+            second_server.register(
+                "/api/v0/devices",
+                {"status": "ok", "devices": [{"device_id": 2}]},
+                method="GET",
+            )
+            second_api = make_recording_api(second_server.url, server_key="secondary")
+            second_api.cache_timeout = 300
 
-        with pytest.raises(RuntimeError, match="Unexpected error"):
-            get_librenms_devices_for_import(api, filters={}, return_cache_status=True)
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_success_caches_result(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        devices = [{"device_id": 1}]
-        api.list_devices.return_value = (True, devices)
-
-        get_librenms_devices_for_import(api, filters={})
-        mock_cache.set.assert_called_once()
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_creates_api_when_none_provided(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-
-        mock_api_instance = MagicMock()
-        mock_api_instance.server_key = "default"
-        mock_api_instance.cache_timeout = 300
-        mock_api_instance.list_devices.return_value = (True, [])
-
-        with patch("netbox_librenms_plugin.import_utils.filters.LibreNMSAPI") as MockAPI:
-            MockAPI.return_value = mock_api_instance
-            get_librenms_devices_for_import(server_key="default")
-            MockAPI.assert_called_once_with(server_key="default")
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_status_with_other_filters_go_to_client(self, mock_cache):
-        """When status is set, all other filters go client-side."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        devices = [{"device_id": 1, "type": "server", "location_id": 5}]
-        api.list_devices.return_value = (True, devices)
-
-        get_librenms_devices_for_import(api, filters={"status": "1", "location": "5", "type": "server"})
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "up"
+            assert get_librenms_devices_for_import(live_librenms.api) == [{"device_id": 1}]
+            assert get_librenms_devices_for_import(second_api) == [{"device_id": 2}]
 
 
 class TestApplyClientFilters:
-    """Tests for _apply_client_filters (lines 258-284)."""
-
-    def test_filter_by_location(self):
+    @pytest.mark.parametrize(
+        ("filters", "expected_ids"),
+        [
+            ({"location": "10"}, [1]),
+            ({"type": "network"}, [1]),
+            ({"os": "ios"}, [1]),
+            ({"hostname": "router"}, [1]),
+            ({"sysname": "core"}, [1]),
+            ({"hardware": "c9300"}, [1]),
+            ({}, [1, 2, 3]),
+        ],
+    )
+    def test_filters_defensive_real_response_shapes(self, filters, expected_ids):
         from netbox_librenms_plugin.import_utils.filters import _apply_client_filters
 
         devices = [
-            {"device_id": 1, "location_id": 10},
-            {"device_id": 2, "location_id": 20},
-        ]
-        result = _apply_client_filters(devices, {"location": "10"})
-        assert len(result) == 1
-        assert result[0]["device_id"] == 1
-
-    def test_filter_by_type(self):
-        from netbox_librenms_plugin.import_utils.filters import _apply_client_filters
-
-        devices = [
-            {"device_id": 1, "type": "network"},
-            {"device_id": 2, "type": "server"},
-        ]
-        result = _apply_client_filters(devices, {"type": "network"})
-        assert len(result) == 1
-        assert result[0]["device_id"] == 1
-
-    def test_filter_by_os(self):
-        from netbox_librenms_plugin.import_utils.filters import _apply_client_filters
-
-        devices = [
-            {"device_id": 1, "os": "ios"},
-            {"device_id": 2, "os": "linux"},
-        ]
-        result = _apply_client_filters(devices, {"os": "ios"})
-        assert len(result) == 1
-
-    def test_filter_by_hostname(self):
-        from netbox_librenms_plugin.import_utils.filters import _apply_client_filters
-
-        devices = [
-            {"device_id": 1, "hostname": "router01.example.com"},
-            {"device_id": 2, "hostname": "switch01.example.com"},
-        ]
-        result = _apply_client_filters(devices, {"hostname": "router"})
-        assert len(result) == 1
-        assert result[0]["device_id"] == 1
-
-    def test_filter_by_sysname(self):
-        from netbox_librenms_plugin.import_utils.filters import _apply_client_filters
-
-        devices = [
-            {"device_id": 1, "sysName": "core-router"},
-            {"device_id": 2, "sysName": "access-switch"},
-        ]
-        result = _apply_client_filters(devices, {"sysname": "core"})
-        assert len(result) == 1
-
-    def test_filter_by_hardware(self):
-        from netbox_librenms_plugin.import_utils.filters import _apply_client_filters
-
-        devices = [
-            {"device_id": 1, "hardware": "Cisco C9300-48P"},
-            {"device_id": 2, "hardware": "Juniper MX480"},
-        ]
-        result = _apply_client_filters(devices, {"hardware": "C9300"})
-        assert len(result) == 1
-
-    def test_hardware_none_value_handled(self):
-        from netbox_librenms_plugin.import_utils.filters import _apply_client_filters
-
-        devices = [
-            {"device_id": 1, "hardware": None},
-            {"device_id": 2, "hardware": "Cisco C9300"},
-        ]
-        result = _apply_client_filters(devices, {"hardware": "C9300"})
-        assert len(result) == 1
-        assert result[0]["device_id"] == 2
-
-    def test_no_filters_returns_all(self):
-        from netbox_librenms_plugin.import_utils.filters import _apply_client_filters
-
-        devices = [{"device_id": 1}, {"device_id": 2}]
-        result = _apply_client_filters(devices, {})
-        assert len(result) == 2
-
-
-class TestGetLibreNMSDevicesMoreCoverage:
-    """More tests for missing filter branches."""
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_status_invalid_string_sets_none(self, mock_cache):
-        """Lines 116-117: ValueError/TypeError when status is not a valid int."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [{"device_id": 1}])
-
-        result = get_librenms_devices_for_import(api, filters={"status": "invalid_value"})
-        assert isinstance(result, list)
-        # Invalid status means api.list_devices is called with None (no API type filter)
-        api.list_devices.assert_called_once_with(None)
-        # The single device returned from the API is passed through unchanged
-        assert len(result) == 1
-        assert result[0]["device_id"] == 1
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_status_with_all_other_filters_go_to_client(self, mock_cache):
-        """Lines 130-136: When status set, all filters (loc/type/os/hostname/sysname/hw) go client-side."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (
-            True,
-            [
-                {
-                    "device_id": 1,
-                    "type": "server",
-                    "location_id": 5,
-                    "os": "linux",
-                    "hostname": "srv01",
-                    "sysName": "srv01",
-                    "hardware": "Dell",
-                },
-                {
-                    "device_id": 2,
-                    "type": "other",
-                    "location_id": 99,
-                    "os": "windows",
-                    "hostname": "othersrv",
-                    "sysName": "othersrv",
-                    "hardware": "HP",
-                },
-            ],
-        )
-
-        result = get_librenms_devices_for_import(
-            api,
-            filters={
-                "status": "1",
-                "location": "5",
+            {
+                "device_id": 1,
+                "location_id": 10,
+                "type": "network",
+                "os": "ios-xe",
+                "hostname": "router-01.example",
+                "sysName": "core-01",
+                "hardware": "Example C9300",
+            },
+            {
+                "device_id": 2,
+                "location_id": 20,
                 "type": "server",
                 "os": "linux",
-                "hostname": "srv01",
-                "sysname": "srv01",
-                "hardware": "Dell",
+                "hostname": "server-01.example",
+                "sysName": "server-01",
+                "hardware": "Example server",
             },
-        )
-        assert isinstance(result, list)
-        # The matching device should be present, but the non-matching device should not
-        device_ids = [d["device_id"] for d in result]
-        assert 1 in device_ids
-        assert len(result) == 1
-        assert 2 not in device_ids
+            {"device_id": 3, "hardware": None},
+        ]
 
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_location_with_remaining_client_filters(self, mock_cache):
-        """Lines 150-156: location API filter with type/os/hostname/sysname/hardware as client filters."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (
-            True,
-            [
-                {
-                    "device_id": 1,
-                    "type": "network",
-                    "os": "ios",
-                    "hostname": "router01",
-                    "sysName": "router01",
-                    "hardware": "Cisco",
-                    "location_id": "5",
-                },
-                {
-                    "device_id": 2,
-                    "type": "network",
-                    "os": "ios",
-                    "hostname": "switch99",
-                    "sysName": "switch99",
-                    "hardware": "Cisco",
-                    "location_id": "5",
-                },
-            ],
-        )
-
-        result = get_librenms_devices_for_import(
-            api,
-            filters={
-                "location": "5",
-                "type": "network",
-                "os": "ios",
-                "hostname": "router01",
-                "sysname": "router01",
-                "hardware": "Cisco",
-            },
-        )
-        assert len(result) == 1
-        assert result[0]["device_id"] == 1
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "location_id"
-        assert call_args["query"] == "5"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_type_filter_with_remaining_client_filters(self, mock_cache):
-        """Lines 162-168: type API filter with os/hostname/sysname/hardware as client filters."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (
-            True,
-            [
-                {
-                    "device_id": 1,
-                    "type": "network",
-                    "os": "ios",
-                    "hostname": "router01",
-                    "sysName": "router01",
-                    "hardware": "Cisco",
-                },
-            ],
-        )
-
-        get_librenms_devices_for_import(
-            api,
-            filters={
-                "type": "network",
-                "os": "ios",
-                "hostname": "router01",
-                "sysname": "router01",
-                "hardware": "Cisco",
-            },
-        )
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "type"
-        assert call_args["query"] == "network"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_os_filter_with_remaining_client_filters(self, mock_cache):
-        """Lines 174-178: os API filter with hostname/sysname/hardware as client filters."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (
-            True,
-            [
-                {"device_id": 1, "os": "ios", "hostname": "router01", "sysName": "router01", "hardware": "Cisco"},
-            ],
-        )
-
-        get_librenms_devices_for_import(
-            api,
-            filters={
-                "os": "ios",
-                "hostname": "router01",
-                "sysname": "router01",
-                "hardware": "Cisco",
-            },
-        )
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "os"
-        assert call_args["query"] == "ios"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_hostname_filter_with_sysname_and_hardware(self, mock_cache):
-        """Lines 184-186: hostname API filter with sysname/hardware as client filters."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (
-            True,
-            [
-                {"device_id": 1, "hostname": "router01", "sysName": "router01", "hardware": "Cisco"},
-            ],
-        )
-
-        get_librenms_devices_for_import(
-            api,
-            filters={
-                "hostname": "router01",
-                "sysname": "router01",
-                "hardware": "Cisco",
-            },
-        )
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "hostname"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_sysname_filter_with_hardware(self, mock_cache):
-        """Line 194: sysname API filter with hardware as client filter."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (
-            True,
-            [
-                {"device_id": 1, "sysName": "router01", "hardware": "Cisco"},
-            ],
-        )
-
-        get_librenms_devices_for_import(
-            api,
-            filters={
-                "sysname": "router01",
-                "hardware": "Cisco",
-            },
-        )
-        call_args = api.list_devices.call_args[0][0]
-        assert call_args["type"] == "sysName"
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_client_filters_applied_to_results(self, mock_cache):
-        """Line 237: _apply_client_filters is called when client_filters is set."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        # Two devices, one matches hardware filter, one doesn't
-        api.list_devices.return_value = (
-            True,
-            [
-                {"device_id": 1, "hardware": "Cisco C9300", "location_id": 5},
-                {"device_id": 2, "hardware": "Juniper MX480", "location_id": 5},
-            ],
-        )
-
-        result = get_librenms_devices_for_import(
-            api,
-            filters={
-                "location": "5",
-                "hardware": "C9300",  # Goes to client_filters
-            },
-        )
-        # Should only return the Cisco device after client filtering
-        assert len(result) == 1
-        assert result[0]["device_id"] == 1
-
-
-class TestGetLibreNMSReturnCacheStatus:
-    """Tests for return_cache_status path (line 237)."""
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_return_cache_status_with_fresh_data(self, mock_cache):
-        """Line 237: return devices, from_cache when return_cache_status=True."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (True, [{"device_id": 1}])
-
-        result = get_librenms_devices_for_import(api, return_cache_status=True)
-        assert isinstance(result, tuple)
-        devices, from_cache = result
-        assert from_cache is False
-        assert len(devices) == 1
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_return_cache_status_with_cached_data(self, mock_cache):
-        """Line 218: return devices, from_cache when cache hit + return_cache_status=True."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        cached_devices = [{"device_id": 1}]
-        mock_cache.get.return_value = cached_devices
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-
-        result = get_librenms_devices_for_import(api, return_cache_status=True)
-        assert isinstance(result, tuple)
-        devices, from_cache = result
-        assert from_cache is True
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_api_failure_raises_from_the_return_cache_status_path(self, mock_cache):
-        """A failed fetch raises, so return_cache_status never yields a misleading ([], False)."""
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.list_devices.return_value = (False, "Error")
-
-        with pytest.raises(LibreNMSUnreachable, match="Error"):
-            get_librenms_devices_for_import(api, return_cache_status=True)
-
-
-class TestCacheKeyServerKeyIsolation:
-    """Test that cache keys are isolated per server key (Thread 38)."""
-
-    @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_cache_key_uses_api_server_key(self, mock_cache):
-        """Different server_keys produce different cache keys."""
-        from unittest.mock import MagicMock
-
-        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
-
-        mock_cache.get.return_value = None
-        api1 = MagicMock()
-        api1.server_key = "server1"
-        api1.cache_timeout = 300
-        api2 = MagicMock()
-        api2.server_key = "server2"
-        api2.cache_timeout = 300
-        api1.list_devices.return_value = (True, [])
-        api2.list_devices.return_value = (True, [])
-
-        get_librenms_devices_for_import(api1, filters={})
-        get_librenms_devices_for_import(api2, filters={})
-
-        assert mock_cache.set.call_count == 2
-        keys = [call.args[0] for call in mock_cache.set.call_args_list]
-        assert keys[0] != keys[1]
-        assert any("server1" in k for k in keys)
-        assert any("server2" in k for k in keys)
+        assert [device["device_id"] for device in _apply_client_filters(devices, filters)] == expected_ids
