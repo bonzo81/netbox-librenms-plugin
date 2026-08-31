@@ -3569,16 +3569,12 @@ class TestGetSerialPortSensors:
         assert len(requests_seen) == 2
         assert ok2 is True and [s["device_id"] for s in data2] == [12]
 
-    def test_json_decode_error_reported_as_invalid_json(self, mock_librenms_api, mock_response_factory):
+    def test_json_decode_error_reported_as_invalid_json(self, mock_librenms_api, librenms_server):
         """A non-JSON 200 body must surface 'Invalid JSON', not be mislabeled 'Error connecting' — requests JSONDecodeError subclasses both ValueError and RequestException, so the ValueError handler must precede the RequestException one (mirrors get_port_stack)."""
-        import unittest.mock as mock
+        librenms_server.register_raw("/api/v0/resources/sensors", "not-json", method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        import requests as _requests
-
-        resp = mock_response_factory(status_code=200, json_data={})
-        resp.json.side_effect = _requests.exceptions.JSONDecodeError("Expecting value", "", 0)
-        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=resp):
-            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
         assert "Invalid JSON" in msg

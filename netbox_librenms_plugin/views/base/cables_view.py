@@ -2313,6 +2313,18 @@ class BaseCableTableView(
                 {"cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
+        if context.get("refresh_incomplete"):
+            messages.warning(
+                request,
+                "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again.",
+            )
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.CABLES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
+            return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
+
         # Decide the outcome before announcing it. cache.set() does not confirm that the
         # snapshot exists, and an eviction can remove it before this check.
         coordinator = SyncCacheConsistency(obj)
