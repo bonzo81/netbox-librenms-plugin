@@ -624,13 +624,18 @@ class TestRemoveServerMappingView:
             logged_in_client,
             "remove_server_mapping",
             device,
-            {"object_type": "device", "server_key": "retired", "tab": "interfaces"},
+            {
+                "object_type": "device",
+                "server_key": "retired",
+                "active_server_key": SERVER_KEY,
+                "tab": "interfaces",
+            },
         )
 
         device.refresh_from_db()
         mapping = device.custom_field_data["librenms_id"]
         assert mapping == {SERVER_KEY: 6541}
-        assert response.url.endswith("?tab=interfaces")
+        assert response.url.endswith(f"?tab=interfaces&server_key={SERVER_KEY}")
         assert any("Removed LibreNMS mapping" in text for text in _messages(response, "success"))
 
     def test_configured_mapping_cannot_be_removed(self, logged_in_client, librenms_server):

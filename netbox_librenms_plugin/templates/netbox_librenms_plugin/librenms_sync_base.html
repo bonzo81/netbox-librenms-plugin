@@ -204,6 +204,7 @@
                           onsubmit="return confirm('Remove mapping for server \'{{ mapping.server_key|escapejs }}\'? This cannot be undone.');">
                         {% csrf_token %}
                         <input type="hidden" name="server_key" value="{{ mapping.server_key }}">
+                        <input type="hidden" name="active_server_key" value="{{ server_key|default:'' }}">
                         <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
                         <button type="submit" class="btn btn-sm btn-danger"
                                 title="Remove stale mapping for unconfigured server '{{ mapping.server_key }}'">

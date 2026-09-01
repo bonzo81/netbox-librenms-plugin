@@ -43,11 +43,11 @@ def make_server_timeout(monkeypatch, server, route, *, method="GET"):
     from netbox_librenms_plugin import librenms_api
 
     def respond_after_timeout(**request):
-        sleep(0.1)
+        sleep(1.0)
         return 200, {"status": "ok"}
 
-    monkeypatch.setattr(librenms_api, "DEFAULT_API_TIMEOUT", 0.01)
-    monkeypatch.setattr(librenms_api, "EXTENDED_API_TIMEOUT", 0.01)
+    monkeypatch.setattr(librenms_api, "DEFAULT_API_TIMEOUT", 0.2)
+    monkeypatch.setattr(librenms_api, "EXTENDED_API_TIMEOUT", 0.2)
     server.register(route, respond_after_timeout, method=method)
 
 

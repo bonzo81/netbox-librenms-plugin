@@ -285,6 +285,23 @@ def test_active_and_preferred_servers_render_as_distinct_states(client, servers)
 
 
 @pytest.mark.django_db
+def test_remove_mapping_form_preserves_the_active_server(client, servers):
+    owner = make_device(
+        "remove-mapping-active-server",
+        librenms_cf={"primary": {"id": 13599}, "retired": {"id": 13600}},
+    )
+    _register_device(servers.primary, 13599, owner.name)
+    client.force_login(make_superuser("remove-mapping-active-server-writer"))
+
+    response = client.get(_sync_url(owner), {"server_key": "primary"})
+
+    html = response.content.decode()
+    assert response.status_code == 200
+    assert reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[owner.pk]) in html
+    assert html.count('name="active_server_key" value="primary"') == 1
+
+
+@pytest.mark.django_db
 def test_view_only_user_sees_preference_but_not_star_controls(client, servers):
     owner = make_device(
         "view-only-preference",

@@ -92,32 +92,45 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
     incomplete_key = "librenms_filter_cache_metadata_primary_incomplete"
     secondary_key = get_cache_metadata_key("secondary", {"hostname": "shared-edge"}, False)
     retired_key = get_cache_metadata_key("retired", {"hostname": "shared-edge"}, False)
-    cache.set("librenms_cache_index_primary", [primary_key, stale_key, incomplete_key], timeout=300)
-    cache.set(primary_key, metadata("primary", now), timeout=300)
-    cache.set(stale_key, metadata("secondary", now), timeout=300)
-    cache.set(
+    cache_keys = [
+        "librenms_cache_index_primary",
+        "librenms_cache_index_secondary",
+        "librenms_cache_index_retired",
+        primary_key,
+        stale_key,
         incomplete_key,
-        {
-            "server_key": "primary",
-            "cached_at": now.isoformat(),
-            "cache_timeout": 300,
-            "device_count": 1,
-        },
-        timeout=300,
-    )
-    cache.set("librenms_cache_index_secondary", [secondary_key], timeout=300)
-    cache.set(secondary_key, metadata("secondary", now - timedelta(seconds=600)), timeout=300)
-    cache.set("librenms_cache_index_retired", [retired_key], timeout=300)
-    cache.set(retired_key, metadata("retired", now), timeout=300)
+        secondary_key,
+        retired_key,
+    ]
+    try:
+        cache.set("librenms_cache_index_primary", [primary_key, stale_key, incomplete_key], timeout=300)
+        cache.set(primary_key, metadata("primary", now), timeout=300)
+        cache.set(stale_key, metadata("secondary", now), timeout=300)
+        cache.set(
+            incomplete_key,
+            {
+                "server_key": "primary",
+                "cached_at": now.isoformat(),
+                "cache_timeout": 300,
+                "device_count": 1,
+            },
+            timeout=300,
+        )
+        cache.set("librenms_cache_index_secondary", [secondary_key], timeout=300)
+        cache.set(secondary_key, metadata("secondary", now - timedelta(seconds=600)), timeout=300)
+        cache.set("librenms_cache_index_retired", [retired_key], timeout=300)
+        cache.set(retired_key, metadata("retired", now), timeout=300)
 
-    searches = get_active_cached_searches_for_servers(
-        {"primary": "Primary LibreNMS", "secondary": "Secondary LibreNMS"}
-    )
+        searches = get_active_cached_searches_for_servers(
+            {"primary": "Primary LibreNMS", "secondary": "Secondary LibreNMS"}
+        )
 
-    assert [(search["server_key"], search["cache_key"]) for search in searches] == [("primary", primary_key)]
-    assert cache.get("librenms_cache_index_primary") == [primary_key]
-    assert cache.get("librenms_cache_index_secondary") == []
-    assert cache.get("librenms_cache_index_retired") == [retired_key]
+        assert [(search["server_key"], search["cache_key"]) for search in searches] == [("primary", primary_key)]
+        assert cache.get("librenms_cache_index_primary") == [primary_key]
+        assert cache.get("librenms_cache_index_secondary") == []
+        assert cache.get("librenms_cache_index_retired") == [retired_key]
+    finally:
+        cache.delete_many(cache_keys)
 
 
 @pytest.mark.django_db

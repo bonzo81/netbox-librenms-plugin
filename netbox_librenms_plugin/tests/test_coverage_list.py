@@ -117,7 +117,7 @@ class TestCachedSearchOption:
             (["1"], False, True),
             (["0"], True, False),
             ([], True, True),
-            (["1", "0"], False, False),
+            (["1", "0"], True, True),
         ],
     )
     def test_only_one_explicit_boolean_overrides_the_fallback(self, values, fallback, expected):

@@ -76,6 +76,17 @@ def _validated_sync_tab(request):
     return submitted_tab if submitted_tab in {tab.value for tab in SyncTab} else None
 
 
+def _validated_active_server_key(request):
+    """Return a safe server key for preserving the active sync-page context."""
+    submitted_key = request.POST.get("active_server_key", "").strip()
+    if not submitted_key:
+        return None
+    try:
+        return require_server_key(submitted_key)
+    except ValueError:
+        return None
+
+
 def _server_mapping_redirect(object_type, pk, active_server_key=None, active_sync_tab=None):
     """Redirect a server-mapping action to its validated object sync context."""
     url = reverse(_sync_url_name(object_type), kwargs={"pk": pk})
@@ -873,22 +884,23 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return error
 
         active_sync_tab = _validated_sync_tab(request)
+        active_server_key = _validated_active_server_key(request)
         obj, model = self._get_object(object_type, pk)
         server_key = request.POST.get("server_key", "").strip()
 
         if not server_key:
             messages.error(request, "No server_key provided.")
-            return _server_mapping_redirect(object_type, pk, active_sync_tab=active_sync_tab)
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
         try:
             server_key = require_server_key(server_key)
         except ValueError as exc:
             messages.error(request, str(exc))
-            return _server_mapping_redirect(object_type, pk, active_sync_tab=active_sync_tab)
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
         cf_value = self._normalize_librenms_mapping(obj.custom_field_data.get("librenms_id"))
         if not isinstance(cf_value, dict) or server_key not in cf_value:
             messages.warning(request, f"No mapping found for server '{server_key}'.")
-            return _server_mapping_redirect(object_type, pk, active_sync_tab=active_sync_tab)
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
         # Refuse to remove mappings for servers that are still configured in the plugin.
         # Only orphaned (unconfigured) mappings may be removed via this endpoint.
@@ -910,14 +922,14 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 f"Cannot remove mapping for configured server '{server_key}'. "
                 "Remove the server from plugin configuration first, then retry.",
             )
-            return _server_mapping_redirect(object_type, pk, active_sync_tab=active_sync_tab)
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
         with transaction.atomic():
             try:
                 obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
-                return _server_mapping_redirect(object_type, pk, active_sync_tab=active_sync_tab)
+                return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
             cf = self._normalize_librenms_mapping(obj_locked.custom_field_data.get("librenms_id"))
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
@@ -942,17 +954,17 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                         "Validation error removing LibreNMS mapping for server %r: %s", server_key, error_msg
                     )
                     messages.error(request, f"Validation error removing LibreNMS mapping: {error_msg}")
-                    return _server_mapping_redirect(object_type, pk, active_sync_tab=active_sync_tab)
+                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 except Exception as exc:
                     transaction.set_rollback(True)
                     logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
                     messages.error(request, f"Unexpected error removing LibreNMS mapping: {exc}")
-                    return _server_mapping_redirect(object_type, pk, active_sync_tab=active_sync_tab)
+                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:
                 messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
 
-        return _server_mapping_redirect(object_type, pk, active_sync_tab=active_sync_tab)
+        return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
 
 class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
