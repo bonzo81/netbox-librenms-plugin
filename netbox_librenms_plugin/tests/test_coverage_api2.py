@@ -58,11 +58,25 @@ def _sync_status_url(job_pk):
 
 
 class TestSyncJobStatus:
-    def test_missing_or_foreign_job_returns_404(self, client):
+    def test_missing_job_returns_404(self, client):
         user = make_superuser("job-status-missing")
         client.force_login(user)
 
         response = client.post(_sync_status_url(999_999))
+
+        assert response.status_code == 404
+        assert response.json() == {"error": "Job not found"}
+
+    def test_foreign_job_returns_404(self, client):
+        from core.choices import JobStatusChoices
+        from django.contrib.auth import get_user_model
+
+        owner = get_user_model().objects.create_user(username="job-status-owner")
+        requester = make_superuser("job-status-foreign")
+        database_job = _database_job(owner, uuid4(), JobStatusChoices.STATUS_PENDING)
+        client.force_login(requester)
+
+        response = client.post(_sync_status_url(database_job.pk))
 
         assert response.status_code == 404
         assert response.json() == {"error": "Job not found"}
