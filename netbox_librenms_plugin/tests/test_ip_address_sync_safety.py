@@ -1801,6 +1801,65 @@ def test_force_reassigns_only_the_matching_vrf_row(client, settings):
 
 
 @pytest.mark.django_db
+def test_a_force_checkbox_without_a_valid_intent_syncs_nothing(client, settings):
+    """An expired confirmation must drop its row, not sync it against the Global VRF."""
+    # The checkbox and its signed intent post together, so a token that has aged past max_age
+    # leaves the checkbox posting alone. The confirmation form carries no vrf_<row_id> field,
+    # so the row would be classified against Global and a third address row created.
+    _configure_test_server(settings)
+    blue = VRF.objects.create(name="Stale Intent Blue")
+    red = VRF.objects.create(name="Stale Intent Red")
+    device = make_device("ip-stale-intent", librenms_cf={"default": {"id": 42}})
+    target = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    target.custom_field_data["librenms_id"] = {"default": 7001}
+    target.save(update_fields=["custom_field_data"])
+    blue_current = make_interface(device, "Ethernet2", iface_type="1000base-t")
+    red_current = make_interface(device, "Ethernet3", iface_type="1000base-t")
+    blue_ip = IPAddress.objects.create(address="198.18.4.10/24", vrf=blue, assigned_object=blue_current)
+    red_ip = IPAddress.objects.create(address="198.18.4.10/24", vrf=red, assigned_object=red_current)
+    client.force_login(make_superuser("ip-stale-intent-user"))
+    assert _refresh_ip_snapshot(client, device, "198.18.4.10", 24).status_code == 200
+
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    conflict_response = client.post(
+        sync_url,
+        {
+            "server_key": "default",
+            "select": "198.18.4.10/24",
+            "vrf_198.18.4.10/24": str(blue.pk),
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert conflict_response.status_code == 200
+    assert conflict_response.context["conflicts"][0]["forceable"] is True
+
+    force_response = client.post(
+        sync_url,
+        {
+            "server_key": "default",
+            "force_conflict": "198.18.4.10/24",
+            "conflict_intent": "expired-token",
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert force_response.status_code == 200
+    assert _message_texts(force_response) == [
+        "IP address confirmation is invalid or has expired. Refresh the IP data and try again."
+    ]
+    assert not IPAddress.objects.filter(address="198.18.4.10/24", vrf__isnull=True).exists()
+    blue_ip.refresh_from_db()
+    red_ip.refresh_from_db()
+    assert blue_ip.assigned_object == blue_current
+    assert red_ip.assigned_object == red_current
+    assert target.ip_addresses.count() == 0
+
+
+@pytest.mark.django_db
 def test_sync_creates_an_independent_global_row_when_other_vrfs_are_ambiguous(client, settings):
     """Rows in other VRFs must not block creation in the explicitly selected Global VRF."""
     _configure_test_server(settings)
