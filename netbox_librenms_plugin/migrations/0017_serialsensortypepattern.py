@@ -45,7 +45,7 @@ class Migration(migrations.Migration):
         # Generated against the supported NetBox 4.2 floor. SerialSensorTypePattern only
         # references extras.Tag and extras.TaggedItem, which are available on that floor.
         ("extras", "0122_charfield_null_choices"),
-        ("netbox_librenms_plugin", "0015_librenmssettings_remember_interface_name_per_platform"),
+        ("netbox_librenms_plugin", "0016_portstacklagpattern_sap_name_pattern"),
     ]
 
     operations = [
