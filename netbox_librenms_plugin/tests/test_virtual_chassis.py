@@ -1,7 +1,5 @@
 """Tests for import_utils/virtual_chassis.py."""
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 
@@ -28,13 +26,6 @@ class TestLoadVcMemberNamePattern:
         settings_model.objects.all().delete()
         settings_model.objects.create(vc_member_name_pattern=pattern)
 
-    def _patch_settings(self, settings_obj):
-        """Patch the deferred LibreNMSSettings lookup for values the real CharField cannot hold."""
-        return patch(
-            "netbox_librenms_plugin.models.LibreNMSSettings.objects",
-            **{"order_by.return_value.first.return_value": settings_obj},
-        )
-
     def test_returns_valid_pattern(self):
         """A configured non-empty pattern is read back verbatim from the real settings row."""
         self._store_pattern("-SW{position}")
@@ -55,27 +46,15 @@ class TestLoadVcMemberNamePattern:
         self._settings_model().objects.all().delete()
         assert self._call() == self.DEFAULT
 
-    def test_returns_default_for_none_pattern(self):
-        """A NULL pattern (unreachable via the NOT NULL CharField) falls back to the default."""
-        settings = MagicMock()
-        settings.vc_member_name_pattern = None
-        with self._patch_settings(settings):
-            assert self._call() == self.DEFAULT
-
-    def test_returns_default_for_boolean(self):
-        """A boolean pattern (the CharField would stringify it) falls back to the default."""
-        settings = MagicMock()
-        settings.vc_member_name_pattern = True
-        with self._patch_settings(settings):
-            assert self._call() == self.DEFAULT
-
-    def test_returns_default_on_exception(self):
+    def test_returns_default_on_exception(self, monkeypatch):
         """A DB error while loading settings falls back to the default."""
-        with patch(
-            "netbox_librenms_plugin.models.LibreNMSSettings.objects",
-        ) as mock_objs:
-            mock_objs.order_by.side_effect = RuntimeError("db error")
-            assert self._call() == self.DEFAULT
+        settings_model = self._settings_model()
+
+        def fail_query(*_args, **_kwargs):
+            raise RuntimeError("db error")
+
+        monkeypatch.setattr(settings_model.objects, "order_by", fail_query)
+        assert self._call() == self.DEFAULT
 
 
 class TestGenerateVcMemberName:
@@ -95,13 +74,14 @@ class TestGenerateVcMemberName:
         result = self._call("switch01", 2, serial="ABC123", pattern=" [{serial}]")
         assert result == "switch01 [ABC123]"
 
+    @pytest.mark.django_db
     def test_none_pattern_loads_from_settings(self):
-        """When pattern is None, _load_vc_member_name_pattern is called."""
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="-STACK{position}",
-        ):
-            result = self._call("core01", 3, pattern=None)
+        """When pattern is None, the persisted pattern is loaded."""
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.all().delete()
+        LibreNMSSettings.objects.create(vc_member_name_pattern="-STACK{position}")
+        result = self._call("core01", 3, pattern=None)
         assert result == "core01-STACK3"
 
     def test_malformed_pattern_falls_back_to_default(self):

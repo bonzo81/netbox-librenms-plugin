@@ -11,8 +11,6 @@ Covers:
   - LibreNMSCableTable.render_remote_device() dims unconfigured serial ports
 """
 
-from unittest.mock import patch
-
 import pytest
 
 # Shared real-DB builders (see tests/conftest.py).
@@ -53,6 +51,33 @@ def _make_view():
     view.librenms_id = 12
     view._librenms_api = LibreNMSAPI(server_key=configured_server_key())
     return view
+
+
+_NO_SENSOR_ROUTE = object()
+
+
+def _register_refresh(
+    server,
+    device_id,
+    *,
+    links=None,
+    links_status=200,
+    ports=None,
+    sensors=_NO_SENSOR_ROUTE,
+    sensors_status=200,
+    hostname="test-device",
+):
+    """Serve one cable refresh through the real HTTP client."""
+    links = {"status": "ok", "links": []} if links is None else links
+    ports = {"status": "ok", "ports": []} if ports is None else ports
+    server.register(f"/api/v0/devices/{device_id}/links", links, status=links_status)
+    server.register(f"/api/v0/devices/{device_id}/ports", ports)
+    server.register(
+        f"/api/v0/devices/{device_id}",
+        {"status": "ok", "devices": [{"device_id": device_id, "hostname": hostname}]},
+    )
+    if sensors is not _NO_SENSOR_ROUTE:
+        server.register("/api/v0/resources/sensors", sensors, status=sensors_status)
 
 
 # ---------------------------------------------------------------------------
@@ -961,26 +986,15 @@ class TestNormalCableLinkQueryBound:
 class TestSerialFetchSkippedWithoutHostId:
     """An unmapped device must not call LibreNMS with a missing host ID."""
 
-    def test_serial_fetch_skipped_when_no_host_librenms_id(self):
-        import requests
-
+    def test_serial_fetch_skipped_when_no_host_librenms_id(self, live_librenms):
         obj, _csps, _ = make_serial_device("oob-only-serial", csp_names=["ttyS1"])
         view = _make_view()
-        requested_urls = []
-
-        def not_found(url, *args, **kwargs):
-            requested_urls.append(url)
-            response = requests.models.Response()
-            response.status_code = 404
-            response.url = url
-            return response
-
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=not_found):
-            result = view.get_links_data(obj)
+        result = view.get_links_data(obj)
 
         assert result is None
-        assert requested_urls
-        assert all("/devices/None/links" not in url for url in requested_urls)
+        requested_paths = [request["path"] for request in live_librenms.server.requests]
+        assert requested_paths
+        assert all("/devices/None/links" not in path for path in requested_paths)
         assert view._serial_links_fetch_failed is False
 
 
@@ -991,45 +1005,7 @@ class TestSerialFetchSkippedWithoutHostId:
 class TestSerialSyncSurvivesHostLinks404:
     """Verify a host links 404 leaves serial rows cached and syncable through the full cable-creation flow."""
 
-    def _routed_get(self):
-        import json
-
-        import requests
-
-        def _get(url, *args, **kwargs):
-            resp = requests.models.Response()
-            resp.url = url
-            if url.endswith("/links"):
-                # LibreNMS returns 404 for a device that has no links (a terminal server).
-                resp.status_code = 404
-                resp._content = b'{"status":"error","message":"Device does not have any links"}'
-            elif url.endswith("/resources/sensors"):
-                resp.status_code = 200
-                resp._content = json.dumps(
-                    {
-                        "status": "ok",
-                        "sensors": [
-                            {
-                                "sensor_id": 1007,
-                                "device_id": 13,
-                                "sensor_type": "acsSerialPortTable",
-                                "sensor_index": "acsSerialPortTableStatus.7",
-                                "sensor_descr": "router-z Status",
-                            }
-                        ],
-                    }
-                ).encode()
-            elif url.endswith("/ports"):
-                resp.status_code = 200
-                resp._content = b'{"status": "ok", "ports": []}'
-            else:  # pragma: no cover - defensive default for any unexpected route
-                resp.status_code = 200
-                resp._content = b'{"status": "ok"}'
-            return resp
-
-        return _get
-
-    def test_serial_rows_cached_and_syncable_when_host_links_404(self, client):
+    def test_serial_rows_cached_and_syncable_when_host_links_404(self, client, live_librenms):
         from django.core.cache import cache
         from dcim.models import Cable
         from django.urls import reverse
@@ -1048,12 +1024,30 @@ class TestSerialSyncSurvivesHostLinks404:
         console_port = cps[0]
 
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=self._routed_get()):
-            refreshed = client.post(
-                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[acs.pk]),
-                {"server_key": server_key},
-                HTTP_HX_REQUEST="true",
-            )
+        _register_refresh(
+            live_librenms.server,
+            13,
+            links={"status": "error", "message": "Device does not have any links"},
+            links_status=404,
+            sensors={
+                "status": "ok",
+                "sensors": [
+                    {
+                        "sensor_id": 1007,
+                        "device_id": 13,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.7",
+                        "sensor_descr": "router-z Status",
+                    }
+                ],
+            },
+            hostname=acs.name,
+        )
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[acs.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
 
         assert refreshed.status_code == 200
         cache_key = object.__new__(SyncCablesView).get_cache_key(acs, "links", server_key)
@@ -1097,11 +1091,8 @@ class TestSerialSyncSurvivesHostLinks404:
         assert console_port.cable_id == csp.cable_id
         assert Cable.objects.filter(pk=csp.cable_id).exists()
 
-    def test_a_carried_over_serial_row_is_not_syncable(self, client):
+    def test_a_carried_over_serial_row_is_not_syncable(self, client, live_librenms):
         """Verify an incomplete serial refresh carries prior rows forward without allowing sync from superseded data."""
-        import json
-
-        import requests
         from dcim.models import Cable, ConsolePort, Device, Interface
         from django.core.cache import cache
         from django.urls import reverse
@@ -1117,46 +1108,33 @@ class TestSerialSyncSurvivesHostLinks404:
         local.save()
         _remote, _, (console_port,) = make_serial_device("serial-carryover-remote", cp_names=["console"])
 
-        def routed_get(url, *args, **kwargs):
-            response = requests.models.Response()
-            response.url = url
-            if url.endswith("/links"):
-                response.status_code = 200
-                response._content = b'{"status":"ok","links":[]}'
-            elif url.endswith("/ports"):
-                response.status_code = 200
-                response._content = b'{"status":"ok","ports":[]}'
-            elif url.endswith("/resources/sensors"):
-                response.status_code = 200
-                response._content = json.dumps(
+        _register_refresh(
+            live_librenms.server,
+            13,
+            sensors={
+                "status": "ok",
+                "sensors": [
                     {
-                        "status": "ok",
-                        "sensors": [
-                            {
-                                "sensor_id": 1007,
-                                "device_id": 13,
-                                "sensor_type": "acsSerialPortTable",
-                                "sensor_index": "acsSerialPortTableStatus.7",
-                                "sensor_descr": "serial-carryover-remote Status",
-                            }
-                        ],
+                        "sensor_id": 1007,
+                        "device_id": 13,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.7",
+                        "sensor_descr": "serial-carryover-remote Status",
                     }
-                ).encode()
-            else:  # pragma: no cover - unexpected external route
-                response.status_code = 404
-                response._content = b"{}"
-            return response
+                ],
+            },
+            hostname=local.name,
+        )
 
         cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
 
         # A privileged refresh reads the sensors and caches the serial row.
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
-            client.post(
-                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
-                {"server_key": server_key},
-                HTTP_HX_REQUEST="true",
-            )
+        client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
         assert cache.get(cache_key)["incomplete_sources"] == []
 
         # A refresh that may not view any ConsoleServerPort carries that row forward unread.
@@ -1166,12 +1144,11 @@ class TestSerialSyncSurvivesHostLinks404:
                 [("view", Device), ("view", Interface), ("view", ConsolePort), ("view", Cable)],
             )
         )
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
-            client.post(
-                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
-                {"server_key": server_key},
-                HTTP_HX_REQUEST="true",
-            )
+        client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
         carried = cache.get(cache_key)
         assert carried["incomplete_sources"] == ["serial"]
         assert [row["row_id"] for row in carried["links"]] == ["serial:1007"]
@@ -1199,11 +1176,8 @@ class TestSerialSyncSurvivesHostLinks404:
         assert console_port.cable_id is None
         assert not Cable.objects.exists()
 
-    def test_host_link_remains_syncable_when_sensor_fetch_fails(self, client):
+    def test_host_link_remains_syncable_when_sensor_fetch_fails(self, client, live_librenms):
         """A serial sensor outage must not invalidate a successful host-link snapshot."""
-        import json
-
-        import requests
         from dcim.models import Cable
         from django.core.cache import cache
         from django.urls import reverse
@@ -1221,54 +1195,37 @@ class TestSerialSyncSurvivesHostLinks404:
         remote = make_device("serial-partial-host-remote")
         remote_interface = make_interface(remote, "Ethernet9")
 
-        def routed_get(url, *args, **kwargs):
-            response = requests.models.Response()
-            response.url = url
-            if url.endswith("/links"):
-                response.status_code = 200
-                response._content = json.dumps(
+        _register_refresh(
+            live_librenms.server,
+            13,
+            links={
+                "status": "ok",
+                "links": [
                     {
-                        "status": "ok",
-                        "links": [
-                            {
-                                "id": 901,
-                                "local_port_id": 101,
-                                "remote_hostname": remote.name,
-                                "remote_port": remote_interface.name,
-                                "remote_port_id": 202,
-                                "protocol": "lldp",
-                            }
-                        ],
+                        "id": 901,
+                        "local_port_id": 101,
+                        "remote_hostname": remote.name,
+                        "remote_port": remote_interface.name,
+                        "remote_port_id": 202,
+                        "protocol": "lldp",
                     }
-                ).encode()
-            elif url.endswith("/ports"):
-                response.status_code = 200
-                response._content = json.dumps(
-                    {
-                        "status": "ok",
-                        "ports": [{"port_id": 101, "ifName": local_interface.name, "ifDescr": local_interface.name}],
-                    }
-                ).encode()
-            elif url.endswith("/resources/sensors"):
-                response.status_code = 503
-                response._content = b'{"status":"error","message":"temporarily unavailable"}'
-            elif url.endswith("/devices/13"):
-                response.status_code = 200
-                response._content = json.dumps(
-                    {"status": "ok", "devices": [{"device_id": 13, "hostname": local.name}]}
-                ).encode()
-            else:  # pragma: no cover - unexpected external route
-                response.status_code = 404
-                response._content = b"{}"
-            return response
+                ],
+            },
+            ports={
+                "status": "ok",
+                "ports": [{"port_id": 101, "ifName": local_interface.name, "ifDescr": local_interface.name}],
+            },
+            sensors={"status": "error", "message": "temporarily unavailable"},
+            sensors_status=503,
+            hostname=local.name,
+        )
 
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
-            refreshed = client.post(
-                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
-                {"server_key": server_key},
-                HTTP_HX_REQUEST="true",
-            )
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
 
         assert refreshed.status_code == 200
         assert "serial port sensor fetch failed" in refreshed.content.decode()
@@ -1278,11 +1235,10 @@ class TestSerialSyncSurvivesHostLinks404:
         assert cached["incomplete_sources"] == ["serial"]
         row_id = cached["links"][0]["row_id"]
 
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
-            cached_render = client.get(
-                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
-                {"tab": "cables", "server_key": server_key},
-            )
+        cached_render = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
         assert cached_render.status_code == 200
         assert cached_render.context["cable_sync"]["incomplete_sources"] == ["serial"]
         assert "These LibreNMS sources failed: serial" in cached_render.content.decode()
@@ -1306,11 +1262,8 @@ class TestSerialSyncSurvivesHostLinks404:
         assert local_interface.cable_id == remote_interface.cable_id
         assert Cable.objects.filter(pk=local_interface.cable_id).exists()
 
-    def test_serial_row_remains_syncable_when_host_fetch_fails(self, client):
+    def test_serial_row_remains_syncable_when_host_fetch_fails(self, client, live_librenms):
         """A host-link outage must not invalidate a successful serial snapshot."""
-        import json
-
-        import requests
         from dcim.models import Cable
         from django.core.cache import cache
         from django.urls import reverse
@@ -1326,43 +1279,32 @@ class TestSerialSyncSurvivesHostLinks404:
         local.save()
         _remote, _, (console_port,) = make_serial_device("serial-partial-sensor-remote", cp_names=["console"])
 
-        def routed_get(url, *args, **kwargs):
-            response = requests.models.Response()
-            response.url = url
-            if url.endswith("/links"):
-                response.status_code = 503
-                response._content = b'{"status":"error","message":"temporarily unavailable"}'
-            elif url.endswith("/ports"):
-                response.status_code = 200
-                response._content = b'{"status":"ok","ports":[]}'
-            elif url.endswith("/resources/sensors"):
-                response.status_code = 200
-                response._content = json.dumps(
+        _register_refresh(
+            live_librenms.server,
+            13,
+            links={"status": "error", "message": "temporarily unavailable"},
+            links_status=503,
+            sensors={
+                "status": "ok",
+                "sensors": [
                     {
-                        "status": "ok",
-                        "sensors": [
-                            {
-                                "sensor_id": 1007,
-                                "device_id": 13,
-                                "sensor_type": "acsSerialPortTable",
-                                "sensor_index": "acsSerialPortTableStatus.7",
-                                "sensor_descr": "serial-partial-sensor-remote Status",
-                            }
-                        ],
+                        "sensor_id": 1007,
+                        "device_id": 13,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.7",
+                        "sensor_descr": "serial-partial-sensor-remote Status",
                     }
-                ).encode()
-            else:  # pragma: no cover - unexpected external route
-                response.status_code = 404
-                response._content = b"{}"
-            return response
+                ],
+            },
+            hostname=local.name,
+        )
 
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
-            refreshed = client.post(
-                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
-                {"server_key": server_key},
-                HTTP_HX_REQUEST="true",
-            )
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
 
         assert refreshed.status_code == 200
         assert "host links fetch failed" in refreshed.content.decode()
@@ -1645,11 +1587,8 @@ class TestSerialCableReadScope:
         cache.set(key, {"links": [row]}, timeout=300)
         return row
 
-    def test_sensor_without_a_netbox_port_stays_visible_to_a_granted_user(self, client):
+    def test_sensor_without_a_netbox_port_stays_visible_to_a_granted_user(self, client, live_librenms):
         """Verify a granted user sees an unmodelled LibreNMS sensor so the missing console port remains visible."""
-        import json
-
-        import requests
         from dcim.models import ConsoleServerPort, Device
         from django.urls import reverse
 
@@ -1661,55 +1600,43 @@ class TestSerialCableReadScope:
         set_librenms_device_id(device, 42, server_key)
         device.save()
 
-        def external_get(url, *args, **kwargs):
-            response = requests.models.Response()
-            response.url = url
-            if url.endswith("/links"):
-                response.status_code = 404
-                response._content = b'{"status":"error","message":"Device does not have any links"}'
-            elif url.endswith("/ports"):
-                response.status_code = 200
-                response._content = b'{"status":"ok","ports":[]}'
-            elif url.endswith("/resources/sensors"):
-                response.status_code = 200
-                response._content = json.dumps(
+        _register_refresh(
+            live_librenms.server,
+            42,
+            links={"status": "error", "message": "Device does not have any links"},
+            links_status=404,
+            sensors={
+                "status": "ok",
+                "sensors": [
                     {
-                        "status": "ok",
-                        "sensors": [
-                            {
-                                "sensor_id": 101,
-                                "device_id": 42,
-                                "sensor_type": "acsSerialPortTable",
-                                "sensor_index": "acsSerialPortTableStatus.1",
-                                "sensor_descr": "modelled-label Status",
-                            },
-                            {
-                                "sensor_id": 109,
-                                "device_id": 42,
-                                "sensor_type": "acsSerialPortTable",
-                                "sensor_index": "acsSerialPortTableStatus.9",
-                                "sensor_descr": "unmodelled-label Status",
-                            },
-                        ],
-                    }
-                ).encode()
-            else:
-                response.status_code = 200
-                response._content = b'{"status":"ok"}'
-            return response
+                        "sensor_id": 101,
+                        "device_id": 42,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.1",
+                        "sensor_descr": "modelled-label Status",
+                    },
+                    {
+                        "sensor_id": 109,
+                        "device_id": 42,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.9",
+                        "sensor_descr": "unmodelled-label Status",
+                    },
+                ],
+            },
+            hostname=device.name,
+        )
 
         refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk])
 
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=external_get):
-            admin_html = client.post(refresh_url, {"server_key": server_key}, HTTP_HX_REQUEST="true").content.decode()
+        admin_html = client.post(refresh_url, {"server_key": server_key}, HTTP_HX_REQUEST="true").content.decode()
 
         granted = self._user("serial-unmodelled-port-user", device)
         self._grant(granted, "serial-unmodelled-port-csp", ConsoleServerPort, ["view"])
         self._grant(granted, "serial-unmodelled-port-devices", Device, ["view"])
         client.force_login(granted)
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=external_get):
-            granted_html = client.post(refresh_url, {"server_key": server_key}, HTTP_HX_REQUEST="true").content.decode()
+        granted_html = client.post(refresh_url, {"server_key": server_key}, HTTP_HX_REQUEST="true").content.decode()
 
         # ttyS9 has no ConsoleServerPort in NetBox at all.
         assert modelled_csp.name in admin_html
@@ -1735,7 +1662,7 @@ class TestSerialCableReadScope:
 
         assert response.status_code == 404
 
-    def test_viewed_vc_member_does_not_expose_a_hidden_sync_owner(self, client):
+    def test_viewed_vc_member_does_not_expose_a_hidden_sync_owner(self, client, live_librenms):
         """A visible sibling must not expose serial components from a hidden sync member."""
         from dcim.models import ConsoleServerPort
         from django.urls import reverse
@@ -1764,21 +1691,18 @@ class TestSerialCableReadScope:
         assert csp.name not in html
         assert reverse("dcim:consoleserverport", args=[csp.pk]) not in html
 
-        with patch("netbox_librenms_plugin.librenms_api._session.get") as http_get:
-            refreshed = client.post(
-                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[visible.pk]),
-                {"server_key": server_key},
-                HTTP_HX_REQUEST="true",
-            )
+        request_count = len(live_librenms.server.requests)
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[visible.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
 
         assert refreshed.status_code == 200
-        http_get.assert_not_called()
+        assert len(live_librenms.server.requests) == request_count
 
-    def test_refresh_keeps_raw_serial_inventory_but_hides_ungranted_ports(self, client):
+    def test_refresh_keeps_raw_serial_inventory_but_hides_ungranted_ports(self, client, live_librenms):
         """A constrained CSP grant must filter the response, not the shared raw snapshot."""
-        import json
-
-        import requests
         from dcim.models import ConsoleServerPort
         from django.core.cache import cache
         from django.urls import reverse
@@ -1803,49 +1727,37 @@ class TestSerialCableReadScope:
         )
         client.force_login(user)
 
-        def external_get(url, *args, **kwargs):
-            response = requests.models.Response()
-            response.url = url
-            if url.endswith("/links"):
-                response.status_code = 404
-                response._content = b'{"status":"error","message":"Device does not have any links"}'
-            elif url.endswith("/ports"):
-                response.status_code = 200
-                response._content = b'{"status":"ok","ports":[]}'
-            elif url.endswith("/resources/sensors"):
-                response.status_code = 200
-                response._content = json.dumps(
+        _register_refresh(
+            live_librenms.server,
+            42,
+            links={"status": "error", "message": "Device does not have any links"},
+            links_status=404,
+            sensors={
+                "status": "ok",
+                "sensors": [
                     {
-                        "status": "ok",
-                        "sensors": [
-                            {
-                                "sensor_id": 101,
-                                "device_id": 42,
-                                "sensor_type": "acsSerialPortTable",
-                                "sensor_index": "acsSerialPortTableStatus.1",
-                                "sensor_descr": "visible-serial-label Status",
-                            },
-                            {
-                                "sensor_id": 102,
-                                "device_id": 42,
-                                "sensor_type": "acsSerialPortTable",
-                                "sensor_index": "acsSerialPortTableStatus.2",
-                                "sensor_descr": "hidden-serial-label Status",
-                            },
-                        ],
-                    }
-                ).encode()
-            else:
-                response.status_code = 200
-                response._content = b'{"status":"ok"}'
-            return response
-
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=external_get):
-            response = client.post(
-                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
-                {"server_key": server_key},
-                HTTP_HX_REQUEST="true",
-            )
+                        "sensor_id": 101,
+                        "device_id": 42,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.1",
+                        "sensor_descr": "visible-serial-label Status",
+                    },
+                    {
+                        "sensor_id": 102,
+                        "device_id": 42,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.2",
+                        "sensor_descr": "hidden-serial-label Status",
+                    },
+                ],
+            },
+            hostname=device.name,
+        )
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
 
         assert response.status_code == 200
         html = response.content.decode()
@@ -1860,9 +1772,8 @@ class TestSerialCableReadScope:
             hidden_csp.name,
         }
 
-    def test_refresh_without_visible_serial_ports_skips_the_sensor_request(self, client):
+    def test_refresh_without_visible_serial_ports_skips_the_sensor_request(self, client, live_librenms):
         """A Device grant alone must not authorize an instance-wide sensor download."""
-        import requests
         from django.urls import reverse
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1873,31 +1784,21 @@ class TestSerialCableReadScope:
         device.save()
         user = self._user("serial-no-csp-grant-user", device)
         client.force_login(user)
-        requested_urls = []
-
-        def external_get(url, *args, **kwargs):
-            requested_urls.append(url)
-            response = requests.models.Response()
-            response.url = url
-            if url.endswith("/links"):
-                response.status_code = 404
-                response._content = b'{"status":"error","message":"Device does not have any links"}'
-            elif url.endswith("/ports"):
-                response.status_code = 200
-                response._content = b'{"status":"ok","ports":[]}'
-            else:
-                raise AssertionError(f"unexpected LibreNMS request: {url}")
-            return response
-
-        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=external_get):
-            response = client.post(
-                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
-                {"server_key": server_key},
-                HTTP_HX_REQUEST="true",
-            )
+        _register_refresh(
+            live_librenms.server,
+            43,
+            links={"status": "error", "message": "Device does not have any links"},
+            links_status=404,
+            hostname=device.name,
+        )
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
 
         assert response.status_code == 200
-        assert all(not url.endswith("/resources/sensors") for url in requested_urls)
+        assert all(request["path"] != "/api/v0/resources/sensors" for request in live_librenms.server.requests)
 
     def test_verify_does_not_link_an_ungranted_local_interface(self, client):
         import json

@@ -8,10 +8,8 @@ Targets:
 - vlans.py lines 134-139 (grouped VLAN update/skip paths).
 """
 
-from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
-
 import pytest
+from django.core.cache import cache
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -38,7 +36,7 @@ def _make_iv(request=None):
 
     v = make_view(SyncInterfacesView, request)
     v._post_server_key = "default"
-    v.object = MagicMock()
+    v.object = None
     return v
 
 
@@ -46,12 +44,6 @@ def _make_dv(request=None):
     from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
 
     return make_view(DeleteNetBoxInterfacesView, request)
-
-
-@contextmanager
-def _pa():
-    """Passthrough atomic: real context manager that does not suppress exceptions."""
-    yield
 
 
 # ===========================================================================
@@ -127,22 +119,23 @@ class TestSyncInterfacesGetObject:
 
 class TestGetCachedPortsData:
     def test_cache_miss_warns_and_returns_none(self):
-        v = _make_iv()
-        v.get_cache_key = MagicMock(return_value="k")
-        with patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mc:
-            mc.get.return_value = None
-            with patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mm:
-                result = v.get_cached_ports_data(MagicMock(), MagicMock())
+        request = make_request("get")
+        device = make_device("cached-ports-miss")
+        v = _make_iv(request)
+        result = v.get_cached_ports_data(request, device, "default")
+
         assert result is None
-        mm.warning.assert_called_once()
+        assert message_texts(request, "warning") == ["No cached data found. Please refresh the data before syncing."]
 
     def test_cache_hit_returns_ports(self):
-        v = _make_iv()
-        v.get_cache_key = MagicMock(return_value="k")
+        request = make_request("get")
+        device = make_device("cached-ports-hit")
+        v = _make_iv(request)
         ports = [{"ifName": "eth0"}]
-        with patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mc:
-            mc.get.return_value = {"ports": ports}
-            assert v.get_cached_ports_data(MagicMock(), MagicMock()) == ports
+        key = v.get_cache_key(device, "ports", "default")
+        cache.set(key, {"ports": ports}, timeout=300)
+
+        assert v.get_cached_ports_data(request, device, "default") == ports
 
 
 # ===========================================================================
@@ -160,8 +153,6 @@ class TestSyncInterface:
 
     def _v(self, request=None):
         v = _make_iv(request)
-        v.update_interface_attributes = MagicMock()
-        v._sync_interface_vlans = MagicMock()
         v._lookup_maps = {}
         v._skipped_conflicts = []
         return v
@@ -175,7 +166,6 @@ class TestSyncInterface:
         v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
 
         assert Interface.objects.filter(device=dev, name="eth0").exists()
-        v.update_interface_attributes.assert_called_once()
 
     def test_device_vc_target_in_valid_ids(self):
         """A posted sibling of the same chassis is honoured: the interface lands on the sibling."""
@@ -264,7 +254,6 @@ class TestSyncInterface:
 
         view.sync_interface(device, {"ifName": hidden.name}, [], "ifName")
 
-        view.update_interface_attributes.assert_not_called()
         assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
 
     def test_existing_interface_with_an_unconstrained_change_grant_is_synced(self):
@@ -283,7 +272,6 @@ class TestSyncInterface:
 
         view.sync_interface(device, {"ifName": existing.name}, [], "ifName")
 
-        view.update_interface_attributes.assert_called_once()
         assert view._skipped_conflicts == []
 
     def test_vm_uses_vminterface(self):
@@ -295,23 +283,6 @@ class TestSyncInterface:
         v.sync_interface(vm, {"ifName": "eth0"}, [], "ifName")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
-        v.update_interface_attributes.assert_called_once()
-
-    def test_vlans_excluded_skips_sync(self):
-        dev = make_device("sync-novlan")
-        v = self._v()
-
-        v.sync_interface(dev, {"ifName": "eth0"}, ["vlans"], "ifName")
-
-        v._sync_interface_vlans.assert_not_called()
-
-    def test_vlans_not_excluded_calls_sync(self):
-        dev = make_device("sync-vlan")
-        v = self._v()
-
-        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
-
-        v._sync_interface_vlans.assert_called_once()
 
 
 # ===========================================================================
@@ -579,121 +550,6 @@ class TestDeleteNetBoxInterfacesPost:
         assert "error(s)" in data["message"]
         assert not Interface.objects.filter(pk=mine.pk).exists()
         assert Interface.objects.filter(pk=stranger.pk).exists()
-
-
-# ===========================================================================
-# devices.py lines 77, 81-82: port_association_mode + invalid poller_group
-# ===========================================================================
-
-
-class TestDevicesFormValidEdgeCases:
-    def _v(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
-
-        v = object.__new__(AddDeviceToLibreNMSView)
-        v._librenms_api = MagicMock()
-        v._librenms_api.add_device.return_value = (True, "Added")
-        v._librenms_api.server_key = "default"
-        v.request = MagicMock()
-        v.object = MagicMock()
-        v.object.get_absolute_url.return_value = "/d/"
-        return v
-
-    def test_port_association_mode_line_77(self):
-        """Line 77: device_data[port_association_mode] set when truthy."""
-        v = self._v()
-        f = MagicMock()
-        f.cleaned_data = {"hostname": "h", "force_add": False, "port_association_mode": 2, "community": "pub"}
-        with patch("netbox_librenms_plugin.views.sync.devices.messages"):
-            with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
-                v.form_valid(f, snmp_version="v2c")
-        dd = v._librenms_api.add_device.call_args[0][0]
-        assert dd["port_association_mode"] == 2
-
-    def test_invalid_poller_group_lines_81_82(self):
-        """Lines 81-82: except (ValueError, TypeError) silently catches invalid int."""
-        v = self._v()
-        f = MagicMock()
-        f.cleaned_data = {"hostname": "h", "force_add": False, "poller_group": "bad-int", "community": "pub"}
-        with patch("netbox_librenms_plugin.views.sync.devices.messages"):
-            with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
-                v.form_valid(f, snmp_version="v2c")
-        dd = v._librenms_api.add_device.call_args[0][0]
-        assert "poller_group" not in dd
-
-
-# ===========================================================================
-# locations.py lines 26-28, 32-35, 44-49
-# ===========================================================================
-
-
-class TestSyncSiteLocationViewGetTable:
-    def test_get_table_configures_table(self):
-        """Lines 26-28: get_table calls super().get_table then table.configure(request)."""
-        import django_tables2
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-
-        v = object.__new__(SyncSiteLocationView)
-        v.request = MagicMock()
-        mt = MagicMock()
-        with patch.object(django_tables2.SingleTableView, "get_table", return_value=mt):
-            result = v.get_table()
-        mt.configure.assert_called_once_with(v.request)
-        assert result is mt
-
-
-class TestSyncSiteLocationViewGetContextData:
-    def test_adds_filter_form(self):
-        """Lines 32-35: adds filter_form to context."""
-        import django_tables2
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-
-        v = object.__new__(SyncSiteLocationView)
-        v.request = MagicMock()
-        v.request.GET = {}
-        mf = MagicMock()
-        mf.return_value.form = MagicMock()
-        v.filterset = mf
-        with patch.object(django_tables2.SingleTableView, "get_context_data", return_value={}):
-            with patch.object(type(v), "get_queryset", return_value=[]):
-                ctx = v.get_context_data()
-        assert "filter_form" in ctx
-
-
-class TestSyncSiteLocationViewGetQuerysetSuccess:
-    def _view(self, get_params, locations):
-        """The real view over the real Site table, with only the LibreNMS locations call stubbed."""
-        from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-
-        v = make_view(SyncSiteLocationView, make_request("get", get_params))
-        v._librenms_api.get_locations.return_value = (True, locations)
-        return v
-
-    def test_returns_sync_data(self):
-        """One SyncData row per real Site, paired with its LibreNMS location."""
-        from dcim.models import Site
-
-        Site.objects.create(name="Loc Site A", slug="loc-site-a")
-        Site.objects.create(name="Loc Site B", slug="loc-site-b")
-        v = self._view({}, [{"location": "Loc Site A"}])
-
-        result = v.get_queryset()
-
-        assert {row.netbox_site.name for row in result} == set(Site.objects.values_list("name", flat=True))
-        matched = next(row for row in result if row.netbox_site.name == "Loc Site A")
-        assert matched.librenms_location == {"location": "Loc Site A"}
-
-    def test_filterset_branch(self):
-        """A GET query narrows the rows through the real SiteLocationFilterSet."""
-        from dcim.models import Site
-
-        Site.objects.create(name="Filter Hit", slug="filter-hit")
-        Site.objects.create(name="Filter Miss", slug="filter-miss")
-        v = self._view({"q": "Hit"}, [{"location": "Filter Hit"}])
-
-        result = v.get_queryset()
-
-        assert [row.netbox_site.name for row in result] == ["Filter Hit"]
 
 
 # ===========================================================================

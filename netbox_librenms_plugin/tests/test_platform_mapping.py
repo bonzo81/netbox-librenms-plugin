@@ -5,9 +5,30 @@ find_matching_platform ordering, and BulkExportYAML view.
 TDD: these tests are written before implementation.
 """
 
-from unittest.mock import MagicMock, patch
-
 import pytest
+
+
+pytestmark = pytest.mark.django_db
+
+
+def _platform(name="Cisco IOS"):
+    from dcim.models import Platform
+
+    return Platform.objects.create(name=name, slug=name.lower().replace(" ", "-"))
+
+
+def _device_type(model="Cisco 4321"):
+    from dcim.models import DeviceType, Manufacturer
+
+    manufacturer, _ = Manufacturer.objects.get_or_create(name="Mapping Vendor", slug="mapping-vendor")
+    return DeviceType.objects.create(manufacturer=manufacturer, model=model, slug=model.lower().replace(" ", "-"))
+
+
+def _module_type(model="WS-X4748"):
+    from dcim.models import Manufacturer, ModuleType
+
+    manufacturer, _ = Manufacturer.objects.get_or_create(name="Module Vendor", slug="module-vendor")
+    return ModuleType.objects.create(manufacturer=manufacturer, model=model)
 
 
 def _set_fk_cache(instance, field_name, value):
@@ -31,44 +52,31 @@ class TestPlatformMappingModel:
         """__str__ shows librenms_os -> platform."""
         from netbox_librenms_plugin.models import PlatformMapping
 
-        mapping = PlatformMapping.__new__(PlatformMapping)
-        mapping.librenms_os = "ios"
-        platform = MagicMock()
-        platform.__str__ = lambda s: "Cisco IOS"
-        _set_fk_cache(mapping, "netbox_platform", platform)
+        mapping = PlatformMapping(librenms_os="ios", netbox_platform=_platform())
         assert str(mapping) == "ios -> Cisco IOS"
 
     def test_clean_strips_whitespace(self):
         """clean() strips leading/trailing whitespace from librenms_os."""
         from netbox_librenms_plugin.models import PlatformMapping
 
-        mapping = PlatformMapping.__new__(PlatformMapping)
-        mapping.librenms_os = "  ios  "
-        mapping.description = ""
-        with patch("netbox.models.NetBoxModel.clean"):
-            mapping.clean()
+        mapping = PlatformMapping(librenms_os="  ios  ", netbox_platform=_platform("Whitespace Platform"))
+        mapping.clean()
         assert mapping.librenms_os == "ios"
 
     def test_clean_normalizes_to_lowercase(self):
         """clean() lowercases librenms_os to prevent case-variant duplicates."""
         from netbox_librenms_plugin.models import PlatformMapping
 
-        mapping = PlatformMapping.__new__(PlatformMapping)
-        mapping.librenms_os = "IOS"
-        mapping.description = ""
-        with patch("netbox.models.NetBoxModel.clean"):
-            mapping.clean()
+        mapping = PlatformMapping(librenms_os="IOS", netbox_platform=_platform("Lowercase Platform"))
+        mapping.clean()
         assert mapping.librenms_os == "ios"
 
     def test_clean_strips_and_lowercases(self):
         """clean() strips and lowercases in one pass."""
         from netbox_librenms_plugin.models import PlatformMapping
 
-        mapping = PlatformMapping.__new__(PlatformMapping)
-        mapping.librenms_os = "  EOS  "
-        mapping.description = ""
-        with patch("netbox.models.NetBoxModel.clean"):
-            mapping.clean()
+        mapping = PlatformMapping(librenms_os="  EOS  ", netbox_platform=_platform("EOS Platform"))
+        mapping.clean()
         assert mapping.librenms_os == "eos"
 
     def test_clean_raises_on_blank(self):
@@ -77,29 +85,19 @@ class TestPlatformMappingModel:
 
         from netbox_librenms_plugin.models import PlatformMapping
 
-        mapping = PlatformMapping.__new__(PlatformMapping)
-        mapping.librenms_os = "   "
-        mapping.description = ""
-
-        import pytest
+        mapping = PlatformMapping(librenms_os="   ", netbox_platform=_platform("Blank Platform"))
 
         with pytest.raises(ValidationError) as exc_info:
-            with patch("netbox.models.NetBoxModel.clean"):
-                mapping.clean()
+            mapping.clean()
         assert "librenms_os" in str(exc_info.value)
 
     def test_get_absolute_url(self):
         """get_absolute_url returns correct URL."""
         from netbox_librenms_plugin.models import PlatformMapping
 
-        mapping = PlatformMapping.__new__(PlatformMapping)
-        mapping.pk = 42
+        mapping = PlatformMapping.objects.create(librenms_os="absolute-url", netbox_platform=_platform("URL Platform"))
 
-        with patch("netbox_librenms_plugin.models.reverse") as mock_reverse:
-            mock_reverse.return_value = "/plugins/librenms/platform-mappings/42/"
-            url = mapping.get_absolute_url()
-        mock_reverse.assert_called_once_with("plugins:netbox_librenms_plugin:platformmapping_detail", args=[42])
-        assert url == "/plugins/librenms/platform-mappings/42/"
+        assert mapping.get_absolute_url().endswith(f"/platform-mappings/{mapping.pk}/")
 
     def test_meta_ordering(self):
         """Model Meta ordering is by librenms_os."""
@@ -120,20 +118,16 @@ class TestDeviceTypeMappingModel:
         """clean() strips leading/trailing whitespace from librenms_hardware."""
         from netbox_librenms_plugin.models import DeviceTypeMapping
 
-        mapping = DeviceTypeMapping.__new__(DeviceTypeMapping)
-        mapping.librenms_hardware = "  Cisco 4321  "
-        with patch("netbox.models.NetBoxModel.clean"):
-            mapping.clean()
+        mapping = DeviceTypeMapping(librenms_hardware="  Cisco 4321  ", netbox_device_type=_device_type())
+        mapping.clean()
         assert mapping.librenms_hardware == "cisco 4321"
 
     def test_clean_normalizes_to_lowercase(self):
         """clean() lowercases librenms_hardware to prevent case-variant duplicates."""
         from netbox_librenms_plugin.models import DeviceTypeMapping
 
-        mapping = DeviceTypeMapping.__new__(DeviceTypeMapping)
-        mapping.librenms_hardware = "Juniper MX480"
-        with patch("netbox.models.NetBoxModel.clean"):
-            mapping.clean()
+        mapping = DeviceTypeMapping(librenms_hardware="Juniper MX480", netbox_device_type=_device_type("Juniper MX480"))
+        mapping.clean()
         assert mapping.librenms_hardware == "juniper mx480"
 
     def test_clean_raises_on_blank(self):
@@ -143,11 +137,9 @@ class TestDeviceTypeMappingModel:
 
         from netbox_librenms_plugin.models import DeviceTypeMapping
 
-        mapping = DeviceTypeMapping.__new__(DeviceTypeMapping)
-        mapping.librenms_hardware = "   "
+        mapping = DeviceTypeMapping(librenms_hardware="   ", netbox_device_type=_device_type("Blank Device Type"))
         with pytest.raises(ValidationError) as exc_info:
-            with patch("netbox.models.NetBoxModel.clean"):
-                mapping.clean()
+            mapping.clean()
         assert "librenms_hardware" in str(exc_info.value)
 
 
@@ -158,12 +150,9 @@ class TestPlatformMappingToYaml:
         """to_yaml() returns a string."""
         from netbox_librenms_plugin.models import PlatformMapping
 
-        mapping = PlatformMapping.__new__(PlatformMapping)
-        mapping.librenms_os = "ios"
-        platform = MagicMock()
-        platform.__str__ = lambda s: "Cisco IOS"
-        _set_fk_cache(mapping, "netbox_platform", platform)
-        mapping.description = "Test description"
+        mapping = PlatformMapping(
+            librenms_os="ios", netbox_platform=_platform("YAML String Platform"), description="Test description"
+        )
 
         result = mapping.to_yaml()
         assert isinstance(result, str)
@@ -174,12 +163,9 @@ class TestPlatformMappingToYaml:
 
         from netbox_librenms_plugin.models import PlatformMapping
 
-        mapping = PlatformMapping.__new__(PlatformMapping)
-        mapping.librenms_os = "ios"
-        platform = MagicMock()
-        platform.__str__ = lambda s: "Cisco IOS"
-        _set_fk_cache(mapping, "netbox_platform", platform)
-        mapping.description = "A description"
+        mapping = PlatformMapping(
+            librenms_os="ios", netbox_platform=_platform("Cisco IOS"), description="A description"
+        )
 
         result = yaml.safe_load(mapping.to_yaml())
         assert result["librenms_os"] == "ios"
@@ -201,12 +187,7 @@ class TestToYamlOnAllMappingModels:
 
         from netbox_librenms_plugin.models import DeviceTypeMapping
 
-        mapping = DeviceTypeMapping.__new__(DeviceTypeMapping)
-        mapping.librenms_hardware = "Cisco 4321"
-        device_type = MagicMock()
-        device_type.__str__ = lambda s: "Cisco 4321"
-        _set_fk_cache(mapping, "netbox_device_type", device_type)
-        mapping.description = ""
+        mapping = DeviceTypeMapping(librenms_hardware="Cisco 4321", netbox_device_type=_device_type("YAML 4321"))
 
         result = mapping.to_yaml()
         assert isinstance(result, str)
@@ -220,13 +201,7 @@ class TestToYamlOnAllMappingModels:
 
         from netbox_librenms_plugin.models import ModuleTypeMapping
 
-        mapping = ModuleTypeMapping.__new__(ModuleTypeMapping)
-        mapping.librenms_model = "WS-X4748-RJ45"
-        module_type = MagicMock()
-        module_type.__str__ = lambda s: "WS-X4748"
-        _set_fk_cache(mapping, "netbox_module_type", module_type)
-        mapping.manufacturer_id = None
-        mapping.description = ""
+        mapping = ModuleTypeMapping(librenms_model="WS-X4748-RJ45", netbox_module_type=_module_type())
 
         result = mapping.to_yaml()
         assert isinstance(result, str)
@@ -256,7 +231,7 @@ class TestToYamlOnAllMappingModels:
 
         from netbox_librenms_plugin.models import ModuleBayMapping
 
-        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping = ModuleBayMapping()
         mapping.librenms_name = "Slot 1"
         mapping.librenms_class = "container"
         mapping.netbox_bay_name = "Slot 1"
@@ -628,45 +603,42 @@ class TestReplacementTemplateValidation:
 
         from netbox_librenms_plugin.models import ModuleBayMapping
 
-        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping = ModuleBayMapping()
         mapping.librenms_name = r"^(\d+)$"
         mapping.librenms_class = ""
         mapping.netbox_bay_name = r"Slot \2"  # only 1 group
         mapping.is_regex = True
         mapping.description = ""
 
-        with patch("netbox.models.NetBoxModel.clean"):
-            with pytest.raises(ValidationError) as exc_info:
-                mapping.clean()
+        with pytest.raises(ValidationError) as exc_info:
+            mapping.clean()
         assert "netbox_bay_name" in exc_info.value.message_dict
 
     def test_module_bay_mapping_accepts_valid_backref(self):
         r"""Valid \\1 back-reference on a single-group pattern is accepted."""
         from netbox_librenms_plugin.models import ModuleBayMapping
 
-        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping = ModuleBayMapping()
         mapping.librenms_name = r"^(\d+)$"
         mapping.librenms_class = ""
         mapping.netbox_bay_name = r"Slot \1"
         mapping.is_regex = True
         mapping.description = ""
 
-        with patch("netbox.models.NetBoxModel.clean"):
-            mapping.clean()  # Should not raise
+        mapping.clean()
 
     def test_module_bay_mapping_accepts_named_backref(self):
         r"""Valid \\g<n> back-reference on a named-group pattern is accepted."""
         from netbox_librenms_plugin.models import ModuleBayMapping
 
-        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping = ModuleBayMapping()
         mapping.librenms_name = r"^(?P<n>\d+)$"
         mapping.librenms_class = ""
         mapping.netbox_bay_name = r"Slot \g<n>"
         mapping.is_regex = True
         mapping.description = ""
 
-        with patch("netbox.models.NetBoxModel.clean"):
-            mapping.clean()  # Should not raise
+        mapping.clean()
 
     def test_module_bay_mapping_rejects_invalid_named_backref(self):
         """Referencing a named group that does not exist raises ValidationError."""
@@ -675,16 +647,15 @@ class TestReplacementTemplateValidation:
 
         from netbox_librenms_plugin.models import ModuleBayMapping
 
-        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping = ModuleBayMapping()
         mapping.librenms_name = r"^(\d+)$"
         mapping.librenms_class = ""
         mapping.netbox_bay_name = r"Slot \g<missing>"
         mapping.is_regex = True
         mapping.description = ""
 
-        with patch("netbox.models.NetBoxModel.clean"):
-            with pytest.raises(ValidationError) as exc_info:
-                mapping.clean()
+        with pytest.raises(ValidationError) as exc_info:
+            mapping.clean()
         assert "netbox_bay_name" in exc_info.value.message_dict
 
     # --- NormalizationRule ---
@@ -696,56 +667,52 @@ class TestReplacementTemplateValidation:
 
         from netbox_librenms_plugin.models import NormalizationRule
 
-        rule = NormalizationRule.__new__(NormalizationRule)
+        rule = NormalizationRule()
         rule.match_pattern = r"^(\w+)$"
         rule.replacement = r"\2"  # only 1 group
         rule.scope = "device_type"
         rule.description = ""
         _set_fk_cache(rule, "manufacturer", None)
 
-        with patch("netbox.models.NetBoxModel.clean"):
-            with pytest.raises(ValidationError) as exc_info:
-                rule.clean()
+        with pytest.raises(ValidationError) as exc_info:
+            rule.clean()
         assert "replacement" in exc_info.value.message_dict
 
     def test_normalization_rule_accepts_valid_backref(self):
         r"""Replacement \\1 on single-group pattern is accepted."""
         from netbox_librenms_plugin.models import NormalizationRule
 
-        rule = NormalizationRule.__new__(NormalizationRule)
+        rule = NormalizationRule()
         rule.match_pattern = r"^(\w+)$"
         rule.replacement = r"\1"
         rule.scope = "device_type"
         rule.description = ""
         _set_fk_cache(rule, "manufacturer", None)
 
-        with patch("netbox.models.NetBoxModel.clean"):
-            rule.clean()  # Should not raise
+        rule.clean()
 
     def test_normalization_rule_accepts_named_backref(self):
         r"""Replacement \\g<name> on named-group pattern is accepted."""
         from netbox_librenms_plugin.models import NormalizationRule
 
-        rule = NormalizationRule.__new__(NormalizationRule)
+        rule = NormalizationRule()
         rule.match_pattern = r"^(?P<hw>\w+)$"
         rule.replacement = r"\g<hw>"
         rule.scope = "device_type"
         rule.description = ""
         _set_fk_cache(rule, "manufacturer", None)
 
-        with patch("netbox.models.NetBoxModel.clean"):
-            rule.clean()  # Should not raise
+        rule.clean()
 
     def test_normalization_rule_empty_replacement_no_backref(self):
         """Empty replacement string is valid for a pattern with capture groups."""
         from netbox_librenms_plugin.models import NormalizationRule
 
-        rule = NormalizationRule.__new__(NormalizationRule)
+        rule = NormalizationRule()
         rule.match_pattern = r"^(\d+)$"
         rule.replacement = ""
         rule.scope = "device_type"
         rule.description = ""
         _set_fk_cache(rule, "manufacturer", None)
 
-        with patch("netbox.models.NetBoxModel.clean"):
-            rule.clean()  # Should not raise
+        rule.clean()
