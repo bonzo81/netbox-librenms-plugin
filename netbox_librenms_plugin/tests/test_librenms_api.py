@@ -2673,8 +2673,13 @@ class TestResolvePortRelationships:
 
         assert result["sub_interfaces"] == {}
 
+    @pytest.mark.django_db
     def test_junos_channelized_colon_ports_keep_their_relationships(self, mock_librenms_api):
         """A Junos breakout port (xe-1/1/3:1) must not be caught by another vendor's SAP rule."""
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        # The colon SAP rule must actually be stored, or OS scoping is not what keeps these edges.
+        assert PortStackLagPattern.objects.filter(librenms_os="timos", sap_name_pattern=":").exists()
         # Verbatim shape from a live MX480 (LibreNMS device 9), where the colon guard dropped
         # 77 of 156 usable ifStack rows and left ten aggregates with no members at all.
         ports = [
@@ -2688,7 +2693,9 @@ class TestResolvePortRelationships:
             {"high_port_id": 4602, "low_port_id": 4604},
         ]
 
-        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={}, device_os="junos")
+        # lag_patterns stays unset: supplying it skips the OS-scoped SAP read, which is the
+        # exact decision this test guards.
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, device_os="junos")
 
         assert result["lag_members"] == {4601: 4603}
         assert result["sub_interfaces"][4602] == 4601
