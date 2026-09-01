@@ -216,7 +216,17 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if request.POST.get("force_all"):
             selected_ips = list(force_intents)
         elif request.POST.getlist("force_conflict"):
-            selected_ips = list(dict.fromkeys(request.POST.getlist("force_conflict")))
+            # The checkbox and its signed intent post together, but an expired intent drops out of
+            # force_intents while the checkbox value survives. The confirmation form carries no
+            # vrf_<row_id> field, so such a row would be classified against the Global VRF instead
+            # of the one the user confirmed. Keep only rows whose intent is still valid.
+            confirmed = set()
+            for value in request.POST.getlist("force_conflict"):
+                try:
+                    confirmed.add(str(parse_address_with_prefix(value)))
+                except ValueError:
+                    continue
+            selected_ips = [row_id for row_id in force_intents if row_id in confirmed]
         else:
             selected_ips = self.get_selected_ips(request)
 
