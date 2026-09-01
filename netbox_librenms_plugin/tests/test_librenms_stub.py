@@ -692,15 +692,16 @@ def test_stub_stops_answering_patch_on_a_hostname_a_rename_superseded():
         server.stop()
 
 
-def _raw_headers_only_post(server, *, content_length, token, timeout=5):
+def _raw_headers_only_post(server, *, content_length, token, request_connection_close=True, timeout=5):
     """Send POST headers that declare a body, send no body, and return the status line."""
     host, _, port = server.url.removeprefix("http://").partition(":")
+    connection_header = "Connection: close\r\n" if request_connection_close else ""
     request = (
         "POST /api/v0/devices HTTP/1.1\r\n"
         f"Host: {host}:{port}\r\n"
         f"X-Auth-Token: {token}\r\n"
         f"Content-Length: {content_length}\r\n"
-        "Connection: close\r\n\r\n"
+        f"{connection_header}\r\n"
     ).encode()
     with socket.create_connection((host, int(port)), timeout=timeout) as client:
         client.settimeout(timeout)
@@ -710,6 +711,30 @@ def _raw_headers_only_post(server, *, content_length, token, timeout=5):
             received += chunk
     lines = received.decode(errors="replace").splitlines()
     return lines[0] if lines else ""
+
+
+@pytest.mark.parametrize(
+    ("content_length", "token", "expected_status"),
+    [
+        (MAX_REQUEST_BODY_BYTES, f"not-{TOKEN}", "401"),
+        (-1, TOKEN, "400"),
+        (MAX_REQUEST_BODY_BYTES + 1, TOKEN, "413"),
+    ],
+)
+def test_stub_closes_a_rejected_body_connection(content_length, token, expected_status):
+    """Every pre-read rejection must answer and close an otherwise reusable HTTP/1.1 socket."""
+    server = _start_stub()
+    try:
+        status_line = _raw_headers_only_post(
+            server,
+            content_length=content_length,
+            token=token,
+            request_connection_close=False,
+        )
+
+        assert expected_status in status_line, status_line
+    finally:
+        server.stop()
 
 
 def test_stub_refuses_a_wrong_token_before_reading_the_declared_body():
