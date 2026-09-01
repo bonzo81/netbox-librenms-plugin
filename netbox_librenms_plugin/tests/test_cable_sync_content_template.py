@@ -12,7 +12,7 @@ import pytest
 
 @pytest.mark.django_db
 class TestCableSyncContentTemplateMigratedMode:
-    def _render(self, *, migrated, server_key="default"):
+    def _render(self, *, migrated, server_key="default", rows=()):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -24,7 +24,7 @@ class TestCableSyncContentTemplateMigratedMode:
         device = make_device("cable-tmpl-dev")
         request = RequestFactory().get("/")
         request.user = AnonymousUser()  # NetBox context processors read request.user
-        table = LibreNMSCableTable([], device=device)
+        table = LibreNMSCableTable(rows, device=device)
         RequestConfig(request).configure(table)
         cable_sync = {
             "object": device,
@@ -59,6 +59,25 @@ class TestCableSyncContentTemplateMigratedMode:
         assert "<form" in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
+
+    def test_migrated_read_only_row_has_no_sync_action(self):
+        """The view's read-only row state must leave no live cable-sync submit control."""
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            rows=[
+                {
+                    "row_id": "read-only-row",
+                    "device_id": 1,
+                    "local_port": "Gi0/1",
+                    "remote_port_name": "Gi0/2",
+                    "remote_device": "remote-device",
+                    "cable_status": "No Cable",
+                    "can_create_cable": False,
+                }
+            ],
+        )
+
+        assert "Sync Cable" not in html
 
     def test_verify_url_uses_the_active_script_prefix(self):
         from django.urls import get_script_prefix, set_script_prefix

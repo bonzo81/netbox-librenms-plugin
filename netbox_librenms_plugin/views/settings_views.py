@@ -19,13 +19,13 @@ logger = logging.getLogger(__name__)
 class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
     """
     View for managing plugin settings including server selection and import options.
-    Uses two separate forms for cleaner validation and separation of concerns.
+    Uses three separate forms for cleaner validation and separation of concerns.
     """
 
     template_name = "netbox_librenms_plugin/settings.html"
 
     def get(self, request):
-        """Display both settings forms."""
+        """Display all settings forms."""
         # Get or create the settings object
         settings, created = LibreNMSSettings.objects.get_or_create()
 

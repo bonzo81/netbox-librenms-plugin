@@ -276,6 +276,19 @@ def test_interface_verify_application_failure_is_reported():
     assert "console.error('Interface verification rejected:', data.error || data.message" in rejected
 
 
+def test_cable_verify_application_failure_is_reported():
+    """A 2xx cable rejection must expose its server-provided reason before rollback."""
+    handler = _js_block(
+        _js_source(),
+        "function handleCableChange(select, value)",
+        "Handle VC member selection change for module verification",
+    )
+    rejection_log = "console.error('Cable verification rejected:', data.error || data.message || 'Unknown error');"
+
+    assert rejection_log in handler
+    assert handler.index(rejection_log) < handler.index("rollbackToLastVerified();", handler.index(rejection_log))
+
+
 def test_relationship_sync_missing_data_shows_alert_icon():
     """A relationship button with incomplete data must show a visible failure state."""
     rejected = _js_block(

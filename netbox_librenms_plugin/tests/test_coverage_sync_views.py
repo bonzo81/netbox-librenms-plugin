@@ -406,6 +406,19 @@ class TestSyncCablesViewProcessInterfaceSync:
                 results = view.process_interface_sync(interfaces, [])
         assert "eth1" in results["missing_remote"]
 
+    @pytest.mark.django_db
+    def test_unexpected_row_failure_is_collected_as_failed(self):
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        view = _make_view(SyncCablesView)
+        interface = {"row_id": "row-7"}
+
+        with patch.object(view, "process_single_interface", side_effect=RuntimeError("sync failed")):
+            results = view.process_interface_sync([interface], [])
+
+        assert results["failed"] == ["row-7"]
+        assert results["invalid"] == []
+
 
 class TestSyncCablesViewDisplaySyncResults:
     def test_missing_remote_calls_error(self):
