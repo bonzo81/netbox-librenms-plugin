@@ -76,9 +76,9 @@ def _validated_sync_tab(request):
     return submitted_tab if submitted_tab in {tab.value for tab in SyncTab} else None
 
 
-def _validated_active_server_key(request):
+def _validated_active_server_key(request, field="active_server_key"):
     """Return a safe server key for preserving the active sync-page context."""
-    submitted_key = request.POST.get("active_server_key", "").strip()
+    submitted_key = request.POST.get(field, "").strip()
     if not submitted_key:
         return None
     try:
@@ -88,7 +88,7 @@ def _validated_active_server_key(request):
 
 
 def _server_mapping_redirect(object_type, pk, active_server_key=None, active_sync_tab=None):
-    """Redirect a server-mapping action to its validated object sync context."""
+    """Redirect a sync-page action to its validated object sync context."""
     url = reverse(_sync_url_name(object_type), kwargs={"pk": pk})
     query = {}
     if active_sync_tab:
@@ -785,10 +785,14 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             return error
 
         device = self.restrict_object_or_404(Device, "change", pk=pk)
+        # The modal posts the tab's server scope, so return the user to that same server and tab
+        # instead of the session/default one.
+        active_server_key = _validated_active_server_key(request, "server_key")
+        active_sync_tab = _validated_sync_tab(request)
 
         if not device.virtual_chassis:
             messages.error(request, "Device is not part of a virtual chassis")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
         assignments_made = 0
         errors = []
@@ -847,7 +851,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         if assignments_made == 0 and not errors:
             messages.info(request, "No serial assignments were made")
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
 
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -993,7 +997,9 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             requested_key = require_server_key(request.POST.get("server_key", ""))
         except ValueError as exc:
             messages.error(request, str(exc))
-            return self._redirect(object_type, pk, active_sync_tab=active_sync_tab)
+            # The later branches keep the user's server context; this one must too, or a
+            # malformed submission drops a non-default page back to the default server.
+            return self._redirect(object_type, pk, _validated_active_server_key(request), active_sync_tab)
         submitted_active_key = request.POST.get("active_server_key", "").strip() or None
 
         with transaction.atomic():

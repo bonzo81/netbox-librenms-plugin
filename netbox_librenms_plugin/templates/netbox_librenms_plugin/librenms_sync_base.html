@@ -1123,6 +1123,7 @@ that may well be correct.
                       action="{% url 'plugins:netbox_librenms_plugin:assign_vc_serial' pk=object.pk %}">
                     {% csrf_token %}
                     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+                    <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
                     <table class="table table-striped">
                         <thead>
                             <tr>

@@ -116,6 +116,32 @@ def test_preference_post_changes_only_preference_and_keeps_transient_server(clie
 
 
 @pytest.mark.django_db
+def test_preference_post_keeps_the_active_server_when_the_key_is_rejected(client, servers):
+    """A malformed server_key must not drop a non-default page back to the default server."""
+    device = make_device(
+        "preference-invalid-key",
+        librenms_cf={"primary": {"id": 13521}, "secondary": {"id": 13522}},
+    )
+    client.force_login(make_superuser("object-preference-invalid-key"))
+
+    response = client.post(
+        _preference_url(device),
+        {
+            "object_type": "device",
+            "server_key": "   ",
+            "active_server_key": "primary",
+            "tab": "modules",
+        },
+    )
+
+    assert response.status_code == 302
+    assert response.url == f"{_sync_url(device)}?tab=modules&server_key=primary"
+    assert _message_texts(response) == ["LibreNMS server key must be a non-empty string."]
+    device.refresh_from_db()
+    assert "_preferred_server" not in device.custom_field_data["librenms_id"]
+
+
+@pytest.mark.django_db
 def test_preference_post_ignores_unrelated_legacy_validation_errors(client, servers):
     owner = make_device(
         "preference-with-legacy-rack-fields",

@@ -424,6 +424,32 @@ class TestVirtualChassisInventory:
 
         assert view._get_vc_inventory_serials(members[0]) == []
 
+    def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
+        """AssignVCSerialView can only preserve the context the rendered form posts."""
+        _vc, members = make_virtual_chassis_members("inventory-form-context", count=2)
+        members[0].custom_field_data["librenms_id"] = {SERVER_KEY: 6643}
+        members[0].save()
+        _register_device(
+            librenms_server,
+            6643,
+            members[0].name,
+            inventory=[
+                {
+                    "entPhysicalClass": "chassis",
+                    "entPhysicalDescr": "Unassigned member",
+                    "entPhysicalSerialNum": "VC-FORM-SERIAL",
+                    "entPhysicalModelName": "Member model",
+                }
+            ],
+        )
+
+        response = logged_in_client.get(_sync_url(members[0]), {"tab": "cables"})
+
+        html = response.content.decode()
+        form = html[html.index('id="vc-serials-form"') : html.index("</form>", html.index('id="vc-serials-form"'))]
+        assert f'name="server_key" value="{SERVER_KEY}"' in form
+        assert 'name="tab" value="cables"' in form
+
 
 @pytest.mark.django_db
 class TestPlatformAndPatternHelpers:

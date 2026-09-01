@@ -575,6 +575,40 @@ class TestAssignVCSerialView:
         assert any("not part of the same virtual chassis" in text for text in errors)
         assert any("not found" in text for text in errors)
 
+    def test_the_redirect_keeps_the_active_server_and_tab(self, logged_in_client, librenms_server):
+        """A multi-server user must land back on the server and tab the modal was opened from."""
+        first = make_device("vc-serial-context-first")
+        second = make_device("vc-serial-context-second")
+        make_virtual_chassis("vc-serial-context", first, second)
+
+        response = logged_in_client.post(
+            _url("assign_vc_serial", first.pk),
+            {
+                "server_key": SECONDARY_KEY,
+                "tab": "cables",
+                "serial_1": "CONTEXT-SERIAL",
+                "member_id_1": str(second.pk),
+            },
+        )
+
+        assert response.status_code == 302
+        assert response.url == f"{_url('device_librenms_sync', first.pk)}?tab=cables&server_key={SECONDARY_KEY}"
+        second.refresh_from_db()
+        assert second.serial == "CONTEXT-SERIAL"
+
+    def test_a_rejected_device_still_returns_to_its_server_and_tab(self, logged_in_client, librenms_server):
+        """The early error branch must preserve the context the success branch does."""
+        device = make_device("vc-serial-context-standalone")
+
+        response = logged_in_client.post(
+            _url("assign_vc_serial", device.pk),
+            {"server_key": SECONDARY_KEY, "tab": "cables"},
+        )
+
+        assert response.status_code == 302
+        assert response.url == f"{_url('device_librenms_sync', device.pk)}?tab=cables&server_key={SECONDARY_KEY}"
+        assert any("not part of a virtual chassis" in text for text in _messages(response, "error"))
+
     def test_device_without_a_chassis_is_rejected(self, logged_in_client, librenms_server):
         device = make_device("vc-serial-standalone")
 
