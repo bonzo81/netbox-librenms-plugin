@@ -21,6 +21,7 @@
     {% csrf_token %}
     <input type="hidden" name="server_key" value="{{ server_key }}">
     <input type="hidden" name="set-primary-ip-toggle" value="{% if set_primary_ip %}on{% else %}off{% endif %}">
+    <input type="hidden" name="create-missing-interfaces-toggle" value="{% if create_missing_interfaces %}on{% else %}off{% endif %}">
 
     {% include 'inc/messages.html' %}
 
