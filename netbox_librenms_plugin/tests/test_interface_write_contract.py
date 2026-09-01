@@ -90,6 +90,50 @@ class TestInterfaceAliasContract:
 
 
 @pytest.mark.django_db
+class TestInterfaceNameGateModel:
+    """The view's name gate must read the same column bound the writer enforces."""
+
+    def test_a_vm_row_is_gated_by_the_vminterface_column(self, monkeypatch):
+        """A name the VMInterface column cannot hold is skipped, not handed to the writer."""
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.tests.conftest import make_vm
+        from netbox_librenms_plugin.tests.view_test_helpers import make_view
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        # NetBox gives both models a 64-character name today. The writer already reads the
+        # concrete model so the two cannot drift; shrink one to prove the gate reads it too.
+        monkeypatch.setattr(VMInterface._meta.get_field("name"), "max_length", 8)
+        vm = make_vm("vm-name-gate")
+        view = make_view(SyncInterfacesView)
+        view._skipped_conflicts = []
+
+        view.sync_interface(vm, _port(ifName="E" * 20), ["vlans"], "ifName")
+
+        assert not VMInterface.objects.filter(virtual_machine=vm).exists()
+        assert view._skipped_conflicts == [
+            "EEEEEEEEEEEEEEEEEEEE (interface name is longer than the 8 characters NetBox stores)"
+        ]
+
+    def test_a_vm_name_that_fits_still_syncs(self):
+        """Positive control: the stricter model must not reject an ordinary name."""
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.tests.conftest import make_vm
+        from netbox_librenms_plugin.tests.view_test_helpers import make_view
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        vm = make_vm("vm-name-gate-ok")
+        view = make_view(SyncInterfacesView)
+        view._skipped_conflicts = []
+
+        view.sync_interface(vm, _port(ifName="eth0"), ["vlans"], "ifName")
+
+        assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
+        assert view._skipped_conflicts == []
+
+
+@pytest.mark.django_db
 class TestInterfaceStringLengthContract:
     """LibreNMS free text must be bounded to the column it is written to.
 

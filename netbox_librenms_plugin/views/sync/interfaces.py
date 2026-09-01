@@ -893,14 +893,17 @@ class SyncInterfacesView(
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         """Create or update a single NetBox interface from LibreNMS data."""
         raw_interface_name = librenms_interface.get(interface_name_field)
-        interface_name = syncable_interface_name(librenms_interface, interface_name_field)
+        # update_interface_from_port bounds the name by the concrete writer model, so this gate
+        # reads the same one; the default would let a name the writer refuses through.
+        writer_model = VMInterface if isinstance(obj, VirtualMachine) else Interface
+        interface_name = syncable_interface_name(librenms_interface, interface_name_field, writer_model)
         raw_port_id = librenms_interface.get("port_id")
         port_id = normalize_librenms_port_id(raw_port_id)
         lookup_port_id = raw_port_id if port_id is not None else None
         if interface_name is None:
             self._record_skipped_conflict(
                 raw_interface_name,
-                interface_name_rejection_reason(librenms_interface, interface_name_field),
+                interface_name_rejection_reason(librenms_interface, interface_name_field, writer_model),
             )
             return
 
