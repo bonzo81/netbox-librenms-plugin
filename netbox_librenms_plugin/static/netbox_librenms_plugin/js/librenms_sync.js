@@ -923,15 +923,18 @@ function initializeTableCheckboxes(tableId) {
         toggleAll.addEventListener('change', function () {
             liveCheckboxes().forEach(checkbox => {
                 checkbox.checked = toggleAll.checked;
-                // Explicitly (de)selecting every box: clear any data-auto-selected marker a child
-                // set on a parent before this loop reached it, so unchecking the last child can't
-                // later auto-deselect a parent the user included via select-all.
-                delete checkbox.dataset.autoSelected;
-                // Fire a bubbling change so the auto-select handler (cross-page parent /
-                // LAG member inclusion) runs for select-all too, not just single clicks.
-                // That handler is idempotent, so a double fire is harmless.
-                checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                // Every box is now the user's explicit choice, so drop the markers that said this
+                // code had put it there; otherwise the recompute below would release rows the
+                // select-all just included.
+                delete checkbox.dataset.autoRequired;
+                delete checkbox.dataset.autoMember;
+                delete checkbox.dataset.selectionCleared;
             });
+            // Recompute once for the whole page rather than per row: select-all still has to pull
+            // in an off-page parent or aggregate, but the closure is the same for every seed.
+            refreshRequiredSelections();
+            persistTableSelection(table);
+            updateBulkActionButton();
         });
     }
 
@@ -954,19 +957,24 @@ function initializeTableCheckboxes(tableId) {
                 if (start !== -1 && end !== -1) {
                     current.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
                         cb.checked = anchor.checked;
-                        // Explicit range selection: clear a stale data-auto-selected marker so a later
-                        // last-child uncheck can't auto-deselect a parent the user shift-selected.
-                        delete cb.dataset.autoSelected;
-                        // Fire change so shift-range selection runs the same auto-select logic
-                        // (cross-page parent / LAG member inclusion) as single clicks / select-all.
-                        cb.dispatchEvent(new Event('change', { bubbles: true }));
+                        // The range is an explicit choice, so it owns these rows outright.
+                        delete cb.dataset.autoRequired;
+                        delete cb.dataset.autoMember;
+                        delete cb.dataset.selectionCleared;
                     });
+                    refreshRequiredSelections();
+                    persistTableSelection(table);
+                    updateBulkActionButton();
                 }
             }
 
             setAnchor(checkbox);
         });
     });
+
+    // Re-check whatever this table had selected on another page. Runs after the handlers are
+    // bound so the requirement cascade sees the restored rows.
+    restoreTableSelection(table);
 }
 
 /**
@@ -984,163 +992,566 @@ function initializeCheckboxes() {
 }
 
 /**
- * Auto-select LAG member rows when a LAG row checkbox is toggled.
- * Reads data-port-id on the LAG row and checks all rows with
- * data-member-of-lag matching that port_id.
+ * Selection dependency rules for the interface tables.
  *
- * Also auto-selects the parent interface row when a sub-interface checkbox
- * is toggled. Reads data-parent-port-id on the sub-interface row and finds
- * the parent row by tr[data-port-id]. When the parent is on a different page,
- * the server expands the cached relationship map and a brief notice is shown.
+ * A row cannot sync unless the rows it depends on are synced too: a sub-interface needs its
+ * parent, and a LAG member needs its aggregate. Both are read off the row as LibreNMS port ids
+ * (data-parent-port-id, data-member-of-lag) and both chain, so et-0/0/6.0 pulls in et-0/0/6,
+ * which in turn pulls in ae2.
  *
- * Both behaviours are controlled by the #autoSelectLagMembers toggle.
+ * Requirements are recomputed from the rows the user checked rather than propagated hop by hop.
+ * A recompute is idempotent and needs no unwind bookkeeping, so an aggregate that is only
+ * required transitively is dropped as soon as the last row needing it is cleared.
+ *
+ * Checking an aggregate additionally pulls its MEMBERS in. That is a convenience, not a
+ * requirement (an aggregate syncs perfectly well on its own), so it is applied once when the
+ * aggregate is toggled and the user stays free to clear an individual member afterwards.
+ *
+ * Everything here is gated on the #autoSelectLagMembers toggle.
  */
+
+/** Marks a row this code checked to satisfy another row's requirement. */
+const REQUIRED_MARKER = 'autoRequired';
+/** Marks a member row an aggregate pulled in as a convenience. */
+const MEMBER_MARKER = 'autoMember';
+/** Marks a row the user cleared by hand, so the cascade stops offering to re-add it. */
+const CLEARED_MARKER = 'selectionCleared';
+
+/**
+ * Return the table rows that carry a LibreNMS port id, indexed by that id.
+ *
+ * @returns {Map<string, HTMLTableRowElement>} Row per port id present on this page.
+ */
+function _rowsByPortId() {
+    const rows = new Map();
+    document.querySelectorAll('tr[data-port-id]').forEach(function (row) {
+        const portId = row.dataset.portId;
+        if (portId) rows.set(portId, row);
+    });
+    return rows;
+}
+
+/**
+ * Return the port ids a row depends on: its parent interface and its aggregate.
+ *
+ * @param {HTMLTableRowElement} row - The row to read.
+ * @returns {string[]} Port ids that must be selected alongside this row.
+ */
+function _requiredPortIds(row) {
+    return [row.dataset.parentPortId, row.dataset.memberOfLag].filter(Boolean);
+}
+
+/**
+ * Return a row's selection checkbox when it can be toggled.
+ *
+ * @param {HTMLTableRowElement|null} row - The row to read.
+ * @returns {HTMLInputElement|null} The enabled checkbox, or null.
+ */
+function _selectableCheckbox(row) {
+    if (!row) return null;
+    const checkbox = row.querySelector('input[name="select"]');
+    return checkbox && !checkbox.disabled ? checkbox : null;
+}
+
+/**
+ * Recompute which rows are held selected to satisfy another row's requirements.
+ *
+ * Walks the requirement chain from every row the user selected in their own right, checks each
+ * required row still on this page, and releases any row this code had checked that nothing
+ * requires any more. Rows required from another page raise an inline notice instead.
+ *
+ * @returns {boolean} True when the selection changed.
+ */
+function refreshRequiredSelections() {
+    const toggle = document.getElementById('autoSelectLagMembers');
+    const enabled = Boolean(toggle && toggle.checked);
+    const rows = _rowsByPortId();
+    const required = new Set();
+    const offPage = new Map();
+
+    if (enabled) {
+        // Seeds are the rows selected on their own account: a user click, a select-all, or a
+        // member an aggregate pulled in. A row held only by this function is never a seed, or
+        // releasing the last real selection could not release the chain above it.
+        const pending = [];
+        rows.forEach(function (row) {
+            const checkbox = _selectableCheckbox(row);
+            if (checkbox && checkbox.checked && !checkbox.dataset[REQUIRED_MARKER]) {
+                pending.push(row);
+            }
+        });
+
+        while (pending.length) {
+            const row = pending.pop();
+            _requiredPortIds(row).forEach(function (portId) {
+                if (required.has(portId)) return;
+                required.add(portId);
+                const requiredRow = rows.get(portId);
+                if (requiredRow) {
+                    pending.push(requiredRow);
+                } else if (!offPage.has(portId)) {
+                    // Name the relationship so the notice can say which row is missing and why.
+                    const isParent = row.dataset.parentPortId === portId;
+                    offPage.set(portId, {
+                        kind: isParent ? 'Parent' : 'LAG',
+                        name: (isParent ? row.dataset.parentName : row.dataset.lagName) || portId,
+                    });
+                }
+            });
+        }
+    }
+
+    let changed = false;
+    rows.forEach(function (row, portId) {
+        const checkbox = _selectableCheckbox(row);
+        if (!checkbox) return;
+        if (required.has(portId)) {
+            // A row the user cleared by hand stays cleared. A missing parent only leaves the
+            // relationship unset rather than failing the sync, so re-checking the box under the
+            // user's cursor would be fighting them over a hint.
+            if (!checkbox.checked && !checkbox.dataset[CLEARED_MARKER]) {
+                checkbox.checked = true;
+                checkbox.dataset[REQUIRED_MARKER] = 'true';
+                changed = true;
+            }
+        } else {
+            if (checkbox.dataset[REQUIRED_MARKER]) {
+                delete checkbox.dataset[REQUIRED_MARKER];
+                if (checkbox.checked) {
+                    checkbox.checked = false;
+                    changed = true;
+                }
+            }
+            // Nothing needs this row any more, so a later requirement starts from a clean slate.
+            delete checkbox.dataset[CLEARED_MARKER];
+        }
+    });
+
+    offPage.forEach(function (related) {
+        _showRequiredRowCrossPageNotice(related.name, related.kind);
+    });
+
+    return changed;
+}
+
+/**
+ * Check or release the member rows of an aggregate the user just toggled.
+ *
+ * @param {HTMLTableRowElement} row - The aggregate row that changed.
+ * @param {boolean} checked - Whether the aggregate is now selected.
+ * @returns {boolean} True when the selection changed.
+ */
+function _propagateToLagMembers(row, checked) {
+    const portId = row.dataset.portId;
+    if (!portId) return false;
+    let changed = false;
+    document.querySelectorAll('tr[data-member-of-lag="' + CSS.escape(portId) + '"]').forEach(function (memberRow) {
+        const checkbox = _selectableCheckbox(memberRow);
+        if (!checkbox) return;
+        if (checked) {
+            if (!checkbox.checked) {
+                checkbox.checked = true;
+                checkbox.dataset[MEMBER_MARKER] = 'true';
+                changed = true;
+            }
+        } else if (checkbox.dataset[MEMBER_MARKER]) {
+            delete checkbox.dataset[MEMBER_MARKER];
+            if (checkbox.checked) {
+                checkbox.checked = false;
+                changed = true;
+            }
+        }
+    });
+    return changed;
+}
+
 document.addEventListener('change', function (e) {
     const checkbox = e.target;
     if (!checkbox.matches('input[name="select"]') || checkbox.disabled) return;
 
-    const toggle = document.getElementById('autoSelectLagMembers');
-    const autoSelectEnabled = Boolean(toggle && toggle.checked);
-
     const row = checkbox.closest('tr');
     if (!row) return;
 
+    // The user acted on this row, so it is theirs now: drop the markers that said this code
+    // had put it there, or a later recompute would release a row they chose to keep.
+    delete checkbox.dataset[REQUIRED_MARKER];
+    if (checkbox.checked) {
+        delete checkbox.dataset[CLEARED_MARKER];
+    } else {
+        delete checkbox.dataset[MEMBER_MARKER];
+        checkbox.dataset[CLEARED_MARKER] = 'true';
+    }
+
+    const toggle = document.getElementById('autoSelectLagMembers');
     let changed = false;
-
-    // A checkbox that is now unchecked is no longer an auto-kept selection; drop the marker so a
-    // later manual re-check is treated as intentional (and not auto-undone with its children).
-    if (!checkbox.checked && checkbox.dataset.autoSelected) {
-        delete checkbox.dataset.autoSelected;
+    if (toggle && toggle.checked) {
+        changed = _propagateToLagMembers(row, checkbox.checked);
     }
-
-    // --- LAG: check/uncheck all members ---
-    // Each member the aggregate pulls in is marked data-auto-selected, and the uncheck side
-    // retracts ONLY marked members — so a member the user ticked manually before touching the
-    // aggregate survives toggling it off. Still skipped for synthetic parent-UNWIND events (see
-    // the uncheck path below): that event already retracted an auto-selected parent directly, so
-    // cascading it through here would only redundantly re-toggle the aggregate's members.
-    const portId = row.dataset.portId;
-    if (autoSelectEnabled && portId && !(e.detail && e.detail.lnmsParentUnwind)) {
-        const memberRows = document.querySelectorAll('tr[data-member-of-lag="' + CSS.escape(portId) + '"]');
-        memberRows.forEach(function (memberRow) {
-            const memberCheckbox = memberRow.querySelector('input[name="select"]');
-            if (!memberCheckbox || memberCheckbox.disabled) return;
-            if (checkbox.checked) {
-                // Aggregate checked: pull in each member not already selected, marking it
-                // auto-selected so unchecking the aggregate can retract ONLY what it added. A
-                // member already checked (manually or otherwise) keeps its state and marker.
-                if (!memberCheckbox.checked) {
-                    memberCheckbox.checked = true;
-                    memberCheckbox.dataset.autoSelected = 'true';
-                    // Run the same handler for the member so its own second-order rules apply
-                    // (a member that is also a sub-interface child injects/removes its parent).
-                    memberCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
-                    changed = true;
-                }
-            } else if (memberCheckbox.checked && memberCheckbox.dataset.autoSelected) {
-                // Aggregate unchecked: retract ONLY members it auto-selected — a member the user
-                // ticked themselves (no marker) is preserved.
-                delete memberCheckbox.dataset.autoSelected;
-                memberCheckbox.checked = false;
-                memberCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
-                changed = true;
-            }
-        });
-    }
-
-    // --- Sub-interface: select parent when checking ---
-    const parentPortId = row.dataset.parentPortId;
-    if (autoSelectEnabled && parentPortId && checkbox.checked) {
-        const parentRow = document.querySelector('tr[data-port-id="' + CSS.escape(parentPortId) + '"]');
-        if (parentRow) {
-            // Parent is on the same page - check it directly
-            const parentCheckbox = parentRow.querySelector('input[name="select"]');
-            if (parentCheckbox && !parentCheckbox.disabled && !parentCheckbox.checked) {
-                parentCheckbox.checked = true;
-                // Mark as auto-selected so the uncheck path below can undo it when the last child
-                // is cleared — without clobbering a parent the user checked themselves.
-                parentCheckbox.dataset.autoSelected = 'true';
-                // Propagate up a nested parent chain.
-                parentCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
-                changed = true;
-            }
-        } else {
-            _showParentCrossPageNotice(row.dataset.parentName || parentPortId);
-        }
-    }
-
-    // --- Sub-interface: undo parent auto-selection when the last child is unchecked ---
-    // Only act once NO other still-checked child on this page references the same parent —
-    // otherwise unchecking one sibling would drop the parent the remaining siblings still need.
-    if (parentPortId && !checkbox.checked) {
-        const siblingStillChecked = Array.prototype.some.call(
-            document.querySelectorAll(
-                'tr[data-parent-port-id="' + CSS.escape(parentPortId) + '"] input[name="select"]:not(:disabled)'
-            ),
-            function (cb) { return cb !== checkbox && cb.checked; }
-        );
-        if (!siblingStillChecked) {
-            // Same-page parent: uncheck it ONLY if we auto-selected it (data-auto-selected) — a
-            // parent the user checked themselves carries no marker and is preserved. Gated on the
-            // toggle like the auto-SELECT above: with #autoSelectLagMembers off the user has taken
-            // manual control, so a leftover marker from when the toggle was on must not let this
-            // uncheck a parent they are deliberately keeping (only the hidden-input cleanup above
-            // stays always-run). Dispatch so a nested grandparent chain unwinds too — as a
-            // CustomEvent flagged lnmsParentUnwind so the LAG member propagation ignores it (it
-            // would otherwise uncheck manually-selected member rows of an aggregate parent).
-            if (autoSelectEnabled) {
-                const parentRow = document.querySelector('tr[data-port-id="' + CSS.escape(parentPortId) + '"]');
-                if (parentRow) {
-                    const parentCheckbox = parentRow.querySelector('input[name="select"]');
-                    if (
-                        parentCheckbox &&
-                        !parentCheckbox.disabled &&
-                        parentCheckbox.checked &&
-                        parentCheckbox.dataset.autoSelected
-                    ) {
-                        delete parentCheckbox.dataset.autoSelected;
-                        parentCheckbox.checked = false;
-                        parentCheckbox.dispatchEvent(
-                            new CustomEvent('change', { bubbles: true, detail: { lnmsParentUnwind: true } })
-                        );
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-
-    if (changed) {
+    if (refreshRequiredSelections() || changed) {
         updateBulkActionButton();
     }
 });
 
-// Keep cross-page parent notices symmetric with #autoSelectLagMembers. Turning it back on replays
-// checked child rows because their own change handlers do not otherwise run again.
+// Keep the cascade in step with #autoSelectLagMembers: turning it off releases every row this
+// code is holding, turning it back on re-derives them from what the user has selected.
 document.addEventListener('change', function (e) {
     const toggle = e.target;
     if (!toggle.matches('#autoSelectLagMembers')) return;
 
-    if (toggle.checked) {
-        document.querySelectorAll('input[name="select"]:checked:not(:disabled)').forEach(function (checkbox) {
-            checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+    let changed = false;
+    if (!toggle.checked) {
+        // One rule in both directions: turning the cascade off gives back exactly the rows it
+        // added, so the selection left behind is the one the user made themselves.
+        document.querySelectorAll('input[name="select"][data-auto-member]').forEach(function (checkbox) {
+            delete checkbox.dataset[MEMBER_MARKER];
+            if (checkbox.checked) {
+                checkbox.checked = false;
+                changed = true;
+            }
         });
+    }
+    if (refreshRequiredSelections() || changed) {
+        const table =
+            document.getElementById('librenms-interface-table') ||
+            document.getElementById('librenms-interface-table-vm');
+        if (table) persistTableSelection(table);
+        updateBulkActionButton();
+    }
+
+    if (!toggle.checked) {
+        const noticeContainer = document.getElementById('parent-cross-page-notices');
+        if (noticeContainer) {
+            noticeContainer.remove();
+        }
+    }
+});
+
+// ============================================
+// CROSS-PAGE SELECTION
+// ============================================
+
+/**
+ * Selection persistence for the paginated sync tables.
+ *
+ * The comparison tables paginate with ordinary links, so moving to page 2 reloads the document
+ * and every checked box is gone. The rows a user wants rarely sit on one page, so the selection
+ * is kept per table in sessionStorage: written on every change, restored when the table renders,
+ * and submitted as hidden inputs for the rows that are not on the visible page.
+ *
+ * All the sync POST handlers resolve a row from its own key against the whole cached snapshot
+ * rather than the rendered page, so a row selected on another page needs no server-side change.
+ * Per-row companion inputs (a VC member dropdown, a module's target device) are stored with the
+ * row and re-submitted alongside it.
+ */
+
+/** Tables whose selection survives pagination, and the tab each belongs to. */
+const SELECTABLE_TABLE_IDS = [
+    'librenms-interface-table',
+    'librenms-interface-table-vm',
+    'librenms-cable-table',
+    'librenms-cable-table-vc',
+    'librenms-ipaddress-table',
+    'librenms-vlan-table',
+    'librenms-port-vlan-table',
+    'librenms-module-table',
+];
+
+/**
+ * Build the sessionStorage key for one table.
+ *
+ * Scoped to the object being synced (the path), the table, and the LibreNMS server, so two
+ * devices, two tabs, or two servers never share a selection. The page number is deliberately
+ * left out: carrying the selection across pages is the whole point.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {string} The storage key.
+ */
+function _selectionStorageKey(table) {
+    const serverKeyInput = document.querySelector('[name=server_key]');
+    const serverKey = serverKeyInput ? serverKeyInput.value : '';
+    return 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
+}
+
+/**
+ * Read a table's stored selection.
+ *
+ * Each entry records the row's companion inputs and whether the cascade put the row there, so a
+ * row restored after paging keeps the same standing it had before.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
+ */
+function readStoredSelection(table) {
+    try {
+        const raw = window.sessionStorage.getItem(_selectionStorageKey(table));
+        const parsed = raw ? JSON.parse(raw) : null;
+        // A hand-edited or half-written entry must not take the table down with it. The result
+        // gets a null prototype so a row key like __proto__ becomes an ordinary entry instead of
+        // hitting the prototype setter and disappearing.
+        const store = Object.create(null);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            Object.keys(parsed).forEach(function (key) {
+                store[key] = parsed[key];
+            });
+        }
+        return store;
+    } catch (_) {
+        // Private browsing and blocked site data both throw on access, not just on write.
+        return Object.create(null);
+    }
+}
+
+/**
+ * Replace a table's stored selection.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @param {Object} selection - Companion input values per selected row key.
+ * @returns {void}
+ */
+function writeStoredSelection(table, selection) {
+    try {
+        const key = _selectionStorageKey(table);
+        if (Object.keys(selection).length) {
+            window.sessionStorage.setItem(key, JSON.stringify(selection));
+        } else {
+            window.sessionStorage.removeItem(key);
+        }
+    } catch (_) {
+        // Storage is a convenience here; the visible page still submits its own checked rows.
+    }
+}
+
+/**
+ * Collect the companion inputs a row submits alongside its checkbox.
+ *
+ * A dropdown or hidden field inside the row (the VC member, a module's target device) is part of
+ * that row's answer, so it has to travel with the row when the row is submitted from another page.
+ *
+ * @param {HTMLTableRowElement} row - The row to read.
+ * @returns {Object<string, string>} Companion values by input name.
+ */
+function _rowCompanionInputs(row) {
+    const values = {};
+    row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
+        if (input.name && input.name !== 'select') {
+            values[input.name] = input.value;
+        }
+    });
+    return values;
+}
+
+/**
+ * Store the visible page's selection, keeping rows selected on other pages untouched.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {void}
+ */
+function persistTableSelection(table) {
+    if (!table || !table.id) return;
+    const selection = readStoredSelection(table);
+    table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
+        const row = checkbox.closest('tr');
+        if (!row) return;
+        if (checkbox.checked) {
+            selection[checkbox.value] = {
+                inputs: _rowCompanionInputs(row),
+                auto: checkbox.dataset[REQUIRED_MARKER]
+                    ? 'required'
+                    : checkbox.dataset[MEMBER_MARKER]
+                      ? 'member'
+                      : '',
+            };
+        } else {
+            // Only the visible page can retract a row: an absent checkbox means "another page",
+            // not "cleared".
+            delete selection[checkbox.value];
+        }
+    });
+    writeStoredSelection(table, selection);
+    updateOffPageSelectionNotice(table);
+}
+
+/**
+ * Re-check the visible rows a previous page of this table left selected.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {void}
+ */
+function restoreTableSelection(table) {
+    if (!table || !table.id) return;
+    const selection = readStoredSelection(table);
+    let restored = false;
+    table.querySelectorAll('td input[name="select"]:not(:disabled)').forEach(function (checkbox) {
+        const entry = selection[checkbox.value];
+        if (!entry || checkbox.checked) return;
+        checkbox.checked = true;
+        // Restore how the row got there: a row the cascade added must still be released when
+        // the row that needed it is cleared, rather than becoming a choice of the user's.
+        if (entry.auto === 'required') {
+            checkbox.dataset[REQUIRED_MARKER] = 'true';
+        } else if (entry.auto === 'member') {
+            checkbox.dataset[MEMBER_MARKER] = 'true';
+        }
+        restored = true;
+    });
+    if (restored) {
+        refreshRequiredSelections();
+        updateBulkActionButton();
+    }
+    updateOffPageSelectionNotice(table);
+}
+
+/**
+ * Return the stored row keys that are not rendered on the visible page.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {string[]} Row keys selected on other pages.
+ */
+function offPageSelectionKeys(table) {
+    const selection = readStoredSelection(table);
+    const visible = new Set();
+    table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
+        visible.add(checkbox.value);
+    });
+    return Object.keys(selection).filter(function (key) {
+        return !visible.has(key);
+    });
+}
+
+/**
+ * Show how many rows are selected on other pages, with a control to clear them.
+ *
+ * Selections the user cannot see would otherwise be submitted silently, so the count is stated
+ * on the page that will submit them.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {void}
+ */
+function updateOffPageSelectionNotice(table) {
+    const count = offPageSelectionKeys(table).length;
+    const noticeId = table.id + '-offpage-selection';
+    let notice = document.getElementById(noticeId);
+
+    if (!count) {
+        if (notice) notice.remove();
         return;
     }
 
-    const noticeContainer = document.getElementById('parent-cross-page-notices');
-    if (noticeContainer) {
-        noticeContainer.remove();
+    if (!notice) {
+        notice = document.createElement('div');
+        notice.id = noticeId;
+        notice.className = 'alert alert-info alert-sm py-1 px-2 small mb-1 d-flex align-items-center gap-2';
+        const icon = document.createElement('i');
+        icon.className = 'mdi mdi-checkbox-multiple-marked-outline';
+        notice.appendChild(icon);
+        notice.appendChild(document.createElement('span'));
+        const clear = document.createElement('button');
+        clear.type = 'button';
+        clear.className = 'btn btn-link btn-sm p-0';
+        clear.textContent = 'Clear';
+        clear.addEventListener('click', function () {
+            clearStoredSelection(table);
+            table.querySelectorAll('td input[name="select"]:checked').forEach(function (checkbox) {
+                checkbox.checked = false;
+                delete checkbox.dataset.autoRequired;
+                delete checkbox.dataset.autoMember;
+                delete checkbox.dataset.selectionCleared;
+            });
+            refreshRequiredSelections();
+            updateBulkActionButton();
+        });
+        notice.appendChild(clear);
+        table.parentNode.insertBefore(notice, table);
+    }
+
+    notice.querySelector('span').textContent =
+        count === 1 ? '1 more row is selected on another page.' : count + ' more rows are selected on other pages.';
+}
+
+/**
+ * Forget a table's stored selection.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {void}
+ */
+function clearStoredSelection(table) {
+    writeStoredSelection(table, {});
+    updateOffPageSelectionNotice(table);
+}
+
+/**
+ * Add the off-page selection to a form as hidden inputs, then forget it.
+ *
+ * The rows on the visible page serialize themselves; only the ones the user selected elsewhere
+ * need injecting. The store is cleared because submitting consumes the selection.
+ *
+ * @param {HTMLFormElement} form - The form being submitted.
+ * @returns {void}
+ */
+function injectOffPageSelections(form) {
+    form.querySelectorAll('input[data-offpage-select]').forEach(function (input) {
+        input.remove();
+    });
+
+    SELECTABLE_TABLE_IDS.forEach(function (tableId) {
+        const table = document.getElementById(tableId);
+        // The module table sits OUTSIDE its form and is rebuilt at htmx:configRequest instead,
+        // which would drop anything injected here.
+        if (!table || !form.contains(table)) return;
+
+        const selection = readStoredSelection(table);
+        offPageSelectionKeys(table).forEach(function (rowKey) {
+            const hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = 'select';
+            hidden.value = rowKey;
+            hidden.dataset.offpageSelect = '1';
+            form.appendChild(hidden);
+
+            const companions = (selection[rowKey] && selection[rowKey].inputs) || {};
+            Object.keys(companions).forEach(function (name) {
+                const companion = document.createElement('input');
+                companion.type = 'hidden';
+                companion.name = name;
+                companion.value = companions[name];
+                companion.dataset.offpageSelect = '1';
+                form.appendChild(companion);
+            });
+        });
+        clearStoredSelection(table);
+    });
+}
+
+// Persist on every selection change, whoever made it: a click, a select-all, or the requirement
+// cascade pulling in a parent. The listener is registered once for the document, so a table
+// swapped in by HTMX is covered without re-binding.
+document.addEventListener('change', function (e) {
+    if (!e.target.matches || !e.target.matches('input[name="select"]')) return;
+    const table = e.target.closest('table');
+    if (table && SELECTABLE_TABLE_IDS.includes(table.id)) {
+        persistTableSelection(table);
+    }
+});
+
+document.addEventListener('submit', function (e) {
+    if (e.target instanceof HTMLFormElement) {
+        injectOffPageSelections(e.target);
     }
 });
 
 /**
- * Show a brief inline notice when a sub-interface's parent is auto-included
- * from a different page (cross-page parent selection).
+ * Show a brief inline notice when a row's parent or aggregate is on another page.
+ *
+ * The relationship is applied when that interface already exists in NetBox, but an interface
+ * NetBox does not have yet is only created by syncing its own row, so the notice says where to
+ * find it rather than promising it is handled. The selection survives the trip.
+ *
  * The notice auto-dismisses after 5 seconds.
- * @param {string} parentName - Name of the parent interface
+ *
+ * @param {string} relatedName - Name of the required interface.
+ * @param {string} kind - Relationship label, 'Parent' or 'LAG'.
  */
-function _showParentCrossPageNotice(parentName) {
+function _showRequiredRowCrossPageNotice(relatedName, kind) {
     const containerId = 'parent-cross-page-notices';
     let container = document.getElementById(containerId);
     if (!container) {
@@ -1153,24 +1564,26 @@ function _showParentCrossPageNotice(parentName) {
         table.parentNode.insertBefore(container, table);
     }
 
-    // Avoid duplicate notices for the same parent
-    if (container.querySelector('[data-parent="' + CSS.escape(parentName) + '"]')) return;
+    // Avoid duplicate notices for the same interface
+    if (container.querySelector('[data-required="' + CSS.escape(relatedName) + '"]')) return;
 
     const notice = document.createElement('div');
     notice.className = 'alert alert-info alert-dismissible py-1 px-2 small mb-1';
-    notice.dataset.parent = parentName;
+    notice.dataset.required = relatedName;
 
-    // Build the notice via DOM nodes rather than innerHTML: parentName is interface
+    // Build the notice via DOM nodes rather than innerHTML: the name is interface
     // data and must never be interpreted as HTML (DOM-XSS). textContent escapes it.
     const icon = document.createElement('i');
     icon.className = 'mdi mdi-information-outline me-1';
     notice.appendChild(icon);
-    notice.appendChild(document.createTextNode('Parent interface '));
+    notice.appendChild(document.createTextNode(kind + ' interface '));
     const strong = document.createElement('strong');
-    strong.textContent = parentName;
+    strong.textContent = relatedName;
     notice.appendChild(strong);
     notice.appendChild(
-        document.createTextNode(' is on another page and will be included in the sync automatically.')
+        document.createTextNode(
+            ' is on another page. Select it there if it is not in NetBox yet; this page keeps your selection.'
+        )
     );
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
@@ -2956,6 +3369,15 @@ document.addEventListener('DOMContentLoaded', function () {
                         params.append(`device_selection_${cb.value}`, selectedDevice.value);
                     }
                 });
+                // Modules the user selected on another page of this table: the rows are gone
+                // from the DOM, so their target device travels with them out of the store.
+                const stored = readStoredSelection(table);
+                offPageSelectionKeys(table).forEach((rowKey) => {
+                    params.append('select', rowKey);
+                    const companions = (stored[rowKey] && stored[rowKey].inputs) || {};
+                    Object.keys(companions).forEach((name) => params.append(name, companions[name]));
+                });
+                clearStoredSelection(table);
             }
         }
     });

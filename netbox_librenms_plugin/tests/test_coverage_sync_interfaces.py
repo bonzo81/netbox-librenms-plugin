@@ -245,39 +245,15 @@ def test_vlan_apply_all_skips_groups_unavailable_to_a_target_row():
     assert "if (newGroupId && !matchedGroup) return;" in handler
 
 
-def test_reenabling_relationship_autoselect_replays_checked_rows():
-    """Checked children rebuild cross-page parent inputs when auto-select is re-enabled."""
-    import re
-
-    handler = _js_block(
-        _js_source(),
-        "// Keep cross-page parent notices symmetric",
-        "Show a brief inline notice",
-    )
-    assert re.search(r"toggle\.matches\(\s*['\"]#autoSelectLagMembers['\"]\s*\)", handler), (
-        "toggle handler must key on #autoSelectLagMembers"
-    )
-    assert re.search(r"if\s*\(\s*toggle\.checked\s*\)", handler), "re-enable branch must gate on toggle.checked"
-    # Backreference pins the string closing after the disabled-row exclusion. A suffix such as
-    # :not(*) (valid CSS, matches nothing) must fail this instead of slipping past a prefix check.
-    assert re.search(
-        r"querySelectorAll\(\s*(['\"])input\[name=.select.\]:checked:not\(:disabled\)\1\s*\)",
-        handler,
-    ), "re-enable branch must replay exactly the checked, enabled rows"
-    assert re.search(r"dispatchEvent\(\s*new\s+Event\(\s*['\"]change['\"]\s*,\s*\{\s*bubbles:\s*true", handler), (
-        "replay must re-dispatch a bubbling change event"
-    )
-
-
 def test_cross_page_parent_does_not_copy_child_member_target():
     """An off-page parent is resolved independently instead of inheriting the child's owner."""
     handler = _js_block(
         _js_source(),
-        "// --- Sub-interface: select parent when checking ---",
-        "// --- Sub-interface: undo parent auto-selection",
+        "function refreshRequiredSelections()",
+        "function _propagateToLagMembers(row, checked)",
     )
 
-    assert "_showParentCrossPageNotice" in handler
+    assert "_showRequiredRowCrossPageNotice" in handler
     assert "auto_parent_port_id" not in handler
     assert "device_selection_" not in handler
 
@@ -309,7 +285,7 @@ def test_cross_page_parent_notice_close_button_has_accessible_name():
 
     notice = _js_block(
         _js_source(),
-        "function _showParentCrossPageNotice(parentName)",
+        "function _showRequiredRowCrossPageNotice(relatedName, kind)",
         "// VIRTUAL CHASSIS & VRF HANDLING",
     )
     assert re.search(
@@ -318,23 +294,19 @@ def test_cross_page_parent_notice_close_button_has_accessible_name():
     )
 
 
-def test_relationship_row_selectors_are_css_escaped():
-    import re
+def test_relationship_rows_are_matched_without_interpolated_selectors():
+    """Requirement resolution indexes the rows instead of building a selector per port id.
 
-    handler = _js_block(
-        _js_source(),
-        "// --- Sub-interface: select parent when checking ---",
-        "// Keep cross-page parent notices symmetric",
-    )
+    The behaviour this protects (a port id that carries selector metacharacters still cascades)
+    is exercised for real in tests/browser/test_interface_selection_browser.py; this pins the
+    structure that makes it safe, so a future rewrite cannot quietly reintroduce interpolation.
+    """
     source = _js_source()
+    handler = _js_block(source, "function refreshRequiredSelections()", "function _propagateToLagMembers(row, checked)")
+
+    assert "querySelectorAll(" not in handler, "requirement lookups must go through the row index"
     assert 'data-member-of-lag="' + "' + CSS.escape(portId)" in source, (
-        "the LAG-member selector must CSS.escape the port id"
-    )
-    assert source.count('data-port-id="' + "' + CSS.escape(parentPortId)") == 2, (
-        "both parent-row selectors must CSS.escape the port id"
-    )
-    assert re.search(r"data-parent-port-id=\"'\s*\+\s*CSS\.escape\(parentPortId\)", handler), (
-        "the sibling-row attribute selector must CSS.escape the port id"
+        "the one remaining interpolated selector must CSS.escape the port id"
     )
 
 

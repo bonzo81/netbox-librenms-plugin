@@ -1,6 +1,7 @@
-"""Browser-level checks for the sync-tab cache state machine."""
+"""Browser-level checks for the sync tabs: the cache state machine and table selection."""
 
 import json
+from html import escape
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,321 @@ import pytest
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 STYLE_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "css" / "librenms_sync.css"
+
+
+# ===========================================================================
+# Interface selection: the requirement cascade and cross-page state
+# ===========================================================================
+SELECTION_PAGE_URL = "https://plugin.example.com/device/1/sync"
+
+# Verbatim relationship shape of a live Junos MX304 (LibreNMS device 20): et-0/0/6.0 is a unit of
+# et-0/0/6, et-0/0/6 is a member of ae2, and ae2.0 is a unit of ae2.
+JUNOS_ROWS = [
+    {"port_id": "4303", "name": "ae2"},
+    {"port_id": "4304", "name": "ae2.0", "parent": "4303"},
+    {"port_id": "4301", "name": "et-0/0/6", "lag": "4303"},
+    {"port_id": "4302", "name": "et-0/0/6.0", "parent": "4301", "parent_name": "et-0/0/6"},
+]
+
+
+def _selection_row_markup(row):
+    esc = escape
+    attrs = [f'data-port-id="{esc(row["port_id"])}"']
+    if row.get("parent"):
+        attrs.append(f'data-parent-port-id="{esc(row["parent"])}"')
+    if row.get("parent_name"):
+        attrs.append(f'data-parent-name="{esc(row["parent_name"])}"')
+    if row.get("lag"):
+        attrs.append(f'data-member-of-lag="{esc(row["lag"])}"')
+    if row.get("lag_name"):
+        attrs.append(f'data-lag-name="{esc(row["lag_name"])}"')
+    companion = (
+        f'<select name="device_selection_{esc(row["port_id"])}"><option value="7">m7</option></select>'
+        if row.get("companion")
+        else ""
+    )
+    # A port id is not always usable as a DOM id, so a row can name its own checkbox.
+    dom_id = row.get("dom_id", row["port_id"])
+    return (
+        f"<tr {' '.join(attrs)}>"
+        f'<td data-col="selection"><input type="checkbox" name="select" value="{esc(row["port_id"])}"'
+        f' id="cb-{esc(dom_id)}"></td>'
+        f"<td>{row['name']}{companion}</td></tr>"
+    )
+
+
+def _selection_page_html(rows, *, auto_select=True):
+    checked = "checked" if auto_select else ""
+    body = "".join(_selection_row_markup(row) for row in rows)
+    return f"""<!doctype html><html><body>
+        <input type="checkbox" id="autoSelectLagMembers" {checked}>
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+          <input type="hidden" name="server_key" value="production">
+          <table id="librenms-interface-table">
+            <thead><tr><th><input type="checkbox" class="toggle"></th><th>Name</th></tr></thead>
+            <tbody>{body}</tbody>
+          </table>
+          <button type="submit" id="do-sync">Sync</button>
+        </form>
+        </body></html>"""
+
+
+def _load_selection_page(page, rows, *, url=SELECTION_PAGE_URL, auto_select=True):
+    """Serve the fixture page from a real origin so sessionStorage behaves as it does in NetBox."""
+    html = _selection_page_html(rows, auto_select=auto_select)
+    page.route(
+        f"{SELECTION_PAGE_URL}**",
+        lambda route: route.fulfill(status=200, content_type="text/html", body=html),
+    )
+    page.goto(url)
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate("initializeCheckboxes()")
+
+
+def _checked_values(page):
+    return set(page.evaluate("Array.from(document.querySelectorAll('input[name=select]:checked')).map(cb => cb.value)"))
+
+
+class TestRequirementCascade:
+    """Selecting a row must select everything that row depends on, all the way up."""
+
+    def test_sub_interface_pulls_in_its_parent_and_that_parent_s_aggregate(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+
+        page.check("#cb-4302")
+
+        # et-0/0/6.0 needs et-0/0/6, which needs ae2. Stopping at the parent leaves the
+        # aggregate unsynced, and the LAG assignment is then silently dropped.
+        assert _checked_values(page) == {"4302", "4301", "4303"}
+
+    def test_aggregate_unit_pulls_in_its_aggregate(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+
+        page.check("#cb-4304")
+
+        assert _checked_values(page) == {"4304", "4303"}
+
+    def test_clearing_the_last_dependent_releases_the_whole_chain(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+
+        page.check("#cb-4302")
+        page.uncheck("#cb-4302")
+
+        assert _checked_values(page) == set()
+
+    def test_a_chain_held_by_another_row_is_not_released(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+
+        page.check("#cb-4302")
+        page.check("#cb-4304")
+        page.uncheck("#cb-4302")
+
+        # ae2 is still required by ae2.0; only et-0/0/6 goes.
+        assert _checked_values(page) == {"4304", "4303"}
+
+    def test_an_aggregate_the_user_chose_survives_its_dependents(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+
+        page.check("#cb-4303")
+        page.check("#cb-4302")
+        page.uncheck("#cb-4302")
+
+        # ae2 pulled et-0/0/6 in as a member, and ae2 was the user's own choice, so both stay.
+        assert _checked_values(page) == {"4303", "4301"}
+
+    def test_a_member_the_user_clears_stays_cleared(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+
+        page.check("#cb-4303")
+        page.uncheck("#cb-4301")
+
+        assert _checked_values(page) == {"4303"}
+
+    def test_a_required_row_the_user_clears_is_not_re_added(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+        page.check("#cb-4302")
+
+        page.uncheck("#cb-4303")
+
+        # ae2 was pulled in for et-0/0/6.0, but a missing aggregate only leaves the LAG unset,
+        # so the box must stay where the user put it instead of snapping back.
+        assert _checked_values(page) == {"4302", "4301"}
+
+    def test_a_cleared_row_is_offered_again_once_nothing_needs_it(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+        page.check("#cb-4302")
+        page.uncheck("#cb-4303")
+        page.uncheck("#cb-4302")
+
+        page.check("#cb-4302")
+
+        assert _checked_values(page) == {"4302", "4301", "4303"}
+
+    def test_the_cascade_is_off_when_the_toggle_is_off(self, page):
+        _load_selection_page(page, JUNOS_ROWS, auto_select=False)
+
+        page.check("#cb-4302")
+
+        assert _checked_values(page) == {"4302"}
+
+    def test_turning_the_toggle_off_releases_only_what_the_cascade_added(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+        # ae2 first: clicking it once et-0/0/6.0 has already pulled it in would be a no-op,
+        # so it would stay a row the cascade owns rather than one the user chose.
+        page.check("#cb-4303")
+        page.check("#cb-4302")
+
+        page.uncheck("#autoSelectLagMembers")
+
+        # ae2 pulled et-0/0/6 in and et-0/0/6.0 required both; only the two rows the user
+        # clicked survive turning the cascade off.
+        assert _checked_values(page) == {"4302", "4303"}
+
+    def test_a_parent_on_another_page_raises_a_notice(self, page):
+        # et-0/0/6.0 is rendered without its parent row, as it is when they straddle a page break.
+        _load_selection_page(page, [JUNOS_ROWS[3]])
+
+        page.check("#cb-4302")
+
+        notice = page.locator("#parent-cross-page-notices").inner_text()
+        assert "Parent interface" in notice
+        assert "et-0/0/6" in notice
+
+    def test_an_aggregate_on_another_page_is_named_as_a_lag(self, page):
+        # et-0/0/6 without its ae2 row: the notice has to say LAG, not Parent.
+        rows = [dict(JUNOS_ROWS[2], lag_name="ae2")]
+        _load_selection_page(page, rows)
+
+        page.check("#cb-4301")
+
+        notice = page.locator("#parent-cross-page-notices").inner_text()
+        assert "LAG interface" in notice
+        assert "ae2" in notice
+
+    def test_turning_the_toggle_back_on_re_derives_the_chain(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+        page.check("#cb-4302")
+        page.uncheck("#autoSelectLagMembers")
+
+        page.check("#autoSelectLagMembers")
+
+        assert _checked_values(page) == {"4302", "4301", "4303"}
+
+    def test_a_port_id_with_selector_metacharacters_still_cascades(self, page):
+        # port_id values are integers today, so this only guards the escaping: an unescaped
+        # quote would abort the member selector and silently select nothing.
+        rows = [
+            {"port_id": 'a"b', "name": "ae9", "dom_id": "ae9"},
+            {"port_id": "5001", "name": "et-0/0/9", "lag": 'a"b'},
+        ]
+        _load_selection_page(page, rows)
+
+        page.check("#cb-ae9")
+
+        assert _checked_values(page) == {'a"b', "5001"}
+
+    def test_select_all_pulls_in_requirements_once(self, page):
+        _load_selection_page(page, JUNOS_ROWS)
+
+        page.check("input.toggle")
+
+        assert _checked_values(page) == {"4301", "4302", "4303", "4304"}
+
+
+class TestCrossPageSelection:
+    """A selection must survive paging, and reach the server when it is submitted."""
+
+    def test_selection_is_restored_when_the_row_comes_back(self, page):
+        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.check("#cb-4304")
+
+        page.goto(f"{SELECTION_PAGE_URL}?page=2")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeCheckboxes()")
+
+        assert "4304" in _checked_values(page)
+
+    def test_rows_selected_on_another_page_are_counted_on_this_one(self, page):
+        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.check("#cb-4304")
+
+        # Page 2 renders a different slice, so the ae2.0 row is not in the DOM any more.
+        _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
+
+        notice = page.locator("#librenms-interface-table-offpage-selection")
+        assert "2 more rows are selected on other pages." in notice.inner_text()
+
+    def test_rows_selected_on_another_page_are_submitted(self, page):
+        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.check("#cb-4304")
+        _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
+        page.check("#cb-4301")
+
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        posted = request_info.value.post_data
+
+        # The visible row serializes itself; ae2.0 and the ae2 it required come from the store.
+        assert sorted(value for key, value in _selection_form_pairs(posted) if key == "select") == [
+            "4301",
+            "4303",
+            "4304",
+        ]
+
+    def test_a_restored_row_keeps_the_standing_it_had(self, page):
+        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.check("#cb-4302")
+
+        # Page away and back: et-0/0/6 and ae2 were pulled in by the cascade, not chosen, so
+        # clearing et-0/0/6.0 must still release them.
+        _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
+        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        assert _checked_values(page) == {"4302", "4301", "4303"}
+
+        page.uncheck("#cb-4302")
+
+        assert _checked_values(page) == set()
+
+    def test_a_row_key_that_collides_with_an_object_property_survives(self, page):
+        # port_id values are integers today; this pins that the store holds row keys as data,
+        # so a key like __proto__ is kept rather than swallowed by the prototype setter.
+        rows = [{"port_id": "__proto__", "name": "ae9", "dom_id": "proto"}, JUNOS_ROWS[2]]
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.check("#cb-proto")
+
+        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+
+        assert ("select", "__proto__") in _selection_form_pairs(request_info.value.post_data)
+
+    def test_clearing_the_notice_drops_the_off_page_selection(self, page):
+        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.check("#cb-4304")
+        _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
+
+        page.click("#librenms-interface-table-offpage-selection button")
+
+        assert page.locator("#librenms-interface-table-offpage-selection").count() == 0
+        assert _checked_values(page) == set()
+
+    def test_a_companion_input_travels_with_its_row(self, page):
+        rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.check("#cb-4303")
+
+        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+
+        assert ("device_selection_4303", "7") in _selection_form_pairs(request_info.value.post_data)
+
+
+def _selection_form_pairs(post_data):
+    """Parse an application/x-www-form-urlencoded body into (name, value) pairs."""
+    from urllib.parse import parse_qsl
+
+    return parse_qsl(post_data or "")
 
 
 def _replace_fixture_markup(html, old, new):
