@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 import json
 from threading import Barrier
-from unittest.mock import patch
 
 import pytest
 
@@ -407,28 +406,22 @@ def test_bundled_recording_transceivers_reference_present_ports(recording):
 
 def test_make_recording_api_delegates_non_servers_config_to_real():
     """The recording API override must preserve every non-server plugin setting."""
+    from django.conf import settings
+
     import netbox_librenms_plugin.librenms_api as api_mod
     from netbox_librenms_plugin.tests.conftest import make_recording_api
 
     # Read the expected non-server value outside the temporary settings override.
     expected_other = api_mod.get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
 
-    captured = {}
-    real_init = api_mod.LibreNMSAPI.__init__
+    original_config = settings.PLUGINS_CONFIG
+    api = make_recording_api("http://127.0.0.1:9", server_key="test")
 
-    def spy_init(self, *args, **kwargs):
-        # Exercise both the overridden server map and an unchanged defaulted lookup while the
-        # constructor reads Django's temporary plugin settings.
-        captured["servers"] = api_mod.get_plugin_config("netbox_librenms_plugin", "servers")
-        captured["other"] = api_mod.get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
-        return real_init(self, *args, **kwargs)
-
-    with patch.object(api_mod.LibreNMSAPI, "__init__", spy_init):
-        make_recording_api("http://127.0.0.1:9", server_key="test")
-
-    # Only the server map changes. Every other plugin setting retains its real value.
-    assert "test" in captured["servers"]
-    assert captured["other"] == expected_other
+    assert api.server_key == "test"
+    assert api.librenms_url == "http://127.0.0.1:9"
+    assert api.cache_timeout == expected_other
+    assert settings.PLUGINS_CONFIG is original_config
+    assert api_mod.get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300) == expected_other
 
 
 def test_manifest_is_in_sync_with_bundled_recordings():
@@ -457,27 +450,27 @@ def test_concurrent_manifest_rebuilds_do_not_share_a_temporary_file(monkeypatch,
         return original_replace(path, target)
 
     monkeypatch.setattr(type(manifest_path), "replace", synchronized_replace)
-    with patch.object(recordings_store, "MANIFEST_PATH", manifest_path):
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(Command(stdout=StringIO())._rebuild_manifest) for _ in range(2)]
-            for future in futures:
-                future.result(timeout=10)
+    monkeypatch.setattr(recordings_store, "MANIFEST_PATH", manifest_path)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(Command(stdout=StringIO())._rebuild_manifest) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
 
     assert manifest_path.exists()
     assert len(synchronized_writes) == 2
     assert len(set(synchronized_writes)) == 2
 
 
-def test_load_manifest_fails_when_file_is_unreadable(tmp_path):
+def test_load_manifest_fails_when_file_is_unreadable(tmp_path, monkeypatch):
     """An unreadable manifest must not make every captured shape look new."""
     from netbox_librenms_plugin.data_shapes import recordings_store
 
     manifest_path = tmp_path / "manifest.json"
     manifest_path.mkdir()
 
-    with patch.object(recordings_store, "MANIFEST_PATH", manifest_path):
-        with pytest.raises(RuntimeError, match="manifest"):
-            recordings_store.load_manifest()
+    monkeypatch.setattr(recordings_store, "MANIFEST_PATH", manifest_path)
+    with pytest.raises(RuntimeError, match="manifest"):
+        recordings_store.load_manifest()
 
 
 @pytest.mark.parametrize(
@@ -491,25 +484,25 @@ def test_load_manifest_fails_when_file_is_unreadable(tmp_path):
         '[{"name":"x","signature":{"virtual_chassis":null}}]',
     ],
 )
-def test_load_manifest_fails_when_content_is_invalid(tmp_path, content):
+def test_load_manifest_fails_when_content_is_invalid(tmp_path, content, monkeypatch):
     """A corrupt or wrong-type manifest must not become an empty coverage set."""
     from netbox_librenms_plugin.data_shapes import recordings_store
 
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(content)
 
-    with patch.object(recordings_store, "MANIFEST_PATH", manifest_path):
-        with pytest.raises(RuntimeError, match="manifest"):
-            recordings_store.load_manifest()
+    monkeypatch.setattr(recordings_store, "MANIFEST_PATH", manifest_path)
+    with pytest.raises(RuntimeError, match="manifest"):
+        recordings_store.load_manifest()
 
 
-def test_load_manifest_fails_when_file_is_missing(tmp_path):
+def test_load_manifest_fails_when_file_is_missing(tmp_path, monkeypatch):
     """A missing packaged manifest must surface the packaging error."""
     from netbox_librenms_plugin.data_shapes import recordings_store
 
-    with patch.object(recordings_store, "MANIFEST_PATH", tmp_path / "missing.json"):
-        with pytest.raises(RuntimeError, match="manifest"):
-            recordings_store.load_manifest()
+    monkeypatch.setattr(recordings_store, "MANIFEST_PATH", tmp_path / "missing.json")
+    with pytest.raises(RuntimeError, match="manifest"):
+        recordings_store.load_manifest()
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
@@ -526,11 +519,7 @@ def test_recording_has_required_schema(recording):
 def _assert_virtual_chassis(api, device_id, expected):
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
 
-    with patch(
-        "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-        return_value="{master}-m{position}",
-    ):
-        result = detect_virtual_chassis_from_inventory(api, device_id)
+    result = detect_virtual_chassis_from_inventory(api, device_id)
 
     if expected is None:
         assert result is None

@@ -130,54 +130,61 @@ class TestRealGrants:
 
 @pytest.mark.django_db
 class TestRealView:
-    def test_make_view_binds_the_request_and_runs_the_real_gate(self):
+    def test_make_view_binds_the_request_and_runs_the_real_gate(self, live_librenms):
         """A superuser drives the real permission gate to a real DB write — no ORM mock in sight."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         dev = make_device("seam-serial")
+        set_librenms_device_id(dev, 42, "default")
+        dev.save(update_fields=["custom_field_data"])
+        live_librenms.server.device_info_response(device_id=42, hostname=dev.name, serial="SN-SEAM")
         request = make_request("post")
         view = make_view(UpdateDeviceSerialView, request)
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-SEAM"})
 
         post(view, request, pk=dev.pk)
 
         assert Device.objects.get(pk=dev.pk).serial == "SN-SEAM"
 
-    def test_the_real_gate_denies_a_user_without_the_change_grant(self):
+    def test_the_real_gate_denies_a_user_without_the_change_grant(self, live_librenms):
         """No mocked ``require_all_permissions``: the denial comes from a real missing grant."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         dev = make_device("seam-denied")
+        set_librenms_device_id(dev, 42, "default")
+        dev.save(update_fields=["custom_field_data"])
+        live_librenms.server.device_info_response(device_id=42, hostname=dev.name, serial="SN-DENIED")
         user = make_user_with_perms("seam-viewer", [("view", Device)])
         request = make_request("post", user=user)
         view = make_view(UpdateDeviceSerialView, request)
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-DENIED"})
 
         post(view, request, pk=dev.pk)
 
         assert Device.objects.get(pk=dev.pk).serial == ""
         assert any("Missing permissions" in t for t in message_texts(request, "error"))
+        assert live_librenms.server.requests == []
 
-    def test_a_constrained_grant_404s_on_a_device_outside_it(self):
+    def test_a_constrained_grant_404s_on_a_device_outside_it(self, live_librenms):
         """The scoped lookup must fail closed, not fall through to the plain manager."""
         from django.http import Http404
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from dcim.models import Device
 
         mine = make_device("seam-scoped-mine")
         theirs = make_device("seam-scoped-theirs")
+        set_librenms_device_id(mine, 42, "default")
+        mine.save(update_fields=["custom_field_data"])
+        live_librenms.server.device_info_response(device_id=42, hostname=mine.name, serial="SN-X")
         user = make_user_with_perms("seam-scoped", [("change", Device)], constraints={"name": "seam-scoped-mine"})
         request = make_request("post", user=user)
         view = make_view(UpdateDeviceSerialView, request)
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-X"})
 
         with pytest.raises(Http404):
             post(view, request, pk=theirs.pk)

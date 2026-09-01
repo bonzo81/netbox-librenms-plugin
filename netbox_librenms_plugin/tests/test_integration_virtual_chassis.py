@@ -10,10 +10,21 @@ Run:
 """
 
 from copy import deepcopy
-from unittest.mock import patch
 
+import pytest
 from django.conf import settings
+from django.core.cache import cache
 from django.test import override_settings
+
+
+@pytest.fixture(autouse=True)
+def vc_member_name_pattern(db):
+    """Store the naming pattern through the same model used in production."""
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    plugin_settings, _ = LibreNMSSettings.objects.get_or_create(pk=1)
+    plugin_settings.vc_member_name_pattern = "-m{position}"
+    plugin_settings.save(update_fields=["vc_member_name_pattern"])
 
 
 def _make_api(url, token="test-token", server_key="test"):
@@ -85,11 +96,7 @@ class TestDetectVCCiscoStack:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
         assert result["is_stack"] is True
@@ -114,11 +121,7 @@ class TestDetectVCCiscoStack:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {5: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
         positions = [m["position"] for m in result["members"]]
@@ -142,11 +145,7 @@ class TestDetectVCCiscoStack:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
         positions = [m["position"] for m in result["members"]]
@@ -187,11 +186,7 @@ class TestDetectVCCiscoStack:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
         m1, m2 = result["members"]
@@ -216,11 +211,7 @@ class TestDetectVCCiscoStack:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
         # Members should have non-empty suggested names
@@ -258,11 +249,7 @@ class TestDetectVCJuniperStyle:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {10: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
         assert result["is_stack"] is True
@@ -307,11 +294,7 @@ class TestDetectVCStackPreferredOverChassis:
         }
         librenms_server.vc_inventory_callable(device_id, root_items, children)
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         # Must have detected 2 members (via stack index), not 0 (via chassis index)
         assert result is not None
@@ -333,11 +316,7 @@ class TestDetectVCSingleDevice:
         member_items = [_chassis(100, "SN-ONLY", position=1)]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is None
 
@@ -363,11 +342,7 @@ class TestDetectVCSingleDevice:
         # Register root-only, no children needed
         librenms_server.vc_inventory_callable(device_id, root_items, {})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is None
 
@@ -384,11 +359,7 @@ class TestDetectVCEdgeCases:
         librenms_server.device_info_response(device_id=device_id, hostname="empty-sw")
         librenms_server.vc_inventory_callable(device_id, [], {})  # empty root
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is None
 
@@ -403,11 +374,7 @@ class TestDetectVCEdgeCases:
         # Register 500 for inventory calls
         librenms_server.register(f"/api/v0/inventory/{device_id}", {"status": "error"}, status=500)
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is None
 
@@ -426,11 +393,7 @@ class TestDetectVCEdgeCases:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
         assert result["member_count"] == 2
@@ -451,11 +414,7 @@ class TestDetectVCEdgeCases:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-            return_value="{master}-m{position}",
-        ):
-            result = detect_virtual_chassis_from_inventory(api, device_id)
+        result = detect_virtual_chassis_from_inventory(api, device_id)
 
         # Should still detect VC even without device info
         assert result is not None
@@ -466,11 +425,11 @@ class TestDetectVCEdgeCases:
 
 
 class TestGetVCDataHTTP:
-    """get_virtual_chassis_data() integrating with mock HTTP server and patched cache."""
+    """get_virtual_chassis_data() integrating with HTTP and the configured cache."""
 
     def test_cache_miss_fetches_via_http(self, librenms_server):
         """Cache miss triggers detect_virtual_chassis_from_inventory via HTTP."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
         device_id = 60
@@ -483,23 +442,16 @@ class TestGetVCDataHTTP:
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.return_value = None  # cache miss
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                result = get_virtual_chassis_data(api, device_id)
+        result = get_virtual_chassis_data(api, device_id)
 
-        # Should have called cache.set to store result
-        assert mock_cache.set.called
         assert result is not None
         assert result["is_stack"] is True
         assert result["member_count"] == 2
+        assert cache.get(_vc_cache_key(api, device_id)) == result
 
     def test_cache_hit_returns_without_http(self, librenms_server):
         """Cache hit returns immediately without making any HTTP calls."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
         device_id = 61
@@ -507,18 +459,16 @@ class TestGetVCDataHTTP:
         # Include detection_error to match what _clone_virtual_chassis_data adds
         cached_data = {"is_stack": True, "member_count": 3, "members": [], "detection_error": None}
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.return_value = cached_data
-            result = get_virtual_chassis_data(api, device_id)
+        cache.set(_vc_cache_key(api, device_id), cached_data, timeout=300)
+        result = get_virtual_chassis_data(api, device_id)
 
-        # cache.set should NOT be called (no new fetch)
-        assert not mock_cache.set.called
+        assert librenms_server.requests == []
         assert result["is_stack"] is True
         assert result["member_count"] == 3
 
     def test_force_refresh_fetches_even_if_cached(self, librenms_server):
         """force_refresh=True bypasses cache and fetches from HTTP."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
         device_id = 62
@@ -534,13 +484,8 @@ class TestGetVCDataHTTP:
         # Even with cached data, force_refresh should hit the API
         old_cached = {"is_stack": True, "member_count": 1, "members": [{"serial": "OLD"}], "detection_error": None}
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.return_value = old_cached
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                result = get_virtual_chassis_data(api, device_id, force_refresh=True)
+        cache.set(_vc_cache_key(api, device_id), old_cached, timeout=300)
+        result = get_virtual_chassis_data(api, device_id, force_refresh=True)
 
         # Should have fetched fresh data, not used old_cached
         assert result is not None
@@ -548,7 +493,7 @@ class TestGetVCDataHTTP:
 
     def test_non_vc_device_returns_empty_dict(self, librenms_server):
         """Single device (not VC) → detect returns None → get_virtual_chassis_data returns empty."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
         device_id = 63
@@ -558,16 +503,11 @@ class TestGetVCDataHTTP:
         member_items = [_chassis(100, "SN-ONLY", position=1)]  # only 1 → not VC
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.return_value = None
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                result = get_virtual_chassis_data(api, device_id)
+        result = get_virtual_chassis_data(api, device_id)
 
         assert result is not None
         assert result.get("is_stack") is False
+        assert cache.get(_vc_cache_key(api, device_id)) == result
 
 
 class TestPrefetchVCHTTP:
@@ -575,7 +515,7 @@ class TestPrefetchVCHTTP:
 
     def test_prefetch_multiple_vc_devices(self, librenms_server):
         """Three VC devices → cache populated for all three."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, prefetch_vc_data_for_devices
 
         api = _make_api(librenms_server.url)
 
@@ -588,29 +528,13 @@ class TestPrefetchVCHTTP:
             ]
             librenms_server.vc_inventory_callable(dev_id, root_items, {1: member_items})
 
-        cache_store = {}
+        prefetch_vc_data_for_devices(api, [70, 71, 72])
 
-        def mock_cache_set(key, val, timeout=None):
-            cache_store[key] = val
-
-        def mock_cache_get(key):
-            return cache_store.get(key)
-
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.side_effect = mock_cache_get
-            mock_cache.set.side_effect = mock_cache_set
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                prefetch_vc_data_for_devices(api, [70, 71, 72])
-
-        # Cache should have entries for all 3 VC devices
-        assert len(cache_store) >= 3
+        assert all(cache.get(_vc_cache_key(api, device_id))["is_stack"] for device_id in (70, 71, 72))
 
     def test_prefetch_mix_vc_and_single(self, librenms_server):
         """Mix of VC and single devices → VC is cached, single is processed without error."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, prefetch_vc_data_for_devices
 
         api = _make_api(librenms_server.url)
 
@@ -626,27 +550,13 @@ class TestPrefetchVCHTTP:
         member_items_81 = [_chassis(100, "SN-81", position=1)]  # only 1 → not VC
         librenms_server.vc_inventory_callable(81, root_items_81, {1: member_items_81})
 
-        cache_store = {}
-
-        def mock_cache_set(key, val, timeout=None):
-            cache_store[key] = val
-
-        def mock_cache_get(key):
-            return cache_store.get(key)
-
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.side_effect = mock_cache_get
-            mock_cache.set.side_effect = mock_cache_set
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                prefetch_vc_data_for_devices(api, [80, 81])
+        prefetch_vc_data_for_devices(api, [80, 81])
 
         # Both the VC device (80) and the non-VC device (81) should be cached.
         # Non-VC devices get an empty_virtual_chassis_data() cached so prefetch
         # suppresses repeated API hits on subsequent renders.
-        assert len(cache_store) == 2
+        assert cache.get(_vc_cache_key(api, 80))["is_stack"] is True
+        assert cache.get(_vc_cache_key(api, 81))["is_stack"] is False
 
 
 class TestNegativeVCCaching:
@@ -654,7 +564,7 @@ class TestNegativeVCCaching:
 
     def test_non_vc_device_result_is_cached(self, librenms_server):
         """Single device (not a stack) → detect returns None → empty result cached."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
         device_id = 200
@@ -664,34 +574,20 @@ class TestNegativeVCCaching:
         member_items = [_chassis(100, "SN-ONLY", position=1)]  # 1 chassis only → not VC
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        cache_store = {}
-
-        def mock_cache_set(key, val, timeout=None):
-            cache_store[key] = val
-
-        def mock_cache_get(key):
-            return cache_store.get(key)
-
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.side_effect = mock_cache_get
-            mock_cache.set.side_effect = mock_cache_set
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                result = get_virtual_chassis_data(api, device_id)
+        result = get_virtual_chassis_data(api, device_id)
 
         assert result is not None
         assert result.get("is_stack") is False
         assert result.get("member_count") == 0
-        # The empty result must have been written to cache so a second call is a hit.
-        assert len(cache_store) == 1
-        cached = list(cache_store.values())[0]
-        assert cached.get("is_stack") is False
+        cached = cache.get(_vc_cache_key(api, device_id))
+        assert cached["is_stack"] is False
+        request_count = len(librenms_server.requests)
+        assert get_virtual_chassis_data(api, device_id) == result
+        assert len(librenms_server.requests) == request_count
 
     def test_api_error_result_is_cached(self, librenms_server):
         """API 500 on inventory → detect returns None → empty result still cached."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
         device_id = 201
@@ -699,31 +595,15 @@ class TestNegativeVCCaching:
         # Register a 500 for the root inventory call
         librenms_server.routes[f"/api/v0/inventory/{device_id}"] = (500, {"status": "error", "message": "internal"})
 
-        cache_store = {}
-
-        def mock_cache_set(key, val, timeout=None):
-            cache_store[key] = val
-
-        def mock_cache_get(key):
-            return cache_store.get(key)
-
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.side_effect = mock_cache_get
-            mock_cache.set.side_effect = mock_cache_set
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                result = get_virtual_chassis_data(api, device_id)
+        result = get_virtual_chassis_data(api, device_id)
 
         assert result is not None
         assert result.get("is_stack") is False
-        # Even API failures get cached to suppress repeated hits until TTL expires.
-        assert len(cache_store) == 1
+        assert cache.get(_vc_cache_key(api, device_id))["is_stack"] is False
 
     def test_force_refresh_bypasses_negative_cache(self, librenms_server):
         """force_refresh=True re-fetches even when a negative result is cached."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
         device_id = 202
@@ -736,31 +616,14 @@ class TestNegativeVCCaching:
         # Pre-populate cache with an empty (negative) result.
         empty_cached = {"is_stack": False, "member_count": 0, "members": [], "detection_error": None}
 
-        call_count = {"n": 0}
+        cache_key = _vc_cache_key(api, device_id)
+        cache.set(cache_key, empty_cached, timeout=300)
+        result_cached = get_virtual_chassis_data(api, device_id)
+        assert librenms_server.requests == []
 
-        def mock_cache_get(key):
-            return empty_cached  # always returns cached negative
-
-        cache_set_calls = []
-
-        def mock_cache_set(key, val, timeout=None):
-            cache_set_calls.append((key, val))
-            call_count["n"] += 1
-
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.side_effect = mock_cache_get
-            mock_cache.set.side_effect = mock_cache_set
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                # Normal call — should use cache, NOT call set again
-                result_cached = get_virtual_chassis_data(api, device_id)
-                assert call_count["n"] == 0  # no new set; cache hit returned
-
-                # force_refresh=True — must bypass cache and re-fetch + re-cache
-                result_fresh = get_virtual_chassis_data(api, device_id, force_refresh=True)
-                assert call_count["n"] == 1  # set called once for the re-fetch
+        result_fresh = get_virtual_chassis_data(api, device_id, force_refresh=True)
+        assert librenms_server.requests
+        assert cache.get(cache_key) == result_fresh
 
         assert result_cached.get("is_stack") is False
         assert result_fresh.get("is_stack") is False
@@ -860,7 +723,7 @@ class TestCrossServerCacheIsolation:
 
     def test_different_server_keys_use_isolated_cache_entries(self, librenms_server):
         """Data cached via server-a must not be returned when querying the same device via server-b."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         device_id = 300
 
@@ -873,36 +736,16 @@ class TestCrossServerCacheIsolation:
         member_items = [_chassis(100, "SN-A1", position=1), _chassis(200, "SN-A2", position=2)]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        cache_store = {}
-
-        def mock_cache_set(key, val, timeout=None):
-            cache_store[key] = val
-
-        def mock_cache_get(key):
-            return cache_store.get(key)
-
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
-            mock_cache.get.side_effect = mock_cache_get
-            mock_cache.set.side_effect = mock_cache_set
-            with patch(
-                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
-                return_value="{master}-m{position}",
-            ):
-                # Warm cache via server-a
-                result_a = get_virtual_chassis_data(api_a, device_id)
-
-                # Query same device via server-b — cache must miss (different key)
-                result_b = get_virtual_chassis_data(api_b, device_id)
+        result_a = get_virtual_chassis_data(api_a, device_id)
+        result_b = get_virtual_chassis_data(api_b, device_id)
 
         # server-a result is a 2-member VC
         assert result_a is not None
         assert result_a.get("member_count") == 2
 
-        # server-b was registered with the same mock routes, so it also fetches a 2-member VC.
-        # The key assertion is that TWO separate cache entries exist — one per server_key.
-        server_a_keys = [k for k in cache_store if "server-a" in k]
-        server_b_keys = [k for k in cache_store if "server-b" in k]
-        assert len(server_a_keys) >= 1, "server-a cache entry expected"
-        assert len(server_b_keys) >= 1, "server-b cache entry expected"
-        assert server_a_keys[0] != server_b_keys[0], "cache keys must differ between servers"
+        server_a_key = _vc_cache_key(api_a, device_id)
+        server_b_key = _vc_cache_key(api_b, device_id)
+        assert server_a_key != server_b_key
+        assert cache.get(server_a_key) == result_a
+        assert cache.get(server_b_key) == result_b
         assert result_a is not result_b, "must not return the same cached object for different servers"

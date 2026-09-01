@@ -1,5 +1,7 @@
 """Shared HTML-slicing helpers for template-content tests."""
 
+from contextlib import contextmanager
+
 
 def extract_enclosing_tag(html, marker, tag="<button"):
     """Return the opening ``tag`` of the element that contains ``marker``.
@@ -16,6 +18,7 @@ def extract_enclosing_tag(html, marker, tag="<button"):
     return html[tag_start : html.index(">", tag_start)]
 
 
+@contextmanager
 def patch_move_url_reverse(viewname_suffix, *, resolve):
     """Patch ``django.urls.reverse`` so a move-to-winner viewname looks registered or not.
 
@@ -24,11 +27,9 @@ def patch_move_url_reverse(viewname_suffix, *, resolve):
     ``resolve=False`` raises ``NoReverseMatch`` for it. Every other viewname resolves for real.
     The move URLs are only registered up-stack, so forcing the state here keeps the guard tests
     branch-independent. ``django.urls.reverse`` is the correct target because ``{% url %}``
-    re-imports ``reverse`` from ``django.urls`` at render time. Returns a ``patch()`` context
-    manager.
+    re-imports ``reverse`` from ``django.urls`` at render time.
     """
-    from unittest.mock import patch
-
+    import django.urls
     from django.urls import NoReverseMatch
     from django.urls import reverse as real_reverse
 
@@ -46,27 +47,8 @@ def patch_move_url_reverse(viewname_suffix, *, resolve):
             raise NoReverseMatch(viewname)
         return real_reverse(viewname, *args, **kwargs)
 
-    return patch("django.urls.reverse", _reverse)
-
-
-def open_tags(html, tag):
-    """Return one attribute dict per opening ``tag`` element in ``html``, in document order.
-
-    ``html.parser`` unescapes attribute values, so a rendered ``&amp;`` reads back as ``&``.
-    Use this instead of a substring check when an assertion must hold for EVERY such element:
-    a substring check passes as soon as one element carries the attribute.
-    """
-    from html.parser import HTMLParser
-
-    class _Collector(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.tags = []
-
-        def handle_starttag(self, name, attrs):
-            if name == tag:
-                self.tags.append(dict(attrs))
-
-    collector = _Collector()
-    collector.feed(html)
-    return collector.tags
+    django.urls.reverse = _reverse
+    try:
+        yield
+    finally:
+        django.urls.reverse = real_reverse

@@ -225,9 +225,10 @@ class TestPortStackLagPattern:
             "plugins-api:netbox_librenms_plugin-api:portstacklagpattern-detail",
             args=[response.json()["id"]],
         )
-        response = client.patch(
+        response = client.generic(
+            "PATCH",
             detail_url,
-            {"description": "Updated through API"},
+            data='{"description": "Updated through API"}',
             content_type="application/json",
         )
         assert response.status_code == 200
@@ -374,10 +375,8 @@ class TestMigration0014Preflight:
 
         return SimpleNamespace(connection=connection)
 
-    def test_preflight_lowercases_mixed_case_rows(self):
+    def test_preflight_lowercases_mixed_case_rows(self, monkeypatch):
         """A mixed-case librenms_os an old full_clean-bypassing path left behind is canonicalized to lowercase."""
-        from unittest.mock import patch
-
         from django.db import connection
         from django.db.migrations.executor import MigrationExecutor
 
@@ -394,8 +393,8 @@ class TestMigration0014Preflight:
         # own, so the CI constraint permits it). The preflight must then canonicalize it. Use a
         # distinctive OS name so it can't collide with a migration-seeded default pattern.
         PortStackLagPattern.objects.bulk_create([PortStackLagPattern(librenms_os="ZZOSX", lag_name_pattern=r"^zz\d+$")])
-        with patch.object(historical_model, "full_clean", lambda self, *a, **k: None):
-            self._preflight()(historical_apps, self._schema_editor())
+        monkeypatch.setattr(historical_model, "full_clean", lambda self, *a, **k: None)
+        self._preflight()(historical_apps, self._schema_editor())
         assert PortStackLagPattern.objects.filter(librenms_os="zzosx").exists()
         assert not PortStackLagPattern.objects.filter(librenms_os="ZZOSX").exists()
 
@@ -446,10 +445,8 @@ class TestMigration0014Preflight:
 
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzbad"
 
-    def test_preflight_strips_surrounding_whitespace(self):
+    def test_preflight_strips_surrounding_whitespace(self, monkeypatch):
         """A whitespace-padded librenms_os a bypassing path left behind is canonicalized to .strip().lower() (matching clean()), not left with surrounding spaces behind the Lower()-only constraint."""
-        from unittest.mock import patch
-
         from django.db import connection
         from django.db.migrations.executor import MigrationExecutor
 
@@ -478,8 +475,8 @@ class TestMigration0014Preflight:
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == " ZZWS "
         # Stub the historical model's full_clean so ONLY the migration's rewrite can normalize the
         # row — otherwise a save-time strip could pass this test even if the migration itself is wrong.
-        with patch.object(historical_model, "full_clean", lambda self, *a, **k: None):
-            self._preflight()(historical_apps, self._schema_editor())
+        monkeypatch.setattr(historical_model, "full_clean", lambda self, *a, **k: None)
+        self._preflight()(historical_apps, self._schema_editor())
         # Exact canonical value, not a DB filter: trailing/leading-space equality is collation-fuzzy
         # and would let " zzws " match "zzws".
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzws"

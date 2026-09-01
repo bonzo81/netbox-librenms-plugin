@@ -5,7 +5,20 @@ Phase 2 tests covering validation state updates, model retrieval,
 and selection extraction functions.
 """
 
-from unittest.mock import MagicMock
+import pytest
+from django.test import RequestFactory
+
+from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+
+pytestmark = pytest.mark.django_db
+
+
+def _role(name="Access Switch"):
+    from dcim.models import DeviceRole
+
+    return DeviceRole.objects.create(name=name, slug=name.lower().replace(" ", "-"))
+
 
 # =============================================================================
 # TestGetModelById - 4 tests
@@ -17,50 +30,136 @@ class TestFetchModelById:
 
     def test_fetch_model_by_id_success(self):
         """Return model instance when found."""
-        mock_model_class = MagicMock()
-        mock_instance = MagicMock(id=1, name="Access Switch")
-        mock_model_class.objects.get.return_value = mock_instance
+        from dcim.models import DeviceRole
 
         from netbox_librenms_plugin.import_validation_helpers import fetch_model_by_id
 
-        result = fetch_model_by_id(mock_model_class, 1)
+        role = _role()
+        result = fetch_model_by_id(DeviceRole, role.pk)
 
-        assert result == mock_instance
-        mock_model_class.objects.get.assert_called_once_with(pk=1)
+        assert result == role
 
     def test_fetch_model_by_id_not_found(self):
         """Return None when ID doesn't exist."""
-        mock_model_class = MagicMock()
-        mock_model_class.DoesNotExist = Exception
-        mock_model_class.objects.get.side_effect = mock_model_class.DoesNotExist
+        from dcim.models import DeviceRole
 
         from netbox_librenms_plugin.import_validation_helpers import fetch_model_by_id
 
-        result = fetch_model_by_id(mock_model_class, 999)
+        result = fetch_model_by_id(DeviceRole, 999999)
 
         assert result is None
 
     def test_fetch_model_by_id_invalid_id(self):
         """Handle invalid ID gracefully."""
-        mock_model_class = MagicMock()
-        mock_model_class.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        from dcim.models import DeviceRole
 
         from netbox_librenms_plugin.import_validation_helpers import fetch_model_by_id
 
-        result = fetch_model_by_id(mock_model_class, "not-a-number")
+        result = fetch_model_by_id(DeviceRole, "not-a-number")
 
         assert result is None
 
     def test_fetch_model_by_id_none_id(self):
         """Handle None ID gracefully."""
-        mock_model_class = MagicMock()
+        from dcim.models import DeviceRole
 
         from netbox_librenms_plugin.import_validation_helpers import fetch_model_by_id
 
-        result = fetch_model_by_id(mock_model_class, None)
+        result = fetch_model_by_id(DeviceRole, None)
 
         assert result is None
-        mock_model_class.objects.get.assert_not_called()
+
+
+# =============================================================================
+# TestExtractSelections - 4 tests
+# =============================================================================
+
+
+class TestExtractDeviceSelections:
+    """Test extraction of device selections from request."""
+
+    def test_extract_selections_all_present(self):
+        """All selections extracted from POST request."""
+        from netbox_librenms_plugin.import_validation_helpers import (
+            extract_device_selections,
+        )
+
+        request = RequestFactory().post(
+            "/",
+            {
+                "cluster_1234": "5",
+                "role_1234": "10",
+                "rack_1234": "15",
+            },
+        )
+
+        result = extract_device_selections(request, device_id=1234)
+
+        assert result["cluster_id"] == "5"
+        assert result["role_id"] == "10"
+        assert result["rack_id"] == "15"
+
+    def test_extract_selections_partial(self):
+        """Missing fields return None."""
+        from netbox_librenms_plugin.import_validation_helpers import (
+            extract_device_selections,
+        )
+
+        request = RequestFactory().post(
+            "/",
+            {
+                "role_1234": "10",
+            },
+        )
+
+        result = extract_device_selections(request, device_id=1234)
+
+        assert result["cluster_id"] is None
+        assert result["role_id"] == "10"
+        assert result["rack_id"] is None
+
+    def test_extract_selections_from_get(self):
+        """Selections extracted from GET request."""
+        from netbox_librenms_plugin.import_validation_helpers import (
+            extract_device_selections,
+        )
+
+        request = RequestFactory().get(
+            "/",
+            {
+                "cluster_999": "3",
+                "role_999": "7",
+                "rack_999": "11",
+            },
+        )
+
+        result = extract_device_selections(request, device_id=999)
+
+        assert result["cluster_id"] == "3"
+        assert result["role_id"] == "7"
+        assert result["rack_id"] == "11"
+
+    def test_extract_selections_empty_values(self):
+        """Empty strings handled correctly."""
+        from netbox_librenms_plugin.import_validation_helpers import (
+            extract_device_selections,
+        )
+
+        request = RequestFactory().post(
+            "/",
+            {
+                "cluster_1234": "",
+                "role_1234": "",
+                "rack_1234": "",
+            },
+        )
+
+        result = extract_device_selections(request, device_id=1234)
+
+        # Empty strings are returned as-is (caller decides meaning)
+        assert result["cluster_id"] == ""
+        assert result["role_id"] == ""
+        assert result["rack_id"] == ""
 
 
 # =============================================================================
@@ -77,7 +176,7 @@ class TestValidationStateUpdates:
             apply_role_to_validation,
         )
 
-        mock_role = MagicMock(id=1, name="Access Switch")
+        role = _role("Access Role")
         validation = {
             "device_role": {"found": False, "role": None},
             "issues": ["Device role must be manually selected before import"],
@@ -87,10 +186,10 @@ class TestValidationStateUpdates:
             "device_type": {"found": True},
         }
 
-        apply_role_to_validation(validation, mock_role, is_vm=False)
+        apply_role_to_validation(validation, role, is_vm=False)
 
         assert validation["device_role"]["found"] is True
-        assert validation["device_role"]["role"] == mock_role
+        assert validation["device_role"]["role"] == role
 
     def test_apply_role_to_validation_clears_issue(self):
         """Selecting role should clear 'role' related validation issue."""
@@ -98,7 +197,7 @@ class TestValidationStateUpdates:
             apply_role_to_validation,
         )
 
-        mock_role = MagicMock(id=1, name="Access Switch")
+        role = _role("Cleared Role")
         validation = {
             "device_role": {"found": False, "role": None},
             "issues": ["Device role must be manually selected before import"],
@@ -108,7 +207,7 @@ class TestValidationStateUpdates:
             "device_type": {"found": True},
         }
 
-        apply_role_to_validation(validation, mock_role, is_vm=False)
+        apply_role_to_validation(validation, role, is_vm=False)
 
         assert len(validation["issues"]) == 0
 
@@ -118,7 +217,7 @@ class TestValidationStateUpdates:
             apply_cluster_to_validation,
         )
 
-        mock_cluster = MagicMock(id=1, name="VMware Cluster 1")
+        cluster = make_vm("validation-cluster").cluster
         validation = {
             "cluster": {"found": False, "cluster": None},
             "issues": ["VM placement requires a matching site, selected cluster, or selected host device"],
@@ -126,10 +225,10 @@ class TestValidationStateUpdates:
             "is_ready": False,
         }
 
-        apply_cluster_to_validation(validation, mock_cluster)
+        apply_cluster_to_validation(validation, cluster)
 
         assert validation["cluster"]["found"] is True
-        assert validation["cluster"]["cluster"] == mock_cluster
+        assert validation["cluster"]["cluster"] == cluster
         assert validation["vm_placement"] == {
             "method": "cluster",
             "found": True,
@@ -144,17 +243,20 @@ class TestValidationStateUpdates:
             apply_rack_to_validation,
         )
 
-        mock_rack = MagicMock(id=1, name="Rack A1")
+        from dcim.models import Rack
+
+        device = make_device("validation-rack-device")
+        rack = Rack.objects.create(name="Rack A1", site=device.site, status="active")
         validation = {
             "issues": [],
             "can_import": True,
             "is_ready": True,
         }
 
-        apply_rack_to_validation(validation, mock_rack)
+        apply_rack_to_validation(validation, rack)
 
         assert validation["rack"]["found"] is True
-        assert validation["rack"]["rack"] == mock_rack
+        assert validation["rack"]["rack"] == rack
 
     def test_remove_validation_issue_single(self):
         """Remove single issue by keyword."""

@@ -6,23 +6,19 @@ scoped to that same server, otherwise a multi-server VC whose viewed member has 
 ``librenms_id`` is renamed from the WRONG LibreNMS device (the server-agnostic
 "any member with any id" fallback picks a sibling linked to a different server).
 
-These tests drive the real ``get_librenms_sync_device`` against a real DB Virtual Chassis
-and the real ``settings.PLUGINS_CONFIG`` path (via ``override_settings``); only the LibreNMS
-HTTP boundary (``LibreNMSAPI.get_librenms_id``) is faked, and it records which device it was
-asked to resolve.
+These tests drive the real ``get_librenms_sync_device`` against a real DB Virtual Chassis,
+the real ``settings.PLUGINS_CONFIG`` path, and a loopback LibreNMS server.
 """
 
 import copy
-from unittest.mock import MagicMock, patch
 
 import pytest
 from django.conf import settings
 from django.test import override_settings
 
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tests.conftest import make_device
-
-
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
@@ -30,6 +26,14 @@ TWO_SERVERS = {
     "default": {"librenms_url": "https://default.example.com", "api_token": "default-token"},
     "siteB": {"librenms_url": "https://siteb.example.com", "api_token": "siteb-token"},
 }
+
+
+@pytest.fixture
+def librenms_server(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        yield server
 
 
 def _plugins_config_with_servers(servers):
@@ -43,7 +47,7 @@ def _plugins_config_with_servers(servers):
 
 @pytest.mark.django_db
 class TestUpdateDeviceNameServerScoping:
-    def test_vc_sync_device_resolved_for_posted_server(self):
+    def test_vc_sync_device_resolved_for_posted_server(self, librenms_server):
         """A POST scoped to ``siteB`` must resolve the siteB-linked sibling, not the default one.
 
         VC layout (viewed member has no own librenms_id):
@@ -79,26 +83,14 @@ class TestUpdateDeviceNameServerScoping:
         viewed.vc_position = 3
         viewed.save()  # no librenms_id -> delegates to the VC sync device
 
-        recorded = {}
+        servers = {key: {"librenms_url": librenms_server.url, "api_token": "test-token"} for key in TWO_SERVERS}
+        librenms_server.device_info_response(device_id=20, hostname="siteb-source", serial="SITEB20")
+        request = make_request("post", {"server_key": "siteB"})
 
-        def _capture(device_arg, *args, **kwargs):
-            recorded["device_pk"] = getattr(device_arg, "pk", None)
-            return None  # bail the view right after resolution; we only assert the target
+        with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(servers)):
+            response = _post(UpdateDeviceNameView(), request, pk=viewed.pk)
 
-        view = object.__new__(UpdateDeviceNameView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        request = MagicMock()
-        request.POST = {"server_key": "siteB"}
-
-        with (
-            override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(TWO_SERVERS)),
-            patch.object(LibreNMSAPI, "get_librenms_id", side_effect=_capture),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect_with_server_key"),
-        ):
-            _post(view, request, pk=viewed.pk)
-
-        assert recorded["device_pk"] == sib_siteB.pk, (
-            "VC sync-device resolution was not scoped to the POSTed server_key "
-            f"(expected siteB sibling pk={sib_siteB.pk}, got pk={recorded['device_pk']})"
-        )
+        assert response.status_code == 302
+        assert [entry["path"] for entry in librenms_server.requests] == ["/api/v0/devices/20"]
+        viewed.refresh_from_db()
+        assert viewed.name == "siteb-source-M3"

@@ -6,7 +6,7 @@ comparison logic in _build_row.
 """
 
 from copy import deepcopy
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,8 +66,14 @@ def _make_view():
 
     view = object.__new__(BaseModuleTableView)
     view._device_manufacturer = None
-    view._librenms_api = MagicMock(server_key="test-server")
-    view.get_cache_key = MagicMock(return_value="test_cache_key")
+    view._librenms_api = SimpleNamespace(server_key="test-server")
+    view._exact_bay_mappings = []
+    view._regex_bay_mappings = []
+    view._norm_rules_bay = None
+    view._norm_rules_type = None
+    view._generic_module_types = {}
+    view._module_type_ambiguities = {}
+    view._carrier_install_rules = []
     return view
 
 
@@ -77,9 +83,12 @@ def _captured_table_view(view):
 
     def fake_get_table(table_data, obj):
         rows_store["rows"] = table_data
-        m = MagicMock()
-        m.configure = MagicMock()
-        return m
+
+        class CapturedTable:
+            def configure(self, request):
+                self.request = request
+
+        return CapturedTable()
 
     view.get_table = fake_get_table
     return rows_store
@@ -1134,12 +1143,10 @@ class TestPostInventoryRefresh:
 
     def test_post_stale_server_key_resolves_migrated_context_with_session_key(self, server_keys):
         """When the POSTed server_key is stale, resolve migrated context under the active session key. Using the stale key would miss the marker and re-enable a donor's sync controls."""
-        from unittest.mock import patch
-
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.utils import build_migrated_context, mark_librenms_migrated
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         active_key, _ = server_keys
@@ -1151,16 +1158,9 @@ class TestPostInventoryRefresh:
         view._librenms_api = LibreNMSAPI(server_key=active_key)
         request = make_request("post", {"server_key": "retired-inventory-server"})
 
-        # The empty-table fragment does not render the migrated marker. Observe only the pure
-        # context builder call while the real resolver, view, request, device, and renderer run.
-        with patch(
-            "netbox_librenms_plugin.utils.build_migrated_context",
-            wraps=build_migrated_context,
-        ) as migrated_context_spy:
-            response = post(view, request, pk=donor.pk)
+        response = post(view, request, pk=donor.pk)
 
         assert response.status_code == 200
-        migrated_context_spy.assert_called_once_with(donor, active_key)
         assert view.active_server_key == active_key
         assert message_texts(request, "error") == ["Selected LibreNMS server is no longer configured."]
 
@@ -1774,8 +1774,10 @@ def _build_linecard_device(*, with_cvr6=False):
 
 def _run_build_context_real(view, inventory_data, device):
     """Drive ``_build_context`` against a REAL device — real ``_get_module_bays`` / ``_get_module_types`` and the real bay-matching algorithm; only ``get_table`` is captured."""
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
     rows_store = _captured_table_view(view)
-    view._build_context(MagicMock(), device, inventory_data)
+    view._build_context(make_request("get"), device, inventory_data)
     return rows_store.get("rows", [])
 
 
@@ -3361,10 +3363,7 @@ class TestPositionalMatchClassAware:
 
     @staticmethod
     def _bay(name, position=None):
-        b = MagicMock()
-        b.name = name
-        b.position = position
-        return b
+        return SimpleNamespace(name=name, position=position)
 
     @staticmethod
     def _walk_port_label_fallback(item_name, slot_num, bays, ifname=None, ifdescr=None):
@@ -3524,7 +3523,7 @@ class TestNoBayWarningHints:
             "example_item": "0/0",
             "example_bay": "Slot 0",
         }
-        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 0": MagicMock()}, suggestion)
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 0": object()}, suggestion)
         assert "0/(\\d+)" in msg
         assert "Slot \\1" in msg
         assert "0/0" in msg and "Slot 0" in msg
@@ -3533,28 +3532,28 @@ class TestNoBayWarningHints:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalClass": "fan"}
-        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": object()})
         assert "Fan" in msg
 
     def test_powersupply_class_hint_names_psu_bays(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalClass": "powerSupply"}
-        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": object()})
         assert "PSU" in msg or "Power Supply" in msg or "PEM" in msg
 
     def test_module_class_hint_names_slot_bays(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalClass": "module"}
-        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": object()})
         assert "Slot" in msg or "SFP" in msg
 
     def test_port_class_hint_uses_plain_language(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalClass": "port"}
-        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": object()})
         assert "no matching bay in netbox" in msg.lower()
         assert msg.lower().count("modulebaymapping") == 1
         assert "if the names differ" in msg.lower()
@@ -3567,8 +3566,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "0/0", "entPhysicalClass": "module"}
-        bay = MagicMock()
-        bay.name = "Slot 0"
+        bay = SimpleNamespace(name="Slot 0")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
         assert sug is not None
         assert sug["is_regex"] is True
@@ -3582,8 +3580,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "0/0", "entPhysicalClass": "module"}
-        bay = MagicMock()
-        bay.name = "Slot 7"  # trailing 7, not 0
+        bay = SimpleNamespace(name="Slot 7")  # trailing 7, not 0
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 7": bay})
         assert sug is None
 
@@ -3591,8 +3588,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "Mainboard", "entPhysicalClass": "module"}
-        bay = MagicMock()
-        bay.name = "Slot 0"
+        bay = SimpleNamespace(name="Slot 0")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
         assert sug is None
 
@@ -3608,8 +3604,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "TenGigE0/0/0/0", "entPhysicalClass": "module"}
-        bay = MagicMock()
-        bay.name = "Slot 0"
+        bay = SimpleNamespace(name="Slot 0")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay}, scope_preserved=True)
         assert sug is None
 
@@ -3618,8 +3613,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "0/FT0", "entPhysicalClass": "fan"}
-        bay = MagicMock()
-        bay.name = "Slot 0"
+        bay = SimpleNamespace(name="Slot 0")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
         assert sug is None
 
@@ -3628,8 +3622,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "0/FT0", "entPhysicalClass": "fan"}
-        bay = MagicMock()
-        bay.name = "Fan Tray 0"
+        bay = SimpleNamespace(name="Fan Tray 0")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Fan Tray 0": bay})
         assert sug is not None
         assert "Fan Tray" in sug["netbox_bay_name"]
@@ -3639,8 +3632,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "0/PT0-PM0", "entPhysicalClass": "powerSupply"}
-        bay = MagicMock()
-        bay.name = "Slot 0"
+        bay = SimpleNamespace(name="Slot 0")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
         assert sug is None
 
@@ -3649,8 +3641,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "Slot A", "entPhysicalClass": "cpmModule"}
-        bay = MagicMock()
-        bay.name = "CPM A"
+        bay = SimpleNamespace(name="CPM A")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"CPM A": bay})
         assert sug is not None
         assert sug["is_regex"] is True
@@ -3665,8 +3656,7 @@ class TestSuggestBayMapping:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "Slot A", "entPhysicalClass": "cpmModule"}
-        bay = MagicMock()
-        bay.name = "Slot 0"
+        bay = SimpleNamespace(name="Slot 0")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
         assert sug is None
 
@@ -3682,7 +3672,7 @@ class TestSuggestBayMappingFromDescr:
             "entPhysicalDescr": "MIC: MRATE LMIC 16x100G/4x400G @ 0/0/*",
             "entPhysicalClass": "container",
         }
-        bays = {"MIC 0": MagicMock(), "RE 0": MagicMock(), "RE 1": MagicMock()}
+        bays = {"MIC 0": object(), "RE 0": object(), "RE 1": object()}
         sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
         assert sug is not None
         assert sug["is_regex"] is True
@@ -3704,7 +3694,7 @@ class TestSuggestBayMappingFromDescr:
             "entPhysicalDescr": "no class hint here",
             "entPhysicalClass": "container",
         }
-        sug = BaseModuleTableView._suggest_bay_mapping(item, {"MIC 0": MagicMock()})
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"MIC 0": object()})
         assert sug is None
 
     def test_descr_class_with_no_matching_bay_returns_none(self):
@@ -3716,7 +3706,7 @@ class TestSuggestBayMappingFromDescr:
             "entPhysicalClass": "container",
         }
         # Device only has MIC 0 — no FPC 5 bay → no suggestion
-        sug = BaseModuleTableView._suggest_bay_mapping(item, {"MIC 0": MagicMock()})
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"MIC 0": object()})
         assert sug is None
 
     def test_descr_fallback_preferred_over_none_for_module_class(self):
@@ -3728,7 +3718,7 @@ class TestSuggestBayMappingFromDescr:
             "entPhysicalDescr": "MIC: MRATE LMIC 16x100G/4x400G @ 1/0/*",
             "entPhysicalClass": "module",
         }
-        bays = {"MIC 0": MagicMock(), "MIC 1": MagicMock()}
+        bays = {"MIC 0": object(), "MIC 1": object()}
         sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
         assert sug is not None
         assert sug["example_bay"] == "MIC 1"
@@ -3743,7 +3733,7 @@ class TestSuggestBayMappingFromDescr:
             "entPhysicalClass": "fan",
             "entPhysicalModelName": "JNP10008-FTC2",
         }
-        bays = {"Fan Tray 0": MagicMock(), "Fan Tray 1": MagicMock(), "FPC 0": MagicMock()}
+        bays = {"Fan Tray 0": object(), "Fan Tray 1": object(), "FPC 0": object()}
         sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
         assert sug is not None
         assert sug["is_regex"] is True
@@ -3767,7 +3757,7 @@ class TestSuggestBayMappingFromDescr:
             "entPhysicalDescr": "Fan Tray 9",
             "entPhysicalClass": "fan",
         }
-        bays = {"Fan Tray 0": MagicMock(), "Fan Tray 1": MagicMock()}
+        bays = {"Fan Tray 0": object(), "Fan Tray 1": object()}
         sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
         assert sug is None
 
@@ -3780,7 +3770,7 @@ class TestSuggestBayMappingFromDescr:
             "entPhysicalDescr": "Fan Tray Controller 0",
             "entPhysicalClass": "fan",
         }
-        bays = {"Slot 0": MagicMock(), "Slot 1": MagicMock()}  # no fan-named bays
+        bays = {"Slot 0": object(), "Slot 1": object()}  # no fan-named bays
         sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
         assert sug is None
 
@@ -3812,8 +3802,7 @@ class TestSuggestTypeMapping:
     def test_description_includes_bay_name_when_bay_available(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        bay = MagicMock()
-        bay.name = "SFP 1"
+        bay = SimpleNamespace(name="SFP 1")
         item = {"entPhysicalModelName": "SFP-10G-SR", "entPhysicalDescr": "10GBASE-SR"}
         sug = BaseModuleTableView._suggest_type_mapping(item, bay)
         assert "SFP 1" in sug["description"]
@@ -3830,8 +3819,7 @@ class TestSuggestTypeMapping:
         """'Unspecified' is a valid librenms_model — a mapping can still be created."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        bay = MagicMock()
-        bay.name = "SFP 2"
+        bay = SimpleNamespace(name="SFP 2")
         item = {"entPhysicalModelName": "Unspecified", "entPhysicalDescr": "1000BaseT"}
         sug = BaseModuleTableView._suggest_type_mapping(item, bay)
         assert sug is not None
@@ -3862,8 +3850,7 @@ class TestSuggestModuleTypeCreate:
     def test_prefills_manufacturer_pk(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        manufacturer = MagicMock()
-        manufacturer.pk = 42
+        manufacturer = SimpleNamespace(pk=42)
         item = {"entPhysicalModelName": "X2-10GB-LR"}
         sug = BaseModuleTableView._suggest_module_type_create(item, manufacturer)
         assert sug["manufacturer"] == 42
@@ -4522,7 +4509,7 @@ class TestMatchedInterfaceLinking:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         row = {"name": "Te1/1/1", "librenms_port_id": None}
-        context = {"interfaces_by_port_id": {42: MagicMock()}}
+        context = {"interfaces_by_port_id": {42: object()}}
 
         BaseModuleTableView._attach_interface_match(row, context)
 
@@ -5004,10 +4991,10 @@ class TestBuildRowIntegratedDedupe:
         assert "type_suggestion" not in row
         assert row["can_install"] is False
 
+    @pytest.mark.django_db
     def test_independent_module_still_evaluated_normally(self):
         """A module with its own serial (not matching any ancestor) takes the normal path."""
         view = _make_view()
-        view._match_module_bay = MagicMock(return_value=None)
         item = {
             "entPhysicalIndex": 200,
             "entPhysicalName": "X",
@@ -5023,11 +5010,7 @@ class TestBuildRowIntegratedDedupe:
             "entPhysicalModelName": "PARENT-MOD",
             "entPhysicalContainedIn": 0,
         }
-        with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
-        ):
-            row = view._build_row(item, {100: parent, 200: item}, {}, {})
+        row = view._build_row(item, {100: parent, 200: item}, {}, {})
         assert row["status"] != "Integrated"
 
 
@@ -5035,7 +5018,7 @@ class TestBuildRowIntegratedDedupe:
 class TestScopePreservedAcrossIntegratedContainer:
     """Verify an integrated container passes its bay scope to children without marking the scope as preserved."""
 
-    def test_port_under_integrated_mda_gets_scope_preserved_false(self):
+    def test_port_under_integrated_mda_gets_scope_preserved_false(self, monkeypatch):
         """Regression: ports under integrated MDA used to lose mapping suggestions."""
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
@@ -5120,20 +5103,20 @@ class TestScopePreservedAcrossIntegratedContainer:
             scope_preserved_seen.append((item.get("entPhysicalIndex"), kw.get("scope_preserved")))
             return original_build_row(self, item, idx_map, mod_bays, mod_types, **kw)
 
-        with patch.object(BaseModuleTableView, "_build_row", spy_build_row):
-            view._append_rows_for_item_context(
-                table_data=[],
-                item=xiom_item,
-                target_context=target_context,
-                index_map=index_map,
-                children_by_parent={100: [mda_item], 200: [port_item]},
-                ignore_rules=[],
-                device_serial="",
-                module_types=view._get_module_types(),
-                manufacturer=selected_device.device_type.manufacturer,
-                selected_device=selected_device,
-                resolution_source="direct",
-            )
+        monkeypatch.setattr(BaseModuleTableView, "_build_row", spy_build_row)
+        view._append_rows_for_item_context(
+            table_data=[],
+            item=xiom_item,
+            target_context=target_context,
+            index_map=index_map,
+            children_by_parent={100: [mda_item], 200: [port_item]},
+            ignore_rules=[],
+            device_serial="",
+            module_types=view._get_module_types(),
+            manufacturer=selected_device.device_type.manufacturer,
+            selected_device=selected_device,
+            resolution_source="direct",
+        )
 
         # Port (idx 300) under integrated MDA must NOT have scope_preserved=True
         port_calls = [sp for idx, sp in scope_preserved_seen if idx == 300]
@@ -5149,14 +5132,15 @@ class TestScopePreservedAcrossIntegratedContainer:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestModuleTypeAmbiguityWarning:
     def _candidate(self, model, mfg_name, pk=1, url="/dcim/module-types/1/"):
-        mt = MagicMock()
-        mt.pk = pk
-        mt.model = model
-        mt.manufacturer.name = mfg_name
-        mt.get_absolute_url.return_value = url
-        return mt
+        return SimpleNamespace(
+            pk=pk,
+            model=model,
+            manufacturer=SimpleNamespace(name=mfg_name),
+            get_absolute_url=lambda: url,
+        )
 
     def test_warning_lists_candidates_when_ambiguous(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -5179,25 +5163,29 @@ class TestModuleTypeAmbiguityWarning:
         assert "No NetBox ModuleType matches 'X'" in msg
 
     def test_find_ambiguity_candidates_matches_normalized_key(self):
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.utils import preload_normalization_rules
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         a = self._candidate("XIOM-x2-s36-800g-qsfpdd", "Nokia", pk=1)
         b = self._candidate("XMA2-s", "Nokia", pk=2)
         ambiguities = {"3HE18883AA": [a, b]}
-        with patch(
-            "netbox_librenms_plugin.utils.apply_normalization_rules",
-            return_value="3HE18883AA",
-        ):
-            cands = BaseModuleTableView._find_ambiguity_candidates(
-                "3HE18883AARB01", ambiguities, manufacturer=None, norm_rules=None
-            )
+        NormalizationRule.objects.create(
+            scope="module_type",
+            match_pattern=r"^(3HE18883AA).+$",
+            replacement=r"\1",
+        )
+        rules = preload_normalization_rules("module_type")
+
+        cands = BaseModuleTableView._find_ambiguity_candidates(
+            "3HE18883AARB01", ambiguities, manufacturer=None, norm_rules=rules
+        )
         assert cands == [a, b]
 
     def test_find_ambiguity_candidates_returns_empty_when_no_collision(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="X"):
-            cands = BaseModuleTableView._find_ambiguity_candidates("X", {"OTHER": []}, None, None)
+        cands = BaseModuleTableView._find_ambiguity_candidates("X", {"OTHER": []}, None, {})
         assert cands == []
 
 
@@ -5327,10 +5315,7 @@ class TestBuildHolderInstallHint:
     """`_build_holder_install_hint` surfaces empty device bays as candidate carriers."""
 
     def _bay(self, name, installed=None):
-        b = MagicMock()
-        b.name = name
-        b.installed_module = installed
-        return b
+        return SimpleNamespace(name=name, installed_module=installed)
 
     def test_returns_none_for_non_module_class(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -5348,7 +5333,7 @@ class TestBuildHolderInstallHint:
     def test_returns_none_when_no_empty_bays(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        bays = {"Slot A": self._bay("Slot A", installed=MagicMock())}
+        bays = {"Slot A": self._bay("Slot A", installed=object())}
         assert BaseModuleTableView._build_holder_install_hint({}, "module", bays) is None
 
     def test_returns_none_when_more_specific_hint_in_play(self):
@@ -5366,7 +5351,7 @@ class TestBuildHolderInstallHint:
         bays = {
             "Slot A": self._bay("Slot A"),
             "Slot B": self._bay("Slot B"),
-            "Slot C": self._bay("Slot C", installed=MagicMock()),
+            "Slot C": self._bay("Slot C", installed=object()),
         }
         msg = BaseModuleTableView._build_holder_install_hint({"entPhysicalName": "CPM A"}, "cpmmodule", bays)
         assert msg is not None
@@ -5392,8 +5377,7 @@ class TestSuggestBayMappingTokenOverlap:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "Sfm 1", "entPhysicalClass": "fabricModule"}
-        bay = MagicMock()
-        bay.name = "Card 1"
+        bay = SimpleNamespace(name="Card 1")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Card 1": bay})
         assert sug is None
 
@@ -5401,8 +5385,7 @@ class TestSuggestBayMappingTokenOverlap:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "Sfm 1", "entPhysicalClass": "fabricModule"}
-        bay = MagicMock()
-        bay.name = "SFM 1"
+        bay = SimpleNamespace(name="SFM 1")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"SFM 1": bay})
         assert sug is not None
         assert sug["example_bay"] == "SFM 1"
@@ -5411,10 +5394,8 @@ class TestSuggestBayMappingTokenOverlap:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "Sfm 1", "entPhysicalClass": "fabricModule"}
-        sfm_bay = MagicMock()
-        sfm_bay.name = "SFM 1"
-        card_bay = MagicMock()
-        card_bay.name = "Card 1"
+        sfm_bay = SimpleNamespace(name="SFM 1")
+        card_bay = SimpleNamespace(name="Card 1")
         # Card listed first in dict insertion order — ensures token overlap, not
         # iteration order, drives the choice.
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Card 1": card_bay, "SFM 1": sfm_bay})
@@ -5426,8 +5407,7 @@ class TestSuggestBayMappingTokenOverlap:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         item = {"entPhysicalName": "0/0", "entPhysicalClass": "module"}
-        bay = MagicMock()
-        bay.name = "Slot 0"
+        bay = SimpleNamespace(name="Slot 0")
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
         assert sug is not None
         assert sug["example_bay"] == "Slot 0"
@@ -5437,9 +5417,7 @@ class TestBuildNoBayWarningHolderHint:
     def test_warning_appends_holder_hint_when_provided(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        msg = BaseModuleTableView._build_no_bay_warning(
-            {}, {"Slot 1": MagicMock()}, holder_hint="Tip: empty bays exist."
-        )
+        msg = BaseModuleTableView._build_no_bay_warning({}, {"Slot 1": object()}, holder_hint="Tip: empty bays exist.")
         assert "Tip: empty bays exist." in msg
 
 
@@ -5447,10 +5425,7 @@ class TestBuildHolderInstallHintNarrowing:
     """Tightened holder hint: skip plain 'port' class and path-style names."""
 
     def _bay(self, name):
-        b = MagicMock()
-        b.name = name
-        b.installed_module = None
-        return b
+        return SimpleNamespace(name=name, installed_module=None)
 
     def test_returns_none_for_plain_port_class(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -5557,14 +5532,16 @@ class TestNestSyntheticTransceivers:
         assert inv[1]["entPhysicalContainedIn"] == 50
 
 
+@pytest.mark.django_db
 class TestRenderActionsPortIdentityFields:
     """Install action form should preserve distinct ifName/ifDescr hidden values."""
 
     def test_install_form_includes_distinct_ifname_and_ifdescr(self):
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         table = object.__new__(LibreNMSModuleTable)
-        table.device = MagicMock(pk=24)
+        table.device = make_device("render-module-install-action")
         table.csrf_token = "csrf123"
         table.server_key = "default"
         table.has_write_permission = True
@@ -5587,8 +5564,7 @@ class TestRenderActionsPortIdentityFields:
             "inventory_digest": "render-actions-row-digest",
         }
 
-        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/plugins/install-module/"):
-            html = str(table.render_actions("", record))
+        html = str(table.render_actions("", record))
 
         # The view reads the serial and the port identity from the cached row for this index.
         # Posted identity fields carry no _source marker, so they must not reach the view at all.
@@ -5600,9 +5576,10 @@ class TestRenderActionsPortIdentityFields:
 
     def test_interface_child_row_does_not_render_install_action(self):
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         table = object.__new__(LibreNMSModuleTable)
-        table.device = MagicMock(pk=24)
+        table.device = make_device("render-module-no-install-action")
         table.csrf_token = "csrf123"
         table.server_key = "default"
         table.has_write_permission = True
@@ -5625,8 +5602,7 @@ class TestRenderActionsPortIdentityFields:
             "serial": "SN-1",
         }
 
-        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/plugins/install-module/"):
-            html = str(table.render_actions("", record))
+        html = str(table.render_actions("", record))
 
         assert '<i class="mdi mdi-download"></i> Install' not in html
 

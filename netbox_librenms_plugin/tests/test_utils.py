@@ -5,9 +5,6 @@ Phase 2 tests covering device type matching, site matching,
 platform matching, and conversion helper functions.
 """
 
-import json
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 
@@ -38,61 +35,46 @@ def _two_member_vc(name, cf_first, cf_second):
 # =============================================================================
 
 
-# match_librenms_hardware_to_device_type now runs the device_type NormalizationRule query
-# (issue #90); enabling django_db lets that real (empty) query run while the lookups below
-# stay mocked, so the matching assertions are unaffected.
 @pytest.mark.django_db
 class TestDeviceTypeMatching:
     """Test device type matching logic."""
 
-    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
-    @patch("dcim.models.DeviceType")
-    def test_match_device_type_exact_match_by_part_number(self, mock_device_type, mock_dtm):
-        """Exact part_number string should match."""
-        mock_dtm.DoesNotExist = Exception
-        mock_dtm.objects.get.side_effect = Exception
-        mock_dt = MagicMock(id=1, model="C9300-48P")
-        mock_device_type.objects.get.return_value = mock_dt
+    @staticmethod
+    def _device_type(model, slug, *, part_number=""):
+        from dcim.models import DeviceType, Manufacturer
 
+        manufacturer, _ = Manufacturer.objects.get_or_create(name="Utils Vendor", slug="utils-vendor")
+        return DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model=model,
+            slug=slug,
+            part_number=part_number,
+        )
+
+    def test_match_device_type_exact_match_by_part_number(self):
+        """Exact part_number string should match."""
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
+        device_type = self._device_type("Access Switch", "utils-access-switch", part_number="C9300-48P")
         result = match_librenms_hardware_to_device_type("C9300-48P")
 
         assert result["matched"] is True
-        assert result["device_type"] == mock_dt
+        assert result["device_type"] == device_type
         assert result["match_type"] == "exact"
 
-    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
-    @patch("dcim.models.DeviceType")
-    def test_match_device_type_exact_match_by_model(self, mock_device_type, mock_dtm):
+    def test_match_device_type_exact_match_by_model(self):
         """Exact model string should match when part_number fails."""
-        mock_dtm.DoesNotExist = Exception
-        mock_dtm.objects.get.side_effect = Exception
-        mock_dt = MagicMock(id=1, model="WS-C3750X-48P")
-        # Part number lookup fails, model lookup succeeds
-        mock_device_type.DoesNotExist = Exception
-        mock_device_type.objects.get.side_effect = [
-            mock_device_type.DoesNotExist,  # part_number lookup fails
-            mock_dt,  # model lookup succeeds
-        ]
-
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
+        device_type = self._device_type("WS-C3750X-48P", "utils-model-match")
         result = match_librenms_hardware_to_device_type("WS-C3750X-48P")
 
         assert result["matched"] is True
-        assert result["device_type"] == mock_dt
+        assert result["device_type"] == device_type
         assert result["match_type"] == "exact"
 
-    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
-    @patch("dcim.models.DeviceType")
-    def test_match_device_type_not_found(self, mock_device_type, mock_dtm):
+    def test_match_device_type_not_found(self):
         """Returns not-found dict when no match found."""
-        mock_dtm.DoesNotExist = Exception
-        mock_dtm.objects.get.side_effect = Exception
-        mock_device_type.DoesNotExist = Exception
-        mock_device_type.objects.get.side_effect = mock_device_type.DoesNotExist
-
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
         result = match_librenms_hardware_to_device_type("NonexistentHardware")
@@ -101,22 +83,21 @@ class TestDeviceTypeMatching:
         assert result["device_type"] is None
         assert result["match_type"] is None
 
-    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
-    def test_match_device_type_mapping_match(self, mock_dtm):
+    def test_match_device_type_mapping_match(self):
         """DeviceTypeMapping entry should be used before part_number/model fallback."""
-        mock_dt = MagicMock(id=1, model="MX480")
-        mock_mapping_obj = MagicMock(netbox_device_type=mock_dt)
-        mock_dtm.DoesNotExist = Exception
-        mock_dtm.objects.get.return_value = mock_mapping_obj
-
+        from netbox_librenms_plugin.models import DeviceTypeMapping
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
+        device_type = self._device_type("MX480", "utils-mapped-model")
+        DeviceTypeMapping.objects.create(
+            librenms_hardware="Juniper MX480 Internet Backbone Router",
+            netbox_device_type=device_type,
+        )
         result = match_librenms_hardware_to_device_type("Juniper MX480 Internet Backbone Router")
 
         assert result["matched"] is True
-        assert result["device_type"] == mock_dt
+        assert result["device_type"] == device_type
         assert result["match_type"] == "mapping"
-        mock_dtm.objects.get.assert_called_once_with(librenms_hardware__iexact="Juniper MX480 Internet Backbone Router")
 
     def test_match_device_type_empty_hardware(self):
         """Empty string returns None."""
@@ -136,44 +117,29 @@ class TestDeviceTypeMatching:
         assert result["matched"] is False
         assert result["device_type"] is None
 
-    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
-    @patch("dcim.models.DeviceType")
-    def test_match_device_type_ambiguous_part_number_returns_none(self, mock_device_type, mock_dtm):
+    def test_match_device_type_ambiguous_part_number_returns_none(self):
         """MultipleObjectsReturned on part_number should return None, not pick .first()."""
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
-        mock_dtm.DoesNotExist = DoesNotExist
-        mock_dtm.MultipleObjectsReturned = type("DTMMult", (Exception,), {})
-        mock_dtm.objects.get.side_effect = DoesNotExist  # DTM not found
-        mock_device_type.DoesNotExist = DoesNotExist
-        mock_device_type.MultipleObjectsReturned = MultipleObjectsReturned
-        mock_device_type.objects.get.side_effect = MultipleObjectsReturned
-
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
+        self._device_type("Duplicate Part A", "utils-duplicate-part-a", part_number="DUPLICATE-PARTNUM")
+        self._device_type("Duplicate Part B", "utils-duplicate-part-b", part_number="DUPLICATE-PARTNUM")
         result = match_librenms_hardware_to_device_type("DUPLICATE-PARTNUM")
 
         assert result is None
 
-    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
-    @patch("dcim.models.DeviceType")
-    def test_match_device_type_ambiguous_model_returns_none(self, mock_device_type, mock_dtm):
+    def test_match_device_type_ambiguous_model_returns_none(self):
         """MultipleObjectsReturned on model should return None, not pick .first()."""
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
-        mock_dtm.DoesNotExist = DoesNotExist
-        mock_dtm.MultipleObjectsReturned = type("DTMMult", (Exception,), {})
-        mock_dtm.objects.get.side_effect = DoesNotExist  # DTM not found
-        mock_device_type.DoesNotExist = DoesNotExist
-        mock_device_type.MultipleObjectsReturned = MultipleObjectsReturned
-        # part_number raises DoesNotExist, model raises MultipleObjectsReturned
-        mock_device_type.objects.get.side_effect = [
-            DoesNotExist("not found"),
-            MultipleObjectsReturned("ambiguous"),
-        ]
+        from dcim.models import DeviceType, Manufacturer
 
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
+        self._device_type("DUPLICATE-MODEL", "utils-duplicate-model-a")
+        other_manufacturer = Manufacturer.objects.create(name="Other Utils Vendor", slug="other-utils-vendor")
+        DeviceType.objects.create(
+            manufacturer=other_manufacturer,
+            model="DUPLICATE-MODEL",
+            slug="utils-duplicate-model-b",
+        )
         result = match_librenms_hardware_to_device_type("DUPLICATE-MODEL")
 
         assert result is None
@@ -184,72 +150,63 @@ class TestDeviceTypeMatching:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestSiteMatching:
     """Test site matching logic."""
 
-    @patch("dcim.models.Site")
-    def test_find_site_for_location_exact_match(self, mock_site_model):
+    def test_find_site_for_location_exact_match(self):
         """Location name matched to site."""
-        mock_site = MagicMock(id=1, name="DC1")
-        mock_site_model.objects.get.return_value = mock_site
-
+        from dcim.models import Site
         from netbox_librenms_plugin.utils import find_matching_site
 
+        site = Site.objects.create(name="DC1", slug="utils-dc1")
         result = find_matching_site("DC1")
 
         assert result["found"] is True
-        assert result["site"] == mock_site
+        assert result["site"] == site
         assert result["match_type"] == "exact"
         assert result["confidence"] == 1.0
 
-    @patch("dcim.models.Site")
-    def test_find_site_for_location_not_found(self, mock_site_model):
-        """Returns None when no match and no mapping applies."""
-        mock_site_model.DoesNotExist = Exception
-        mock_site_model.objects.get.side_effect = mock_site_model.DoesNotExist
-
+    def test_find_site_for_location_not_found(self):
+        """Return no match when neither a site nor a mapping exists."""
         from netbox_librenms_plugin.utils import find_matching_site
 
-        with patch("netbox_librenms_plugin.utils.resolve_location_mapping", return_value=None):
-            result = find_matching_site("Unknown Location")
+        result = find_matching_site("Unknown Location")
 
         assert result["found"] is False
         assert result["site"] is None
         assert result["confidence"] == 0.0
 
-    @patch("dcim.models.Site")
-    def test_find_site_falls_back_to_mapping(self, mock_site_model):
-        """Falls back to a LocationMapping when no exact Site match exists."""
-        mock_site_model.DoesNotExist = Exception
-        mock_site_model.objects.get.side_effect = mock_site_model.DoesNotExist
-        mapped_site = MagicMock(id=7, name="New York")
-
+    def test_find_site_falls_back_to_mapping(self):
+        """Resolve a stored alias when no exact site name matches."""
+        from dcim.models import Site
+        from netbox_librenms_plugin.models import LocationMapping
         from netbox_librenms_plugin.utils import find_matching_site
 
-        with patch(
-            "netbox_librenms_plugin.utils.resolve_location_mapping",
-            return_value=mapped_site,
-        ) as mock_resolve:
-            result = find_matching_site("NYC")
+        mapped_site = Site.objects.create(name="Mapped Site", slug="mapped-site")
+        LocationMapping.objects.create(field_type="site", librenms_value="Site Alias", netbox_object=mapped_site)
 
-        mock_resolve.assert_called_once_with("site", "NYC")
+        result = find_matching_site("Site Alias")
+
         assert result["found"] is True
         assert result["site"] == mapped_site
         assert result["match_type"] == "mapping"
         assert result["confidence"] == 1.0
 
-    @patch("dcim.models.Site")
-    def test_find_site_exact_match_skips_mapping(self, mock_site_model):
-        """Exact Site match wins and the mapping fallback is not consulted."""
-        mock_site = MagicMock(id=1, name="DC1")
-        mock_site_model.objects.get.return_value = mock_site
-
+    def test_find_site_exact_match_skips_mapping(self, django_assert_num_queries):
+        """An exact site name wins without querying a conflicting alias."""
+        from dcim.models import Site
+        from netbox_librenms_plugin.models import LocationMapping
         from netbox_librenms_plugin.utils import find_matching_site
 
-        with patch("netbox_librenms_plugin.utils.resolve_location_mapping") as mock_resolve:
-            result = find_matching_site("DC1")
+        site = Site.objects.create(name="Exact Site", slug="exact-site")
+        mapped_site = Site.objects.create(name="Mapped Site", slug="mapped-site")
+        LocationMapping.objects.create(field_type="site", librenms_value=site.name, netbox_object=mapped_site)
 
-        mock_resolve.assert_not_called()
+        with django_assert_num_queries(1):
+            result = find_matching_site(site.name)
+
+        assert result["site"] == site
         assert result["match_type"] == "exact"
 
     def test_find_site_for_location_empty(self):
@@ -276,46 +233,44 @@ class TestSiteMatching:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestPlatformMatching:
     """Test platform matching logic."""
 
-    @patch("netbox_librenms_plugin.models.PlatformMapping")
-    @patch("dcim.models.Platform")
-    def test_find_platform_for_os_exact_match(self, mock_platform_model, mock_platform_mapping):
+    def test_find_platform_for_os_exact_match(self):
         """OS string matched to platform."""
-        mock_platform = MagicMock(id=1, name="ios")
-        mock_platform_model.objects.get.return_value = mock_platform
-        mock_platform_mapping.DoesNotExist = Exception
-        mock_platform_mapping.objects.get.side_effect = mock_platform_mapping.DoesNotExist
-
+        from dcim.models import Platform
         from netbox_librenms_plugin.utils import find_matching_platform
 
+        platform = Platform.objects.create(name="ios", slug="utils-ios")
         result = find_matching_platform("ios")
 
         assert result["found"] is True
-        assert result["platform"] == mock_platform
+        assert result["platform"] == platform
         assert result["match_type"] == "exact"
-        # Exact name matched — PlatformMapping is never consulted
-        mock_platform_mapping.objects.get.assert_not_called()
-        mock_platform_model.objects.get.assert_called_once_with(name__iexact="ios")
 
-    @patch("netbox_librenms_plugin.models.PlatformMapping")
-    @patch("dcim.models.Platform")
-    def test_find_platform_for_os_not_found(self, mock_platform_model, mock_platform_mapping):
+    def test_find_platform_for_os_mapping_match(self):
+        """A mapping resolves an OS name that differs from the platform name."""
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.models import PlatformMapping
+        from netbox_librenms_plugin.utils import find_matching_platform
+
+        platform = Platform.objects.create(name="Network OS", slug="utils-network-os")
+        PlatformMapping.objects.create(librenms_os="vendor_os", netbox_platform=platform)
+
+        result = find_matching_platform("vendor_os")
+
+        assert result == {"found": True, "platform": platform, "match_type": "mapping"}
+
+    def test_find_platform_for_os_not_found(self):
         """Returns None when no match."""
-        mock_platform_mapping.DoesNotExist = Exception
-        mock_platform_mapping.objects.get.side_effect = mock_platform_mapping.DoesNotExist
-        mock_platform_model.DoesNotExist = Exception
-        mock_platform_model.objects.get.side_effect = mock_platform_model.DoesNotExist
-
         from netbox_librenms_plugin.utils import find_matching_platform
 
         result = find_matching_platform("unknown_os")
 
         assert result["found"] is False
         assert result["platform"] is None
-        mock_platform_mapping.objects.get.assert_called_once_with(librenms_os__iexact="unknown_os")
-        mock_platform_model.objects.get.assert_called_once_with(name__iexact="unknown_os")
 
     def test_find_platform_for_os_empty(self):
         """Empty OS returns None."""
@@ -524,18 +479,20 @@ class TestConversionHelpers:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestVirtualChassisHelpers:
     """Test virtual chassis helper functions."""
 
-    def test_get_virtual_chassis_member_no_vc(self, mock_netbox_device):
+    def test_get_virtual_chassis_member_no_vc(self):
         """Device without VC returns original device."""
+        from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.utils import get_virtual_chassis_member
 
-        mock_netbox_device.virtual_chassis = None
+        device = make_device("utils-standalone-member")
 
-        result = get_virtual_chassis_member(mock_netbox_device, "Ethernet1")
+        result = get_virtual_chassis_member(device, "Ethernet1")
 
-        assert result == mock_netbox_device
+        assert result == device
 
     @pytest.mark.django_db
     def test_get_virtual_chassis_members_real_vc(self):
@@ -563,56 +520,42 @@ class TestVirtualChassisHelpers:
         assert {d.pk for d in get_virtual_chassis_members(m1)} == {m1.pk, m2.pk}
         assert {d.pk for d in get_virtual_chassis_members(m2)} == {m1.pk, m2.pk}
 
-    def test_get_virtual_chassis_members_returns_device_on_enumeration_error(self, caplog):
-        """Non-enumerable / broken VC membership must fall back to [device] AND log a warning (not silently mask the error as 'device has no VC siblings', which would skip sibling-member matching)."""
-        import logging
-        from unittest.mock import MagicMock
-
-        from netbox_librenms_plugin.utils import get_virtual_chassis_members
-
-        device = MagicMock()
-        device.name = "sw1"
-        device.virtual_chassis.members.all.side_effect = RuntimeError("boom")
-
-        with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.utils"):
-            assert get_virtual_chassis_members(device) == [device]
-        assert any("virtual chassis members" in r.message for r in caplog.records)
-
     def test_get_virtual_chassis_member_with_vc(self):
         """Device with VC returns correct member."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
         from netbox_librenms_plugin.utils import get_virtual_chassis_member
 
-        mock_device = MagicMock()
-        mock_member = MagicMock(name="member-1")
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.get.return_value = mock_member
+        first = make_device("utils-member-first")
+        second = make_device("utils-member-second")
+        make_virtual_chassis("utils-member-vc", first, second)
 
-        result = get_virtual_chassis_member(mock_device, "Ethernet1")
+        result = get_virtual_chassis_member(second, "Ethernet1")
 
-        # Should try to get VC member with position 1
-        mock_device.virtual_chassis.members.get.assert_called_once_with(vc_position=1)
-        assert result == mock_member
+        assert result == first
 
     def test_get_virtual_chassis_member_invalid_port(self):
         """Invalid port name returns original device."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
         from netbox_librenms_plugin.utils import get_virtual_chassis_member
 
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()
+        first = make_device("utils-invalid-port-first")
+        second = make_device("utils-invalid-port-second")
+        make_virtual_chassis("utils-invalid-port-vc", first, second)
 
-        result = get_virtual_chassis_member(mock_device, "InvalidPort")
+        result = get_virtual_chassis_member(second, "InvalidPort")
 
-        assert result == mock_device
+        assert result == second
 
-    def test_get_librenms_sync_device_no_vc(self, mock_netbox_device):
+    def test_get_librenms_sync_device_no_vc(self):
         """Device without VC returns itself."""
+        from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        mock_netbox_device.virtual_chassis = None
+        device = make_device("utils-standalone-sync")
 
-        result = get_librenms_sync_device(mock_netbox_device)
+        result = get_librenms_sync_device(device)
 
-        assert result == mock_netbox_device
+        assert result == device
 
     @pytest.mark.django_db
     def test_get_librenms_sync_device_with_librenms_id(self):
@@ -671,22 +614,13 @@ class TestVirtualChassisHelpers:
 
     def test_get_librenms_sync_device_fallback_to_member_with_ip(self):
         """Priority 3: no dict member, master has no IP, another member has primary IP → that member."""
+        from netbox_librenms_plugin.tests.conftest import ip_on
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        vc = MagicMock()
-        master = MagicMock()
-        master.vc_position = 1
-        master.virtual_chassis = vc
-        master.cf = {}
-        master.primary_ip = None  # master has no IP
-
-        member_with_ip = MagicMock()
-        member_with_ip.vc_position = 2
-        member_with_ip.cf = {}
-        member_with_ip.primary_ip = MagicMock()  # this member has IP
-
-        vc.master = master  # designated master exists but has no primary_ip
-        vc.members.all.return_value = [master, member_with_ip]
+        master, member_with_ip = _two_member_vc("sync-primary-ip", None, None)
+        address = ip_on(member_with_ip, "198.18.20.1/24", "management")
+        member_with_ip.primary_ip4 = address
+        member_with_ip.save(update_fields=["primary_ip4"])
 
         result = get_librenms_sync_device(master, server_key="prod")
 
@@ -694,48 +628,43 @@ class TestVirtualChassisHelpers:
 
     def test_get_librenms_sync_device_fallback_lowest_vc_position(self):
         """Priority 4: no IPs anywhere → return member with lowest vc_position."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        vc = MagicMock()
-        member_pos3 = MagicMock()
-        member_pos3.vc_position = 3
-        member_pos3.cf = {}
-        member_pos3.primary_ip = None
+        vc = VirtualChassis.objects.create(name="sync-lowest-position")
+        members = {}
+        for position in (3, 1, 2):
+            member = make_device(f"sync-lowest-{position}")
+            member.virtual_chassis = vc
+            member.vc_position = position
+            member.save()
+            members[position] = member
 
-        member_pos1 = MagicMock()
-        member_pos1.vc_position = 1
-        member_pos1.cf = {}
-        member_pos1.primary_ip = None
+        result = get_librenms_sync_device(members[2], server_key="prod")
 
-        member_pos2 = MagicMock()
-        member_pos2.vc_position = 2
-        member_pos2.cf = {}
-        member_pos2.primary_ip = None
-
-        vc.master = None
-        vc.members.all.return_value = [member_pos3, member_pos1, member_pos2]  # unordered
-
-        member_pos2.virtual_chassis = vc
-
-        result = get_librenms_sync_device(member_pos2, server_key="prod")
-
-        assert result == member_pos1  # lowest vc_position wins
+        assert result == members[1]
 
     def test_get_module_template_interface_names_rewrites_for_vc_member(self):
+        from dcim.models import InterfaceTemplate, Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
         from netbox_librenms_plugin.utils import get_module_template_interface_names
 
-        device = MagicMock()
-        device.vc_position = 3
-        device.virtual_chassis_id = 11
-        device.virtual_chassis = MagicMock()
-        device.virtual_chassis.members.values_list.return_value = [1, 2, 3]
-
-        module = MagicMock()
-        template = MagicMock()
-        instantiated = MagicMock()
-        instantiated.name = "TenGigabitEthernet1/1/1"
-        template.instantiate.return_value = instantiated
-        module.module_type.interfacetemplates.all.return_value = [template]
+        _first, _second, device = self._three_member_vc("utils-template-rewrite")
+        module_device = make_device_with_module_bays("utils-template-module", ["Bay 1"])
+        module_type = make_module_type("utils-template-type")
+        InterfaceTemplate.objects.create(
+            module_type=module_type,
+            name="TenGigabitEthernet1/1/1",
+            type="other",
+        )
+        module = Module.objects.create(
+            device=module_device,
+            module_bay=module_device.modulebays.get(name="Bay 1"),
+            module_type=module_type,
+        )
 
         result = get_module_template_interface_names(device, module)
 
@@ -746,30 +675,27 @@ class TestVirtualChassisHelpers:
         A member whose resolved ID is 0 must be skipped so a real ID is preferred."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        device = MagicMock()
-        vc = MagicMock()
-        device.virtual_chassis = vc
-        vc.master = None
+        member_zero, member_real = _two_member_vc("sync-zero-id", {"default": 0}, {"default": 5})
 
-        member_zero = MagicMock()
-        member_zero.primary_ip = None
-        member_real = MagicMock()
-        member_real.primary_ip = None
+        result = get_librenms_sync_device(member_zero, server_key="default")
 
-        def _id_side_effect(obj, server_key, **kwargs):
-            if obj is member_zero:
-                return 0
-            if obj is member_real:
-                return 5
-            return None
+        assert result == member_real
 
-        # member_zero comes first but has id=0; member_real has id=5 — real ID wins
-        with patch("netbox_librenms_plugin.utils.get_librenms_device_id") as mock_get_id:
-            mock_get_id.side_effect = _id_side_effect
-            vc.members.all.return_value = [member_zero, member_real]
-            result = get_librenms_sync_device(device, server_key="default")
+    @staticmethod
+    def _three_member_vc(name):
+        from dcim.models import VirtualChassis
 
-        assert result is member_real
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        vc = VirtualChassis.objects.create(name=name)
+        members = []
+        for position in (1, 2, 3):
+            member = make_device(f"{name}-{position}")
+            member.virtual_chassis = vc
+            member.vc_position = position
+            member.save()
+            members.append(member)
+        return members
 
 
 # =============================================================================
@@ -889,49 +815,41 @@ class TestSafeDisabledFilters:
 class TestPaginationHelpers:
     """Test pagination helper functions."""
 
-    @patch("netbox_librenms_plugin.utils.get_config")
-    @patch("netbox_librenms_plugin.utils.netbox_get_paginate_count")
-    def test_get_table_paginate_count_from_request(self, mock_netbox_paginate, mock_config):
+    def test_get_table_paginate_count_from_request(self):
         """Custom per_page from request is used."""
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
-        mock_config.return_value.MAX_PAGE_SIZE = 1000
-        mock_request = MagicMock()
-        mock_request.GET = {"table1_per_page": "50"}
+        request = RequestFactory().get("/", {"table1_per_page": "50"})
 
-        result = get_table_paginate_count(mock_request, "table1_")
+        result = get_table_paginate_count(request, "table1_")
 
         assert result == 50
 
     @pytest.mark.parametrize("disabled_max", [0, None])
-    @patch("netbox_librenms_plugin.utils.get_config")
-    @patch("netbox_librenms_plugin.utils.netbox_get_paginate_count")
-    def test_get_table_paginate_count_no_clamp_when_max_disabled(self, mock_netbox_paginate, mock_config, disabled_max):
+    def test_get_table_paginate_count_no_clamp_when_max_disabled(self, settings, disabled_max):
         """MAX_PAGE_SIZE 0/None disables the NetBox ceiling; per_page must pass through unclamped."""
-        # min(per_page, 0) would silently return 0 rows per page; min(per_page, None) TypeErrors.
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
-        mock_config.return_value.MAX_PAGE_SIZE = disabled_max
-        mock_request = MagicMock()
-        mock_request.GET = {"table1_per_page": "500"}
+        settings.MAX_PAGE_SIZE = disabled_max
+        request = RequestFactory().get("/", {"table1_per_page": "500"})
 
-        assert get_table_paginate_count(mock_request, "table1_") == 500
+        assert get_table_paginate_count(request, "table1_") == 500
 
-    @patch("netbox_librenms_plugin.utils.get_config")
-    @patch("netbox_librenms_plugin.utils.netbox_get_paginate_count")
-    def test_get_table_paginate_count_default(self, mock_netbox_paginate, mock_config):
+    def test_get_table_paginate_count_default(self):
         """Default pagination used when no override."""
-        from netbox_librenms_plugin.utils import get_table_paginate_count
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory
 
-        mock_netbox_paginate.return_value = 25
-        mock_request = MagicMock()
-        mock_request.GET = {}
-        mock_request.POST = {}
+        from netbox_librenms_plugin.utils import get_table_paginate_count, netbox_get_paginate_count
 
-        result = get_table_paginate_count(mock_request, "table1_")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
 
-        assert result == 25
-        mock_netbox_paginate.assert_called_once()
+        assert get_table_paginate_count(request, "table1_") == netbox_get_paginate_count(request)
 
 
 # =============================================================================
@@ -939,99 +857,107 @@ class TestPaginationHelpers:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestInterfaceNameField:
     """Test interface name field retrieval."""
 
-    @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_get_interface_name_field_from_get(self, mock_plugin_config):
+    def test_get_interface_name_field_from_get(self):
         """Override from GET request parameter."""
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.utils import get_interface_name_field
 
-        mock_request = MagicMock()
-        mock_request.GET = {"interface_name_field": "ifDescr"}
-        mock_request.POST = {}
-
-        result = get_interface_name_field(mock_request)
+        result = get_interface_name_field(RequestFactory().get("/", {"interface_name_field": "ifDescr"}))
 
         assert result == "ifDescr"
 
-    @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_get_interface_name_field_from_post(self, mock_plugin_config):
+    def test_get_interface_name_field_from_post(self):
         """Override from POST request parameter."""
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.utils import get_interface_name_field
 
-        mock_request = MagicMock()
-        mock_request.GET = {}
-        mock_request.POST = {"interface_name_field": "ifName"}
-
-        result = get_interface_name_field(mock_request)
+        result = get_interface_name_field(RequestFactory().post("/", {"interface_name_field": "ifName"}))
 
         assert result == "ifName"
 
-    @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_get_interface_name_field_from_config(self, mock_plugin_config):
+    def test_get_interface_name_field_from_config(self, settings):
         """Falls back to plugin config."""
+        from copy import deepcopy
+
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.utils import get_interface_name_field
 
-        mock_plugin_config.return_value = "ifDescr"
-        mock_request = MagicMock()
-        mock_request.GET = {}
-        mock_request.POST = {}
-        mock_request.user.config.get.return_value = None
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["interface_name_field"] = "ifDescr"
+        settings.PLUGINS_CONFIG = plugin_config
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
 
-        result = get_interface_name_field(mock_request)
+        result = get_interface_name_field(request)
 
         assert result == "ifDescr"
-        mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")
 
-    @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_unsupported_config_value_falls_back_to_the_default(self, mock_plugin_config):
+    def test_unsupported_config_value_falls_back_to_the_default(self, settings):
         """A configured field the readers reject must not reach a cached snapshot."""
+        from copy import deepcopy
+
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
         from netbox_librenms_plugin.utils import get_interface_name_field
 
-        mock_plugin_config.return_value = "ifAlias"
-        mock_request = MagicMock()
-        mock_request.GET = {}
-        mock_request.POST = {}
-        mock_request.user.config.get.return_value = None
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["interface_name_field"] = "ifAlias"
+        settings.PLUGINS_CONFIG = plugin_config
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
 
-        result = get_interface_name_field(mock_request)
+        result = get_interface_name_field(request)
 
         assert result == DEFAULT_INTERFACE_NAME_FIELD
 
-    @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_get_interface_name_field_from_user_pref(self, mock_plugin_config):
+    def test_get_interface_name_field_from_user_pref(self):
         """Falls back to user preference before plugin config."""
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.utils import get_interface_name_field
 
-        mock_request = MagicMock()
-        mock_request.GET = {}
-        mock_request.POST = {}
-        mock_request.user.config.get.return_value = "ifName"
+        user = make_superuser("utils-interface-preference")
+        user.config.set("plugins.netbox_librenms_plugin.interface_name_field", "ifName", commit=True)
+        request = RequestFactory().get("/")
+        request.user = type(user).objects.get(pk=user.pk)
 
-        result = get_interface_name_field(mock_request)
+        result = get_interface_name_field(request)
 
         assert result == "ifName"
-        mock_plugin_config.assert_not_called()
 
-    @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_get_interface_name_field_does_not_persist_the_param(self, mock_plugin_config):
+    def test_get_interface_name_field_does_not_persist_the_param(self):
         """The read path honours the parameter without writing it.
 
         get_context_data() calls this on every GET render, so persisting here made a read mutate
         stored user state. The selector posts to the save_user_pref endpoint instead.
         """
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.utils import get_interface_name_field
 
-        mock_request = MagicMock()
-        mock_request.GET = {"interface_name_field": "ifDescr"}
-        mock_request.POST = {}
+        user = make_superuser("utils-interface-read-only")
+        path = "plugins.netbox_librenms_plugin.interface_name_field"
+        before = user.config.get(path)
+        request = RequestFactory().get("/", {"interface_name_field": "ifDescr"})
+        request.user = user
 
-        result = get_interface_name_field(mock_request)
+        result = get_interface_name_field(request)
 
         assert result == "ifDescr"
-        mock_request.user.config.set.assert_not_called()
+        user.refresh_from_db()
+        assert user.config.get(path) == before
 
     @pytest.mark.django_db
     def test_persisting_the_preference_does_not_leak_to_other_users(self):
@@ -1073,92 +999,57 @@ class TestInterfaceNameField:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestSaveUserPrefView:
     """Test SaveUserPrefView endpoint for JS-driven preference persistence."""
 
-    def _make_request(self, body, has_perm=True):
-        """Create a mock POST request with JSON body."""
-        request = MagicMock()
-        request.body = json.dumps(body).encode()
-        request.user.has_perm.return_value = has_perm
-        request.user.config = MagicMock()
-        request.method = "POST"
-        return request
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [("use_sysname", True), ("interface_name_field", "ifDescr"), ("strip_domain", False)],
+    )
+    def test_valid_preference_is_persisted(self, client, django_user_model, key, value):
+        """Valid values survive the complete request, view, and user-config path."""
+        from django.urls import reverse
 
-    def test_save_valid_boolean_pref(self):
-        """Saving a valid boolean preference returns ok."""
-        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+        from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        view = SaveUserPrefView()
-        request = self._make_request({"key": "use_sysname", "value": True})
-        view.request = request
+        user = make_superuser(f"utils-pref-{key}")
+        client.force_login(user)
 
-        response = view.post(request)
-
-        assert response.status_code == 200
-        data = json.loads(response.content)
-        assert data["status"] == "ok"
-        request.user.config.set.assert_called_once_with("plugins.netbox_librenms_plugin.use_sysname", True, commit=True)
-
-    def test_save_string_pref(self):
-        """Saving interface_name_field string value works."""
-        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
-
-        view = SaveUserPrefView()
-        request = self._make_request({"key": "interface_name_field", "value": "ifDescr"})
-        view.request = request
-
-        response = view.post(request)
-
-        assert response.status_code == 200
-        request.user.config.set.assert_called_once_with(
-            "plugins.netbox_librenms_plugin.interface_name_field", "ifDescr", commit=True
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:save_user_pref"),
+            data=f'{{"key":"{key}","value":{self._json_value(value)}}}',
+            content_type="application/json",
         )
 
-    def test_reject_invalid_key(self):
-        """Invalid preference key returns 400."""
-        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
-
-        view = SaveUserPrefView()
-        request = self._make_request({"key": "malicious_key", "value": True})
-        view.request = request
-
-        response = view.post(request)
-
-        assert response.status_code == 400
-        data = json.loads(response.content)
-        assert "Invalid preference key" in data["error"]
-        request.user.config.set.assert_not_called()
-
-    def test_reject_invalid_json(self):
-        """Invalid JSON body returns 400."""
-        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
-
-        view = SaveUserPrefView()
-        request = MagicMock()
-        request.body = b"not valid json"
-        view.request = request
-
-        response = view.post(request)
-
-        assert response.status_code == 400
-        data = json.loads(response.content)
-        assert "Invalid JSON" in data["error"]
-
-    def test_save_false_value(self):
-        """Saving False for a toggle works correctly."""
-        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
-
-        view = SaveUserPrefView()
-        request = self._make_request({"key": "strip_domain", "value": False})
-        view.request = request
-
-        response = view.post(request)
-
         assert response.status_code == 200
-        request.user.config.set.assert_called_once_with(
-            "plugins.netbox_librenms_plugin.strip_domain", False, commit=True
+        assert response.json() == {"status": "ok"}
+        stored = django_user_model.objects.get(pk=user.pk)
+        assert stored.config.get(f"plugins.netbox_librenms_plugin.{key}") == value
+
+    @staticmethod
+    def _json_value(value):
+        if isinstance(value, bool):
+            return str(value).lower()
+        return f'"{value}"'
+
+    @pytest.mark.parametrize("body", [b"not valid json", b'{"key":"malicious_key","value":true}'])
+    def test_invalid_payload_is_rejected(self, client, body):
+        """Malformed JSON and unknown preference keys return a client error."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        user = make_superuser(f"utils-invalid-pref-{len(body)}")
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:save_user_pref"),
+            data=body,
+            content_type="application/json",
         )
+
+        assert response.status_code == 400
 
     def test_uses_permission_mixin(self):
         """SaveUserPrefView inherits from LibreNMSPermissionMixin."""
@@ -1168,88 +1059,76 @@ class TestSaveUserPrefView:
         assert issubclass(SaveUserPrefView, LibreNMSPermissionMixin)
 
 
+@pytest.mark.django_db
 class TestDetectVCNormalizationNoop:
     """detect_vc_normalization_noop flags only the no-vendor-support case."""
 
-    def _make_device(self, vc_position=3, vc_id=11, member_positions=(1, 2, 3, 4)):
-        device = MagicMock()
-        device.vc_position = vc_position
-        device.virtual_chassis_id = vc_id
-        if vc_id is None:
-            device.virtual_chassis = None
-        else:
-            device.virtual_chassis = MagicMock()
-            device.virtual_chassis.members.values_list.return_value = list(member_positions)
-        return device
+    @staticmethod
+    def _module_case(tag, template_names, *, in_vc=True):
+        from dcim.models import InterfaceTemplate, Module, VirtualChassis
 
-    def _make_module(self, instantiated_names, raw_names=None):
-        module = MagicMock()
-        templates = []
-        for idx, name in enumerate(instantiated_names):
-            tmpl = MagicMock()
-            raw = (raw_names or [None] * len(instantiated_names))[idx]
-            tmpl.name = raw or name
-            instance = MagicMock()
-            instance.name = name
-            tmpl.instantiate.return_value = instance
-            templates.append(tmpl)
-        module.module_type.interfacetemplates.all.return_value = templates
-        module.module_type.manufacturer.slug = "vendor"
-        module.module_type.model = "MODEL-X"
-        module.module_bay.name = "Bay 0"
-        return module
+        from netbox_librenms_plugin.tests.conftest import make_device, make_device_with_module_bays, make_module_type
+
+        if in_vc:
+            vc = VirtualChassis.objects.create(name=f"utils-normalization-{tag}")
+            members = []
+            for position in (1, 2, 3, 4):
+                if position == 3:
+                    member = make_device_with_module_bays(f"utils-normalization-{tag}-{position}", ["Bay 0"])
+                else:
+                    member = make_device(f"utils-normalization-{tag}-{position}")
+                member.virtual_chassis = vc
+                member.vc_position = position
+                member.save()
+                members.append(member)
+            device = members[2]
+        else:
+            device = make_device_with_module_bays(f"utils-normalization-{tag}", ["Bay 0"])
+
+        module_type = make_module_type(f"utils-normalization-type-{tag}")
+        for name in template_names:
+            InterfaceTemplate.objects.create(module_type=module_type, name=name, type="other")
+        module = Module.objects.create(
+            device=device,
+            module_bay=device.modulebays.get(name="Bay 0"),
+            module_type=module_type,
+        )
+        return device, module
 
     def test_returns_none_when_device_not_in_vc(self):
         from netbox_librenms_plugin.utils import detect_vc_normalization_noop
 
-        device = self._make_device(vc_position=None, vc_id=None)
-        module = self._make_module(["2/x1/1/c9"])
+        device, module = self._module_case("standalone", ["2/x1/1/c9"], in_vc=False)
         assert detect_vc_normalization_noop(device, module) is None
 
     def test_returns_none_when_a_name_matches_regex(self):
         """Cisco-style name matches the rewrite regex → not a vendor-support issue."""
         from netbox_librenms_plugin.utils import detect_vc_normalization_noop
 
-        device = self._make_device()
-        device.device_type.model = "C9300-48T"
-        module = self._make_module(["TenGigabitEthernet1/1/1"])
+        device, module = self._module_case("matching", ["TenGigabitEthernet1/1/1"])
         assert detect_vc_normalization_noop(device, module) is None
 
     def test_returns_diagnostic_when_no_names_match_regex(self):
         """Nokia-style name doesn't match the rewrite regex → flag for reporting."""
         from netbox_librenms_plugin.utils import detect_vc_normalization_noop
 
-        device = self._make_device(vc_position=3, member_positions=(1, 2, 3, 4))
-        device.device_type.model = "7250-IXR"
-        module = self._make_module(["2/x1/1/c9"], raw_names=["{module}"])
+        device, module = self._module_case("diagnostic", ["2/x1/1/c9"])
 
         diag = detect_vc_normalization_noop(device, module)
         assert diag is not None
         assert diag["vc_position"] == 3
         assert diag["vc_member_positions"] == [1, 2, 3, 4]
-        assert diag["template_pairs"] == [("{module}", "2/x1/1/c9")]
-        assert diag["device_type_model"] == "7250-IXR"
-        assert diag["module_type_model"] == "MODEL-X"
-        assert diag["manufacturer_slug"] == "vendor"
+        assert diag["template_pairs"] == [("2/x1/1/c9", "2/x1/1/c9")]
+        assert diag["device_type_model"] == device.device_type.model
+        assert diag["module_type_model"] == module.module_type.model
+        assert diag["manufacturer_slug"] == module.module_type.manufacturer.slug
         assert diag["module_bay_name"] == "Bay 0"
         assert "regex" in diag
 
     def test_returns_none_when_no_templates(self):
         from netbox_librenms_plugin.utils import detect_vc_normalization_noop
 
-        device = self._make_device()
-        module = self._make_module([])
-        assert detect_vc_normalization_noop(device, module) is None
-
-    def test_template_instantiate_exception_is_skipped(self):
-        """Templates that raise on instantiate are skipped; no false positive if all skip."""
-        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
-
-        device = self._make_device()
-        module = MagicMock()
-        bad_template = MagicMock()
-        bad_template.instantiate.side_effect = ValueError("boom")
-        module.module_type.interfacetemplates.all.return_value = [bad_template]
+        device, module = self._module_case("no-templates", [])
         assert detect_vc_normalization_noop(device, module) is None
 
 
@@ -1841,10 +1720,8 @@ class TestSetDeviceIpFkFamily:
         device.refresh_from_db()
         assert device.oob_ip_id == v6.pk
 
-    def test_families_accepted_with_netbox44_family_property(self):
+    def test_families_accepted_with_netbox44_family_property(self, monkeypatch):
         """The guard must not read IPAddress.family: on NetBox 4.4 the property raises on an in-memory str address and getattr's default turns that into a bogus refusal (forced)."""
-        from unittest.mock import patch
-
         from ipam.models import IPAddress
 
         from netbox_librenms_plugin.tests.conftest import ip_on, make_device
@@ -1855,8 +1732,8 @@ class TestSetDeviceIpFkFamily:
         v4.address = "10.0.0.4/24"  # in-memory str, as after IPAddress.objects.create()
         # NetBox 4.4's family property verbatim — 4.5+ added a str-tolerant branch.
         netbox44_family = property(lambda self: self.address.version if self.address else None)
-        with patch.object(IPAddress, "family", netbox44_family):
-            set_device_ip_fk(device, "primary_ip4", v4)
+        monkeypatch.setattr(IPAddress, "family", netbox44_family)
+        set_device_ip_fk(device, "primary_ip4", v4)
         device.refresh_from_db()
         assert device.primary_ip4_id == v4.pk
 

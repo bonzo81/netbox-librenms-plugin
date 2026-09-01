@@ -7,13 +7,20 @@
 These exercise the real functions against the real Django cache / real plugin config — no mocks.
 """
 
-from unittest.mock import MagicMock, patch
+from copy import deepcopy
 
 import pytest
+from django.conf import settings
 from django.core.cache import cache as real_cache
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+def _configured_servers(*keys):
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        key: {"librenms_url": f"https://{key}.example.test", "api_token": "token"} for key in keys
+    }
+    return override_settings(PLUGINS_CONFIG=plugin_config)
 
 
 class TestExtractCachedPortsShapeCheck:
@@ -69,18 +76,18 @@ class TestResolveRequestedServerKey:
 
     def test_configured_string_key_is_honoured(self):
         view = self._view()
-        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"prod": "Prod", "default": "Default"}):
+        with _configured_servers("prod", "default"):
             assert view.resolve_requested_server_key({"server_key": "prod"}) == "prod"
 
     def test_unconfigured_key_falls_back_to_render_resolver(self):
         view = self._view()
-        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"default": "Default"}):
+        with _configured_servers("default"):
             # "prod" is not among the configured servers → degrade, don't address its namespace.
             assert view.resolve_requested_server_key({"server_key": "prod"}) == view._render_server_key()
 
     def test_non_string_key_falls_back_without_crashing(self):
         view = self._view()
-        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"prod": "Prod"}):
+        with _configured_servers("prod"):
             # A JSON list is unhashable; the membership check must be skipped, not TypeError.
             assert view.resolve_requested_server_key({"server_key": ["forged"]}) == view._render_server_key()
 
@@ -99,32 +106,33 @@ class TestResolvePostedServerKey:
     """
 
     def _view(self, active="active-server"):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         view = DeviceInterfaceTableView()
-        view._librenms_api = MagicMock(server_key=active)  # the active-server boundary
+        view._librenms_api = LibreNMSAPI(server_key=active)
         return view
 
     def test_configured_key_is_honoured(self):
-        view = self._view()
-        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"prod": "Prod", "default": "Default"}):
+        with _configured_servers("active-server", "prod", "default"):
+            view = self._view()
             assert view.resolve_posted_server_key({"server_key": "prod"}) == "prod"
 
     def test_forged_nonblank_key_falls_back_to_active(self):
-        view = self._view()
-        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"default": "Default"}):
+        with _configured_servers("active-server", "default"):
+            view = self._view()
             # 'evil' names no configured server → must NOT be honoured (would scope a bind under a
             # bogus namespace); fall back to the active server instead.
             assert view.resolve_posted_server_key({"server_key": "evil"}) == "active-server"
 
     def test_blank_key_falls_back_to_active(self):
-        view = self._view()
-        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"default": "Default"}):
+        with _configured_servers("active-server", "default"):
+            view = self._view()
             assert view.resolve_posted_server_key({"server_key": "   "}) == "active-server"
 
     def test_missing_key_falls_back_to_active(self):
-        view = self._view()
-        with patch.object(LibreNMSAPI, "get_available_servers", return_value={"default": "Default"}):
+        with _configured_servers("active-server", "default"):
+            view = self._view()
             assert view.resolve_posted_server_key({}) == "active-server"
 
 

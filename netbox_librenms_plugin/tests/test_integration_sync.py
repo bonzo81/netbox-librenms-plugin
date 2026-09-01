@@ -2,8 +2,7 @@
 Integration tests using the mock LibreNMS HTTP server.
 
 These tests verify that LibreNMSAPI correctly parses responses from a real
-(but local, mocked) HTTP server, and that the full request/response cycle works.
-No Django database access is used; NetBox model interactions are mocked.
+(but local) HTTP server, and that the full request/response cycle works.
 """
 
 import json
@@ -337,46 +336,34 @@ class TestLibreNMSAPIDiscovery:
 
         assert device_id is None
 
+    @pytest.mark.django_db
     def test_get_librenms_id_resolves_by_ip(self, librenms_server):
         """get_librenms_id() resolves via IP when the device has a primary_ip."""
-        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
 
-        librenms_server.register("/api/v0/devices/10.0.0.10", self._DEVICE_RESPONSE)
+        librenms_server.register("/api/v0/devices/198.18.0.10", self._DEVICE_RESPONSE)
         api = _make_api(librenms_server.url)
+        device = make_device("integration-discovery-ip")
+        device.primary_ip4 = ip_on(device, "198.18.0.10/24", "Ethernet1")
+        device.save(update_fields=["primary_ip4"])
 
-        obj = MagicMock()
-        obj.cf = {}  # no stored ID
-        obj.primary_ip.address.ip = "10.0.0.10"
-        obj.primary_ip.dns_name = None
-        obj.name = "sw01"
-
-        with patch.object(api, "_get_cache_key", return_value="test-key"):
-            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                with patch.object(api, "_store_librenms_id"):
-                    result = api.get_librenms_id(obj)
+        result = api.get_librenms_id(device)
 
         assert result == 42
 
+    @pytest.mark.django_db
     def test_get_librenms_id_falls_back_to_hostname_when_ip_fails(self, librenms_server):
         """get_librenms_id() falls back to hostname when IP lookup returns no result."""
-        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
 
         # IP path returns 404 (unregistered) → fallback to hostname
-        librenms_server.register("/api/v0/devices/sw01.example.com", self._DEVICE_RESPONSE)
+        librenms_server.register("/api/v0/devices/sw01.example.test", self._DEVICE_RESPONSE)
         api = _make_api(librenms_server.url)
+        device = make_device("sw01.example.test")
+        device.primary_ip4 = ip_on(device, "198.18.0.11/24", "Ethernet1")
+        device.save(update_fields=["primary_ip4"])
 
-        obj = MagicMock()
-        obj.cf = {}  # no stored ID
-        obj.primary_ip.address.ip = "192.0.2.1"  # unregistered → 404 → None
-        obj.primary_ip.dns_name = None
-        obj.name = "sw01.example.com"
-
-        with patch.object(api, "_get_cache_key", return_value="test-key"):
-            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                with patch.object(api, "_store_librenms_id"):
-                    result = api.get_librenms_id(obj)
+        result = api.get_librenms_id(device)
 
         assert result == 42
 

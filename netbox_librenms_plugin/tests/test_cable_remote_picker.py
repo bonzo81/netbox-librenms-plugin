@@ -46,6 +46,30 @@ def test_picker_viewability_uses_the_shared_serial_source_constant():
     assert 'source != "serial"' not in source
 
 
+@pytest.fixture
+def picker_librenms(configure_librenms, monkeypatch):
+    """Run a loopback LibreNMS under the server key used by this module."""
+    from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    server = MockLibreNMSServer().start()
+    configure_librenms(
+        {
+            SERVER_KEY: {
+                "librenms_url": server.url,
+                "api_token": "test-token",
+                "cache_timeout": 0,
+                "verify_ssl": False,
+            }
+        }
+    )
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
 class CountingLocMemCache(LocMemCache):
     """Real local-memory cache backend with visible read volume for request tests."""
 
@@ -56,43 +80,29 @@ class CountingLocMemCache(LocMemCache):
         return super().get(key, default=default, version=version)
 
 
-def _serial_refetch_get(link):
-    """Return a real-shape LibreNMS HTTP fake that rebuilds one serial row."""
-    import json
-
-    import requests
-
-    def external_get(url, *args, **kwargs):
-        response = requests.models.Response()
-        response.url = url
-        if url.endswith("/links"):
-            response.status_code = 404
-            response._content = b'{"status":"error","message":"Device does not have any links"}'
-        elif url.endswith("/ports"):
-            response.status_code = 200
-            response._content = b'{"status":"ok","ports":[]}'
-        elif url.endswith("/resources/sensors"):
-            response.status_code = 200
-            response._content = json.dumps(
+def _register_serial_refetch(server, link):
+    """Register real HTTP responses that rebuild one serial row."""
+    server.register(
+        "/api/v0/devices/13/links",
+        {"status": "error", "message": "Device does not have any links"},
+        status=404,
+    )
+    server.register("/api/v0/devices/13/ports", {"status": "ok", "ports": []})
+    server.register(
+        "/api/v0/resources/sensors",
+        {
+            "status": "ok",
+            "sensors": [
                 {
-                    "status": "ok",
-                    "sensors": [
-                        {
-                            "sensor_id": link["sensor_id"],
-                            "device_id": 13,
-                            "sensor_type": "acsSerialPortTable",
-                            "sensor_index": "acsSerialPortTableStatus.8",
-                            "sensor_descr": f"{link['remote_device']} Status",
-                        }
-                    ],
+                    "sensor_id": link["sensor_id"],
+                    "device_id": 13,
+                    "sensor_type": "acsSerialPortTable",
+                    "sensor_index": "acsSerialPortTableStatus.8",
+                    "sensor_descr": f"{link['remote_device']} Status",
                 }
-            ).encode()
-        else:
-            response.status_code = 200
-            response._content = b'{"status":"ok"}'
-        return response
-
-    return external_get
+            ],
+        },
+    )
 
 
 def _rendered_sync_data(client, device, row_ids, server_key=SERVER_KEY, submit_name="select"):
@@ -425,18 +435,15 @@ class TestRemotePickerEndpoint:
         assert rejected.status_code == 400
         assert accepted.status_code == 200
 
-    def test_unknown_row_in_valid_snapshot_does_not_refetch_librenms(self):
+    def test_unknown_row_in_valid_snapshot_does_not_refetch_librenms(self, picker_librenms):
         """A forged row ID must not turn a valid cached snapshot into a live API fetch."""
-        from unittest.mock import patch
-
         client = self._client("unknown-row")
         _acs, _csp, _link, url = self._seed_serial("unknown-row")
 
-        with patch("netbox_librenms_plugin.librenms_api._session.get") as external_get:
-            response = client.get(url, {"row_id": "missing", "server_key": SERVER_KEY})
+        response = client.get(url, {"row_id": "missing", "server_key": SERVER_KEY})
 
         assert response.status_code == 404
-        external_get.assert_not_called()
+        assert picker_librenms.requests == []
 
     def test_unconfigured_serial_label_does_not_auto_create_a_cable(self):
         """A default sensor label is not evidence for a remote Device match."""
@@ -2314,10 +2321,8 @@ class TestManualRepointOfExistingCable:
         new_cp.refresh_from_db()
         assert csp.cable_id == new_cp.cable_id  # re-pointed to the pick
 
-    def test_pick_post_refetches_when_cache_expired(self):
+    def test_pick_post_refetches_when_cache_expired(self, picker_librenms):
         """A pick that lands after the snapshot expired re-fetches from LibreNMS instead of erroring."""
-        from unittest.mock import patch
-
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import clear_test_cache
@@ -2331,18 +2336,15 @@ class TestManualRepointOfExistingCable:
 
         clear_test_cache(cache)  # the snapshot expired between render and pick
 
-        with patch(
-            "netbox_librenms_plugin.librenms_api._session.get",
-            side_effect=_serial_refetch_get(link),
-        ) as external_get:
-            resp = client.post(
-                picker_url,
-                data={"row_id": link["local_port_id"], "server_key": SERVER_KEY, "remote_interface_id": new_cp.pk},
-                HTTP_HX_REQUEST="true",
-            )
+        _register_serial_refetch(picker_librenms, link)
+        resp = client.post(
+            picker_url,
+            data={"row_id": link["local_port_id"], "server_key": SERVER_KEY, "remote_interface_id": new_cp.pk},
+            HTTP_HX_REQUEST="true",
+        )
 
         refetched = cache.get(object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY))
-        assert refetched is not None, [call.args[0] for call in external_get.call_args_list]
+        assert refetched is not None, picker_librenms.requests
         assert resp.status_code == 200, resp.content.decode()
         assert new_cp.name in resp.content.decode()
         key_view = object.__new__(SyncCablesView)
@@ -2365,10 +2367,8 @@ class TestManualRepointOfExistingCable:
 
         assert resp.status_code == 400
 
-    def test_pick_modal_get_refetches_when_cache_expired(self):
+    def test_pick_modal_get_refetches_when_cache_expired(self, picker_librenms):
         """Opening the picker after the snapshot expired re-fetches instead of a dead-end warning."""
-        from unittest.mock import patch
-
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import clear_test_cache
@@ -2381,14 +2381,11 @@ class TestManualRepointOfExistingCable:
 
         clear_test_cache(cache)
 
-        with patch(
-            "netbox_librenms_plugin.librenms_api._session.get",
-            side_effect=_serial_refetch_get(link),
-        ) as external_get:
-            resp = client.get(picker_url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
+        _register_serial_refetch(picker_librenms, link)
+        resp = client.get(picker_url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
 
         refetched = cache.get(object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY))
-        assert refetched is not None, [call.args[0] for call in external_get.call_args_list]
+        assert refetched is not None, picker_librenms.requests
         assert resp.status_code == 200
         content = resp.content.decode()
         assert 'name="q"' in content, content  # the real picker, not the cache-expired warning

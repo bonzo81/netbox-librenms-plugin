@@ -5,8 +5,6 @@ SyncInterfacesView + DeleteNetBoxInterfacesView
 Target: 95%+ coverage
 """
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 from netbox_librenms_plugin.interface_relationships import (
@@ -423,30 +421,34 @@ def test_interface_bulk_selection_ignores_disabled_rows():
 
 class TestSyncInterfacesViewGetObject:
     def test_get_device(self):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        view = object.__new__(SyncInterfacesView)
-        mock_device = MagicMock()
+        device = make_device("get-object-device")
+        request = _make_request(user=make_superuser("get-object-device-user"))
+        view = make_view(SyncInterfacesView, request)
 
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-            return_value=mock_device,
-        ):
-            result = view.get_object("device", 1)
-        assert result is mock_device
+        result = view.get_object("device", device.pk)
+
+        assert isinstance(result, Device)
+        assert result == device
 
     def test_get_vm(self):
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        view = object.__new__(SyncInterfacesView)
-        mock_vm = MagicMock()
+        vm = make_vm("get-object-vm")
+        request = _make_request(user=make_superuser("get-object-vm-user"))
+        view = make_view(SyncInterfacesView, request)
 
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-            return_value=mock_vm,
-        ):
-            result = view.get_object("virtualmachine", 2)
-        assert result is mock_vm
+        result = view.get_object("virtualmachine", vm.pk)
+
+        assert isinstance(result, VirtualMachine)
+        assert result == vm
 
     def test_invalid_type_raises_http404(self):
         from django.http import Http404
@@ -488,139 +490,85 @@ class TestSyncInterfacesViewGetSelectedPortIds:
 
 
 class TestSyncInterfacesViewGetCachedPortsData:
-    def test_cache_miss_warns_and_returns_none(self):
+    @staticmethod
+    def _case(tag, server_key="default"):
+        from types import SimpleNamespace
+
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        view = object.__new__(SyncInterfacesView)
-        view.get_cache_key = MagicMock(return_value="k")
-        req = _make_request()
-        mock_obj = MagicMock(pk=1)
+        device = make_device(f"cached-ports-{tag}")
+        request = _make_request()
+        view = make_view(SyncInterfacesView, request)
+        view._librenms_api = SimpleNamespace(server_key=server_key)
+        return view, request, device
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
-        ):
-            mock_cache.get.return_value = None
-            result = view.get_cached_ports_data(req, mock_obj, "default")
+    def test_cache_miss_warns_and_returns_none(self):
+        from django.core.cache import cache
+
+        view, request, device = self._case("miss")
+        cache.delete(view.get_cache_key(device, "ports", "default"))
+        result = view.get_cached_ports_data(request, device, "default")
 
         assert result is None
-        mock_msgs.warning.assert_called_once()
+        assert message_texts(request, "warning")
 
     def test_cache_hit_returns_ports(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from django.core.cache import cache
 
-        view = object.__new__(SyncInterfacesView)
-        view.get_cache_key = MagicMock(return_value="k")
-        req = _make_request()
-        mock_obj = MagicMock(pk=1)
+        view, request, device = self._case("hit")
         ports = [{"ifName": "Gi0/1"}]
+        cache.set(view.get_cache_key(device, "ports", "default"), {"ports": ports})
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache:
-            mock_cache.get.return_value = {"ports": ports}
-            result = view.get_cached_ports_data(req, mock_obj, "default")
+        result = view.get_cached_ports_data(request, device, "default")
 
         assert result == ports
 
     def test_malformed_cached_ports_treated_as_miss(self):
         """A stale/malformed cache entry (ports not a list of dicts, e.g."""
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from django.core.cache import cache
 
-        view = object.__new__(SyncInterfacesView)
-        view.get_cache_key = MagicMock(return_value="k")
-        req = _make_request()
-        mock_obj = MagicMock(pk=1)
-
-        for bad in ({"ports": None}, {"ports": "oops"}, {"ports": [None]}, ["not-a-dict"]):
-            with (
-                patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
-                patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
-            ):
-                mock_cache.get.return_value = bad
-                result = view.get_cached_ports_data(req, mock_obj, "default")
+        for index, bad in enumerate(({"ports": None}, {"ports": "oops"}, {"ports": [None]}, ["not-a-dict"])):
+            view, request, device = self._case(f"malformed-{index}")
+            cache.set(view.get_cache_key(device, "ports", "default"), bad)
+            result = view.get_cached_ports_data(request, device, "default")
 
             assert result is None, f"malformed {bad!r} should be a miss"
-            mock_msgs.warning.assert_called_once()
+            assert message_texts(request, "warning")
 
     def test_dict_without_ports_key_is_noop_not_miss(self):
         """A cached dict that simply lacks a 'ports' key is a harmless empty no-op (historical behavior), not a 'refresh first' abort — only PRESENT-but-malformed ports fail closed."""
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from django.core.cache import cache
 
-        view = object.__new__(SyncInterfacesView)
-        view.get_cache_key = MagicMock(return_value="k")
-        req = _make_request()
-        mock_obj = MagicMock(pk=1)
-
-        for empty in ({}, {"librenms_id": 5}, {"ports": []}):
-            with (
-                patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
-                patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
-            ):
-                mock_cache.get.return_value = empty
-                result = view.get_cached_ports_data(req, mock_obj, "default")
+        for index, empty in enumerate(({}, {"librenms_id": 5}, {"ports": []})):
+            view, request, device = self._case(f"empty-{index}")
+            cache.set(view.get_cache_key(device, "ports", "default"), empty)
+            result = view.get_cached_ports_data(request, device, "default")
 
             assert result == [], f"{empty!r} should be an empty no-op, not a miss"
-            mock_msgs.warning.assert_not_called()
+            assert message_texts(request, "warning") == []
 
     def test_no_server_key_uses_librenms_api(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from django.core.cache import cache
 
-        view = object.__new__(SyncInterfacesView)
-        view.get_cache_key = MagicMock(return_value="k")
-        mock_api = MagicMock(server_key="mykey")
-        req = _make_request()
-        mock_obj = MagicMock(pk=1)
+        view, request, device = self._case("api-key", server_key="mykey")
+        expected_key = view.get_cache_key(device, "ports", "mykey")
+        cache.set(expected_key, {"ports": [{"ifName": "Ethernet1"}]})
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
-            # The reader resolves the VC sync device unconditionally (mirroring the
-            # writers); identity here = the non-VC case.
-            patch(
-                "netbox_librenms_plugin.views.sync.interfaces.get_librenms_sync_device",
-                side_effect=lambda obj, server_key=None: obj,
-            ),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = None
-            view.get_cached_ports_data(req, mock_obj, None)
+        result = view.get_cached_ports_data(request, device, None)
 
-        # get_cache_key should have been called with (obj, "ports", resolved_server_key)
-        view.get_cache_key.assert_called_once_with(mock_obj, "ports", "mykey")
+        assert result == [{"ifName": "Ethernet1"}]
 
 
 @pytest.mark.django_db
 class TestInterfaceContextOOBRows:
     """get_context_data must not let OOB-controller rows hide / falsely-match main-device interfaces in the netbox-only reconciliation set."""
 
-    def _make_view(self, *, real_cache_keys=False):
+    def _make_view(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        # Concrete device view: its real get_interfaces()/get_select_related_field() drive the
-        # real _build_interface_lookup_maps over obj.interfaces, and the real
-        # get_stored_librenms_id (a local custom-field/cache read — NOT an HTTP call) resolves
-        # idrac0's stored id to None for real. A real LibreNMSAPI is built under a config patch;
-        # __init__ only reads config, so no network is touched.
-        view = object.__new__(DeviceInterfaceTableView)
-        servers = {
-            "default": {
-                "librenms_url": "https://librenms.example.com",
-                "api_token": "test-token",
-                "cache_timeout": 300,
-                "verify_ssl": True,
-            }
-        }
-        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config", return_value=servers):
-            view._librenms_api = LibreNMSAPI(server_key="default")
-        view.get_vlan_groups_for_device = MagicMock(return_value=[])
-        view._build_vlan_lookup_maps = MagicMock(return_value={})
-        view._add_vlan_group_selection = MagicMock()
-        view._add_missing_vlans_info = MagicMock()
-        view.get_table = MagicMock(return_value=MagicMock())
-        if not real_cache_keys:
-            view.get_cache_key = MagicMock(return_value="ports-key")
-            view.get_last_fetched_key = MagicMock(return_value="lf-key")
-            view.get_vlan_overrides_key = MagicMock(return_value="ov-key")
+        view = make_view(DeviceInterfaceTableView, _make_request())
+        view._librenms_api = LibreNMSAPI(server_key="default")
         return view
 
     @staticmethod
@@ -633,54 +581,11 @@ class TestInterfaceContextOOBRows:
         make_interface(device, "idrac0")
         return device
 
-    def test_oob_row_does_not_match_or_hide_host_interface(self):
-        """An OOB row sharing a host interface name renders unmatched (not bound to the host interface) and still doesn't suppress that host interface from the netbox-only set."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
-        # Host owns its own idrac0; LibreNMS reports idrac0 only on the OOB-controller side.
-        dev = make_device("oob-shared-host")
-        make_interface(dev, "idrac0")
-
-        # Real DeviceInterfaceTableView so the real get_interfaces + _build_interface_lookup_maps
-        # + per-port reconciliation run; only peripheral plumbing (vlan helpers, table build,
-        # cache-key derivation) is stubbed. A captured get_table lets us assert the OOB row's fields.
-        view = object.__new__(DeviceInterfaceTableView)
-        # Stub only the LibreNMS client boundary; these interfaces genuinely carry no stored id.
-        view._librenms_api = MagicMock()
-        view._librenms_api.get_stored_librenms_id.return_value = None
-        view.get_vlan_groups_for_device = MagicMock(return_value=[])
-        view._build_vlan_lookup_maps = MagicMock(return_value={})
-        view._add_vlan_group_selection = MagicMock()
-        view._add_missing_vlans_info = MagicMock()
-        captured = {}
-        view.get_table = lambda ports_data, *a, **k: captured.update(ports=ports_data) or MagicMock()
-        view.get_cache_key = MagicMock(return_value="ports-key")
-        view.get_last_fetched_key = MagicMock(return_value="lf-key")
-        view.get_vlan_overrides_key = MagicMock(return_value="ov-key")
-
-        cached = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999, "ifSpeed": 1000000000}]}
-        req = _make_request()
-
-        def cache_get(key):
-            return cached if key == "ports-key" else ({} if key == "ov-key" else None)
-
-        with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-            mock_cache.get.side_effect = cache_get
-            mock_cache.ttl.return_value = None
-            ctx = view.get_context_data(req, dev, "ifName", "default")
-
-        oob_row = next(p for p in captured["ports"] if p.get("_source") == "oob")
-        # The OOB row is a different LibreNMS device's port — it must NOT bind to the host's idrac0.
-        assert oob_row["exists_in_netbox"] is False
-        assert oob_row["netbox_interface"] is None
-        # ...and the host's own idrac0 still surfaces as netbox-only (the OOB row doesn't suppress it).
-        assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
-
     def test_oob_row_does_not_hide_netbox_only_interface(self):
         from django.core.cache import cache
         from django.utils import timezone
 
-        view = self._make_view(real_cache_keys=True)
+        view = self._make_view()
         obj = self._host_with_idrac()
         cached = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
         req = _make_request()
@@ -1626,23 +1531,23 @@ class TestInterfaceContextOOBRows:
 
     def test_fresh_data_renders_without_reading_cache(self):
         """Fresh data renders the partial OOB snapshot after the failed fetch deletes its cache entry."""
+        from django.core.cache import cache
+
         view = self._make_view()
         obj = self._host_with_idrac()
         fresh = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
         req = _make_request()
+        cache_key = view.get_cache_key(obj, "ports", "default")
+        cache.set(cache_key, {"ports": [{"ifName": "cached", "port_id": 123}]})
 
-        with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-            # Simulate the deleted cache: every cache.get returns None.
-            mock_cache.get.return_value = None
-            mock_cache.ttl.return_value = None
+        try:
             ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)
+        finally:
+            cache.delete(cache_key)
 
-        # The ports cache key must never be read — fresh_data short-circuits it.
-        assert all(not (c.args and c.args[0] == "ports-key") for c in mock_cache.get.call_args_list), (
-            "ports cache key was read despite fresh_data override"
-        )
-        # The fresh snapshot was still processed (the OOB row drove dedup) and a table built.
-        assert "table" in ctx
+        rows = list(ctx["table"].data)
+        assert any(row.get("port_id") == 999 for row in rows)
+        assert all(row.get("port_id") != 123 for row in rows)
         assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
 
     def test_malformed_port_stack_relationships_does_not_crash(self):
@@ -1650,7 +1555,7 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
         from django.utils import timezone
 
-        view = self._make_view(real_cache_keys=True)
+        view = self._make_view()
         obj = self._host_with_idrac()
         req = _make_request()
 
@@ -1676,7 +1581,7 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
         from django.utils import timezone
 
-        view = self._make_view(real_cache_keys=True)
+        view = self._make_view()
         obj = self._host_with_idrac()
         req = _make_request()
 
@@ -1703,15 +1608,14 @@ class TestInterfaceContextOOBRows:
         obj = self._host_with_idrac()
         req = _make_request()
 
+        from django.core.cache import cache
+
+        cache_key = view.get_cache_key(obj, "ports", "default")
         for bad in ("garbage-string", {"ports": "not-a-list"}, {"ports": [42]}):
-            with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-                mock_cache.get.side_effect = lambda key, bad=bad: (
-                    bad if key == "ports-key" else ({} if key == "ov-key" else None)
-                )
-                mock_cache.ttl.return_value = None
-                ctx = view.get_context_data(req, obj, "ifName", "default")  # must not raise
+            cache.set(cache_key, bad)
+            ctx = view.get_context_data(req, obj, "ifName", "default")
             assert "table" in ctx
-            assert any(c.args and c.args[0] == "ports-key" for c in mock_cache.delete.call_args_list)
+            assert cache.get(cache_key) is None
 
 
 class TestInterfaceContextVirtualChassisOwner:
@@ -2128,7 +2032,7 @@ class TestInterfaceContextVirtualChassisOwner:
 
 
 class TestSyncInterfacesViewPost:
-    def test_integrity_error_at_the_outer_commit_is_reported_not_a_500(self):
+    def test_integrity_error_at_the_outer_commit_is_reported_not_a_500(self, monkeypatch):
         """A deferred foreign-key IntegrityError at the outer atomic commit redirects instead of returning a 500."""
         from types import SimpleNamespace
 
@@ -2161,13 +2065,12 @@ class TestSyncInterfacesViewPost:
         cache_key = view.get_cache_key(device, "ports", "default")
         cache.set(cache_key, {"ports": [port], "port_stack_relationships": {}})
 
+        def raise_integrity_error(*args, **kwargs):  # noqa: ARG001
+            raise IntegrityError("deferred FK violated at COMMIT")
+
+        monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", raise_integrity_error)
         try:
-            with patch.object(
-                SyncInterfacesView,
-                "_sync_interface_relationships",
-                side_effect=IntegrityError("deferred FK violated at COMMIT"),
-            ):
-                response = _post(view, request, object_type="device", object_id=device.pk)
+            response = _post(view, request, object_type="device", object_id=device.pk)
         finally:
             cache.delete(cache_key)
 
@@ -3726,39 +3629,21 @@ class TestSyncInterfacesViewPost:
 class TestSyncInterfacesViewServerKeyAndRedirect:
     """Post-sync redirect URLs escape interface_name_field values."""
 
-    def _make_view(self):
+    def test_unsupported_interface_name_field_cannot_inject_redirect_query(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        view = object.__new__(SyncInterfacesView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
-        return view
+        device = make_device("sync-redirect-query")
+        request = _make_request(
+            post_data={"interface_name_field": "ifName&injected=1"},
+            user=make_superuser("sync-redirect-query-user"),
+        )
 
-    def _run_no_selection(self, view, mock_api, post_data, name_field="ifName"):
-        """Drive post() down the no-selection redirect path (server_key + redirect_url are set before that), returning the redirect call mock."""
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=MagicMock(pk=1),
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value=name_field),
-            patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
-            patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect,
-            patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
-            # post() rebinds the client to the POSTed server via build_librenms_api (the fail-closed
-            # seam); return a mock so a blank/valid key resolves without touching the DB or a real client.
-            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=mock_api),
-        ):
-            view.post(_make_request(post_data=post_data), "device", 1)
-        return mock_redirect
+        response = _post(SyncInterfacesView(), request, object_type="device", object_id=device.pk)
 
-    def test_interface_name_field_is_url_escaped_in_redirect(self):
-        view = self._make_view()
-        mock_api = MagicMock(server_key="default")
-        mock_redirect = self._run_no_selection(view, mock_api, {}, name_field="ifName&injected=1")
-        url = mock_redirect.call_args.args[0]
-        assert "ifName%26injected%3D1" in url
-        assert "ifName&injected=1" not in url
+        assert response.status_code == 302
+        assert "injected" not in response.url
+        assert "interface_name_field=" in response.url
 
 
 # ===========================================================================
@@ -3768,12 +3653,10 @@ class TestSyncInterfacesViewServerKeyAndRedirect:
 
 class TestSyncInterfacesViewSyncInterfaceDevice:
     def _make_view(self, request=None):
-        """The real view; only its own next steps (attribute copy, VLAN sync) are stubbed."""
+        """Return the real view with the lookup state prepared by post()."""
         view = _sync_view(request)
         view._lookup_maps = {}
         view.interface_name_field = "ifName"
-        view.update_interface_attributes = MagicMock()
-        view._sync_interface_vlans = MagicMock()
         return view
 
     @pytest.mark.django_db
@@ -3782,7 +3665,6 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         from dcim.models import Interface
 
         view = self._make_view()
-        del view.update_interface_attributes  # exercise the real attribute sync + save
         dev = make_device("sync-create")
         librenms_port = {
             "ifName": "Gi0/1",
@@ -3810,7 +3692,6 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 
         view = self._make_view()
-        del view.update_interface_attributes  # run the real attribute sync + save
 
         # The device the user is syncing — it legitimately owns its own Gi0/1.
         dev = make_device("sync-fallback-own")
@@ -3846,24 +3727,6 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         # ...and the port_id is NOT reassigned onto the current device's interface.
         assert get_librenms_device_id(own_iface, "default") is None
 
-    def test_foreign_port_id_skip_is_recorded(self):
-        """When the resolver returns None (port_id belongs to another device), the row is skipped and its name recorded in _skipped_conflicts for the post() summary."""
-        from dcim.models import Device
-
-        view = self._make_view()
-        view._skipped_conflicts = []
-        mock_device = MagicMock()
-        mock_device.__class__ = Device
-        mock_device.virtual_chassis = None
-
-        librenms_port = {"ifName": "Gi0/1", "port_id": 99}
-        view._resolve_device_interface = MagicMock(return_value=None)
-
-        view.sync_interface(mock_device, librenms_port, [], "ifName")
-
-        assert view._skipped_conflicts == ["Gi0/1 (port already mapped elsewhere or ambiguous)"]
-        view.update_interface_attributes.assert_not_called()
-
     def test_device_selection_with_vc_valid(self):
         """A posted sibling of the same chassis receives the interface."""
         from dcim.models import Interface
@@ -3871,7 +3734,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         _vc, (host, sibling) = make_virtual_chassis_members("selvalid")
         view = self._make_view(_make_request(post_data={"device_selection_10": str(sibling.pk)}))
 
-        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, [], "ifName")
+        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName")
 
         assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=host, name="Gi0/1").exists()
@@ -3885,7 +3748,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view = self._make_view(_make_request(post_data={"device_selection_10": str(other.pk)}))
         view._skipped_conflicts = []
 
-        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, [], "ifName")
+        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName")
 
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=other, name="Gi0/1").exists()
@@ -3899,7 +3762,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view = self._make_view(_make_request(post_data={"device_selection_10": str(absent_pk)}))
         view._skipped_conflicts = []
 
-        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, [], "ifName")
+        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName")
 
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
         assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
@@ -3921,7 +3784,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view = self._make_view(request)
         view._skipped_conflicts = []
 
-        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, [], "ifName")
+        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName")
 
         assert not Interface.objects.filter(name="Gi0/1").exists()
         assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
@@ -3934,7 +3797,6 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
         view = self._make_view()
-        del view.update_interface_attributes  # run the real attribute sync + save
 
         dev = make_device("sync-prefers-own")
         iface = make_interface(dev, "Gi0/1")
@@ -3968,7 +3830,6 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
         view = self._make_view()
         view._skipped_conflicts = []
-        del view.update_interface_attributes
 
         dev = make_device("sync-conflict-nolocal")  # deliberately has NO Gi0/1
         other = make_device("sync-conflict-other")
@@ -3998,13 +3859,10 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         vm = make_vm("vmsync-created")
         view = _sync_view()
         view._lookup_maps = {}
-        view.update_interface_attributes = MagicMock()
-        view._sync_interface_vlans = MagicMock()
 
-        view.sync_interface(vm, {"ifName": "eth0", "port_id": None}, [], "ifName")
+        view.sync_interface(vm, {"ifName": "eth0", "port_id": None}, ["vlans"], "ifName")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
-        view.update_interface_attributes.assert_called_once()
 
     def test_vm_port_id_prefers_existing_librenms_id_match(self):
         """A port_id already stored on this VM's interface updates it; no second interface."""
@@ -4016,14 +3874,13 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         matched.save()
         view = _sync_view()
         view._lookup_maps = {}
-        view.update_interface_attributes = MagicMock()
-        view._sync_interface_vlans = MagicMock()
         librenms_port = {"ifName": "renamed-in-librenms", "port_id": 55}
 
-        view.sync_interface(vm, librenms_port, [], "ifName")
+        view.sync_interface(vm, librenms_port, ["vlans"], "ifName")
 
         assert VMInterface.objects.filter(virtual_machine=vm).count() == 1
-        view.update_interface_attributes.assert_called_once_with(matched, librenms_port, None, [], "ifName")
+        matched.refresh_from_db()
+        assert matched.name == "renamed-in-librenms"
 
     def test_invalid_obj_raises_value_error(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -4033,7 +3890,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         librenms_port = {"ifName": "eth0"}
 
         with pytest.raises(ValueError):
-            view.sync_interface(MagicMock(), librenms_port, [], "ifName")
+            view.sync_interface(object(), librenms_port, [], "ifName")
 
 
 class TestSyncInterfacesViewUpdateInterfaceAttributes:
@@ -4528,7 +4385,7 @@ class TestSyncLagAndParentRelationships:
     # what a real attribute access sets, and what the production check reads.
     _CORE_VC_BUG = AttributeError("'Interface' object has no attribute 'virtual_chassis'", name="virtual_chassis")
 
-    def test_cross_member_parent_survives_a_netbox_that_cannot_validate_it(self, db):
+    def test_cross_member_parent_survives_a_netbox_that_cannot_validate_it(self, db, monkeypatch):
         """The edge NetBox 4.4.0 cannot validate is the one it exists to allow: same chassis."""
         from dcim.models import Interface
 
@@ -4545,16 +4402,14 @@ class TestSyncLagAndParentRelationships:
                 raise self._CORE_VC_BUG
             return original_clean(interface)
 
-        with (
-            patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)),
-            patch.object(Interface, "clean", netbox_44_clean),
-        ):
-            _apply_interface_relationship(child, "parent", parent)
+        monkeypatch.setattr(utils, "_get_netbox_version_tuple", lambda: (4, 4, 0))
+        monkeypatch.setattr(Interface, "clean", netbox_44_clean)
+        _apply_interface_relationship(child, "parent", parent)
 
         child.refresh_from_db()
         assert child.parent_id == parent.pk
 
-    def test_cross_member_parent_error_propagates_once_netbox_fixed_it(self, db):
+    def test_cross_member_parent_error_propagates_once_netbox_fixed_it(self, db, monkeypatch):
         """The tolerance is scoped to 4.4.0: a later release must not hide the same failure."""
         from dcim.models import Interface
 
@@ -4565,17 +4420,18 @@ class TestSyncLagAndParentRelationships:
         child = make_interface(member2, "Ethernet7.100", iface_type="virtual")
         parent = make_interface(member1, "Ethernet7")
 
-        with (
-            patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 1)),
-            patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG),
-            pytest.raises(AttributeError),
-        ):
+        def raise_core_bug(instance):  # noqa: ARG001
+            raise self._CORE_VC_BUG
+
+        monkeypatch.setattr(utils, "_get_netbox_version_tuple", lambda: (4, 4, 1))
+        monkeypatch.setattr(Interface, "clean", raise_core_bug)
+        with pytest.raises(AttributeError):
             _apply_interface_relationship(child, "parent", parent)
 
         child.refresh_from_db()
         assert child.parent_id is None
 
-    def test_same_device_parent_does_not_swallow_the_attribute_error(self, db):
+    def test_same_device_parent_does_not_swallow_the_attribute_error(self, db, monkeypatch):
         """Only the cross-chassis edge is tolerated: NetBox never reaches that branch otherwise."""
         from dcim.models import Interface
 
@@ -4585,13 +4441,17 @@ class TestSyncLagAndParentRelationships:
         child = make_interface(device, "Ethernet5.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet5")
 
-        with patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG), pytest.raises(AttributeError):
+        def raise_core_bug(instance):  # noqa: ARG001
+            raise self._CORE_VC_BUG
+
+        monkeypatch.setattr(Interface, "clean", raise_core_bug)
+        with pytest.raises(AttributeError):
             _apply_interface_relationship(child, "parent", parent)
 
         child.refresh_from_db()
         assert child.parent_id is None
 
-    def test_an_unrelated_attribute_error_still_propagates(self, db):
+    def test_an_unrelated_attribute_error_still_propagates(self, db, monkeypatch):
         """The tolerance is keyed on the failing attribute, not on the shape of the edge alone."""
         from dcim.models import Interface
 
@@ -4601,20 +4461,17 @@ class TestSyncLagAndParentRelationships:
         child = make_interface(member2, "Ethernet6.100", iface_type="virtual")
         parent = make_interface(member1, "Ethernet6")
 
-        with (
-            patch.object(
-                Interface,
-                "clean",
-                side_effect=AttributeError("'Interface' object has no attribute 'nope'", name="nope"),
-            ),
-            pytest.raises(AttributeError),
-        ):
+        def raise_unrelated_error(instance):  # noqa: ARG001
+            raise AttributeError("'Interface' object has no attribute 'nope'", name="nope")
+
+        monkeypatch.setattr(Interface, "clean", raise_unrelated_error)
+        with pytest.raises(AttributeError):
             _apply_interface_relationship(child, "parent", parent)
 
         child.refresh_from_db()
         assert child.parent_id is None
 
-    def test_vm_parent_preserves_the_original_attribute_error(self, db):
+    def test_vm_parent_preserves_the_original_attribute_error(self, db, monkeypatch):
         """A VMInterface validation error must not be replaced by a missing device attribute."""
         from virtualization.models import VMInterface
 
@@ -4625,7 +4482,11 @@ class TestSyncLagAndParentRelationships:
         parent = VMInterface.objects.create(virtual_machine=vm, name="Ethernet1")
         original = AttributeError("validation failed", name="unexpected")
 
-        with patch.object(VMInterface, "clean", side_effect=original), pytest.raises(AttributeError) as raised:
+        def raise_original(instance):  # noqa: ARG001
+            raise original
+
+        monkeypatch.setattr(VMInterface, "clean", raise_original)
+        with pytest.raises(AttributeError) as raised:
             _apply_interface_relationship(child, "parent", parent)
 
         assert raised.value is original

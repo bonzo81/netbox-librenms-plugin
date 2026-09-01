@@ -649,9 +649,10 @@ class TestSerialSensorTypePatternModel:
             "plugins-api:netbox_librenms_plugin-api:serialsensortypepattern-detail",
             args=[response.json()["id"]],
         )
-        response = client.patch(
+        response = client.generic(
+            "PATCH",
             detail_url,
-            {"description": "Updated through API"},
+            data=json.dumps({"description": "Updated through API"}),
             content_type="application/json",
         )
         assert response.status_code == 200

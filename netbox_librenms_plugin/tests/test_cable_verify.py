@@ -2,11 +2,10 @@
 Regression tests for SingleCableVerifyView.post().
 
 Fully DB-backed: the verify path re-enriches purely from live NetBox state
-(get_device_by_id_or_name, enrich_remote_port and check_cable_status are ORM lookups — the
-LibreNMS client is never touched once the links cache is warm), so these exercise real
+(get_device_by_id_or_name, enrich_remote_port and check_cable_status are ORM lookups, and the
+LibreNMS client is not touched once the links cache is warm), so these exercise real
 Device/Interface/Cable objects, a real links cache entry and a real object-scoped request end to
-end. The only patched boundary is get_available_servers() — i.e. which LibreNMS servers are
-configured — so the POSTed server_key resolves deterministically.
+end. Tests select servers through the real plugin configuration.
 
 Covers:
 - Stale derived fields (ids/URLs from a previous enrichment) in the cached link are stripped and
@@ -15,13 +14,40 @@ Covers:
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from copy import deepcopy
 
 import pytest
+from django.conf import settings
 from django.core.cache import cache as real_cache
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 
 SERVER_KEY = "default"
+
+
+def _server_settings(*server_keys, broken_default=False):
+    """Configure valid named servers, with an optional unusable default entry."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    servers = {
+        key: {
+            "librenms_url": f"https://{key}.example.com",
+            "api_token": "test-token",
+            "cache_timeout": 0,
+            "verify_ssl": False,
+        }
+        for key in server_keys
+    }
+    if broken_default:
+        servers["default"] = {}
+    plugin_config.setdefault("netbox_librenms_plugin", {})["servers"] = servers
+    return override_settings(PLUGINS_CONFIG=plugin_config)
+
+
+def _api_for_server(server_key):
+    """Build a real API client for one named server."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    with _server_settings(server_key):
+        return LibreNMSAPI(server_key=server_key)
 
 
 def _cable_device(tag, ifaces):
@@ -63,10 +89,7 @@ def _post_with_links(view, request, device, links):
     key = view.get_cache_key(device, "links", SERVER_KEY)
     real_cache.set(key, {"links": links})
     try:
-        with patch(
-            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-            return_value={SERVER_KEY: "Default"},
-        ):
+        with _server_settings(SERVER_KEY):
             response = view.post(request)
     finally:
         real_cache.delete(key)
@@ -229,14 +252,13 @@ class TestXSSEscaping:
 
 
 def _cable_view_with_api(tag, body, *, api_server_key="default"):
-    """Create a cable verification view and superuser request with only the active server key stubbed."""
+    """Create a cable verification view with a real configured API and superuser request."""
     from django.contrib.auth import get_user_model
 
     from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
     view = SingleCableVerifyView()
-    view._librenms_api = MagicMock()
-    view._librenms_api.server_key = api_server_key
+    view._librenms_api = _api_for_server(api_server_key)
     request = RequestFactory().post("/verify-cable/", data=json.dumps(body), content_type="application/json")
     request.user = get_user_model().objects.create_superuser(username=f"guard-{tag}", email="", password="x")
     view.request = request
@@ -261,24 +283,15 @@ class TestServerKeyGuard:
         """Verify a configured string key scopes the real links cache through the server membership check."""
         device, _ = _cable_device("guard-valid", [("eth0", 100)])
         view, request = _cable_view_with_api("valid", {"device_id": device.pk, "row_id": "100", "server_key": "prod"})
+        key = view.get_cache_key(device, "links", "prod")
+        real_cache.set(key, {"links": [{"local_port": "eth0", "local_port_id": 100, "remote_device": ""}]})
+        try:
+            with _server_settings("prod"):
+                row = json.loads(view.post(request).content)["formatted_row"]
+        finally:
+            real_cache.delete(key)
 
-        captured = {}
-        real_get_cache_key = view.get_cache_key
-
-        def spy(dev, kind, sk):
-            captured["server_key"] = sk
-            return real_get_cache_key(dev, kind, sk)
-
-        with (
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"prod": "Prod"},
-            ),
-            patch.object(view, "get_cache_key", side_effect=spy),
-        ):
-            view.post(request)
-
-        assert captured["server_key"] == "prod"  # the posted, CONFIGURED key was honoured, not the active default
+        assert "eth0" in row["local_port"]
 
 
 @pytest.mark.django_db
@@ -315,13 +328,10 @@ class TestCablesGetRenderDegradesOnBrokenDefaultServer:
             timeout=300,
         )
 
-        def broken_cfg(_plugin, cfg_key, *args, **kwargs):
-            # A non-empty 'servers' with no 'default' and no valid dict entry makes LibreNMSAPI()
-            # raise ValueError in its constructor — the exact broken-default-server condition.
-            return {"alpha": "not-a-dict"} if cfg_key == "servers" else None
-
         try:
-            with patch("netbox_librenms_plugin.librenms_api.get_plugin_config", side_effect=broken_cfg):
+            plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+            plugin_config.setdefault("netbox_librenms_plugin", {})["servers"] = {"alpha": "not-a-dict"}
+            with override_settings(PLUGINS_CONFIG=plugin_config):
                 context = view.get_context_data(request, device)
             # Degrades: the cached links still render (server_key falls back to None) instead of a 500.
             assert context is not None
@@ -348,9 +358,7 @@ class TestSingleCableVerifyMisconfiguredDefault:
         site, _ = Site.objects.get_or_create(name="Site-scv", slug="site-scv")
         device = Device.objects.create(name="host-scv", device_type=dt, role=role, site=site, status="active")
 
-        view = object.__new__(SingleCableVerifyView)
-        view._librenms_api = None  # live property: accessing it would build LibreNMSAPI() (default)
-        view.require_object_permissions_json = MagicMock(return_value=None)
+        view = SingleCableVerifyView()
 
         # DEFAULT present-but-broken (no url/token) → LibreNMSAPI() raises; get_available_servers()={'prod'}.
         cfg = {
@@ -381,22 +389,24 @@ class TestSingleCableVerifyMisconfiguredDefault:
 
 
 def _make_view(server_key="default"):
-    """Create a SingleCableVerifyView instance without database access."""
+    """Create a SingleCableVerifyView with a real API and request."""
     from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
-    view = object.__new__(SingleCableVerifyView)
-    view._librenms_api = MagicMock()
-    view._librenms_api.server_key = server_key
-    view.request = MagicMock()
+    view = SingleCableVerifyView()
+    view._librenms_api = _api_for_server(server_key)
+    view.request = RequestFactory().get("/")
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    view.request.user = make_superuser()
     return view
 
 
 def _make_request(body_dict):
-    """Create a mock POST request with JSON body."""
-    request = MagicMock()
-    request.method = "POST"
-    request.body = json.dumps(body_dict).encode()
-    request.META = {"HTTP_X_REQUESTED_WITH": "XMLHttpRequest"}
+    """Create a real permitted JSON POST request."""
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    request = RequestFactory().post("/verify-cable/", data=json.dumps(body_dict), content_type="application/json")
+    request.user = make_superuser()
     return request
 
 
@@ -623,10 +633,7 @@ class TestSingleCableVerifyServerKeyRouting:
         self._seed(view, device, "production")  # links cached ONLY under 'production'
 
         request = _make_request({"device_id": device.pk, "row_id": "700", "server_key": "production"})
-        with patch(
-            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-            return_value={"production": "Production"},
-        ):
+        with _server_settings("production"):
             row = json.loads(view.post(request).content)["formatted_row"]
 
         # The 'production' cache was read → the port link renders (not the empty Missing-Ports row).
@@ -677,13 +684,7 @@ class TestEnrichRemotePortEmptyPort:
         return Device.objects.create(name=name, site=site, device_type=dtype, role=role)
 
     def _make_view(self):
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        view.request = MagicMock()
-        return view
+        return _make_view()
 
     def test_enrich_links_data_survives_remote_device_without_port(self):
         """LLDP neighbor advertising a resolvable device but no remote port: enrich_links_data must not crash (regression: enrich_remote_port returned None → link.get() AttributeError)."""

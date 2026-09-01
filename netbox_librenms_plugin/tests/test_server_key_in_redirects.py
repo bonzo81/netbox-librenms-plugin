@@ -10,15 +10,32 @@ structural canary keeps the suite honest if a builder is renamed or removed.
 """
 
 from pathlib import Path
+from copy import deepcopy
 
 import pytest
-from django.test import RequestFactory
+from django.conf import settings
+from django.test import RequestFactory, override_settings
 
 import netbox_librenms_plugin.views as views_pkg
 from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
 # Per the codebase convention, every redirect/tab URL built in these packages is server-scoped.
 SCOPED_SUBPACKAGES = ("sync", "base", "object_sync")
+
+
+@pytest.fixture
+def prod_server(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {
+            "prod": {"librenms_url": server.url, "api_token": "test-token"}
+        }
+        with override_settings(PLUGINS_CONFIG=plugin_config):
+            yield server
 
 
 def _scoped_python_files():
@@ -125,7 +142,7 @@ def test_modules_action_fragment_keeps_the_server_key(client, settings):
     "view_name",
     ["UpdateDeviceNameView", "UpdateDeviceSerialView", "UpdateDeviceTypeView", "UpdateDevicePlatformView"],
 )
-def test_field_sync_views_preserve_server_key_on_redirect(view_name):
+def test_field_sync_views_preserve_server_key_on_redirect(view_name, prod_server):
     """The four device field-sync views rebind to the POSTed server, so their redirects must carry it.
 
     Each view resolves ``server_key`` via ``rebind_api_for_server`` up front; without preserving it
@@ -135,30 +152,19 @@ def test_field_sync_views_preserve_server_key_on_redirect(view_name):
     ``build_librenms_api`` (the HTTP boundary) is stubbed — real request, real superuser permission
     gate, real ``_device_sync_redirect`` / ``redirect_with_server_key``.
     """
-    from unittest.mock import MagicMock, patch
-
-    from django.contrib.auth import get_user_model
-    from django.contrib.messages.storage.cookie import CookieStorage
-
     from netbox_librenms_plugin.views.sync import device_fields
 
-    user = get_user_model().objects.create(username=f"redir-{view_name}", is_superuser=True, is_active=True)
     device = make_device(f"redir-{view_name.lower()}")
-
-    request = RequestFactory().post("/", {"server_key": "prod"})
-    request.user = user
-    request._messages = CookieStorage(request)  # messages.error() needs storage (session-free) on a bare request
+    request = make_request("post", {"server_key": "prod"})
 
     view = getattr(device_fields, view_name)()
     view.request = request  # require_all_permissions reads self.request
 
-    prod_api = MagicMock(server_key="prod")
-    prod_api.get_librenms_id.return_value = None  # → the shared "Device not found" early redirect
-    with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=prod_api):
-        resp = view.post(request, device.pk)
+    resp = view.post(request, device.pk)
 
     assert resp.status_code in (301, 302), f"{view_name} did not redirect (perm gate?): {resp}"
     assert "server_key=prod" in resp.url, f"{view_name} dropped server_key on redirect: {resp.url}"
+    assert prod_server.requests, f"{view_name} did not use the configured prod server"
 
 
 def test_scoped_tab_builders_exist():
