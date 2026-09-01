@@ -161,7 +161,10 @@ class TestCableStateTokenColumns:
 
         assert token
         present = {field.name for field in CableTermination._meta.get_fields()}
-        for column in set(self.ADDED_AFTER_44) - present:
+        missing = set(self.ADDED_AFTER_44) - present
+        if not missing:
+            pytest.skip("this NetBox has every post-4.4 termination column")
+        for column in missing:
             assert not any(column in query["sql"] for query in queries), (
                 f"the fingerprint named {column}, which this NetBox has no column for"
             )

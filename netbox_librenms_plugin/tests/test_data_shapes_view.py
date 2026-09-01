@@ -62,14 +62,19 @@ def _view_with_api(api):
     return view
 
 
-def _run_capture(view, server, device, *, query="?server_key=test"):
-    """Run capture through real API rebind, ID lookup, and device sync."""
+def _override_servers(server):
+    """Configure the recording server through the real plugin-settings boundary."""
     servers_config = {
         "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
     }
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     plugin_config["netbox_librenms_plugin"]["servers"] = servers_config
-    with override_settings(PLUGINS_CONFIG=plugin_config):
+    return override_settings(PLUGINS_CONFIG=plugin_config)
+
+
+def _run_capture(view, server, device, *, query="?server_key=test"):
+    """Run capture through real API rebind, ID lookup, and device sync."""
+    with _override_servers(server):
         return view.get(_superuser_request(query), device_id=device.pk)
 
 
@@ -485,12 +490,7 @@ def test_capture_view_denies_device_outside_users_object_scope(recording_server)
     request.user = user
     view = _view_with_api(api)
 
-    servers_config = {
-        "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
-    }
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = servers_config
-    with override_settings(PLUGINS_CONFIG=plugin_config):
+    with _override_servers(server):
         # Out-of-scope id must 404 (fail-closed), never render the device's captured shape.
         with pytest.raises(Http404):
             view.get(request, device_id=target.pk)

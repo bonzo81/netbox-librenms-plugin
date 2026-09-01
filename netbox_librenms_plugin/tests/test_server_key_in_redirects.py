@@ -148,9 +148,9 @@ def test_field_sync_views_preserve_server_key_on_redirect(view_name, prod_server
     Each view resolves ``server_key`` via ``rebind_api_for_server`` up front; without preserving it
     on the redirect the page reloads scoped to the session/default server and the non-default tab
     context is lost. This drives the real ``post()`` to the shared "Device not found" early redirect
-    (``server_key`` already resolved to 'prod') and asserts the follow-up URL carries it. Only
-    ``build_librenms_api`` (the HTTP boundary) is stubbed — real request, real superuser permission
-    gate, real ``_device_sync_redirect`` / ``redirect_with_server_key``.
+    (``server_key`` already resolved to 'prod') and asserts the follow-up URL carries it. The test
+    uses a real request, a real superuser permission gate, the real HTTP client, and the real
+    ``_device_sync_redirect`` / ``redirect_with_server_key`` path.
     """
     from netbox_librenms_plugin.views.sync import device_fields
 
