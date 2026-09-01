@@ -163,6 +163,8 @@ class TestAddDeviceFormsScopeToTheActiveServer:
             return response
 
         cache.delete("librenms_poller_group_choices_default")
+        cache.delete("librenms_poller_group_choices_secondary")
+        cache.delete("librenms_poller_group_choices_ghost")
         device = make_device("poller-stale", librenms_cf={"secondary": 42})
         self._render_unknown_device(device, "?server_key=ghost", record)
 

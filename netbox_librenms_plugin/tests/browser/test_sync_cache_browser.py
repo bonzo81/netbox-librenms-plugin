@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 STYLE_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "css" / "librenms_sync.css"
@@ -715,6 +717,53 @@ def test_valid_status_recovers_when_the_initial_state_is_malformed(page):
     assert page.evaluate("syncCacheController().lastCheckFailed") is False
     assert page.locator("#interface-action").count() == 1
     assert page.locator("#ip-action").count() == 1
+
+
+@pytest.mark.parametrize(
+    "contract_text",
+    [
+        pytest.param("{malformed", id="invalid-json"),
+        pytest.param(
+            json.dumps(
+                {
+                    "tabs": {"interfaces": None, "ipaddresses": None},
+                    "states": ["ready", "invalidated"],
+                }
+            ),
+            id="malformed-tab-specs",
+        ),
+    ],
+)
+def test_invalid_cache_contract_stops_status_requests_and_fails_closed(page, contract_text):
+    """An immutable contract error must require reload instead of retrying requests."""
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+    attempts = 0
+
+    def status_response(route):
+        nonlocal attempts
+        attempts += 1
+        route.fulfill(json={"tabs": initial})
+
+    page.set_content(_page_html(initial))
+    page.locator("#librenms-sync-cache-contract").evaluate(
+        "(node, text) => { node.textContent = text; }",
+        contract_text,
+    )
+    page.route("https://plugin.example.com/status?*", status_response)
+    page.add_script_tag(path=str(SCRIPT_PATH))
+
+    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+    page.wait_for_function("syncCacheController().checking === null")
+    page.evaluate("checkSyncCacheStatus()")
+
+    assert attempts == 0
+    assert page.evaluate("syncCacheController().lastCheckFailed") is True
+    assert page.locator("#interface-action").is_disabled()
+    assert page.locator("#ip-action").is_disabled()
+    assert page.locator("#modal-force-action").is_disabled()
 
 
 def test_fragment_failure_logs_the_http_status_and_clears_the_content(page):

@@ -354,6 +354,7 @@ function syncCacheController() {
         notifiedRevisions: new Set(),
         checking: null,
         recheckPending: false,
+        statusChecksDisabled: false,
         statusGeneration: 0,
         lastCheckFailed: false,
         lostFocus: false,
@@ -519,7 +520,10 @@ function failClosedSyncControls(message) {
         updateSyncCacheTabState(tab, { state: 'invalidated', snapshot_available: false });
     });
     const sourceTab = activeSyncTab();
-    document.querySelectorAll('#htmx-modal-content button, #htmx-modal-content input, #htmx-modal-content select, #htmx-modal-content textarea')
+    document.querySelectorAll(
+        '#librenms-sync-tabs button, #librenms-sync-tabs input, #librenms-sync-tabs select, #librenms-sync-tabs textarea, ' +
+        '#htmx-modal-content button, #htmx-modal-content input, #htmx-modal-content select, #htmx-modal-content textarea'
+    )
         .forEach(control => {
             if (control.disabled) return;
             control.disabled = true;
@@ -528,7 +532,9 @@ function failClosedSyncControls(message) {
 }
 
 function restoreFailClosedSyncControls(status) {
-    document.querySelectorAll('#htmx-modal-content [data-cache-fail-closed]')
+    document.querySelectorAll(
+        '#librenms-sync-tabs [data-cache-fail-closed], #htmx-modal-content [data-cache-fail-closed]'
+    )
         .forEach(control => {
             const sourceTab = control.dataset.cacheFailClosed;
             const sourceState = status?.[sourceTab];
@@ -707,9 +713,48 @@ function isValidSyncCacheStatusPayload(payload, expectedTabs, validStates) {
     });
 }
 
+function isValidSyncCacheContract(contract, validStates) {
+    if (!contract || typeof contract !== 'object' || Array.isArray(contract)) return false;
+    if (
+        !(validStates instanceof Set) ||
+        !validStates.size ||
+        !Array.from(validStates).every(state => typeof state === 'string' && state.trim())
+    ) return false;
+    const entries = Object.entries(contract);
+    if (!entries.length) return false;
+    const contentIds = new Set();
+    return entries.every(([tab, spec]) => {
+        if (
+            !tab.trim() ||
+            !spec ||
+            typeof spec !== 'object' ||
+            Array.isArray(spec) ||
+            typeof spec.content_id !== 'string' ||
+            !spec.content_id.trim() ||
+            typeof spec.label !== 'string' ||
+            !spec.label.trim() ||
+            contentIds.has(spec.content_id)
+        ) return false;
+        const pane = document.getElementById(tab);
+        const content = document.getElementById(spec.content_id);
+        if (!pane || !content || !pane.contains(content)) return false;
+        contentIds.add(spec.content_id);
+        return true;
+    });
+}
+
 function checkSyncCacheStatus() {
     const controller = syncCacheController();
     if (!controller) return Promise.resolve();
+    if (controller.statusChecksDisabled) return Promise.resolve();
+    const expectedTabs = Object.keys(controller.contract || {});
+    if (!isValidSyncCacheContract(controller.contract, controller.validStates)) {
+        controller.statusChecksDisabled = true;
+        controller.lastCheckFailed = true;
+        console.error('Invalid cache status contract');
+        failClosedSyncControls('Cache status could not be verified. Reload this tab before continuing.');
+        return Promise.resolve();
+    }
     if (controller.checking) {
         controller.recheckPending = true;
         return controller.checking;
@@ -735,10 +780,7 @@ function checkSyncCacheStatus() {
                 payload === STALE_SYNC_CACHE_STATUS ||
                 controller.statusGeneration !== requestGeneration
             ) return;
-            const expectedTabs = Object.keys(controller.contract || {});
             if (
-                !expectedTabs.length ||
-                !controller.validStates.size ||
                 !isValidSyncCacheStatusPayload(payload, expectedTabs, controller.validStates)
             ) {
                 throw new Error('Invalid cache status response');
