@@ -101,6 +101,21 @@ def _librenms_ip_rows_response(rows, *, device_name):
     return _get
 
 
+def _hidden_form_inputs(html):
+    """Return a rendered form's hidden inputs by name, as a browser would submit them.
+
+    Repeated names collapse, so use this only where one value per name is expected.
+    """
+    import re
+
+    inputs = {}
+    for tag in re.findall(r"<input\b[^>]*>", html):
+        attributes = dict(re.findall(r'([\w-]+)="([^"]*)"', tag))
+        if attributes.get("type") == "hidden" and "name" in attributes:
+            inputs[attributes["name"]] = attributes.get("value", "")
+    return inputs
+
+
 def _configure_test_server(settings):
     """Configure one deterministic LibreNMS server without discarding other plugin settings."""
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
@@ -615,6 +630,82 @@ def test_bulk_sync_applies_safe_rows_and_forces_only_selected_conflicts(client, 
     existing_two.refresh_from_db()
     assert existing_one.assigned_object == target_one
     assert existing_two.assigned_object == current_two
+
+
+@pytest.mark.django_db
+def test_confirmation_replays_create_missing_when_the_target_name_turns_ambiguous(client, settings):
+    """The confirmation form must replay the create-missing choice, or a newly ambiguous name skips the row."""
+    from dcim.models import Interface
+
+    _configure_test_server(settings)
+    _chassis, members = make_virtual_chassis_members("ip-conflict-vc", count=3)
+    page_device, target_device, sibling = members
+    page_device.custom_field_data["librenms_id"] = {"default": {"id": 42}}
+    page_device.save(update_fields=["custom_field_data"])
+    # The signed target: an unbound sibling interface, unambiguous by name while the intent is built.
+    target = make_interface(target_device, "Ethernet2/1", iface_type="1000base-t")
+    holder = make_interface(page_device, "Ethernet1/9", iface_type="1000base-t")
+    existing = IPAddress.objects.create(address="198.18.31.10/24", assigned_object=holder)
+    rows = [
+        {
+            "address": "198.18.31.10",
+            "prefix_length": 24,
+            "port_id": 7101,
+            "interface": "Ethernet2/1",
+            "port_fields": {"ifType": "ethernetCsmacd"},
+        }
+    ]
+    client.force_login(make_superuser("ip-conflict-vc-user"))
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[page_device.pk])
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=_librenms_ip_rows_response(rows, device_name=page_device.name),
+    ):
+        assert (
+            client.post(
+                refresh_url,
+                {"server_key": "default", "interface_name_field": "ifName"},
+                HTTP_HX_REQUEST="true",
+            ).status_code
+            == 200
+        )
+
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": page_device.pk},
+    )
+    conflict_response = client.post(
+        sync_url,
+        {
+            "server_key": "default",
+            "create-missing-interfaces-toggle": "on",
+            "select": "198.18.31.10/24",
+            "vrf_198.18.31.10/24": "",
+        },
+        HTTP_HX_REQUEST="true",
+    )
+    assert conflict_response.status_code == 200
+    conflicts = conflict_response.context["conflicts"]
+    assert [conflict["row_id"] for conflict in conflicts] == ["198.18.31.10/24"]
+
+    # A second member gains the same interface name, so the name map turns ambiguous and
+    # _match_interface alone can no longer resolve the interface the intent already signed.
+    make_interface(sibling, "Ethernet2/1", iface_type="1000base-t")
+
+    # Submit exactly what the rendered form carries, the way a browser would.
+    hidden = _hidden_form_inputs(conflict_response.content.decode())
+    force_response = client.post(
+        sync_url,
+        {**hidden, "force_conflict": conflicts[0]["row_id"]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert force_response.status_code == 200
+    # resolve_or_create_interface_from_port recovers the signed interface itself, so its PK still
+    # satisfies the intent and the confirmed move lands on it.
+    existing.refresh_from_db()
+    assert existing.assigned_object == target
+    assert Interface.objects.filter(device=target_device, name="Ethernet2/1").count() == 1
 
 
 @pytest.mark.django_db
@@ -1579,6 +1670,11 @@ def test_existing_ip_outside_change_scope_is_reported_without_mutation(client, s
 
     assert response.status_code == 200
     assert b"outside your change scope" in response.content
+    # The row carries no grant to change this address, so it must not be offered as forceable
+    # and must not hand the client an intent token it could replay.
+    conflict = next(c for c in response.context["conflicts"] if c["row_id"] == "198.18.20.10/24")
+    assert conflict["forceable"] is False
+    assert conflict["intent"] == ""
     protected_ip.refresh_from_db()
     assert protected_ip.assigned_object_id == original.pk
 
