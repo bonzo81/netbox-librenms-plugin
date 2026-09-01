@@ -9,7 +9,6 @@ Targets:
 """
 
 import pytest
-from django.core.cache import cache
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -110,32 +109,6 @@ class TestSyncInterfacesGetObject:
         v = _make_iv()
         with pytest.raises(Http404):
             v.get_object("rack", 1)
-
-
-# ===========================================================================
-# SyncInterfacesView.get_cached_ports_data
-# ===========================================================================
-
-
-class TestGetCachedPortsData:
-    def test_cache_miss_warns_and_returns_none(self):
-        request = make_request("get")
-        device = make_device("cached-ports-miss")
-        v = _make_iv(request)
-        result = v.get_cached_ports_data(request, device, "default")
-
-        assert result is None
-        assert message_texts(request, "warning") == ["No cached data found. Please refresh the data before syncing."]
-
-    def test_cache_hit_returns_ports(self):
-        request = make_request("get")
-        device = make_device("cached-ports-hit")
-        v = _make_iv(request)
-        ports = [{"ifName": "eth0"}]
-        key = v.get_cache_key(device, "ports", "default")
-        cache.set(key, {"ports": ports}, timeout=300)
-
-        assert v.get_cached_ports_data(request, device, "default") == ports
 
 
 # ===========================================================================

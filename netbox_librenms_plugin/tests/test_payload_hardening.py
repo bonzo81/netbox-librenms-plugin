@@ -48,6 +48,7 @@ class TestVlanCachedPayloadShape:
         device = make_device(f"vlan-readguard-{type(bad).__name__}")
         view = self._view()
         request = RequestFactory().get("/")
+        request.user = AnonymousUser()
         server_key = view.librenms_api.server_key
         vlans_key = view.get_cache_key(device, "vlans", server_key)
         cache.set(vlans_key, bad, timeout=300)

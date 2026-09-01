@@ -14,10 +14,10 @@ from netbox_librenms_plugin.tests.conftest import make_device
 pytestmark = pytest.mark.django_db
 
 
-def _group(pk, name, scope=None):
+def _group(tag, name, scope=None):
     from ipam.models import VLANGroup
 
-    group = VLANGroup(name=name, slug=f"{name.lower().replace(' ', '-')}-{pk}")
+    group = VLANGroup(name=name, slug=f"{name.lower().replace(' ', '-')}-{tag}")
     group.scope = scope
     group.save()
     return group
@@ -163,8 +163,8 @@ class TestRenderName:
 class TestRenderVlanGroupSelection:
     """Tests for LibreNMSVLANTable.render_vlan_group_selection()."""
 
-    def _make_group(self, pk, name, scope=None):
-        return _group(pk, name, scope)
+    def _make_group(self, tag, name, scope=None):
+        return _group(tag, name, scope)
 
     def test_select_element_rendered(self):
         table = _make_table(vlan_groups=[self._make_group(1, "Site VLANs")])
@@ -184,7 +184,7 @@ class TestRenderVlanGroupSelection:
 
     def test_existing_netbox_vlan_group_preselected(self):
         """Priority 1: existing NetBox VLAN group is pre-selected."""
-        group = self._make_group(pk=7, name="Existing Group")
+        group = self._make_group(tag=7, name="Existing Group")
         table = _make_table(vlan_groups=[group])
         record = {
             "vlan_id": 20,
@@ -197,7 +197,7 @@ class TestRenderVlanGroupSelection:
 
     def test_auto_selected_group_preselected(self):
         """Priority 2: auto_selected_group_id is pre-selected when exists_in_netbox is False."""
-        group = self._make_group(pk=3, name="Auto Group")
+        group = self._make_group(tag=3, name="Auto Group")
         table = _make_table(vlan_groups=[group])
         record = {
             "vlan_id": 30,
@@ -254,7 +254,7 @@ class TestRenderVlanGroupSelection:
     def test_scope_info_appended_when_scope_present(self):
         """If group.scope is truthy, scope string is included in option."""
         device = make_device("vlan-table-scoped-group")
-        group = self._make_group(pk=11, name="Rack VLANs", scope=device.site)
+        group = self._make_group(tag=11, name="Rack VLANs", scope=device.site)
         table = _make_table(vlan_groups=[group])
         record = {"vlan_id": 80, "name": "RACK", "exists_in_netbox": False}
         html = str(table.render_vlan_group_selection(None, record))
@@ -262,7 +262,7 @@ class TestRenderVlanGroupSelection:
 
     def test_no_scope_info_when_scope_is_falsy(self):
         """If group.scope is falsy, no extra parenthetical appears."""
-        group = self._make_group(pk=12, name="Global VLANs", scope=None)
+        group = self._make_group(tag=12, name="Global VLANs", scope=None)
         table = _make_table(vlan_groups=[group])
         record = {"vlan_id": 90, "name": "GLOBAL", "exists_in_netbox": False}
         html = str(table.render_vlan_group_selection(None, record))
@@ -334,7 +334,7 @@ class TestLibreNMSVLANTableConfigure:
 
         rows = [{"vlan_id": vlan_id, "name": f"VLAN {vlan_id}", "exists_in_netbox": False} for vlan_id in range(1, 61)]
         table = LibreNMSVLANTable(data=rows)
-        request = RequestFactory().get("/", {"vlans_page": "2"})
+        request = RequestFactory().get("/", {"vlans_page": "2", "vlans_per_page": "25"})
         request.user = AnonymousUser()
 
         table.configure(request)

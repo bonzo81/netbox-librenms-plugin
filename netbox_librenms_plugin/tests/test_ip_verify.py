@@ -35,9 +35,9 @@ def _make_request(body_dict):
     return request
 
 
-def _mock_device(pk=1):
+def _make_device(tag=1):
     """Create a real Device for cache key generation."""
-    return make_device(f"ip-verify-cache-{pk}")
+    return make_device(f"ip-verify-cache-{tag}")
 
 
 class TestCacheKeyFormat:
@@ -54,7 +54,7 @@ class TestCacheKeyFormat:
     def test_cache_key_matches_writer_format(self):
         """The cache key used by post() must match the format used by _prepare_context()."""
         view = _make_view()
-        device = _mock_device(pk=42)
+        device = _make_device(tag=42)
 
         # CacheMixin.get_cache_key produces this format
         expected_key = f"librenms_ip_addresses_device_{device.pk}_prod"
@@ -64,7 +64,7 @@ class TestCacheKeyFormat:
     def test_cache_key_default_server(self):
         """Default server key produces the expected cache key format."""
         view = _make_view()
-        device = _mock_device(pk=7)
+        device = _make_device(tag=7)
 
         expected_key = f"librenms_ip_addresses_device_{device.pk}_default"
         assert view.get_cache_key(device, "ip_addresses", "default") == expected_key
@@ -82,6 +82,60 @@ class TestVerifyPostRejectsNonObjectBody:
 
         assert response.status_code == 400
         assert json.loads(response.content)["message"] == "JSON payload must be an object"
+
+
+class TestVerifyPostServerCacheNamespace:
+    """The endpoint reads the selected configured namespace or the default namespace."""
+
+    @pytest.mark.parametrize(
+        ("server_key", "include_server_key", "selected_vrf"),
+        [("production", True, 20), (None, True, 10), (None, False, 10)],
+    )
+    def test_configured_missing_and_null_server_keys_select_the_expected_cache(
+        self,
+        configure_librenms,
+        server_key,
+        include_server_key,
+        selected_vrf,
+    ):
+        from django.core.cache import cache
+
+        configure_librenms(
+            {
+                "default": {
+                    "librenms_url": "https://default.example.test",
+                    "api_token": "test-token",
+                },
+                "production": {
+                    "librenms_url": "https://production.example.test",
+                    "api_token": "test-token",
+                },
+            }
+        )
+        device = make_device(f"ip-verify-namespace-{selected_vrf}-{include_server_key}")
+        view = _make_view()
+        address = "198.18.40.1/32"
+        for namespace, vrf_id in (("default", 10), ("production", 20)):
+            cache.set(
+                view.get_cache_key(device, "ip_addresses", namespace),
+                {"ip_addresses": [{"ip_with_mask": address, "vrf_id": vrf_id}]},
+                timeout=300,
+            )
+
+        body = {
+            "device_id": device.pk,
+            "object_type": "device",
+            "ip_address": address,
+            "vrf_id": selected_vrf,
+        }
+        if include_server_key:
+            body["server_key"] = server_key
+        request = _make_request(body)
+
+        response = _make_view(request).post(request)
+
+        assert response.status_code == 200
+        assert "Synced" in json.loads(response.content)["formatted_row"]["status"]
 
 
 @pytest.mark.django_db
@@ -103,7 +157,6 @@ class TestVerifyPostRejectsMalformedVrfId:
         return Device.objects.create(name="vrfsk-dev", device_type=dt, role=role, site=site, status="active")
 
     def _post(self, vrf_id):
-        from django.contrib.auth import get_user_model
         from django.core.cache import cache
         from ipam.models import IPAddress
 
@@ -113,7 +166,6 @@ class TestVerifyPostRejectsMalformedVrfId:
         request = _make_request(
             {"ip_address": "10.0.0.1/24", "vrf_id": vrf_id, "device_id": device.pk, "object_type": "device"}
         )
-        request.user = get_user_model().objects.create_superuser(username=f"vrfsk-{device.pk}", email="", password="x")
         view = _make_view(request)
         cache.set(view.get_cache_key(device, "ip_addresses", "default"), {"ip_addresses": []}, timeout=300)
 
