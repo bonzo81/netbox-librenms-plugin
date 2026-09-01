@@ -616,6 +616,7 @@ class LibreNMSAPI:
         device_os: str | None = None,
         interface_name_field: str = "ifName",
         compiled_lag_patterns: list | None = None,
+        compiled_sap_patterns: list | None = None,
     ) -> dict:
         """
         Resolve LAG membership and sub-interface parent relationships from LibreNMS data.
@@ -655,6 +656,12 @@ class LibreNMSAPI:
                                    provided, the PortStackLagPattern DB read and per-call
                                    compile are skipped and this list is used directly, taking
                                    priority over lag_patterns/device_os.
+            compiled_sap_patterns: Optional list of pre-compiled SAP-name regexes. A port_stack
+                                   row naming a SAP describes a service, not an interface
+                                   relationship, so it is skipped. Read from the rows stored for
+                                   device_os only when the LAG patterns are read from there too,
+                                   so a caller that supplies its own patterns stays DB-free; an
+                                   empty list disables the skip.
 
         Returns:
             dict with keys (port_ids are canonical normalized positive ints, so every
@@ -748,6 +755,20 @@ class LibreNMSAPI:
                     # user can tell why LAG detection isn't working.
                     logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
+        # SAP names are vendor notation, so which names are SAPs comes from the same OS-scoped
+        # PortStackLagPattern rows that identify aggregates by name. Nokia SR OS writes a SAP
+        # with a colon (lag-1:10); Junos spells a breakout channel the same way (xe-1/1/3:1), and
+        # skipping those drops most of an MX/PTX chassis's aggregates and sub-interfaces.
+        if compiled_sap_patterns is None:
+            if compiled_lag_patterns is None and lag_patterns is None:
+                from netbox_librenms_plugin.models import PortStackLagPattern
+
+                compiled_sap_patterns = PortStackLagPattern.compiled_sap_patterns_for_os(device_os)
+            else:
+                # A caller that supplied its own LAG patterns owns the SAP rule too, so this
+                # stays DB-free in exactly the cases the LAG read above is.
+                compiled_sap_patterns = []
+
         lag_members: dict = {}
         sub_interfaces: dict = {}
         conflicted_lag_members: set = set()
@@ -800,6 +821,40 @@ class LibreNMSAPI:
                 if suffix.isdigit() and base in by_name_by_field[field]:
                     return by_name_by_field[field][base]
             return port
+
+        def _name_derived_parent(port: dict):
+            """
+            Resolve a port's parent from its own ``.N`` name, ignoring the ifStack.
+
+            LibreNMS carries no ifStack row pairing a Junos aggregate unit with its aggregate
+            (ae2.0 over ae2), so a unit the stack never parents is resolved the same way
+            :func:`_resolve_physical_port` already collapses a member unit: strip a numeric
+            sub-unit suffix and look the base up in the SAME name field.
+
+            Args:
+                port (dict): The port whose parent to resolve.
+
+            Returns:
+                dict | None: The parent port, or None when the names disagree or name no port.
+            """
+            parent = None
+            for field, name in _port_name_items(port):
+                base, _, suffix = name.rpartition(".")
+                if not base or not suffix.isdigit():
+                    continue
+                candidate = by_name_by_field[field].get(base)
+                if candidate is None or candidate is port:
+                    # This field says the port is a sub-unit of a base that is not a port on this
+                    # device, so the other field's match is a coincidence, not corroboration
+                    # (irb.100 whose ifDescr happens to read customer.100 under a "customer"
+                    # port). Unlike the stated-relationship helpers, nothing here has an ifStack
+                    # row backing it up, so an unsupported name is a veto, not a skip.
+                    return None
+                if parent is not None and candidate is not parent:
+                    # ifName and ifDescr name different parents; neither is authoritative.
+                    return None
+                parent = candidate
+            return parent
 
         def _is_sub_unit_of(child_name: str, parent_name: str) -> bool:
             """True when child_name is parent_name + '.<digits>' (a numeric sub-interface)."""
@@ -855,12 +910,14 @@ class LibreNMSAPI:
             if not high_port or not low_port:
                 continue
 
-            # Universal rule: skip Nokia SAP entries (colon notation: lag1:0, lag-1:10). Check
-            # ALL known names, not just the primary: when interface_name_field="ifDescr" a SAP port
-            # can carry a clean ifDescr but the real lag1:0 marker in ifName, so a primary-only
-            # check would miss it and misclassify the row as a LAG/sub-interface relationship.
-            if any(":" in name for name in _port_names(high_port)) or any(
-                ":" in name for name in _port_names(low_port)
+            # Skip the OS's SAP entries. Check ALL known names, not just the primary: when
+            # interface_name_field="ifDescr" a SAP port can carry a clean ifDescr but the real
+            # lag1:0 marker in ifName, so a primary-only check would miss it and misclassify the
+            # row as a LAG/sub-interface relationship.
+            if any(
+                pattern.search(name)
+                for pattern in compiled_sap_patterns
+                for name in _port_names(high_port) + _port_names(low_port)
             ):
                 continue
 
@@ -934,6 +991,61 @@ class LibreNMSAPI:
                     low_phys,
                     high_phys,
                 )  # low is the member, high the aggregate
+
+        def _root_of(node_id):
+            """
+            Return the top of *node_id*'s parent chain in sub_interfaces, compressing the path.
+
+            Args:
+                node_id (int): The port id to walk up from.
+
+            Returns:
+                int: The highest ancestor reachable, or node_id when it has no parent.
+            """
+            path = []
+            while True:
+                cached = roots.get(node_id)
+                if cached is not None:
+                    node_id = cached
+                    break
+                parent_of = sub_interfaces.get(node_id)
+                if parent_of is None:
+                    break
+                path.append(node_id)
+                node_id = parent_of
+            for seen_id in path:
+                roots[seen_id] = node_id
+            return node_id
+
+        # Fill the gaps the ifStack leaves. Junos stacks a member unit straight onto the
+        # aggregate unit (et-0/0/6.0 over ae2.0) and never states ae2.0's own parent, so without
+        # this an aggregate unit has no parent at all. Only untouched children are considered:
+        # a stated parent stays authoritative, and a child dropped as conflicted stays dropped.
+        roots: dict = {}
+        for port in ports_with_id:
+            child_id = normalize_librenms_port_id(port.get("port_id"))
+            if child_id is None or child_id in sub_interfaces or child_id in conflicted_sub_interfaces:
+                continue
+            parent_port = _name_derived_parent(port)
+            if parent_port is None:
+                continue
+            # Two ports that each name the other stay unresolved: neither direction has more
+            # evidence than the other, so a cycle break that kept whichever came first in
+            # iteration order would be picking arbitrarily. Longer cycles below are different --
+            # there the edge closing the loop is the one without support.
+            if _name_derived_parent(parent_port) is port:
+                continue
+            parent_id = normalize_librenms_port_id(parent_port.get("port_id"))
+            if parent_id is None:
+                continue
+            # Names can close a loop, on their own or through edges the ifStack already stated, so
+            # the check walks the COMBINED graph rather than the derived names alone. A cycle in
+            # sub_interfaces would be written to NetBox as a parent hierarchy that cannot exist.
+            # The roots map carries the walk's result back (path compression), keeping the whole
+            # pass linear instead of re-walking every ancestor chain per port.
+            if _root_of(parent_id) == child_id:
+                continue
+            _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
 
         return {"lag_members": lag_members, "sub_interfaces": sub_interfaces}
 

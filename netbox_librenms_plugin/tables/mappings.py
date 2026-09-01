@@ -340,6 +340,7 @@ class PortStackLagPatternTable(NetBoxTable):
     # bulk delete, and "Export Selected (YAML)" (the view always saw zero selected pks).
     librenms_os = tables.Column(verbose_name="LibreNMS OS", linkify=True)
     lag_name_pattern = tables.Column(verbose_name="LAG Name Pattern (regex)")
+    sap_name_pattern = tables.Column(verbose_name="SAP Name Pattern (regex)")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
@@ -352,6 +353,7 @@ class PortStackLagPatternTable(NetBoxTable):
             "id",
             "librenms_os",
             "lag_name_pattern",
+            "sap_name_pattern",
             "description",
             "actions",
         )
@@ -360,6 +362,7 @@ class PortStackLagPatternTable(NetBoxTable):
             "id",
             "librenms_os",
             "lag_name_pattern",
+            "sap_name_pattern",
             "description",
             "actions",
         )

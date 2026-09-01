@@ -11,6 +11,7 @@
           <tr>
             <th>LibreNMS OS</th>
             <th>LAG Name Pattern (regex)</th>
+            <th>SAP Name Pattern (regex)</th>
             <th>Description</th>
           </tr>
         </thead>
@@ -18,6 +19,7 @@
           <tr>
             <td><code>{{ object.librenms_os }}</code></td>
             <td><code>{{ object.lag_name_pattern }}</code></td>
+            <td><code>{{ object.sap_name_pattern|default:"—" }}</code></td>
             <td>{{ object.description|default:"—" }}</td>
           </tr>
         </tbody>

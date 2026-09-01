@@ -418,17 +418,24 @@ class BaseInterfaceTableView(
         unscoped_patterns = PortStackLagPattern.compiled_patterns_for_os(None)
         name_signal = self._has_lag_name_signals(host_ports, interface_name_field, unscoped_patterns, names_per_port)
 
+        # The OS scopes the LAG name patterns AND the SAP colon skip in
+        # resolve_port_relationships, so resolve it for a structural snapshot too. Leaving it
+        # unknown there made every Junos breakout port read as a Nokia SAP. get_device_info is
+        # cached per server/device, so the sync-tab header render usually already paid for this.
         device_os = ""
         device_os_known = False
         scoped_patterns = []
-        if name_signal:
+        if structural_signal or name_signal:
             info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if info_success and isinstance(device_info, dict):
                 raw_device_os = device_info.get("os")
                 if isinstance(raw_device_os, str) and raw_device_os.strip():
                     device_os = raw_device_os.strip()
                     device_os_known = True
+        if name_signal:
             scoped_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
+        # Read the OS's SAP rule here too, so the resolver does not repeat the query per call.
+        scoped_sap_patterns = PortStackLagPattern.compiled_sap_patterns_for_os(device_os)
 
         scoped_name_signal = self._has_lag_name_signals(
             host_ports,
@@ -446,6 +453,7 @@ class BaseInterfaceTableView(
                     device_os=device_os,
                     interface_name_field=interface_name_field,
                     compiled_lag_patterns=scoped_patterns,
+                    compiled_sap_patterns=scoped_sap_patterns,
                 )
             else:
                 relationship_fetch_failed = True
@@ -459,8 +467,10 @@ class BaseInterfaceTableView(
                 )
 
         # A structural signal still gives a useful partial snapshot when the OS lookup fails.
-        # Mark it incomplete because OS-scoped name patterns could describe additional edges.
-        if name_signal and not device_os_known and not relationship_fetch_failed:
+        # Mark it incomplete because OS-scoped name patterns could describe additional edges, and
+        # because the SAP rule is OS-scoped too: an unknown OS applies every vendor's rule, which
+        # can suppress a relationship this device really has.
+        if (structural_signal or name_signal) and not device_os_known and not relationship_fetch_failed:
             logger.warning("Could not determine the LibreNMS device OS for device %s", self.librenms_id)
             librenms_data["relationship_data_incomplete"] = True
             messages.warning(

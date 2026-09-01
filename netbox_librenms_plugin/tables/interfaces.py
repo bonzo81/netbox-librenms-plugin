@@ -107,6 +107,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 ),
                 "data-port-id": lambda record: str(record.get("port_id", "")),
                 "data-member-of-lag": lambda record: str(record.get("librenms_lag_port_id") or ""),
+                "data-lag-name": lambda record: str(record.get("librenms_lag_name") or ""),
                 "data-parent-port-id": lambda record: str(record.get("librenms_parent_port_id") or ""),
                 "data-parent-name": lambda record: str(record.get("librenms_parent_name") or ""),
             },
