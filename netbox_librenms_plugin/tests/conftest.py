@@ -94,9 +94,21 @@ def _seeded_model_rows():
 
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed."""
+    import importlib
+
     for model, lookup_field, value_field, rows in _seeded_model_rows():
         for lookup, value in rows:
             model.objects.get_or_create(**{lookup_field: lookup}, defaults={value_field: value})
+
+    # 0016 sets a SECOND field on rows 0013 already created, so get_or_create above restores them
+    # with the model's blank default and the Nokia SAP rule silently disappears for every test
+    # after the first transactional one. Re-apply it from the migration's own seed data so the
+    # fixture cannot drift from what a real database holds.
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    sap = importlib.import_module("netbox_librenms_plugin.migrations.0016_portstacklagpattern_sap_name_pattern")
+    for os_name, sap_pattern in sap.INITIAL_SAP_PATTERNS:
+        PortStackLagPattern.objects.filter(librenms_os=os_name).update(sap_name_pattern=sap_pattern)
 
 
 @pytest.fixture(autouse=True)

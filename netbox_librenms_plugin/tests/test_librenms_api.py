@@ -7,6 +7,8 @@ with particular focus on HTTP method correctness to prevent regression bugs.
 
 from unittest.mock import MagicMock, patch
 
+import re
+
 import pytest
 import requests
 
@@ -2467,7 +2469,9 @@ class TestResolvePortRelationships:
 
     def test_nokia_sap_excluded_when_colon_in_name(self, mock_librenms_api):
         """Nokia SAP entries (colon in name) must be excluded from output."""
-        result = mock_librenms_api.resolve_port_relationships(NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={})
+        result = mock_librenms_api.resolve_port_relationships(
+            NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={}, compiled_sap_patterns=[re.compile(":")]
+        )
         assert result["lag_members"] == {101: 102}
         assert 200 not in result["lag_members"].values()
 
@@ -2484,7 +2488,11 @@ class TestResolvePortRelationships:
             {"high_port_id": 200, "low_port_id": 102},  # SAP row: must be skipped
         ]
         result = mock_librenms_api.resolve_port_relationships(
-            ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
+            ports,
+            port_stack,
+            lag_patterns={},
+            interface_name_field="ifDescr",
+            compiled_sap_patterns=[re.compile(":")],
         )
         assert result["lag_members"] == {101: 102}
         assert 200 not in result["lag_members"]
@@ -2495,9 +2503,11 @@ class TestResolvePortRelationships:
         assert result["lag_members"].get(201) == 203
 
     def test_junos_ae_sub_interface(self, mock_librenms_api):
-        """Junos: ae10 -> ae10.2221 detected as sub-interface."""
+        """Junos: ae10 -> ae10.2221 from the ifStack, and every other unit from its own name."""
         result = mock_librenms_api.resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[1:], lag_patterns={})
-        assert result["sub_interfaces"] == {206: 205}
+        # 206 is the pair the ifStack states. The other two are units LibreNMS never parents:
+        # xe-0/0/0.0 is only stacked onto ae1.0, and ae1.0 appears in no row of its own.
+        assert result["sub_interfaces"] == {202: 201, 204: 203, 206: 205}
 
     def test_sub_interface_detected_via_ifname_when_namefield_is_ifdescr(self, mock_librenms_api):
         """With interface_name_field='ifDescr', a clean ifDescr must not hide the .N sub-unit that ifName carries."""
@@ -2576,6 +2586,112 @@ class TestResolvePortRelationships:
         """ArcOS: swp15.3 sub-interface of swp15 (both ethernetCsmacd -- not propVirtual)."""
         result = mock_librenms_api.resolve_port_relationships(ARCOS_PORTS, ARCOS_PORT_STACK[1:], lag_patterns={})
         assert result["sub_interfaces"] == {404: 403}
+
+    def test_junos_aggregate_unit_gets_its_aggregate_as_parent(self, mock_librenms_api):
+        """Junos never stacks ae2.0 on ae2, so the aggregate unit's parent must come from its name."""
+        # Verbatim shape from a live MX304 (LibreNMS device 20): ifStack carries
+        # et-0/0/6 <-> et-0/0/6.0 and et-0/0/6.0 <-> ae2.0, and no row at all for ae2.0 <-> ae2.
+        ports = [
+            {"port_id": 4301, "ifName": "et-0/0/6", "ifType": "ethernetCsmacd"},
+            {"port_id": 4302, "ifName": "et-0/0/6.0", "ifType": "propVirtual"},
+            {"port_id": 4303, "ifName": "ae2", "ifType": "ieee8023adLag"},
+            {"port_id": 4304, "ifName": "ae2.0", "ifType": "ieee8023adLag"},
+        ]
+        port_stack = [
+            {"high_port_id": 4301, "low_port_id": 4302},
+            {"high_port_id": 4302, "low_port_id": 4304},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={}, device_os="junos")
+
+        assert result["lag_members"] == {4301: 4303}
+        assert result["sub_interfaces"] == {4302: 4301, 4304: 4303}
+
+    def test_name_derived_parent_skipped_for_a_mutual_sub_unit_pair(self, mock_librenms_api):
+        """Two ports that each name the other as their parent stay unresolved, ifStack or not."""
+        # Each side is a sub-unit of the other across name fields: Eth1.1/Eth1 in ifName,
+        # service.1/service in ifDescr. The stated-relationship branch already drops this pair;
+        # the name fallback must not resolve it either.
+        ports = [
+            {"port_id": 1, "ifName": "Eth1.1", "ifDescr": "service", "ifType": "l2vlan"},
+            {"port_id": 2, "ifName": "Eth1", "ifDescr": "service.1", "ifType": "ethernetCsmacd"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={})
+
+        assert result["sub_interfaces"] == {}
+
+    def test_name_derived_parent_skipped_when_the_name_fields_disagree(self, mock_librenms_api):
+        """A child whose ifName and ifDescr point at different parents gets neither."""
+        ports = [
+            {"port_id": 11, "ifName": "Gi0/1", "ifDescr": "core-a", "ifType": "ethernetCsmacd"},
+            {"port_id": 12, "ifName": "Gi0/2", "ifDescr": "core-b", "ifType": "ethernetCsmacd"},
+            {"port_id": 13, "ifName": "Gi0/1.100", "ifDescr": "core-b.100", "ifType": "l2vlan"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={})
+
+        assert 13 not in result["sub_interfaces"]
+
+    def test_name_derived_parents_never_form_a_cycle(self, mock_librenms_api):
+        """Names can close a loop across fields; the whole chain is dropped, not written to NetBox."""
+        # ifName says a.1 is under a, ifDescr says a is under b, and the third port's ifName puts
+        # b back under a.1. Each pair passes a two-port mutual check, so only a walk catches it.
+        ports = [
+            {"port_id": 1, "ifName": "a.1", "ifDescr": "x", "ifType": "propVirtual"},
+            {"port_id": 2, "ifName": "a", "ifDescr": "b.1", "ifType": "ethernetCsmacd"},
+            {"port_id": 3, "ifName": "a.1.9", "ifDescr": "b", "ifType": "propVirtual"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={}, compiled_sap_patterns=[])
+
+        # Only the edge that closes the loop is dropped. The chain below it is acyclic and is
+        # kept, unlike the two-port case where neither direction has the better claim.
+        assert result["sub_interfaces"] == {1: 2, 2: 3}
+        assert 3 not in result["sub_interfaces"]
+
+    def test_name_derived_parents_still_resolve_a_deep_chain(self, mock_librenms_api):
+        """The cycle walk must not reject a legitimate grandparent chain."""
+        ports = [
+            {"port_id": 21, "ifName": "et-0/0/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 22, "ifName": "et-0/0/1.1", "ifType": "propVirtual"},
+            {"port_id": 23, "ifName": "et-0/0/1.1.2", "ifType": "propVirtual"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={}, compiled_sap_patterns=[])
+
+        assert result["sub_interfaces"] == {22: 21, 23: 22}
+
+    def test_name_derived_parent_needs_a_real_base_port(self, mock_librenms_api):
+        """A dotted name whose base is not a port on the device gets no invented parent."""
+        ports = [
+            {"port_id": 4501, "ifName": "ae7.0", "ifType": "ieee8023adLag"},
+            {"port_id": 4502, "ifName": "lo0.16385", "ifType": "softwareLoopback"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={})
+
+        assert result["sub_interfaces"] == {}
+
+    def test_junos_channelized_colon_ports_keep_their_relationships(self, mock_librenms_api):
+        """A Junos breakout port (xe-1/1/3:1) must not be caught by another vendor's SAP rule."""
+        # Verbatim shape from a live MX480 (LibreNMS device 9), where the colon guard dropped
+        # 77 of 156 usable ifStack rows and left ten aggregates with no members at all.
+        ports = [
+            {"port_id": 4601, "ifName": "xe-1/1/3:1", "ifType": "ethernetCsmacd"},
+            {"port_id": 4602, "ifName": "xe-1/1/3:1.0", "ifType": "propVirtual"},
+            {"port_id": 4603, "ifName": "ae0", "ifType": "ieee8023adLag"},
+            {"port_id": 4604, "ifName": "ae0.0", "ifType": "ieee8023adLag"},
+        ]
+        port_stack = [
+            {"high_port_id": 4601, "low_port_id": 4602},
+            {"high_port_id": 4602, "low_port_id": 4604},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={}, device_os="junos")
+
+        assert result["lag_members"] == {4601: 4603}
+        assert result["sub_interfaces"][4602] == 4601
 
     def test_sub_interface_detected_when_parent_is_low(self, mock_librenms_api):
         """Sub-interface parenting is position-independent: a pair emitted child=high/parent=low must resolve, not fall through to the LAG branch and get dropped by the self-reference guard."""
