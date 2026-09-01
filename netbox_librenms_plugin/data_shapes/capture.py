@@ -286,7 +286,12 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     if device_os is not None:
         os_filter = device_os.strip() if isinstance(device_os, str) else ""
         pattern_qs = pattern_qs.filter(librenms_os__iexact=os_filter) if os_filter else pattern_qs.none()
-    lag_patterns = {row.librenms_os: row.lag_name_pattern for row in pattern_qs}
+    pattern_rows = list(pattern_qs)
+    lag_patterns = {row.librenms_os: row.lag_name_pattern for row in pattern_rows}
+    # Same fidelity argument, over the other rule the same rows carry: a replay without the SAP
+    # pattern resolves a Nokia service access point as a LAG member. Blank means "this OS has no
+    # SAP notation", so it contributes no key rather than an empty pattern that matches nothing.
+    sap_patterns = {row.librenms_os: row.sap_name_pattern for row in pattern_rows if row.sap_name_pattern}
 
     recording = {
         "schema_version": SCHEMA_VERSION,
@@ -295,6 +300,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         "meta": meta_out,
         "device_id": device_id,
         "lag_patterns": lag_patterns,
+        "sap_patterns": sap_patterns,
         "responses": responses,
     }
     # 9. Serial sensor recognition map — ONLY when this device actually has serial sensors. Same

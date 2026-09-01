@@ -74,26 +74,27 @@ def is_redos_prone(pattern):
     return _NESTED_QUANTIFIER_RE.search(pattern) is not None
 
 
-def compile_lag_patterns(recording):
+def _compile_recording_patterns(recording, key):
     """
-    Compile a recording's ``lag_patterns`` into usable regexes, skipping the unsafe ones.
+    Compile one of a recording's per-OS pattern maps into usable regexes.
 
-    The single place a recording's (untrusted, community-submitted) LAG patterns are turned into
-    regexes: the signature, the port compressor and the anonymizer all classify LAG names by these,
-    and a second copy of the compile step would drift from the ReDoS guard above.
+    The single place a recording's (untrusted, community-submitted) patterns are turned into
+    regexes: the signature, the port compressor, the anonymizer and the replay all read them, and
+    a second copy of the compile step would drift from the ReDoS guard above.
 
     Args:
-        recording (dict): A recording; a missing or non-dict ``lag_patterns`` yields no patterns.
+        recording (dict): A recording; a missing or non-dict map yields no patterns.
+        key (str): The recording key holding the map.
 
     Returns:
         list[re.Pattern]: The compiled patterns (ReDoS-prone, typo'd and non-string ones skipped).
     """
     compiled = []
-    # A truthy non-dict lag_patterns (e.g. a list) has no .values() and must degrade to "no
-    # patterns", not crash --validate.
-    lag_patterns = recording.get("lag_patterns")
-    lag_patterns = lag_patterns if isinstance(lag_patterns, dict) else {}
-    for pattern_str in list(lag_patterns.values())[:_MAX_LAG_PATTERNS]:
+    # A truthy non-dict map (e.g. a list) has no .values() and must degrade to "no patterns",
+    # not crash --validate.
+    patterns = recording.get(key)
+    patterns = patterns if isinstance(patterns, dict) else {}
+    for pattern_str in list(patterns.values())[:_MAX_LAG_PATTERNS]:
         # Skip a ReDoS-prone pattern (a length cap can't bound its backtracking — see
         # _is_redos_prone) before compiling, and skip a typo'd regex (re.error) or a non-string
         # value (TypeError) rather than crash — mirroring resolve_port_relationships' hardening.
@@ -104,6 +105,35 @@ def compile_lag_patterns(recording):
         except (re.error, TypeError):
             continue
     return compiled
+
+
+def compile_lag_patterns(recording):
+    """
+    Compile a recording's ``lag_patterns`` into usable regexes, skipping the unsafe ones.
+
+    Args:
+        recording (dict): A recording; a missing or non-dict ``lag_patterns`` yields no patterns.
+
+    Returns:
+        list[re.Pattern]: The compiled LAG name patterns.
+    """
+    return _compile_recording_patterns(recording, "lag_patterns")
+
+
+def compile_sap_patterns(recording):
+    """
+    Compile a recording's ``sap_patterns`` into usable regexes, skipping the unsafe ones.
+
+    A replay that drops these resolves a service access point as a LAG member, so the captured
+    rule has to travel with the recording exactly as the LAG rule does.
+
+    Args:
+        recording (dict): A recording; a missing or non-dict ``sap_patterns`` yields no patterns.
+
+    Returns:
+        list[re.Pattern]: The compiled SAP name patterns.
+    """
+    return _compile_recording_patterns(recording, "sap_patterns")
 
 
 def port_names(port):

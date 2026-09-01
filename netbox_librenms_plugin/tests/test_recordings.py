@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 import pytest
 
+from netbox_librenms_plugin.data_shapes.ports import compile_sap_patterns
+
 from netbox_librenms_plugin.tests.recordings import iter_recording_paths, iter_recordings
 
 _RECORDINGS = iter_recordings()
@@ -405,6 +407,9 @@ def _assert_port_relationships(api, device_id, recording, expected):
         # `(meta or {})` not `meta, {}`: an explicit "meta": null (a shape recording_schema_errors()
         # doesn't reject) returns None, and the chained .get("os") would then AttributeError.
         device_os=(recording.get("meta") or {}).get("os"),
+        # Supplying lag_patterns keeps resolution off the DB, which also means the stored SAP
+        # rule is not read; feed the recording's own snapshot so replay matches production.
+        compiled_sap_patterns=compile_sap_patterns(recording),
     )
 
     # port_stack and ports are independent payloads whose ids may differ in type,
@@ -451,7 +456,9 @@ def test_assert_port_relationships_tolerates_explicit_null_meta():
     api = SimpleNamespace(
         get_ports=lambda device_id: (True, {"ports": []}),
         get_port_stack=lambda device_id: (True, []),
-        resolve_port_relationships=lambda ports, stack, lag_patterns, device_os: {},
+        # **kwargs: the stub must not pin the resolver's keyword list, or every new pattern
+        # argument breaks this test instead of the behaviour it guards.
+        resolve_port_relationships=lambda ports, stack, **kwargs: {},
     )
     # "meta": null is a shape recording_schema_errors() accepts; os is optional. The helper must
     # read (meta or {}).get("os") — reading meta.get directly would AttributeError on None.
@@ -471,8 +478,9 @@ def test_assert_port_relationships_tolerates_explicit_null_lag_patterns():
         def get_port_stack(self, device_id):
             return True, []
 
-        def resolve_port_relationships(self, ports, stack, lag_patterns, device_os):
+        def resolve_port_relationships(self, ports, stack, lag_patterns=None, **kwargs):
             self.lag_patterns = lag_patterns
+            self.sap_patterns = kwargs.get("compiled_sap_patterns")
             return {}
 
     api = RecordingAPI()
@@ -481,6 +489,8 @@ def test_assert_port_relationships_tolerates_explicit_null_lag_patterns():
     _assert_port_relationships(api, 1, recording, expected={})
 
     assert api.lag_patterns == {}
+    # A null lag_patterns must not pull the stored SAP rule from the database either.
+    assert api.sap_patterns == []
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)

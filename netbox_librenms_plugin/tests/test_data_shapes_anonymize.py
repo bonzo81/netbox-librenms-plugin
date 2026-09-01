@@ -686,6 +686,19 @@ def test_version_pseudonymized_to_fw_hash():
     assert find_pii(a1) == []
 
 
+def test_sap_patterns_keys_are_pseudonymized_like_lag_patterns():
+    """The SAP rule is keyed by OS name, so its key has to follow meta.os or replay reads it under a name that no longer matches."""
+    rec = _ports()
+    rec["meta"] = {**rec.get("meta", {}), "os": "timos"}
+    rec["lag_patterns"] = {"timos": r"^lag-\d+$"}
+    rec["sap_patterns"] = {"timos": ":"}
+
+    anon = anonymize_recording(rec, salt="contributor-x")
+
+    assert anon["sap_patterns"] == {pseudonymize_os("timos"): ":"}
+    assert list(anon["sap_patterns"]) == list(anon["lag_patterns"])
+
+
 def test_serial_type_patterns_pass_through_anonymization_verbatim():
     """The serial recognition map survives anonymize untouched (keys AND values, salt or not)."""
     # Unlike lag_patterns (whose OS-name keys are pseudonymized), these keys are vendor

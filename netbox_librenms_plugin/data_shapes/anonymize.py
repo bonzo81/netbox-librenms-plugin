@@ -560,6 +560,11 @@ def anonymize_recording(recording, *, salt=""):
     lag_patterns = recording.get("lag_patterns")
     if isinstance(lag_patterns, dict):
         out["lag_patterns"] = {(pseudonymize_os(k) if k else k): v for k, v in lag_patterns.items()}
+    # sap_patterns is keyed the same way and needs the same treatment, or a replay reads the SAP
+    # rule under an OS name that no longer matches the pseudonymized meta.os.
+    sap_patterns = recording.get("sap_patterns")
+    if isinstance(sap_patterns, dict):
+        out["sap_patterns"] = {(pseudonymize_os(k) if k else k): v for k, v in sap_patterns.items()}
     # serial_type_patterns passes through VERBATIM (via the dict copy above) — deliberately,
     # unlike lag_patterns: its keys are vendor sensor-table identifiers (acsSerialPortTable),
     # not OS names, and replay feeds them back through the sensor_types injection points where

@@ -661,6 +661,43 @@ def test_capture_snapshots_os_scoped_lag_patterns():
 
 
 @pytest.mark.django_db
+def test_capture_snapshots_the_os_sap_pattern_and_omits_a_blank_one():
+    """A replay without the SAP rule resolves a service access point as a LAG member, so the rule travels with the recording exactly as the LAG pattern does."""
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    PortStackLagPattern.objects.create(librenms_os="captest-sap", lag_name_pattern=r"^lag-\d+$", sap_name_pattern=":")
+    # An OS with no SAP notation contributes no key rather than a pattern matching nothing.
+    PortStackLagPattern.objects.create(librenms_os="captest-nosap", lag_name_pattern=r"^ae\d+$")
+    api = _StubApi(
+        {
+            "devices/78": (200, {"status": "ok", "devices": [{"device_id": 78, "os": "captest-sap"}]}),
+            "inventory/78": (200, {"status": "ok", "inventory": []}),
+            "inventory/78/all": (200, {"status": "ok", "inventory": []}),
+            "devices/78/ports": (200, {"status": "ok", "ports": []}),
+            "devices/78/port_stack": (200, {"status": "ok", "mappings": []}),
+            "devices/78/transceivers": (200, {"status": "ok", "transceivers": []}),
+        }
+    )
+
+    recording = capture_device_recording(api, 78)
+
+    assert recording["sap_patterns"] == {"captest-sap": ":"}
+
+    api_nosap = _StubApi(
+        {
+            "devices/79": (200, {"status": "ok", "devices": [{"device_id": 79, "os": "captest-nosap"}]}),
+            "inventory/79": (200, {"status": "ok", "inventory": []}),
+            "inventory/79/all": (200, {"status": "ok", "inventory": []}),
+            "devices/79/ports": (200, {"status": "ok", "ports": []}),
+            "devices/79/port_stack": (200, {"status": "ok", "mappings": []}),
+            "devices/79/transceivers": (200, {"status": "ok", "transceivers": []}),
+        }
+    )
+
+    assert capture_device_recording(api_nosap, 79)["sap_patterns"] == {}
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("blank_os", ["", "   "])
 def test_capture_blank_os_embeds_no_lag_patterns(blank_os):
     """A present but blank OS embeds no LAG patterns because production applies none."""

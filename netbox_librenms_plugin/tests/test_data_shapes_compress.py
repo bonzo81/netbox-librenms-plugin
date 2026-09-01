@@ -69,9 +69,10 @@ def test_compression_preserves_relationship_outcome(recording_server):
 
     assert full_lag == comp_lag
     assert full_sub == comp_sub
-    # Non-vacuous: both relationship kinds are really exercised, incl. the base-name-resolved LAG.
+    # Non-vacuous: both relationship kinds are really exercised, incl. the base-name-resolved LAG
+    # and the two units whose parent no port_stack row states (they come from the name fallback).
     assert full_lag == {"101": "102", "300": "302"}
-    assert full_sub == {"206": "205"}
+    assert full_sub == {"206": "205", "301": "300", "303": "302"}
 
 
 def test_compression_preserves_signature():

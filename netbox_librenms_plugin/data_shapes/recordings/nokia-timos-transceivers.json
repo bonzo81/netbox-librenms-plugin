@@ -13,6 +13,9 @@
   "lag_patterns": {
     "os-57cfb3": "^lag-\\d+$"
   },
+  "sap_patterns": {
+    "os-57cfb3": ":"
+  },
   "responses": {
     "GET /api/v0/devices/5": {
       "status": "ok",
