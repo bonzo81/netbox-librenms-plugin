@@ -400,8 +400,8 @@ def _assert_port_relationships(api, device_id, recording, expected):
     relationships = api.resolve_port_relationships(
         ports_data["ports"],
         port_stack,
-        # Pass patterns explicitly (default {}) so resolution never touches the DB.
-        lag_patterns=recording.get("lag_patterns", {}),
+        # Normalize missing and explicit null patterns so resolution never touches the DB.
+        lag_patterns=recording.get("lag_patterns") or {},
         # `(meta or {})` not `meta, {}`: an explicit "meta": null (a shape recording_schema_errors()
         # doesn't reject) returns None, and the chained .get("os") would then AttributeError.
         device_os=(recording.get("meta") or {}).get("os"),
@@ -457,6 +457,30 @@ def test_assert_port_relationships_tolerates_explicit_null_meta():
     # read (meta or {}).get("os") — reading meta.get directly would AttributeError on None.
     recording = {"name": "null-meta", "meta": None, "lag_patterns": {}}
     _assert_port_relationships(api, 1, recording, expected={})
+
+
+def test_assert_port_relationships_tolerates_explicit_null_lag_patterns():
+    """An explicit lag_patterns: null recording must not load live database patterns."""
+
+    class RecordingAPI:
+        lag_patterns = None
+
+        def get_ports(self, device_id):
+            return True, {"ports": []}
+
+        def get_port_stack(self, device_id):
+            return True, []
+
+        def resolve_port_relationships(self, ports, stack, lag_patterns, device_os):
+            self.lag_patterns = lag_patterns
+            return {}
+
+    api = RecordingAPI()
+    recording = {"name": "null-lag-patterns", "meta": {}, "lag_patterns": None}
+
+    _assert_port_relationships(api, 1, recording, expected={})
+
+    assert api.lag_patterns == {}
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
