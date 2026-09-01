@@ -14,7 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     get_migrated_to_marker,
@@ -267,6 +267,25 @@ class TestMoveInterfaceToWinner:
         interface.refresh_from_db()
         assert interface.device == donor
 
+    def test_donor_only_device_grant_cannot_move_interface_to_the_winner(self, client):
+        """The move writes both devices, so a donor-only device grant must block it."""
+        from dcim.models import Interface
+
+        donor = make_device("interface-winner-scope-donor")
+        winner = make_device("interface-winner-scope-winner")
+        _mark(donor, winner)
+        interface = make_interface(donor, "Ethernet1")
+        user = make_user_with_perms("interface-winner-scope-user", [("change", Interface)])
+        user = grant(user, "change", Device, constraints={"pk": donor.pk})
+        client.force_login(user)
+
+        response = _move_interface(client, interface)
+
+        assert response.status_code == 200
+        assert "HX-Refresh" not in response.headers
+        interface.refresh_from_db()
+        assert interface.device == donor
+
 
 @pytest.mark.django_db
 class TestMoveIPAddressToWinner:
@@ -306,6 +325,27 @@ class TestMoveIPAddressToWinner:
         response = _move_ip(client, address)
 
         assert response.headers["HX-Reswap"] == "none"
+        address.refresh_from_db()
+        assert address.assigned_object == donor_interface
+
+    def test_donor_only_device_grant_cannot_move_ip_to_the_winner(self, client):
+        """The IP move reconciles both devices, so a donor-only device grant must block it."""
+        from ipam.models import IPAddress
+
+        donor = make_device("ip-winner-scope-donor")
+        winner = make_device("ip-winner-scope-winner")
+        _mark(donor, winner)
+        donor_interface = make_interface(donor, "Ethernet1")
+        make_interface(winner, donor_interface.name)
+        address = make_ip("198.18.204.10/24", assigned_object=donor_interface)
+        user = make_user_with_perms("ip-winner-scope-user", [("change", IPAddress)])
+        user = grant(user, "change", Device, constraints={"pk": donor.pk})
+        client.force_login(user)
+
+        response = _move_ip(client, address)
+
+        assert response.status_code == 200
+        assert "HX-Refresh" not in response.headers
         address.refresh_from_db()
         assert address.assigned_object == donor_interface
 
@@ -382,6 +422,27 @@ class TestTransferDeviceIPToWinner:
         assert response.headers["HX-Reswap"] == "none"
         winner.refresh_from_db()
         assert winner.oob_ip is None
+
+    def test_donor_only_device_grant_cannot_transfer_primary_ip_to_the_winner(self, client):
+        """The transfer writes the winner device, so a donor-only grant must block it."""
+        donor = make_device("transfer-winner-scope-donor")
+        winner = make_device("transfer-winner-scope-winner")
+        _mark(donor, winner)
+        address = ip_on(winner, "198.18.215.10/24", "mgmt0")
+        Device.objects.filter(pk=donor.pk).update(primary_ip4=address)
+        donor.refresh_from_db()
+        user = make_user_with_perms("transfer-winner-scope-user", [])
+        user = grant(user, "change", Device, constraints={"pk": donor.pk})
+        client.force_login(user)
+
+        response = _transfer_ip(client, donor, "primary4")
+
+        assert response.status_code == 200
+        assert "HX-Refresh" not in response.headers
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.primary_ip4 == address
+        assert winner.primary_ip4 is None
 
 
 @pytest.mark.django_db

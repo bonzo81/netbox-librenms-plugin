@@ -205,13 +205,6 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "data-bs-toggle" not in link
         assert "data-bs-target" not in link
 
-    @staticmethod
-    def _patch_move_url_reverse(*, resolve):
-        """Force ``interface_move_to_winner`` registered/unregistered via the shared helper."""
-        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
-
-        return patch_move_url_reverse("interface_move_to_winner", resolve=resolve)
-
     def test_migrated_move_button_hidden_for_read_only_users(self):
         """The migrated 'Move' action is a mutating HTMX POST; without write permission it must not render as a live button (it would only fail at the permission gate) — show muted 'read-only' text instead."""
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -220,31 +213,35 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
         marker = {"server_key": "default", "device_id": 1, "at": "now"}
 
-        # Make the move URL resolvable so this test exercises the write-permission gate itself, not
-        # the branch-dependent absence of the URL (registered only up-stack); the negative assertion
-        # can then actually FAIL if the has_write_permission guard is removed.
-        with self._patch_move_url_reverse(resolve=True):
-            ro = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=False)
+        ro = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=False)
         # Assert on the button's own rendered content, not the URL *name* (which never appears in
         # HTML — the template emits the resolved path). The live Move button carries this confirm text.
         assert "Move interface '" not in ro
-        assert "/fake/interface_move_to_winner/1/" not in ro
+        from django.urls import reverse
+
+        assert reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[1]) not in ro
         assert "read-only" in ro
 
     def test_migrated_move_button_write_perm_degrades_when_url_unregistered(self):
         """With write perm, an unregistered move-to-winner URL must degrade to read-only, not 500."""
+        from django.template.loader import render_to_string
+
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("iface-winner-wp")
         iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
-        marker = {"server_key": "default", "device_id": 1, "at": "now"}
-
-        # Force the forward-declared move URL to look unregistered on ANY branch (it IS registered
-        # up-stack) so the {% url ... as %} degrade path is exercised wherever this runs. Unfixed
-        # (bare {% url %}) this raises NoReverseMatch; the {% url ... as %} guard renders the
-        # read-only fallback instead, so the migrated tab never 500s where the URL isn't registered.
-        with self._patch_move_url_reverse(resolve=False):
-            html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
+        html = render_to_string(
+            "netbox_librenms_plugin/inc/_migrate_move_button.html",
+            {
+                "move_url_name": "plugins:netbox_librenms_plugin:missing_interface_move_to_winner",
+                "obj_id": iface["id"],
+                "obj_label": iface["name"],
+                "entity_word": "interface",
+                "winner": winner,
+                "server_key": "default",
+                "has_write_permission": True,
+            },
+        )
         # Assert on the button's rendered content (the confirm text), not the URL name: with the URL
         # unresolved, move_url is '' so the live button must be absent and the read-only span shown.
         assert "Move interface '" not in html
@@ -257,16 +254,18 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         This proves the negative assertions above key off the button's real rendered content — i.e.
         they would actually fail if the button leaked into a read-only / unregistered render.
         """
+        from django.urls import reverse
+
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("iface-winner-write")
         iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
         marker = {"server_key": "default", "device_id": 1, "at": "now"}
 
-        with self._patch_move_url_reverse(resolve=True):
-            html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
+        html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
         assert "Move interface '" in html
-        assert 'hx-post="/fake/interface_move_to_winner/1/"' in html
+        move_url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[1])
+        assert f'hx-post="{move_url}"' in html
         assert "read-only" not in html
 
     def test_move_button_emits_server_key_hx_vals_when_marker_has_key(self):
@@ -278,13 +277,12 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         winner = make_device("iface-tmpl-winner")
         # Alphanumeric key so escapejs leaves it intact (it escapes e.g. '-' to -); the
         # guard behaviour, not escapejs, is what this test pins.
-        with self._patch_move_url_reverse(resolve=True):
-            html = self._render(
-                migrated={"server_key": "edgelondon", "device_id": 1, "at": "now"},
-                winner=winner,
-                netbox_only=[{"id": 1, "name": "eth-only"}],
-                has_write=True,
-            )
+        html = self._render(
+            migrated={"server_key": "edgelondon", "device_id": 1, "at": "now"},
+            winner=winner,
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+            has_write=True,
+        )
         # The Move button renders for the NetBox-only row and carries the server_key. Scope the
         # hx-vals assertion to the Move button's own tag (mirroring the fallback test) so a
         # different element carrying the key can't mask the button dropping its hx-vals.
@@ -302,13 +300,12 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("iface-tmpl-winner-nokey")
-        with self._patch_move_url_reverse(resolve=True):
-            html = self._render(
-                migrated={"device_id": 1, "at": "now"},  # marker has NO server_key
-                winner=winner,
-                netbox_only=[{"id": 1, "name": "eth-only"}],
-                has_write=True,
-            )
+        html = self._render(
+            migrated={"device_id": 1, "at": "now"},  # marker has NO server_key
+            winner=winner,
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+            has_write=True,
+        )
         # The Move button still renders, and never with an empty server_key payload.
         assert "mdi-transfer-right" in html
         assert 'hx-vals=\'{"server_key": ""}\'' not in html
