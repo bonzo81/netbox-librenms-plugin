@@ -741,16 +741,16 @@ class TestGetLibreNMSDeviceInfo:
 class TestStripVcPattern:
     """Tests for _strip_vc_pattern (lines 378+)."""
 
-    def test_strips_default_pattern(self):
+    def test_strips_configured_pattern(self):
         from netbox_librenms_plugin.models import LibreNMSSettings
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
         LibreNMSSettings.objects.update_or_create(
             pk=1,
-            defaults={"vc_member_name_pattern": "-M{position}"},
+            defaults={"vc_member_name_pattern": "-STACK{position}"},
         )
 
-        result = BaseLibreNMSSyncView._strip_vc_pattern("switch01-m2")
+        result = BaseLibreNMSSyncView._strip_vc_pattern("switch01-stack2")
 
         assert result == "switch01"
 

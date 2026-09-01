@@ -80,12 +80,12 @@ def _post(device, module, *, port_id, ifname):
 
 
 def _drive(device, module, *, port_id, ifname):
+    from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
     from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
     view = UpdateModuleInterfaceView()
     request = _post(device, module, port_id=port_id, ifname=ifname)
-    view.request = request  # dispatch() normally wires this; we call post() directly
-    view.post(request, pk=device.pk)
+    post_view(view, request, pk=device.pk)
     return [(m.level_tag, m.message) for m in request._messages]
 
 

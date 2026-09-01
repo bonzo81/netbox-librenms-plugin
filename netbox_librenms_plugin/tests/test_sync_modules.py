@@ -2593,7 +2593,11 @@ class TestModuleMutationScopes:
             }
         ]
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        cache.set(cache_key, {"inventory": inventory}, timeout=300)
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(device, inventory, server_key="default", librenms_id=1),
+            timeout=300,
+        )
         try:
             view.post(request, pk=device.pk)
         finally:

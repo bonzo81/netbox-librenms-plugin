@@ -233,7 +233,7 @@ def test_something(self):
 
 ```python
 device = make_device("test-device", serial="SN1")
-ip = make_ip("192.168.1.1/24", assigned_to=make_interface(device, "mgmt0"))
+ip = make_ip("192.168.1.1/24", assigned_object=make_interface(device, "mgmt0"))
 ```
 
 **Deny a permission by withholding it**, not by stubbing the gate. Build a user who genuinely lacks
@@ -243,6 +243,10 @@ an `HX-Redirect` header for an HTMX POST) and re-read the object to prove no wri
 **Drive the LibreNMS API through the loopback stub** rather than mocking the client:
 
 ```python
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
+from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
+
+
 with run_librenms_server() as server:
     configure_test_servers(settings, {key: {"librenms_url": server.url, "api_token": "t"}})
     server.device_info_response(device_id=42, hostname="r01", serial="SN1")

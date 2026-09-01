@@ -135,7 +135,7 @@ def test_declared_django_range_covers_every_gating_netbox_release():
 
     workflow = yaml.safe_load((REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text())
     matrix = workflow["jobs"]["test-netbox"]["strategy"]["matrix"]["include"]
-    gating_refs = sorted({entry["netbox-ref"] for entry in matrix if not entry["experimental"]})
+    gating_refs = sorted({entry["netbox-ref"] for entry in matrix if not entry.get("experimental")})
     assert gating_refs, "the matrix scan found no gating NetBox ref, so the checks below would pass vacuously"
 
     unmapped = [ref for ref in gating_refs if ref not in NETBOX_REF_DJANGO_PINS]
@@ -147,6 +147,16 @@ def test_declared_django_range_covers_every_gating_netbox_release():
 
     excluded = sorted(ref for ref in gating_refs if not django.specifier.contains(NETBOX_REF_DJANGO_PINS[ref]))
     assert not excluded, f"{django} excludes the Django pin of {excluded}"
+
+
+def test_testing_guide_uses_available_real_object_and_loopback_helpers():
+    """Keep the documented real-object and loopback examples runnable after copy and paste."""
+    guide = (REPOSITORY_ROOT / "docs" / "development" / "testing.md").read_text()
+
+    assert "mock_librenms_server import librenms_mock_server as run_librenms_server" in guide
+    assert "test_modules_view import configure_servers as configure_test_servers" in guide
+    assert "assigned_object=make_interface" in guide
+    assert "assigned_to=" not in guide
 
 
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():

@@ -317,7 +317,7 @@ def collect_container_names(paths):
     for path in paths:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except SyntaxError:
+        except (OSError, UnicodeDecodeError, SyntaxError):
             continue
         checker = MembershipChecker(path)
         checker.collect_containers(tree)
@@ -377,6 +377,8 @@ def check_file(path, hashable_containers=()):
     try:
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
+    except (OSError, UnicodeDecodeError) as exc:
+        return [(path, 0, 0, f"could not read: {exc}")]
     except SyntaxError as exc:
         return [(path, exc.lineno or 0, 0, f"could not parse: {exc.msg}")]
     checker = MembershipChecker(path, hashable_containers, source.splitlines())

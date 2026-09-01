@@ -15,7 +15,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
 
-from lint_unhashable_membership import check_file, collect_container_names  # noqa: E402
+from lint_unhashable_membership import check_file, collect_container_names, main as lint_main  # noqa: E402
 
 
 def _scan(tmp_path, source, extra_sources=()):
@@ -147,6 +147,29 @@ def test_a_constant_imported_from_another_module_is_still_resolved(tmp_path):
         extra_sources=[CONSTANTS],
     )
     assert findings, "a cross-module constant must not hide the finding"
+
+
+@pytest.mark.parametrize("failure", ["missing", "invalid-utf8"])
+def test_an_unreadable_source_is_reported_as_a_finding(tmp_path, failure):
+    """A bad source file must produce a useful diagnostic instead of crashing the lint run."""
+    path = tmp_path / "unreadable.py"
+    if failure == "invalid-utf8":
+        path.write_bytes(b"value = \xff\n")
+
+    findings = check_file(path)
+
+    assert len(findings) == 1
+    assert findings[0][:3] == (path, 0, 0)
+    assert findings[0][3].startswith("could not read:")
+
+
+def test_the_cli_reports_an_invalid_source_instead_of_crashing(tmp_path, capsys):
+    """The declaration scan must let the normal file check report a read failure."""
+    path = tmp_path / "invalid.py"
+    path.write_bytes(b"value = \xff\n")
+
+    assert lint_main([str(path)]) == 1
+    assert "could not read:" in capsys.readouterr().out
 
 
 def test_an_aliased_constant_imported_from_another_module_is_still_resolved(tmp_path):
