@@ -1006,8 +1006,11 @@ class LibreNMSAPI:
             while True:
                 cached = roots.get(node_id)
                 if cached is not None:
+                    # A cached top stops being the top once a later edge gives it a parent, so
+                    # keep walking from it instead of returning it as the root.
+                    path.append(node_id)
                     node_id = cached
-                    break
+                    continue
                 parent_of = sub_interfaces.get(node_id)
                 if parent_of is None:
                     break
