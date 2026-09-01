@@ -43,7 +43,10 @@ def _configure_servers(settings, server):
 
 
 @pytest.fixture
-def librenms_server(settings):
+def librenms_server(settings, monkeypatch):
+    """Run a local HTTP server for real LibreNMS client requests."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     with librenms_mock_server() as server:
         _configure_servers(settings, server)
         yield server
