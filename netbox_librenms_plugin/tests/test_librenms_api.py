@@ -2650,6 +2650,27 @@ class TestResolvePortRelationships:
         assert result["sub_interfaces"] == {1: 2, 2: 3}
         assert 3 not in result["sub_interfaces"]
 
+    def test_a_cached_root_that_later_gains_a_parent_still_closes_the_loop(self, mock_librenms_api):
+        """The walk caches an ancestor; a later edge above it must not hide the cycle."""
+        # ae0's stated parent is ae0.2.3 (crossed name fields: ifDescr q.7 under q). Resolving
+        # ae0.1 then caches root(ae0) = ae0.2.3. The next port gives ae0.2.3 its own parent, so
+        # that cached value is no longer the top, and ae0.2 would otherwise be accepted as ae0's
+        # parent -- writing the cycle ae0 -> ae0.2.3 -> ae0.2 -> ae0 into NetBox.
+        ports = [
+            {"port_id": 31, "ifName": "ae0", "ifDescr": "q.7", "ifType": "ethernetCsmacd"},
+            {"port_id": 32, "ifName": "ae0.1", "ifDescr": "a-desc", "ifType": "propVirtual"},
+            {"port_id": 34, "ifName": "ae0.2.3", "ifDescr": "q", "ifType": "propVirtual"},
+            {"port_id": 33, "ifName": "ae0.2", "ifDescr": "c-desc", "ifType": "propVirtual"},
+        ]
+        port_stack = [{"high_port_id": 34, "low_port_id": 31}]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={}, compiled_sap_patterns=[]
+        )
+
+        assert result["sub_interfaces"] == {31: 34, 32: 31, 34: 33}
+        assert 33 not in result["sub_interfaces"]
+
     def test_name_derived_parents_still_resolve_a_deep_chain(self, mock_librenms_api):
         """The cycle walk must not reject a legitimate grandparent chain."""
         ports = [
