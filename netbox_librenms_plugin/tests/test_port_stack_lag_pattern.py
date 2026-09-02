@@ -80,16 +80,6 @@ class TestPortStackLagPattern:
 
         assert model.objects.get(librenms_os="timos").sap_name_pattern == ":"
 
-    def test_a_corrupted_sap_pattern_is_not_reported_as_intact(self, django_db_reset_sequences):
-        """restore_seeded_state skips the repair unless the intactness check reads BOTH seeds."""
-        from netbox_librenms_plugin.tests.conftest import restore_seeded_state
-
-        model = self._model()
-        model.objects.filter(librenms_os="timos").update(sap_name_pattern="")
-
-        assert restore_seeded_state(force=False) is True
-        assert model.objects.get(librenms_os="timos").sap_name_pattern == ":"
-
     def test_yaml_export_carries_the_sap_pattern(self):
         """A customized SAP rule has to survive export and re-import, or it silently reverts to blank."""
         import yaml

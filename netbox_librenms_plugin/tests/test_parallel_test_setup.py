@@ -14,6 +14,7 @@ from django.test import override_settings
 
 from netbox_librenms_plugin.tests.conftest import (
     _seeded_model_rows,
+    _seeded_sap_rows,
     restore_seeded_state,
 )
 from netbox_librenms_plugin.tests.isolated_settings import TEST_DB_NAME_PREFIX
@@ -429,6 +430,21 @@ def test_a_changed_seed_value_is_restored_even_though_its_lookup_key_survived():
     assert restore_seeded_state(force=False) is True
 
     for model, lookup_field, value_field, rows in _seeded_model_rows():
+        stored = set(model.objects.values_list(lookup_field, value_field))
+        assert stored.issuperset(rows)
+
+
+@pytest.mark.django_db
+def test_a_corrupted_sap_pattern_is_not_reported_as_intact():
+    """The intactness check reads the SAP seed too, or a blank sap_name_pattern skips the repair."""
+    for model, lookup_field, value_field, rows in _seeded_sap_rows():
+        lookup, _value = rows[0]
+        blanked = model.objects.filter(**{lookup_field: lookup}).update(**{value_field: ""})
+        assert blanked, f"{model.__name__} has no row for {lookup!r}, so nothing was corrupted"
+
+    assert restore_seeded_state(force=False) is True
+
+    for model, lookup_field, value_field, rows in _seeded_sap_rows():
         stored = set(model.objects.values_list(lookup_field, value_field))
         assert stored.issuperset(rows)
 
