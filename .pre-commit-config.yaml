@@ -12,7 +12,9 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^netbox_librenms_plugin/tests/browser/vendor/
       - id: end-of-file-fixer
+        exclude: ^netbox_librenms_plugin/tests/browser/vendor/
       - id: check-yaml
         exclude: ^mkdocs\.yml$
       - id: check-added-large-files

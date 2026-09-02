@@ -1,6 +1,7 @@
 """Browser-level checks for the sync tabs: the cache state machine and table selection."""
 
 import json
+import re
 from html import escape
 from pathlib import Path
 
@@ -727,6 +728,92 @@ def test_cache_reads_carry_the_browser_url(page):
         )
 
     assert fragment.value.headers.get("hx-current-url") == SYNC_PAGE_URL
+
+
+SAVE_PREF_URL = "https://plugin.example.com/save-pref"
+
+
+def _ipaddress_toggle_fragment():
+    """Build an IP address fragment around the template's own "Set Primary IP" script."""
+    markup = (TEMPLATE_DIR / "_ipaddress_sync_content.html").read_text()
+    blocks = re.findall(r"<script>.*?</script>", markup, flags=re.DOTALL)
+    assert len(blocks) == 1, f"the IP address template must carry one inline script, found {len(blocks)}"
+    script = _replace_fixture_markup(
+        blocks[0],
+        "{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}",
+        SAVE_PREF_URL,
+    )
+    return (
+        '<input type="checkbox" id="set-primary-ip-toggle-cb" checked>'
+        "<table><tbody>"
+        '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="10.0.0.1"></td></tr>'
+        '<tr><td><input type="checkbox" name="select" value="10.0.0.2"></td></tr>'
+        "</tbody></table>" + script
+    )
+
+
+def test_a_cache_fragment_runs_its_inline_script(page):
+    """A restored fragment must run its inline script, or the toggle it binds stays dead until a sync."""
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state("ipaddresses-ready"),
+    }
+    saved_prefs = []
+
+    def save_pref(route):
+        saved_prefs.append(route.request.post_data)
+        route.fulfill(json={"status": "ok"})
+
+    page.route(
+        "https://plugin.example.com/fragment/ipaddresses*",
+        lambda route: route.fulfill(body=_ipaddress_toggle_fragment(), content_type="text/html"),
+    )
+    page.route(SAVE_PREF_URL, save_pref)
+    _serve_sync_page(
+        page, '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _page_html(initial)
+    )
+    page.evaluate("async () => { initializeSyncCacheConsistency(); await loadSyncCacheFragment('ipaddresses'); }")
+
+    mgmt_row = page.locator('tr[data-mgmt-ip="true"] input[name="select"]')
+    plain_row = page.locator('tr:not([data-mgmt-ip]) input[name="select"]')
+    assert mgmt_row.is_checked()
+    assert not plain_row.is_checked()
+
+    with page.expect_request(SAVE_PREF_URL):
+        page.uncheck("#set-primary-ip-toggle-cb")
+
+    assert not mgmt_row.is_checked()
+    assert [json.loads(body) for body in saved_prefs] == [{"key": "set_primary_ip", "value": False}]
+
+    page.check("#set-primary-ip-toggle-cb")
+
+    assert mgmt_row.is_checked()
+
+
+def test_a_cache_fragment_load_does_not_recheck_the_cache_status(page):
+    """The loader runs as the outcome of a status check, so its swap must not start another one."""
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state("ipaddresses-ready"),
+    }
+    status_requests = []
+
+    def serve_status(route):
+        status_requests.append(route.request.url)
+        route.fulfill(json={"tabs": initial})
+
+    page.route("https://plugin.example.com/status?*", serve_status)
+    page.route(
+        "https://plugin.example.com/fragment/interfaces*",
+        lambda route: route.fulfill(body='<span id="restored">restored</span>', content_type="text/html"),
+    )
+    page.set_content(_page_html(initial))
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate("async () => { initializeSyncCacheConsistency(); await loadSyncCacheFragment('interfaces'); }")
+
+    assert page.locator("#restored").count() == 1
+    assert page.evaluate("syncCacheController().checking") is None
+    assert status_requests == []
 
 
 def test_module_verify_carries_the_browser_url(page):
