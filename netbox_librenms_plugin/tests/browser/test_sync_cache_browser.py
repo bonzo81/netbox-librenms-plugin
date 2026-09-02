@@ -1,7 +1,6 @@
 """Browser-level checks for the sync tabs: the cache state machine and table selection."""
 
 import json
-import re
 from html import escape
 from pathlib import Path
 
@@ -736,10 +735,11 @@ SAVE_PREF_URL = "https://plugin.example.com/save-pref"
 def _ipaddress_toggle_fragment():
     """Build an IP address fragment around the template's own "Set Primary IP" script."""
     markup = (TEMPLATE_DIR / "_ipaddress_sync_content.html").read_text()
-    blocks = re.findall(r"<script>.*?</script>", markup, flags=re.DOTALL)
-    assert len(blocks) == 1, f"the IP address template must carry one inline script, found {len(blocks)}"
+    assert markup.count("<script") == 1, "the IP address template must carry exactly one inline script"
+    start = markup.index("<script>")
+    end = markup.index("</script>", start) + len("</script>")
     script = _replace_fixture_markup(
-        blocks[0],
+        markup[start:end],
         "{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}",
         SAVE_PREF_URL,
     )
