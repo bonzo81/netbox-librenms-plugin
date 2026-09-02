@@ -455,15 +455,16 @@ class TestBuildAllServerMappings:
             "mapping-bool",
             librenms_cf={"default": True, "other": 42},
         )
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {
-            "other": {
-                "librenms_url": "https://librenms-other.example.com",
-                "api_token": "test-token-other",
-                "display_name": "Other",
-            }
-        }
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(
+            settings,
+            {
+                "other": {
+                    "librenms_url": "https://librenms-other.example.com",
+                    "api_token": "test-token-other",
+                    "display_name": "Other",
+                }
+            },
+        )
 
         result = BaseLibreNMSSyncView._build_all_server_mappings(device, "default")
 
@@ -505,9 +506,7 @@ class TestBuildAllServerMappings:
             "mapping-non-digit-string",
             librenms_cf={"default": "not-a-number"},
         )
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {}
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(settings, {})
 
         result = BaseLibreNMSSyncView._build_all_server_mappings(device, "default")
 
@@ -535,9 +534,7 @@ class TestBuildAllServerMappings:
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
         device = make_device("mapping-malformed-server", librenms_cf={"default": 42})
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {"default": "this-is-not-a-dict"}
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(settings, {"default": "this-is-not-a-dict"})
 
         result = BaseLibreNMSSyncView._build_all_server_mappings(device, "default")
 
@@ -586,9 +583,7 @@ class TestBuildAllServerMappings:
             "mapping-migrated-only",
             librenms_cf={"default": {"_migrated_to": {"device_id": 5}}},
         )
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {}
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(settings, {})
 
         result = BaseLibreNMSSyncView._build_all_server_mappings(device, "default")
 
@@ -609,9 +604,7 @@ class TestAllServerMappingsDidValidation:
             "did-validation-bool",
             librenms_cf={"default": True, "prod": 42},
         )
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {}
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(settings, {})
 
         result = self._call(device)
 
@@ -621,9 +614,7 @@ class TestAllServerMappingsDidValidation:
 
     def test_skips_none_did(self, settings):
         device = make_device("did-validation-none", librenms_cf={"default": None})
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {}
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(settings, {})
 
         result = self._call(device)
 
@@ -631,9 +622,7 @@ class TestAllServerMappingsDidValidation:
 
     def test_coerces_digit_string_did(self, settings):
         device = make_device("did-validation-digit-string", librenms_cf={"prod": "99"})
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {}
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(settings, {})
 
         result = self._call(device)
 
@@ -645,9 +634,7 @@ class TestAllServerMappingsDidValidation:
             "did-validation-non-digit-string",
             librenms_cf={"default": "bogus"},
         )
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {}
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(settings, {})
 
         result = self._call(device)
 
@@ -658,9 +645,7 @@ class TestAllServerMappingsDidValidation:
             "did-validation-ints",
             librenms_cf={"default": 5, "secondary": 10},
         )
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {}
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(settings, {})
 
         result = self._call(device)
 
@@ -1045,14 +1030,15 @@ class TestFullPageMigratedContextServerScope:
         }
         donor.save()
 
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_config["netbox_librenms_plugin"]["servers"] = {
-            "default": {
-                "librenms_url": "https://default.example.com",
-                "api_token": "test-token",
-            }
-        }
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(
+            settings,
+            {
+                "default": {
+                    "librenms_url": "https://default.example.com",
+                    "api_token": "test-token",
+                }
+            },
+        )
         client.force_login(make_superuser("stale-key-su"))
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[donor.pk])
 

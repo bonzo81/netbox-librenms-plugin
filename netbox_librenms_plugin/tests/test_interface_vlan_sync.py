@@ -164,18 +164,13 @@ class TestPortVlanEnrichment:
     @staticmethod
     def _api(settings):
         """Return a real client bound to a configured server; parse_port_vlan_data sends no request."""
-        from copy import deepcopy
-
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
 
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_settings = plugin_config["netbox_librenms_plugin"]
-        plugin_settings["servers"] = {
-            "default": {"librenms_url": "http://default.librenms.test", "api_token": "token-default"}
-        }
-        plugin_settings.pop("librenms_url", None)
-        plugin_settings.pop("api_token", None)
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(
+            settings,
+            {"default": {"librenms_url": "http://default.librenms.test", "api_token": "token-default"}},
+        )
         return LibreNMSAPI(server_key="default")
 
     def test_parse_port_vlan_data_access_port(self, settings):

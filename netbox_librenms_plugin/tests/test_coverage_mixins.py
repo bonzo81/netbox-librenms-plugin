@@ -15,17 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-
-def configure_servers(settings, servers):
-    """Replace the plugin's configured LibreNMS servers, leaving the rest of PLUGINS_CONFIG intact."""
-    from copy import deepcopy
-
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_settings = plugin_config["netbox_librenms_plugin"]
-    plugin_settings["servers"] = servers
-    plugin_settings.pop("librenms_url", None)
-    plugin_settings.pop("api_token", None)
-    settings.PLUGINS_CONFIG = plugin_config
+from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, configure_no_librenms_servers
 
 
 def server_entry(key, *, display_name=None):
@@ -84,7 +74,7 @@ class TestLibreNMSAPIMixinActiveServerKey:
     def test_returns_bound_client_server_key(self, settings):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        configure_servers(settings, {"prod": server_entry("prod")})
+        configure_librenms_servers(settings, {"prod": server_entry("prod")})
         mixin = self._mixin()
         mixin._librenms_api = LibreNMSAPI(server_key="prod")
 
@@ -94,7 +84,7 @@ class TestLibreNMSAPIMixinActiveServerKey:
         """The rebind-fail render path has no client bound; the property must answer without building one."""
         # No usable server at all: the lazy librenms_api property would raise here, so a
         # "default" answer proves the property was never consulted.
-        configure_servers(settings, {})
+        configure_no_librenms_servers(settings)
         mixin = self._mixin()
         mixin._librenms_api = None
 
@@ -210,7 +200,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
 
     def test_empty_key_keeps_session_api(self, settings):
         """No POSTed key: return the bound client's key and leave the client in place."""
-        configure_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
+        configure_librenms_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
         mixin = self._mixin("default")
         original = mixin._librenms_api
 
@@ -219,7 +209,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
         assert mixin._librenms_api is original
 
     def test_valid_key_rebinds_and_returns_key(self, settings):
-        configure_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
+        configure_librenms_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
         mixin = self._mixin("default")
         original = mixin._librenms_api
 
@@ -231,7 +221,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
 
     def test_returns_resolved_key_not_raw_post_value(self, settings):
         """With no 'default' configured the auto-default falls back, so the resolved key differs."""
-        configure_servers(settings, {"primary": server_entry("primary")})
+        configure_librenms_servers(settings, {"primary": server_entry("primary")})
         mixin = self._mixin("primary")
 
         result = mixin.rebind_api_for_server("default")
@@ -241,7 +231,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
 
     def test_unknown_key_returns_none_without_rebinding(self, settings):
         """A stale or tampered key leaves the bound client untouched."""
-        configure_servers(settings, {"default": server_entry("default")})
+        configure_librenms_servers(settings, {"default": server_entry("default")})
         mixin = self._mixin("default")
         original = mixin._librenms_api
 
@@ -250,7 +240,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
 
     def test_empty_key_no_cached_api_builds_default(self, settings):
         """No POSTed key and no cached client builds the default and caches it for reuse."""
-        configure_servers(settings, {"default": server_entry("default")})
+        configure_librenms_servers(settings, {"default": server_entry("default")})
         mixin = self._mixin()
 
         assert mixin.rebind_api_for_server("") == "default"
@@ -259,7 +249,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
 
     def test_empty_key_misconfigured_default_returns_none(self, settings):
         """A default that cannot be bound fails closed with None instead of raising."""
-        configure_servers(settings, {"default": {"librenms_url": "", "api_token": ""}})
+        configure_librenms_servers(settings, {"default": {"librenms_url": "", "api_token": ""}})
         mixin = self._mixin()
 
         assert mixin.rebind_api_for_server("") is None
@@ -286,7 +276,7 @@ class TestLibreNMSAPIMixinResolveGetRenderServerKey:
 
     def test_blank_key_misconfigured_default_does_not_rebuild_client(self, settings):
         """A blank key with an unbindable default degrades to no scope and leaves the client unbound."""
-        configure_servers(settings, {"default": {"librenms_url": "", "api_token": ""}})
+        configure_librenms_servers(settings, {"default": {"librenms_url": "", "api_token": ""}})
         mixin = self._mixin()
 
         scoped, unresolved = mixin.resolve_get_render_server_key(self._request())
@@ -299,7 +289,7 @@ class TestLibreNMSAPIMixinResolveGetRenderServerKey:
         """A blank key returns the already-bound client's key rather than rebuilding one."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        configure_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
+        configure_librenms_servers(settings, {"default": server_entry("default"), "prod": server_entry("prod")})
         mixin = self._mixin()
         mixin._librenms_api = LibreNMSAPI(server_key="prod")
         original = mixin._librenms_api
@@ -312,7 +302,7 @@ class TestLibreNMSAPIMixinResolveGetRenderServerKey:
 
     def test_unknown_requested_key_flags_unresolved(self, settings):
         """A named server that no longer resolves is reported back as unresolved."""
-        configure_servers(settings, {"default": server_entry("default")})
+        configure_librenms_servers(settings, {"default": server_entry("default")})
         mixin = self._mixin()
 
         scoped, unresolved = mixin.resolve_get_render_server_key(self._request("ghost"))
@@ -329,7 +319,7 @@ class TestLibreNMSAPIMixinGetContextData:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
-        configure_servers(settings, {"default": server_entry("default", display_name="Default")})
+        configure_librenms_servers(settings, {"default": server_entry("default", display_name="Default")})
 
         class FakeBase:
             def get_context_data(self, **kwargs):
@@ -353,7 +343,7 @@ class TestLibreNMSAPIMixinGetContextData:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
-        configure_servers(settings, {"default": server_entry("default")})
+        configure_librenms_servers(settings, {"default": server_entry("default")})
         # object.__new__ leaves no base get_context_data, so super() raises AttributeError inside.
         mixin = object.__new__(LibreNMSAPIMixin)
         mixin._librenms_api = LibreNMSAPI(server_key="default")
@@ -369,7 +359,7 @@ class TestLibreNMSAPIMixinGetContextData:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
-        configure_servers(settings, {"prod": server_entry("prod", display_name="Production")})
+        configure_librenms_servers(settings, {"prod": server_entry("prod", display_name="Production")})
         mixin = object.__new__(LibreNMSAPIMixin)
         mixin._librenms_api = LibreNMSAPI(server_key="prod")
 
@@ -1273,7 +1263,7 @@ class TestRenderServerKeyDegradation:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
-        configure_servers(settings, {"active": server_entry("active")})
+        configure_librenms_servers(settings, {"active": server_entry("active")})
         view = DeviceLibreNMSSyncView()
         view._librenms_api = LibreNMSAPI(server_key="active")
 
