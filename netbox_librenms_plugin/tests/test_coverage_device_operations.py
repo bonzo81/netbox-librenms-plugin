@@ -168,6 +168,13 @@ class TestDetermineDeviceName:
         result = _determine_device_name({"sysName": None, "hostname": "sw02"})
         assert result == "sw02"
 
+    def test_non_string_sysname_falls_back_to_hostname(self):
+        """A non-string sysName cannot name a device, so the hostname wins."""
+        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
+
+        result = _determine_device_name({"sysName": 7, "hostname": "sw02"})
+        assert result == "sw02"
+
     def test_none_hostname_falls_back_to_device_id(self):
         from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
 
@@ -682,6 +689,43 @@ class TestValidateDeviceForImport:
         assert result is not None
         assert "is_ready" in result
         assert result["existing_device"] is None
+
+    def test_naming_criteria_ignores_a_non_string_sysname(self):
+        """naming_criteria reports the hostname source that the resolved name really came from."""
+        libre_device = {
+            "device_id": 7,
+            "hostname": "sw02",
+            "sysName": 7,
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "type": "network",
+        }
+        result = self._validate(libre_device, use_sysname=True)
+
+        assert result["resolved_name"] == "sw02"
+        criteria = result["naming_criteria"]
+        assert criteria["source"] == "hostname"
+        assert criteria["raw_sysname"] == ""
+        assert criteria["raw_hostname"] == "sw02"
+
+    def test_naming_criteria_reports_the_id_fallback_when_no_name_is_a_string(self):
+        """With no string name at all, both the resolved name and the source are the id fallback."""
+        libre_device = {
+            "device_id": 7,
+            "hostname": None,
+            "sysName": 7,
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "type": "network",
+        }
+        result = self._validate(libre_device)
+
+        assert result["resolved_name"] == "device-7"
+        assert result["naming_criteria"]["source"] == "device-7"
 
     def test_validation_result_key_contract(self):
         """Pin the result-dict key set to the documented Returns schema.

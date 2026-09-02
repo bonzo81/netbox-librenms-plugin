@@ -271,6 +271,13 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
     return None
 
 
+def _name_candidates(libre_device: dict) -> tuple[str | None, str | None]:
+    """Return the sysName and hostname values that can name a device: strings only."""
+    sysname = libre_device.get("sysName")
+    hostname = libre_device.get("hostname")
+    return (sysname if isinstance(sysname, str) else None, hostname if isinstance(hostname, str) else None)
+
+
 def _determine_device_name(
     libre_device: dict,
     use_sysname: bool = True,
@@ -300,10 +307,7 @@ def _determine_device_name(
         'router'
     """
     # LibreNMS sends JSON, so a name field can arrive as any type; only a str can name a device.
-    sysname = libre_device.get("sysName")
-    hostname = libre_device.get("hostname")
-    sysname = sysname if isinstance(sysname, str) else None
-    hostname = hostname if isinstance(hostname, str) else None
+    sysname, hostname = _name_candidates(libre_device)
 
     # Determine base name based on use_sysname preference
     if use_sysname:
@@ -731,8 +735,9 @@ def validate_device_for_import(
             device_id=librenms_id,
         )
         result["resolved_name"] = hostname
-        _raw_sysname = libre_device.get("sysName") or ""
-        _raw_hostname = libre_device.get("hostname") or ""
+        _raw_sysname, _raw_hostname = _name_candidates(libre_device)
+        _raw_sysname = _raw_sysname or ""
+        _raw_hostname = _raw_hostname or ""
         if not _raw_sysname and not _raw_hostname:
             _source = f"device-{librenms_id}"
         elif use_sysname:
