@@ -2910,6 +2910,45 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert b"already in JSON format" not in response.content
         assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == "+99"
 
+    def test_refuses_a_reader_only_legacy_form_even_when_a_rival_owns_the_id(self):
+        """Refuse the reader-only "4_2": under int() the rival's single match would pass the ambiguity guard."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        device = make_device("migrate-reader-only-device", serial="MIGRATE-SERIAL", librenms_cf="4_2")
+        rival = make_device(
+            "migrate-reader-only-rival",
+            serial="RIVAL-SERIAL",
+            librenms_cf={self.server_key: 99},
+        )
+        self._register_device(42, "migrate-reader-only-device", serial="MIGRATE-SERIAL")
+        # Only an ID match sets serial_confirmed, and "4_2" matches no lookup, so force is required here.
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+                "force": "on",
+            },
+            user=make_view_user("migrate-reader-only-device-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = self._post_after_validation(
+            view,
+            request,
+            42,
+            lambda: Device.objects.filter(pk=rival.pk).update(custom_field_data={"librenms_id": {self.server_key: 42}}),
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"is not a plain positive integer" in response.content
+        assert b"does not match the active device ID" not in response.content
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == "4_2"
+        assert Device.objects.get(pk=rival.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+
     def test_rejects_a_vm_migration_without_force_because_no_vm_confirms_a_serial(self):
         """VMs need force: only Device ID matches set serial_confirmed (import_utils/device_operations.py:802)."""
         from virtualization.models import VirtualMachine

@@ -2075,9 +2075,12 @@ class DeviceConflictActionView(
             cf_value = existing_device.custom_field_data.get("librenms_id")
             if not is_legacy_librenms_id(cf_value):
                 return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-            # Read the value back through the same helper the gate above used, so the comparison
-            # below cannot accept a form the lookup predicates would not match.
+            # coerce_librenms_id, not int(): a reader-only form ("4_2") never matches the rival-owner lookup below.
             cf_int = coerce_librenms_id(cf_value)
+            if cf_int is None:
+                return _htmx_error_response(
+                    f"Legacy librenms_id {cf_value!r} is not a plain positive integer; cannot migrate safely."
+                )
             # Verify the stored legacy ID matches the active LibreNMS device_id so we don't
             # migrate a stale/incorrect association to the wrong server mapping.
             if cf_int != librenms_id:
