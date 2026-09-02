@@ -584,9 +584,12 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
     const requestGeneration = statusGeneration ?? controller.statusGeneration;
     const url = new URL(pane.dataset.fragmentUrl, window.location.href);
     url.searchParams.set('server_key', controller.root.dataset.serverKey);
+    const fragmentHeaders = { 'X-Requested-With': 'XMLHttpRequest' };
+    const fragmentCsrf = getCsrfToken();
+    if (fragmentCsrf) fragmentHeaders['X-CSRFToken'] = fragmentCsrf;
     return fetch(url, {
         credentials: 'same-origin',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        headers: fragmentHeaders,
         signal,
     })
         .then(response => {
@@ -765,9 +768,12 @@ function checkSyncCacheStatus() {
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => abortController.abort(), SYNC_CACHE_STATUS_TIMEOUT_MS);
     let statusRequest;
+    const statusHeaders = { 'Accept': 'application/json' };
+    const statusCsrf = getCsrfToken();
+    if (statusCsrf) statusHeaders['X-CSRFToken'] = statusCsrf;
     statusRequest = fetch(url, {
         credentials: 'same-origin',
-        headers: { 'Accept': 'application/json' },
+        headers: statusHeaders,
         signal: abortController.signal,
     })
         .then(response => {
@@ -1450,14 +1456,15 @@ function updateOffPageSelectionNotice(table) {
         clear.className = 'btn btn-link btn-sm p-0';
         clear.textContent = 'Clear';
         clear.addEventListener('click', function () {
-            clearStoredSelection(table);
-            table.querySelectorAll('td input[name="select"]:checked').forEach(function (checkbox) {
-                checkbox.checked = false;
-                delete checkbox.dataset.autoRequired;
-                delete checkbox.dataset.autoMember;
-                delete checkbox.dataset.selectionCleared;
+            // The notice counts only the rows on other pages, so Clear drops only those. Wiping
+            // the store and the visible checkboxes would discard a selection the user can see and
+            // did not ask to lose.
+            const selection = readStoredSelection(table);
+            offPageSelectionKeys(table).forEach(function (key) {
+                delete selection[key];
             });
-            refreshRequiredSelections();
+            writeStoredSelection(table, selection);
+            updateOffPageSelectionNotice(table);
             updateBulkActionButton();
         });
         notice.appendChild(clear);

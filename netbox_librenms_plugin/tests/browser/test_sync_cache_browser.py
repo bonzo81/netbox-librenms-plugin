@@ -297,15 +297,25 @@ class TestCrossPageSelection:
 
         assert ("select", "__proto__") in _selection_form_pairs(request_info.value.post_data)
 
-    def test_clearing_the_notice_drops_the_off_page_selection(self, page):
+    def test_clearing_the_notice_drops_only_the_off_page_selection(self, page):
+        """The notice counts other pages, so Clear must not take this page's rows with it."""
         _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
         page.check("#cb-4304")
         _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
+        page.check("#cb-4301")
+        visible = _checked_values(page)
+        assert visible
 
         page.click("#librenms-interface-table-offpage-selection button")
 
         assert page.locator("#librenms-interface-table-offpage-selection").count() == 0
-        assert _checked_values(page) == set()
+        assert _checked_values(page) == visible
+
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+        assert ("select", "4304") not in pairs
+        assert ("select", "4301") in pairs
 
     def test_a_companion_input_travels_with_its_row(self, page):
         rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
@@ -569,6 +579,49 @@ def test_cold_tab_does_not_show_stale_state_before_first_refresh(page):
     assert page.locator("#interface-refresh").count() == 1
     assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
     assert "cache is unavailable" not in page.locator("#interface-sync-content").inner_text()
+
+
+def test_cache_reads_carry_the_csrf_token(page):
+    """The frontend rule is that every fetch() sends the token, so both cache reads must."""
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state("ipaddresses-ready"),
+    }
+    seen = {}
+
+    def record(name, fulfil):
+        def handler(route):
+            seen[name] = route.request.headers.get("x-csrftoken")
+            fulfil(route)
+
+        return handler
+
+    page.route(
+        "https://plugin.example.com/status?*",
+        record("status", lambda route: route.fulfill(json={"tabs": initial})),
+    )
+    page.route(
+        "https://plugin.example.com/fragment/interfaces*",
+        record(
+            "fragment",
+            lambda route: route.fulfill(
+                body='<div id="interface-sync-content">refreshed</div>', content_type="text/html"
+            ),
+        ),
+    )
+    page.set_content('<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _page_html(initial))
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate(
+        """
+        async () => {
+            initializeSyncCacheConsistency();
+            await checkSyncCacheStatus();
+            await loadSyncCacheFragment('interfaces');
+        }
+        """
+    )
+
+    assert seen == {"status": "test-csrf-token", "fragment": "test-csrf-token"}
 
 
 def test_cold_tab_does_not_flash_stale_during_tab_navigation(page):
