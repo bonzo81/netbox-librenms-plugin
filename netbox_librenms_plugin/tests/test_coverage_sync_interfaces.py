@@ -15,6 +15,7 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_interface_by_port_id,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
     make_device,
     make_interface,
     make_virtual_chassis_members,
@@ -5490,20 +5491,18 @@ class TestRelationshipSyncObjectScope:
         assert child.parent_id is None
 
 
-def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type():
+def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
     """A retry must repair a stale aggregate type instead of reporting success."""
     from types import SimpleNamespace
 
     from dcim.models import Interface
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.tests.conftest import make_superuser
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
-    # Derive the key: CI configures one server, the dev environment configures several.
-    server_key = next(iter(LibreNMSAPI.get_available_servers()))
+    server_key = configure_default_librenms_server(settings)
     device = make_device("lag-type-repair")
     member = make_interface(device, "Ethernet1")
     aggregate = make_interface(device, "Port-Channel1", iface_type="lag")

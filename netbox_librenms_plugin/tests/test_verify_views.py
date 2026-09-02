@@ -671,18 +671,18 @@ class TestSingleInterfaceVerifyView:
         assert "stale-display-name" not in row["name"]
 
     @pytest.mark.django_db
-    def test_table_and_verify_resolve_the_same_stable_id_row(self, client):
+    def test_table_and_verify_resolve_the_same_stable_id_row(self, client, settings):
         """The table and verify endpoint must prefer the same stable-ID interface."""
         from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        server_key = configure_default_librenms_server(settings)
         device = make_device("verify-table-resolution")
         stable_match = make_interface(device, "NetBoxStable")
         name_candidate = make_interface(device, "Ethernet1")
@@ -1079,14 +1079,18 @@ class TestSingleInterfaceVerifyView:
         assert f"/dcim/devices/{hidden_device.pk}/" not in body
 
     @pytest.mark.django_db
-    def test_hidden_related_owner_stays_unavailable_through_verify_and_inline_post(self):
+    def test_hidden_related_owner_stays_unavailable_through_verify_and_inline_post(self, settings):
         from types import SimpleNamespace
 
         from django.core.cache import cache
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_default_librenms_server,
+            make_interface,
+            make_virtual_chassis_members,
+        )
         from netbox_librenms_plugin.tests.view_test_helpers import (
             grant,
             make_request,
@@ -1102,9 +1106,7 @@ class TestSingleInterfaceVerifyView:
         )
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(hidden_parent_device, "Ethernet2")
-        # Use the real configured key. The devcontainer names it ``stub`` while CI names it
-        # ``default``; a hardcoded key makes the request fail before the permission behavior.
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        server_key = configure_default_librenms_server(settings)
         set_librenms_device_id(child, 10, server_key)
         set_librenms_device_id(parent, 20, server_key)
         child.save()
@@ -1237,14 +1239,14 @@ class TestSingleInterfaceVerifyView:
         assert json.loads(response.content)["status"] == "error"
 
     @pytest.mark.django_db
-    def test_view_only_non_lag_target_never_receives_lag_promotion_button(self):
+    def test_view_only_non_lag_target_never_receives_lag_promotion_button(self, settings):
         from types import SimpleNamespace
 
         from django.core.cache import cache
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import (
             grant,
             make_request,
@@ -1255,7 +1257,7 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        server_key = configure_default_librenms_server(settings)
         device = make_device("verify-view-only-lag-target")
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="other")

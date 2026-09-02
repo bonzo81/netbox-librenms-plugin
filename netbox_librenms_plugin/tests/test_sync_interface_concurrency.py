@@ -8,7 +8,7 @@ import os
 import pytest
 from django.apps import apps
 
-from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_virtual_chassis_members
 
 # Window a competing thread must NOT get through while the row lock is held. A negative wait
 # proves only that nothing happened inside it, so keep the four sites on one name and raise it
@@ -113,7 +113,7 @@ def test_selected_vc_target_is_locked_through_interface_sync():
     assert Interface.objects.filter(device=target_device, name="Gi0/1").exists()
 
 
-def _run_vlan_scope_sync(*, move_target, suffix):
+def _run_vlan_scope_sync(*, move_target, suffix, settings):
     """Run the VLAN-scope sync once and return the synced interface.
 
     ``move_target`` commits the target's site change inside the lock window. The caller with
@@ -130,15 +130,12 @@ def _run_vlan_scope_sync(*, move_target, suffix):
     from django.db import close_old_connections, connection
     from ipam.models import VLAN, VLANGroup
 
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     _vc, (page_device, target_device) = make_virtual_chassis_members(f"sync-vlan-scope-{suffix}")
-    # Use the real configured key. The devcontainer and CI use different names, and the request
-    # must pass the configured-server guard before this test can reach the lock boundary.
-    server_key = next(iter(LibreNMSAPI.get_available_servers()))
+    server_key = configure_default_librenms_server(settings)
     set_librenms_device_id(page_device, 1, server_key)
     page_device.save()
     new_site = Site.objects.create(
@@ -241,16 +238,16 @@ def _run_vlan_scope_sync(*, move_target, suffix):
     return target_device.interfaces.get(name="Ethernet2")
 
 
-def test_vlan_scope_assigns_the_selected_group_without_a_race():
+def test_vlan_scope_assigns_the_selected_group_without_a_race(settings):
     """Positive control: the posted vlan_group key really does assign the VLAN."""
-    interface = _run_vlan_scope_sync(move_target=False, suffix="no-race")
+    interface = _run_vlan_scope_sync(move_target=False, suffix="no-race", settings=settings)
 
     assert [vlan.vid for vlan in interface.tagged_vlans.all()] == [100]
 
 
-def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked():
+def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked(settings):
     """A site change must not commit between VLAN scope resolution and interface sync."""
-    interface = _run_vlan_scope_sync(move_target=True, suffix="race")
+    interface = _run_vlan_scope_sync(move_target=True, suffix="race", settings=settings)
 
     # Meaningful only because the control above assigns VLAN 100 through the same POST key.
     assert list(interface.tagged_vlans.all()) == []
