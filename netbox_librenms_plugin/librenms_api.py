@@ -1801,9 +1801,9 @@ class LibreNMSAPI:
         """
         Return serial-port sensor records for a single device from LibreNMS.
 
-        Why this fetches the *instance-wide* sensor table and filters client-side,
-        rather than a per-device call: LibreNMS offers no usable per-device route for
-        these sensors.
+        Why this fetches the *instance-wide* sensor table and filters it by device,
+        rather than using a per-device call: LibreNMS offers no usable per-device route
+        for these sensors.
 
         * ``/api/v0/resources/sensors`` takes no parameters (it is documented as
           "Input: None") — it always returns every sensor on the instance.
@@ -1814,7 +1814,7 @@ class LibreNMSAPI:
           (``/health/state/{sensor_id}`` per sensor — 49 calls for a 48-port Avocent).
 
         So the instance-wide table is the cheapest correct source. Each user-initiated cable
-        refresh fetches current sensor data, then filters it down to ``device_id``. Cached cable
+        refresh filters rows to ``device_id`` before validating their serial values. Cached cable
         page renders use the stored cable snapshot and do not call this method.
 
         Route: /api/v0/resources/sensors
@@ -1836,21 +1836,15 @@ class LibreNMSAPI:
         serial_types = sensor_types
         if not serial_types:
             return True, []
-        success, all_serial_sensors = self._fetch_serial_port_sensors(sensor_types=serial_types)
-        if not success:
-            return False, all_serial_sensors
+        return self._fetch_serial_port_sensors(device_id, sensor_types=serial_types)
 
-        device_sensors = [s for s in all_serial_sensors if str(s.get("device_id")) == str(device_id)]
-        return True, device_sensors
-
-    def _fetch_serial_port_sensors(self, sensor_types: dict | None = None) -> tuple[bool, list | str]:
+    def _fetch_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:
         """
-        Fetch the instance-wide sensor table and return only serial-port sensors.
-
-        Returns the serial-typed subset across ALL devices (the public
-        :meth:`get_serial_port_sensors` filters that by device).
+        Fetch the serial-port sensors of one device from the instance-wide sensor table.
 
         Args:
+            device_id: LibreNMS device ID. Other devices' rows are skipped before their
+                serial values are validated.
             sensor_types: Optional explicit recognition map; defaults to the
                 ``SerialSensorTypePattern`` table's map.
 
@@ -1908,6 +1902,8 @@ class LibreNMSAPI:
                         unreadable_sensor_types += 1
                         continue
                     if sensor_type not in serial_types:
+                        continue
+                    if str(sensor.get("device_id")) != str(device_id):
                         continue
                     deleted = sensor.get("sensor_deleted", 0)
                     valid_deleted = (

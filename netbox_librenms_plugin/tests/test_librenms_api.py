@@ -3387,6 +3387,42 @@ class TestGetSerialPortSensors:
         assert success is True
         assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
 
+    def test_a_malformed_serial_row_on_another_device_does_not_fail_the_requested_device(
+        self, mock_librenms_api, librenms_server
+    ):
+        """A malformed serial row on another device must not stop the requested device refresh."""
+        other = self._make_sensor(99, port_num=8)
+        other["sensor_id"] = "';alert(1);//"
+        good = self._make_sensor(12, port_num=7)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [other, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_a_malformed_sensor_deleted_on_another_device_does_not_fail_the_requested_device(
+        self, mock_librenms_api, librenms_server
+    ):
+        """A malformed sensor_deleted on another device must not stop the requested device refresh."""
+        other = self._make_sensor(99, port_num=8)
+        other["sensor_deleted"] = 2
+        good = self._make_sensor(12, port_num=7)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [other, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
     def test_unrelated_sensor_deleted_does_not_fail_the_serial_fetch(self, mock_librenms_api, librenms_server):
         """One unrelated sensor with an out-of-contract sensor_deleted must not drop serial rows."""
         unrelated = self._make_sensor(99, sensor_type="tempSensor", port_num=5)
