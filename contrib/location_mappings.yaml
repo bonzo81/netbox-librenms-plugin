@@ -1,7 +1,7 @@
 # Location Mappings — Examples
 #
 # Maps a LibreNMS `location` value (or a token parsed from it) to a specific
-# NetBox organisation object: a Region, Site, Location, Rack, or Tenant.
+# NetBox organisation object: a Site, Location, Rack, or Tenant.
 #
 # Used when the LibreNMS value does not match the NetBox object's name exactly.
 # Matching is exact (case-insensitive) on `librenms_value`.
@@ -9,18 +9,12 @@
 # Import via: LibreNMS → Location Mappings → Import → YAML
 #
 # Fields:
-#   field_type     — one of: region, site, location, rack, tenant
+#   field_type     — one of: site, location, rack, tenant
 #   librenms_value — the value as it appears in LibreNMS (e.g. "NYC")
 #   netbox_object  — the NetBox object's name (must already exist in NetBox)
 #   parent_site    — (optional) restricts location/rack lookups to this site,
 #                    since NetBox scopes locations and racks to a parent site
 #   description    — (optional) free-text notes
-
-# ── Region ────────────────────────────────────────────────────────────────────
-- field_type: region
-  librenms_value: us-east
-  netbox_object: US East
-  description: LibreNMS region code to NetBox Region
 
 # ── Site ──────────────────────────────────────────────────────────────────────
 - field_type: site

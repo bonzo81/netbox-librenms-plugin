@@ -382,6 +382,109 @@ class TestDeviceValidation:
         assert result["site"]["found"] is True
         assert result["site"]["site"] == site
 
+    @patch("netbox_librenms_plugin.import_utils.device_operations.parse_location_for_import")
+    @patch("netbox_librenms_plugin.import_utils.device_operations._resolve_rack_for_import")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    def test_validate_device_preselects_matched_parsed_rack(
+        self,
+        mock_match_type,
+        mock_find_platform,
+        mock_find_site,
+        mock_resolve_rack,
+        mock_parse_location,
+    ):
+        """An unambiguous parsed rack is selected in the import-table state."""
+        from dcim.models import Site
+
+        site, _ = Site.objects.get_or_create(name="DC1", slug="dc1")
+        rack = MagicMock(name="rack")
+        mock_find_site.return_value = {
+            "found": True,
+            "site": site,
+            "match_type": "exact",
+            "confidence": 1.0,
+        }
+        mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
+        mock_parse_location.return_value = {"rack": "R1"}
+        mock_resolve_rack.return_value = rack
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        result = validate_device_for_import(
+            {"device_id": 1, "hostname": "switch-01", "location": "DC1, R1"},
+            include_vc_detection=False,
+        )
+
+        mock_resolve_rack.assert_called_once_with(site, "R1")
+        assert result["rack"]["rack"] is rack
+
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Tenant")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_location")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.parse_location_for_import")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    def test_validate_device_previews_location_hierarchy_and_tenant(
+        self,
+        mock_match_type,
+        mock_find_platform,
+        mock_find_site,
+        mock_parse_location,
+        mock_find_location,
+        MockTenant,
+    ):
+        """Parsed optional values are resolved for the validation modal preview."""
+        from dcim.models import Site
+        from types import SimpleNamespace
+
+        site, _ = Site.objects.get_or_create(name="DC1", slug="dc1")
+        parent_location = SimpleNamespace(name="parent-location", parent=None)
+        child_location = SimpleNamespace(name="child-location", parent=parent_location)
+        tenant = MagicMock(name="tenant")
+        mock_find_site.return_value = {
+            "found": True,
+            "site": site,
+            "match_type": "exact",
+            "confidence": 1.0,
+        }
+        mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
+        mock_parse_location.return_value = {
+            "region": "North America",
+            "location": "Row B",
+            "rack": None,
+            "tenant": "Acme",
+        }
+        mock_find_location.return_value = child_location
+        MockTenant.objects.filter.return_value.first.return_value = tenant
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        result = validate_device_for_import(
+            {"device_id": 1, "hostname": "switch-01", "location": "DC1, Row B, Acme"},
+            include_vc_detection=False,
+        )
+
+        mock_find_location.assert_called_once_with(site, "Row B")
+        assert result["region"] == {"found": False, "region": None}
+        assert result["location"] == {
+            "found": True,
+            "location": child_location,
+            "match_type": "exact",
+            "token": "Row B",
+            "hierarchy": [parent_location, child_location],
+        }
+        MockTenant.objects.filter.assert_called_once_with(name__iexact="Acme")
+        assert result["tenant"] == {
+            "found": True,
+            "tenant": tenant,
+            "match_type": "exact",
+            "token": "Acme",
+        }
+
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
     @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")

@@ -729,11 +729,14 @@ class TestValidateDeviceForImport:
             "issues",
             "warnings",
             "site",
+            "region",
             "device_type",
             "device_role",
             "cluster",
             "platform",
             "rack",
+            "location",
+            "tenant",
         }
 
     def test_vm_import_uses_correct_model(self):
@@ -2042,24 +2045,33 @@ class TestImportSingleDeviceMoreEdgeCases:
         mock_resolve.assert_not_called()
         mock_logger.warning.assert_called_once()
 
-    def test_manual_rack_not_overridden_by_parsed_token(self):
-        """A rack chosen via validation is never overwritten by the parsed rack token."""
+    def test_automatic_rack_is_reresolved_after_manual_site_override(self):
+        """A suggested rack from the original site cannot survive a site override."""
         parsed = {"region": None, "site": None, "location": None, "rack": "R9", "tenant": None}
-        preselected_rack = MagicMock()
+        automatically_selected_rack = MagicMock(name="original-rack")
+        overridden_site = MagicMock(name="overridden-site")
+        resolved_rack = MagicMock(name="overridden-rack")
         validation = self._base_validation()
-        validation["rack"] = {"rack": preselected_rack}
+        validation["rack"] = {"rack": automatically_selected_rack}
 
-        with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack:
-            with patch(
-                "netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping"
-            ) as mock_resolve:
-                result, MockDevice = self._run_import_with_tokens(parsed_location=parsed, validation=validation)
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.Site") as MockSite,
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations._resolve_rack_for_import",
+                return_value=resolved_rack,
+            ) as mock_resolve_rack,
+        ):
+            MockSite.objects.filter.return_value.first.return_value = overridden_site
+            result, MockDevice = self._run_import_with_tokens(
+                parsed_location=parsed,
+                manual_mappings={"site_id": 2},
+                validation=validation,
+            )
 
         assert result.get("success") is True
-        assert MockDevice.call_args.kwargs.get("rack") is preselected_rack
-        # No auto-resolution attempted because a rack was already selected.
-        MockRack.objects.filter.assert_not_called()
-        assert not [c for c in mock_resolve.call_args_list if c.args and c.args[0] == "rack"]
+        assert MockDevice.call_args.kwargs.get("site") is overridden_site
+        assert MockDevice.call_args.kwargs.get("rack") is resolved_rack
+        mock_resolve_rack.assert_called_once_with(overridden_site, "R9")
 
     def test_tenant_resolved_from_parsed_token_exact_match(self):
         """A parsed tenant token resolves to a tenant by exact name."""
