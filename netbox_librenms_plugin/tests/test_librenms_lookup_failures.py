@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
 ABSENT_DEVICE_ID = 4041
 ERRORING_DEVICE_ID = 1255
 CONFLICTING_DEVICE_ID = 1266
+AMBIGUOUS_DEVICE_ID = 1277
 
 
 def _point_plugin_at(settings, url):
@@ -155,6 +156,29 @@ def test_the_sync_page_reports_a_discovered_id_conflict(client, librenms_server,
 
     assert response.status_code == 200
     assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in body
+
+
+@pytest.mark.django_db
+def test_the_sync_page_reports_an_ambiguous_id_claim(client, librenms_server, settings):
+    """Two NetBox owners of one LibreNMS ID must read as a conflict, not a server error."""
+    # lock_librenms_id_assignment raises AmbiguousLibreNMSIdError for this state, and
+    # resolve_librenms_id converts only LibreNMSIDConflictError, so the page used to 500.
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    make_device("librenms-ambiguous-owner-a", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
+    make_device("librenms-ambiguous-owner-b", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
+    target = make_device("librenms-ambiguous-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": AMBIGUOUS_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-ambiguous-page-user"))
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]))
+    body = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert "matches multiple Device host records" in body
 
 
 @pytest.mark.django_db

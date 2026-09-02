@@ -476,15 +476,24 @@ class LibreNMSAPI:
             and "librenms_id" in obj.cf
         )
         if can_persist_mapping:
-            from netbox_librenms_plugin.utils import lock_librenms_id_assignment, set_librenms_device_id
+            from netbox_librenms_plugin.utils import (
+                AmbiguousLibreNMSIdError,
+                lock_librenms_id_assignment,
+                set_librenms_device_id,
+            )
 
             with transaction.atomic():
-                locked_obj, conflict = lock_librenms_id_assignment(
-                    librenms_id,
-                    self.server_key,
-                    owner_queryset=type(obj).objects.all(),
-                    owner_pk=obj.pk,
-                )
+                try:
+                    locked_obj, conflict = lock_librenms_id_assignment(
+                        librenms_id,
+                        self.server_key,
+                        owner_queryset=type(obj).objects.all(),
+                        owner_pk=obj.pk,
+                    )
+                except AmbiguousLibreNMSIdError as exc:
+                    # resolve_librenms_id turns only LibreNMSIDConflictError into a user-facing
+                    # message, so an ambiguous claim would otherwise reach the view as a 500.
+                    raise LibreNMSIDConflictError(str(exc)) from None
                 if conflict is not None:
                     object_label = "VM" if conflict._meta.model_name == "virtualmachine" else "device"
                     raise LibreNMSIDConflictError(
