@@ -4963,6 +4963,94 @@ class TestModulesRedirectResponse:
         assert response.status_code == 204
         assert response["HX-Redirect"] == "/sync/?tab=modules#librenms-module-table"
 
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "current_url",
+        [
+            "http://[::1]:8000/sync/?tab=modules&server_key=production#librenms-module-table",
+            "http://[::1]:8000/sync/?tab=modules&server_key=production",
+        ],
+        ids=["with-fragment", "without-fragment"],
+    )
+    def test_htmx_request_sent_from_the_target_page_refreshes_instead_of_redirecting(self, current_url):
+        """An HX-Redirect to the page's own URL never navigates and htmx keeps the row spinner, so reload."""
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+
+        request = make_request(
+            "post",
+            {"server_key": "production"},
+            path="/sync/",
+            HTTP_HX_REQUEST="true",
+            HTTP_HX_CURRENT_URL=current_url,
+        )
+
+        response = _modules_redirect_response(request, "/sync/")
+
+        assert response.status_code == 204
+        assert response["HX-Refresh"] == "true"
+        assert "HX-Redirect" not in response
+
+    @pytest.mark.django_db
+    def test_htmx_request_sent_from_another_page_keeps_the_redirect(self):
+        """A target with a different query is a real navigation, so HX-Redirect stays."""
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+
+        request = make_request(
+            "post",
+            {"server_key": "production"},
+            path="/sync/",
+            HTTP_HX_REQUEST="true",
+            HTTP_HX_CURRENT_URL="http://[::1]:8000/sync/?tab=modules",
+        )
+
+        response = _modules_redirect_response(request, "/sync/")
+
+        assert response["HX-Redirect"] == "/sync/?tab=modules&server_key=production#librenms-module-table"
+        assert "HX-Refresh" not in response
+
+    @pytest.mark.django_db
+    def test_install_module_posted_from_its_own_page_reloads_that_page(self):
+        """End to end: a real install view answers a same-page HTMX post with HX-Refresh."""
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("install-refresh-same-page")
+        sync_path = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
+        user = make_user_with_perms(
+            "install-refresh-same-page",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("change", Interface),
+                ("delete", Interface),
+            ],
+        )
+        request = make_request(
+            "post",
+            {"server_key": "prod"},
+            user=user,
+            path="/install-module/",
+            HTTP_HX_REQUEST="true",
+            HTTP_HX_CURRENT_URL=f"http://testserver{sync_path}?tab=modules&server_key=prod#librenms-module-table",
+        )
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="prod")
+
+        response = _post(view, request, pk=device.pk)
+
+        assert response.status_code == 204
+        assert response["HX-Refresh"] == "true"
+        assert "HX-Redirect" not in response
+
     def test_explicit_server_key_is_appended(self):
         """A server-scoped action must keep the active server_key in the follow-up URL so the user returns to the same cache namespace this request mutated/read."""
         from unittest.mock import MagicMock, patch

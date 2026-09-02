@@ -523,8 +523,8 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    # hx-post swaps just the module table in place (the view returns the
-                    # table partial for HTMX); method/action keep it working without JS.
+                    # hx-post: the view answers with HX-Redirect, or HX-Refresh when the page is
+                    # already the target; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -565,8 +565,8 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    # hx-post swaps just the module table in place (the view returns the
-                    # table partial for HTMX); method/action keep it working without JS.
+                    # hx-post: the view answers with HX-Redirect, or HX-Refresh when the page is
+                    # already the target; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -592,8 +592,8 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    # hx-post swaps just the module table in place (the view returns the
-                    # table partial for HTMX); method/action keep it working without JS.
+                    # hx-post: the view answers with HX-Redirect, or HX-Refresh when the page is
+                    # already the target; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -624,8 +624,8 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    # hx-post swaps just the module table in place (the view returns the
-                    # table partial for HTMX); method/action keep it working without JS.
+                    # hx-post: the view answers with HX-Redirect, or HX-Refresh when the page is
+                    # already the target; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -727,8 +727,8 @@ class LibreNMSModuleTable(tables.Table):
             for opt in record["carrier_install_options"]:
                 buttons.append(
                     format_html(
-                        # hx-post swaps just the module table in place (install_module returns the
-                        # table partial for HTMX); method/action keep it working without JS.
+                        # hx-post: install_module answers with HX-Redirect, or HX-Refresh when the page
+                        # is already the target; method/action keep it working without JS.
                         '<form method="post" action="{}" hx-post="{}"'
                         ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                         ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'

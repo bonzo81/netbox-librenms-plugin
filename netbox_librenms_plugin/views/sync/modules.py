@@ -2,7 +2,7 @@
 
 import logging
 import re
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -56,8 +56,11 @@ def _modules_redirect_response(request, sync_url, server_key=None):
 
     For HTMX requests (those carrying ``HX-Request: true``) we return an empty
     response with an ``HX-Redirect`` header so the browser performs a full navigation
-    that picks up Django messages and refreshes the modules table. For non-HTMX
-    requests we return a normal Django redirect.
+    that picks up Django messages and refreshes the modules table. When the target is
+    the page the request came from (``HX-Current-URL``, fragment ignored) the response
+    carries ``HX-Refresh: true`` instead: a same-document ``HX-Redirect`` never
+    navigates and htmx keeps the row indicator spinning. For non-HTMX requests we
+    return a normal Django redirect.
 
     These module sync actions are server-scoped, so the follow-up page must stay on
     the server whose cache namespace this request just mutated/read. The active
@@ -82,9 +85,22 @@ def _modules_redirect_response(request, sync_url, server_key=None):
     target += "#librenms-module-table"
     if request.headers.get("HX-Request") == "true":
         response = HttpResponse(status=204)
-        response["HX-Redirect"] = target
+        if _hx_target_is_current_page(request, target):
+            response["HX-Refresh"] = "true"
+        else:
+            response["HX-Redirect"] = target
         return apply_request_cache_transition(request, response)
     return apply_request_cache_transition(request, redirect(target))
+
+
+def _hx_target_is_current_page(request, target):
+    """Return True when *target* names the page the HTMX request was sent from, fragment ignored."""
+    current = request.headers.get("HX-Current-URL")
+    if not current:
+        return False
+    current_parts = urlsplit(current)
+    target_parts = urlsplit(target)
+    return (current_parts.path, current_parts.query) == (target_parts.path, target_parts.query)
 
 
 def _modules_cache_missing_response(request, sync_url, server_key):
