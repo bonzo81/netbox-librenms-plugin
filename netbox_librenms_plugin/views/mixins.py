@@ -1421,6 +1421,7 @@ class VlanAssignmentMixin:
                 - untagged_set: VLAN object or None
                 - tagged_set: list of VLAN objects
                 - missing_vlans: list of VIDs not found in NetBox
+                - changed: bool, True when the mode, the untagged VLAN or the tagged VLANs were written
         """
         # Support both dict (per-VLAN) and string/int/None (single group) for backward compat
         if not isinstance(vlan_group_map, dict):
