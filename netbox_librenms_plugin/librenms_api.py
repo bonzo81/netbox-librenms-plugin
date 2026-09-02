@@ -1000,10 +1000,18 @@ class LibreNMSAPI:
                 node_id (int): The port id to walk up from.
 
             Returns:
-                int: The highest ancestor reachable, or node_id when it has no parent.
+                int | None: The highest ancestor reachable, node_id when it has no parent, or
+                    None when the chain is already cyclic.
             """
+            seen = set()
             path = []
             while True:
+                if node_id in seen:
+                    # The stated ifStack pass relates a pair on evidence from EITHER name field
+                    # and rejects only a mutual pair, so a longer cycle can already be in
+                    # sub_interfaces. Report it rather than walking the loop forever.
+                    return None
+                seen.add(node_id)
                 cached = roots.get(node_id)
                 if cached is not None:
                     # A cached top stops being the top once a later edge gives it a parent, so
@@ -1046,7 +1054,8 @@ class LibreNMSAPI:
             # sub_interfaces would be written to NetBox as a parent hierarchy that cannot exist.
             # The roots map carries the walk's result back (path compression), keeping the whole
             # pass linear instead of re-walking every ancestor chain per port.
-            if _root_of(parent_id) == child_id:
+            parent_root = _root_of(parent_id)
+            if parent_root is None or parent_root == child_id:
                 continue
             _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
 
