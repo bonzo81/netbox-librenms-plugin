@@ -58,6 +58,11 @@ FLAGGED = {
     "value carried through an annotated local name": (
         'def f(cached):\n    v: object = cached.get("x")\n    return v in NAMES\n'
     ),
+    "value carried through an or-fallback": 'def f(cached):\n    v = cached.get("x") or ""\n    return v in NAMES\n',
+    "value carried through a conditional expression": (
+        'def f(cached, c):\n    v = cached.get("x") if c else ""\n    return v in NAMES\n'
+    ),
+    "or-fallback used inline as the left operand": 'def f(cached):\n    return (cached.get("x") or "") in NAMES\n',
     "membership inside a chained comparison": ('def f(cached):\n    v = cached.get("x")\n    return v is v in NAMES\n'),
     "tuple narrowing does not prove element hashability": (
         'def f(cached):\n    v = cached.get("x")\n    if isinstance(v, tuple):\n        return v in NAMES\n    return False\n'
@@ -90,6 +95,18 @@ CLEAN = {
     "explicitly reviewed and suppressed": (
         'def f(cached):\n    # unhashable-ok: validated at the snapshot boundary\n    return cached.get("x") in NAMES\n'
     ),
+    "isinstance-guarded conditional expression": (
+        'def f(cached):\n    v = cached.get("x")\n    safe = v if isinstance(v, str) else ""\n    return safe in NAMES\n'
+    ),
+    "negated isinstance guarding the fallback arm": (
+        'def f(cached):\n    v = cached.get("x")\n    safe = "" if not isinstance(v, str) else v\n    return safe in NAMES\n'
+    ),
+    "isinstance-guarded and-chain value": (
+        'def f(cached):\n    v = cached.get("x")\n    safe = isinstance(v, str) and v\n    return safe in NAMES\n'
+    ),
+    "fail-closed or-chain value": (
+        'def f(cached):\n    v = cached.get("x")\n    safe = not isinstance(v, str) or v\n    return safe in NAMES\n'
+    ),
 }
 
 # Guards that do not actually protect the membership test: the check must still report these.
@@ -116,6 +133,12 @@ LATE_OR_NEGATED_GUARDS = {
     ),
     "isinstance narrowing a different name": (
         'def f(cached, other):\n    v = cached.get("x")\n    return isinstance(other, str) and v in NAMES\n'
+    ),
+    "and-chain that returns the falsy external value": (
+        'def f(cached):\n    v = cached.get("x")\n    w = v and isinstance(v, str)\n    return w in NAMES\n'
+    ),
+    "negated isinstance guarding the wrong arm of a conditional expression": (
+        'def f(cached):\n    v = cached.get("x")\n    w = v if not isinstance(v, str) else ""\n    return w in NAMES\n'
     ),
 }
 

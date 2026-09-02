@@ -119,6 +119,17 @@ def _negated_isinstance(node, target_fingerprint):
     )
 
 
+def _operand_is_narrowed(node, index):
+    """Return whether an earlier operand of the boolean *node* proves operand *index* hashable."""
+    target = _fingerprint(node.values[index])
+    for earlier in node.values[:index]:
+        if isinstance(node.op, ast.And) and _guards_in(earlier, target):
+            return True
+        if isinstance(node.op, ast.Or) and _negated_isinstance(earlier, target):
+            return True
+    return False
+
+
 def _contains(node, needle):
     """Return whether *needle* appears anywhere inside *node*."""
     return any(sub is needle for sub in ast.walk(node))
@@ -213,6 +224,19 @@ class MembershipChecker(ast.NodeVisitor):
     def _is_tainted(self, node):
         if self._is_external_read(node):
             return True
+        # A fallback keeps the external value when it is truthy, so it keeps the taint,
+        # unless an earlier operand or the test narrowed that value first.
+        if isinstance(node, ast.BoolOp):
+            return any(
+                self._is_tainted(value) and not _operand_is_narrowed(node, index)
+                for index, value in enumerate(node.values)
+            )
+        if isinstance(node, ast.IfExp):
+            body_tainted = self._is_tainted(node.body) and not _guards_in(node.test, _fingerprint(node.body))
+            orelse_tainted = self._is_tainted(node.orelse) and not _negated_isinstance(
+                node.test, _fingerprint(node.orelse)
+            )
+            return body_tainted or orelse_tainted
         return isinstance(node, ast.Name) and node.id in self._scope.tainted
 
     def visit_FunctionDef(self, node):
