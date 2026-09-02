@@ -230,6 +230,66 @@ class TestRequirementCascade:
 
         assert _checked_values(page) == {"4301", "4302", "4303", "4304"}
 
+    def test_a_shift_range_pulls_in_the_members_of_an_aggregate_it_covers(self, page):
+        # ae2 sits inside the range and its member et-0/0/6 outside it; a click on ae2 pulls
+        # that member in, so the range has to as well.
+        rows = [
+            {"port_id": "4001", "name": "et-0/0/1"},
+            JUNOS_ROWS[0],
+            {"port_id": "4002", "name": "et-0/0/2"},
+            JUNOS_ROWS[2],
+        ]
+        _load_selection_page(page, rows)
+        page.click("#cb-4001")
+
+        page.click("#cb-4002", modifiers=["Shift"])
+
+        assert _checked_values(page) == {"4001", "4303", "4002", "4301"}
+
+        page.uncheck("#autoSelectLagMembers")
+
+        # The ranged rows are the user's own, so turning the cascade off gives back exactly the
+        # member the range pulled in.
+        assert _checked_values(page) == {"4001", "4303", "4002"}
+
+    def test_a_shift_range_that_clears_an_aggregate_releases_its_members(self, page):
+        # A click that clears ae2 gives et-0/0/6 back and keeps ae2 cleared, so a range must too.
+        rows = [
+            {"port_id": "4001", "name": "et-0/0/1"},
+            JUNOS_ROWS[0],
+            {"port_id": "4002", "name": "et-0/0/2"},
+            JUNOS_ROWS[2],
+            JUNOS_ROWS[1],
+        ]
+        _load_selection_page(page, rows)
+        page.check("#cb-4303")
+        page.check("#cb-4304")
+        # Anchor on a row the user just cleared, so the range clears everything it covers.
+        page.click("#cb-4001")
+        page.click("#cb-4001")
+
+        page.click("#cb-4002", modifiers=["Shift"])
+
+        # et-0/0/6 is released with its aggregate, and ae2 stays cleared although ae2.0 requires it.
+        assert _checked_values(page) == {"4304"}
+
+    def test_a_shift_range_across_a_selected_aggregate_keeps_a_cleared_member_cleared(self, page):
+        # ae2 does not change state here, so crossing it must not undo the user's clear.
+        rows = [
+            {"port_id": "4001", "name": "et-0/0/1"},
+            JUNOS_ROWS[0],
+            {"port_id": "4002", "name": "et-0/0/2"},
+            JUNOS_ROWS[2],
+        ]
+        _load_selection_page(page, rows)
+        page.check("#cb-4303")
+        page.uncheck("#cb-4301")
+        page.click("#cb-4001")
+
+        page.click("#cb-4002", modifiers=["Shift"])
+
+        assert _checked_values(page) == {"4001", "4303", "4002"}
+
 
 class TestCrossPageSelection:
     """A selection must survive paging, and reach the server when it is submitted."""

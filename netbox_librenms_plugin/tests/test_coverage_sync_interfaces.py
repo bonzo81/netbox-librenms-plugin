@@ -250,7 +250,7 @@ def test_cross_page_parent_does_not_copy_child_member_target():
     handler = _js_block(
         _js_source(),
         "function refreshRequiredSelections()",
-        "function _propagateToLagMembers(row, checked)",
+        "function _propagateToLagMembers(",
     )
 
     assert "_showRequiredRowCrossPageNotice" in handler
@@ -298,16 +298,16 @@ def test_relationship_rows_are_matched_without_interpolated_selectors():
     """Requirement resolution indexes the rows instead of building a selector per port id.
 
     The behaviour this protects (a port id that carries selector metacharacters still cascades)
-    is exercised for real in tests/browser/test_sync_cache_browser.py; this pins the
-    structure that makes it safe, so a future rewrite cannot quietly reintroduce interpolation.
+    is exercised for real in tests/browser/test_sync_cache_browser.py; this pins the structure
+    that makes it safe: no port id reaches a selector at all.
     """
     source = _js_source()
-    handler = _js_block(source, "function refreshRequiredSelections()", "function _propagateToLagMembers(row, checked)")
+    handler = _js_block(source, "function refreshRequiredSelections()", "function _propagateToLagMembers(")
 
     assert "querySelectorAll(" not in handler, "requirement lookups must go through the row index"
-    assert 'data-member-of-lag="' + "' + CSS.escape(portId)" in source, (
-        "the one remaining interpolated selector must CSS.escape the port id"
-    )
+    assert 'data-member-of-lag="' not in source, "member lookups must go through the member index"
+    # The one CSS.escape left keys the cross-page notice on an interface name, not on a port id.
+    assert source.count("CSS.escape(") == 1, "no port id may be interpolated into a selector"
 
 
 def test_interface_select_all_has_one_change_handler():

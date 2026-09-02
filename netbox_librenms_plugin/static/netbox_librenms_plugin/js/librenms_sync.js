@@ -933,14 +933,12 @@ function initializeTableCheckboxes(tableId) {
     if (toggleAll && toggleAll.dataset.tableToggleInitialized !== 'true') {
         toggleAll.dataset.tableToggleInitialized = 'true';
         toggleAll.addEventListener('change', function () {
+            // Index the member rows once for the batch: a per-row selector query would be quadratic.
+            const membersByLag = _membersByLag();
             liveCheckboxes().forEach(checkbox => {
+                const changed = checkbox.checked !== toggleAll.checked;
                 checkbox.checked = toggleAll.checked;
-                // Every box is now the user's explicit choice, so drop the markers that said this
-                // code had put it there; otherwise the recompute below would release rows the
-                // select-all just included.
-                delete checkbox.dataset.autoRequired;
-                delete checkbox.dataset.autoMember;
-                delete checkbox.dataset.selectionCleared;
+                applyRowSelection(checkbox, membersByLag, changed);
             });
             // Recompute once for the whole page rather than per row: select-all still has to pull
             // in an off-page parent or aggregate, but the closure is the same for every seed.
@@ -967,12 +965,12 @@ function initializeTableCheckboxes(tableId) {
                 // Skip the range when the prior anchor was swapped out (indexOf -1) rather than
                 // slicing a bogus range off the live list.
                 if (start !== -1 && end !== -1) {
+                    // Index the member rows once for the batch: a per-row selector query would be quadratic.
+                    const membersByLag = _membersByLag();
                     current.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
+                        const changed = cb.checked !== anchor.checked;
                         cb.checked = anchor.checked;
-                        // The range is an explicit choice, so it owns these rows outright.
-                        delete cb.dataset.autoRequired;
-                        delete cb.dataset.autoMember;
-                        delete cb.dataset.selectionCleared;
+                        applyRowSelection(cb, membersByLag, changed);
                     });
                     refreshRequiredSelections();
                     persistTableSelection(table);
@@ -1066,6 +1064,21 @@ function _selectableCheckbox(row) {
 }
 
 /**
+ * Return the member rows on this page, grouped by the port id of their aggregate.
+ *
+ * @returns {Map<string, HTMLTableRowElement[]>} Member rows per aggregate port id.
+ */
+function _membersByLag() {
+    const members = new Map();
+    document.querySelectorAll('tr[data-member-of-lag]').forEach(function (row) {
+        const lagPortId = row.dataset.memberOfLag;
+        if (!members.has(lagPortId)) members.set(lagPortId, []);
+        members.get(lagPortId).push(row);
+    });
+    return members;
+}
+
+/**
  * Recompute which rows are held selected to satisfy another row's requirements.
  *
  * Walks the requirement chain from every row the user selected in their own right, checks each
@@ -1151,13 +1164,14 @@ function refreshRequiredSelections() {
  *
  * @param {HTMLTableRowElement} row - The aggregate row that changed.
  * @param {boolean} checked - Whether the aggregate is now selected.
+ * @param {Map<string, HTMLTableRowElement[]>} membersByLag - Member rows per aggregate port id, from _membersByLag().
  * @returns {boolean} True when the selection changed.
  */
-function _propagateToLagMembers(row, checked) {
+function _propagateToLagMembers(row, checked, membersByLag) {
     const portId = row.dataset.portId;
     if (!portId) return false;
     let changed = false;
-    document.querySelectorAll('tr[data-member-of-lag="' + CSS.escape(portId) + '"]').forEach(function (memberRow) {
+    (membersByLag.get(portId) || []).forEach(function (memberRow) {
         const checkbox = _selectableCheckbox(memberRow);
         if (!checkbox) return;
         if (checked) {
@@ -1177,28 +1191,42 @@ function _propagateToLagMembers(row, checked) {
     return changed;
 }
 
-document.addEventListener('change', function (e) {
-    const checkbox = e.target;
-    if (!checkbox.matches('input[name="select"]') || checkbox.disabled) return;
-
+/**
+ * Apply the selection rules for a row the user set, and cascade to the aggregate's members.
+ *
+ * The change handler calls this for a click; the shift-range and select-all paths call it for
+ * each row they assign, because a programmatic `checked` assignment raises no change event.
+ * A range that crosses an already selected aggregate must not re-check a member the user cleared.
+ *
+ * @param {HTMLInputElement} checkbox - The row checkbox, already in its new state.
+ * @param {Map<string, HTMLTableRowElement[]>} membersByLag - Member rows per aggregate port id, from _membersByLag().
+ * @param {boolean} changed - Whether the checkbox state changed; only a transition cascades.
+ * @returns {boolean} True when a member row changed.
+ */
+function applyRowSelection(checkbox, membersByLag, changed) {
     const row = checkbox.closest('tr');
-    if (!row) return;
-
+    if (!row) return false;
     // The user acted on this row, so it is theirs now: drop the markers that said this code
     // had put it there, or a later recompute would release a row they chose to keep.
     delete checkbox.dataset[REQUIRED_MARKER];
     if (checkbox.checked) {
         delete checkbox.dataset[CLEARED_MARKER];
+        delete checkbox.dataset[MEMBER_MARKER];
     } else {
         delete checkbox.dataset[MEMBER_MARKER];
         checkbox.dataset[CLEARED_MARKER] = 'true';
     }
-
+    if (!changed) return false;
     const toggle = document.getElementById('autoSelectLagMembers');
-    let changed = false;
-    if (toggle && toggle.checked) {
-        changed = _propagateToLagMembers(row, checkbox.checked);
-    }
+    if (!toggle || !toggle.checked) return false;
+    return _propagateToLagMembers(row, checkbox.checked, membersByLag);
+}
+
+document.addEventListener('change', function (e) {
+    const checkbox = e.target;
+    if (!checkbox.matches('input[name="select"]') || checkbox.disabled) return;
+
+    const changed = applyRowSelection(checkbox, _membersByLag(), true);
     if (refreshRequiredSelections() || changed) {
         updateBulkActionButton();
     }
