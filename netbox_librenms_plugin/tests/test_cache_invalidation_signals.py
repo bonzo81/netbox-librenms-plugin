@@ -20,6 +20,9 @@ from netbox_librenms_plugin.tests.cache_test_helpers import (
     drain_pending_commit_callbacks as _drain_pending_commit_callbacks,
 )
 from netbox_librenms_plugin.tests.cache_test_helpers import (
+    plugin_commit_callbacks as _plugin_commit_callbacks,
+)
+from netbox_librenms_plugin.tests.cache_test_helpers import (
     seed_every_tab as _seed_every_tab,
 )
 from netbox_librenms_plugin.tests.cache_test_helpers import (
@@ -381,7 +384,11 @@ class TestOneFlushPerObject:
                 for index in range(25):
                     make_interface(device, f"Ethernet{index}")
 
-        assert len(callbacks) == 1, f"expected one flush for 25 writes, got {len(callbacks)}"
+        plugin_callbacks = _plugin_commit_callbacks(callbacks)
+        assert len(plugin_callbacks) == 1, (
+            f"expected one flush for 25 writes, got {len(plugin_callbacks)}: "
+            f"{[(getattr(cb, '__module__', None), getattr(cb, '__qualname__', None)) for cb in callbacks]}"
+        )
 
     def test_many_assigned_rows_resolve_their_interface_in_one_query(self, django_capture_on_commit_callbacks):
         """Generic assignments must be resolved once per model when the batch commits."""

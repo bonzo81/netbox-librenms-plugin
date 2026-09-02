@@ -20,6 +20,11 @@ def drain_pending_commit_callbacks():
     transaction.get_connection().run_on_commit.clear()
 
 
+def plugin_commit_callbacks(callbacks):
+    """Keep only this plugin's hooks. NetBox registers commit callbacks of its own (deferred search flush since 4.7)."""
+    return [cb for cb in callbacks if getattr(cb, "__module__", None) == "netbox_librenms_plugin.cache_signals"]
+
+
 def seed_every_tab(obj, server_key="default"):
     """Give *obj* a snapshot on every applicable tab so invalidation is observable."""
     from django.core.cache import cache
