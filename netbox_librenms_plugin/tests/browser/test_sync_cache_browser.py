@@ -8,6 +8,7 @@ import pytest
 
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
+TEMPLATE_DIR = Path(__file__).parents[2] / "templates" / "netbox_librenms_plugin"
 STYLE_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "css" / "librenms_sync.css"
 
 
@@ -958,6 +959,64 @@ def test_successful_cache_status_check_restores_only_fail_closed_modal_controls(
     assert not page.locator("#modal-force-action").is_disabled()
     assert page.locator("#modal-already-disabled").is_disabled()
     assert page.locator("#restored-interface-action").count() == 1
+
+
+def test_verified_missing_snapshot_restores_pane_controls_but_not_modal_controls(page):
+    """A verified missing snapshot must restore pane controls but not modal controls."""
+    initial = {
+        "interfaces": _state("cold-interfaces", "missing", available=False),
+        "ipaddresses": _state("before-ip"),
+    }
+    attempts = 0
+
+    def status_response(route):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            route.fulfill(status=503)
+        else:
+            route.fulfill(json={"tabs": initial})
+
+    page.set_content(_page_html(initial))
+    page.evaluate(
+        """() => {
+            const button = document.createElement('button');
+            button.id = 'interfaces-refresh';
+            document.getElementById('interfaces').append(button);
+        }"""
+    )
+    page.route("https://plugin.example.com/status?*", status_response)
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+    page.wait_for_function("syncCacheController().lastCheckFailed === true && syncCacheController().checking === null")
+
+    assert page.locator("#interfaces-refresh").is_disabled()
+    assert page.locator("#modal-force-action").is_disabled()
+
+    page.evaluate("checkSyncCacheStatus()")
+    page.wait_for_function("syncCacheController().lastCheckFailed === false && syncCacheController().checking === null")
+
+    assert not page.locator("#interfaces-refresh").is_disabled()
+    assert page.locator("#modal-force-action").is_disabled()
+    assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
+
+
+@pytest.mark.parametrize(
+    ("template", "content_id"),
+    [
+        ("_interface_sync.html", "interface-sync-content"),
+        ("_ipaddress_sync.html", "ipaddress-sync-content"),
+        ("_module_sync.html", "module-sync-content"),
+        ("_vlan_sync.html", "vlan-sync-content"),
+        ("_cable_sync.html", "cable-sync-content"),
+    ],
+)
+def test_the_tab_templates_keep_the_refresh_button_outside_the_cached_content(template, content_id):
+    """The pane refresh button the fail-closed test injects must mirror the real templates."""
+    markup = (TEMPLATE_DIR / template).read_text()
+    refresh = markup.index("Refresh ")
+    content = markup.index(f'id="{content_id}"')
+    assert refresh < content, f"{template}: the refresh button moved inside #{content_id}"
 
 
 def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled(page):

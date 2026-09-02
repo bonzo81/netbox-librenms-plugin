@@ -532,18 +532,23 @@ function failClosedSyncControls(message) {
 }
 
 function restoreFailClosedSyncControls(status) {
+    if (!status) return;
     document.querySelectorAll(
         '#librenms-sync-tabs [data-cache-fail-closed], #htmx-modal-content [data-cache-fail-closed]'
     )
         .forEach(control => {
-            const sourceTab = control.dataset.cacheFailClosed;
-            const sourceState = status?.[sourceTab];
-            const sourceContent = syncCacheContent(sourceTab);
-            if (
-                !sourceState?.snapshot_available ||
-                !sourceContent ||
-                sourceContent.dataset.cacheEmpty === 'true'
-            ) return;
+            // A verified status restores pane chrome so users can create or reload a snapshot.
+            // A modal acts on tab content, so it waits for that content to exist again.
+            if (control.closest('#htmx-modal-content')) {
+                const sourceTab = control.dataset.cacheFailClosed;
+                const sourceState = status[sourceTab];
+                const sourceContent = syncCacheContent(sourceTab);
+                if (
+                    !sourceState?.snapshot_available ||
+                    !sourceContent ||
+                    sourceContent.dataset.cacheEmpty === 'true'
+                ) return;
+            }
             delete control.dataset.cacheFailClosed;
             control.disabled = false;
         });
