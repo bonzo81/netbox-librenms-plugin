@@ -589,7 +589,8 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
     const requestGeneration = statusGeneration ?? controller.statusGeneration;
     const url = new URL(pane.dataset.fragmentUrl, window.location.href);
     url.searchParams.set('server_key', controller.root.dataset.serverKey);
-    const fragmentHeaders = { 'X-Requested-With': 'XMLHttpRequest' };
+    // The fragment carries return_url links built from HX-Current-URL (tables/modules.py); fetch() sends no HTMX headers.
+    const fragmentHeaders = { 'X-Requested-With': 'XMLHttpRequest', 'HX-Current-URL': window.location.href };
     const fragmentCsrf = getCsrfToken();
     if (fragmentCsrf) fragmentHeaders['X-CSRFToken'] = fragmentCsrf;
     return fetch(url, {
@@ -2500,7 +2501,8 @@ function handleModuleChange(select, value) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': csrfToken
+            'X-CSRFToken': csrfToken,
+            'HX-Current-URL': window.location.href
         },
         body: JSON.stringify({
             device_id: value,

@@ -625,6 +625,76 @@ def test_cache_reads_carry_the_csrf_token(page):
     assert seen == {"status": "test-csrf-token", "fragment": "test-csrf-token"}
 
 
+SYNC_PAGE_URL = "https://plugin.example.com/device/1/librenms-sync/?tab=modules&interface_name_field=ifDescr"
+
+
+def _serve_sync_page(page, html, url=SYNC_PAGE_URL):
+    """Serve the fixture from the sync page's own URL so window.location is what NetBox shows."""
+    page.route(
+        lambda candidate: candidate.split("?")[0] == url.split("?")[0],
+        lambda route: route.fulfill(status=200, content_type="text/html", body=html),
+    )
+    page.goto(url)
+    page.add_script_tag(path=str(SCRIPT_PATH))
+
+
+def test_cache_reads_carry_the_browser_url(page):
+    """The fragment is rendered with return_url links, so it must learn the page URL like an HTMX request."""
+    initial = {
+        "interfaces": _state("interfaces-ready"),
+        "ipaddresses": _state("ipaddresses-ready"),
+    }
+    page.route(
+        "https://plugin.example.com/status?*",
+        lambda route: route.fulfill(json={"tabs": initial}),
+    )
+    page.route(
+        "https://plugin.example.com/fragment/interfaces*",
+        lambda route: route.fulfill(body='<div id="interface-sync-content">refreshed</div>', content_type="text/html"),
+    )
+    _serve_sync_page(
+        page, '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _page_html(initial)
+    )
+    with page.expect_request("https://plugin.example.com/fragment/interfaces*") as fragment:
+        page.evaluate(
+            """
+            async () => {
+                initializeSyncCacheConsistency();
+                await checkSyncCacheStatus();
+                await loadSyncCacheFragment('interfaces');
+            }
+            """
+        )
+
+    assert fragment.value.headers.get("hx-current-url") == SYNC_PAGE_URL
+
+
+def test_module_verify_carries_the_browser_url(page):
+    """The verify response rebuilds the row's action links, so the POST must carry the page URL too."""
+    page.route(
+        "**/plugins/librenms_plugin/verify-module/",
+        lambda route: route.fulfill(json={"status": "error"}),
+    )
+    _serve_sync_page(
+        page,
+        """
+        <input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">
+        <input type="hidden" name="server_key" value="primary">
+        <table><tbody>
+          <tr data-ent-index="7" data-depth="0">
+            <td data-col="device_selection">
+              <select id="module-device" data-row-id="7" data-module="7"><option value="1">r01</option></select>
+            </td>
+          </tr>
+        </tbody></table>
+        """,
+    )
+    with page.expect_request("**/plugins/librenms_plugin/verify-module/") as verify:
+        page.evaluate("handleModuleChange(document.getElementById('module-device'), '1')")
+
+    assert verify.value.headers.get("hx-current-url") == SYNC_PAGE_URL
+
+
 def test_cold_tab_does_not_flash_stale_during_tab_navigation(page):
     """Checking a never-refreshed tab must not briefly mark it stale."""
     initial = {
