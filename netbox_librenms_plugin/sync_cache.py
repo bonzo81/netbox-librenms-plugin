@@ -806,7 +806,10 @@ def _write_transition_to_response(request, response, transition):
     """Serialize one completed transition onto the response headers and messages."""
     payload = transition.browser_payload()
     response["X-LibreNMS-Cache-Transition"] = json.dumps(payload, separators=(",", ":"))
-    browser_navigation = bool(response.get("Location") or response.get("HX-Redirect"))
+    # HX-Refresh reloads the page, so its notices must be queued for the next document, like a redirect.
+    browser_navigation = bool(
+        response.get("Location") or response.get("HX-Redirect") or response.get("HX-Refresh") == "true"
+    )
     if request.headers.get("HX-Request") == "true" and not browser_navigation:
         existing = response.get("HX-Trigger")
         try:

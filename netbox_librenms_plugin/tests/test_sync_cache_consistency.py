@@ -30,6 +30,8 @@ from netbox_librenms_plugin.sync_cache import (
     sync_subject_key,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    make_module_bay,
+    make_module_type,
     configure_librenms_servers,
     configure_no_librenms_servers,
     ip_on,
@@ -919,6 +921,38 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
     next_page = client.get(device.get_absolute_url())
     assert next_page.status_code == 200
     assert b"Other sync tabs were cleared" not in next_page.content
+
+
+@pytest.mark.django_db(
+    transaction=True,
+    available_apps=tuple(app.name for app in django_apps.get_app_configs()),
+)
+def test_same_page_htmx_module_action_queues_the_cache_notice_for_the_reload(client, settings):
+    """A module action that answers HX-Refresh must queue its cache notice for the reloaded page."""
+    _configure_servers(settings)
+    device = make_device("cache-modules-refresh-notice", librenms_cf={"primary": {"id": 612}})
+    bay = make_module_bay(device, "Refresh Bay")
+    module_type = make_module_type("REFRESH-CARD")
+    _seed_snapshot("ports", device, "primary")
+    client.force_login(make_superuser("cache-modules-refresh-user"))
+    sync_page = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
+    install_url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+
+    response = client.post(
+        install_url,
+        {"server_key": "primary", "module_bay_id": bay.pk, "module_type_id": module_type.pk, "serial": "REFRESH-1"},
+        HTTP_HX_REQUEST="true",
+        HTTP_HX_CURRENT_URL=f"http://testserver{sync_page}?tab=modules&server_key=primary#librenms-module-table",
+    )
+
+    assert response.status_code == 204
+    assert response["HX-Refresh"] == "true"
+    assert "HX-Trigger" not in response
+    assert Module.objects.filter(device=device, module_bay=bay).exists()
+    assert cache.get(_cache_key("ports", device, "primary")) is None
+    next_page = client.get(device.get_absolute_url())
+    assert next_page.status_code == 200
+    assert b"Other sync tabs were cleared" in next_page.content
 
 
 @pytest.mark.django_db
