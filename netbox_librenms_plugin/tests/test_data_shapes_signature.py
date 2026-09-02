@@ -514,7 +514,17 @@ def test_is_redos_prone_flags_nested_quantifiers_but_not_real_lag_patterns():
     """The ReDoS guard flags nested unbounded quantifiers (the ^(a+)+$ class), not real LAG patterns."""
     from netbox_librenms_plugin.data_shapes import ports
 
-    for evil in (r"^(a+)+$", r"(a*)*", r"(a+)*", r"(.*x)+", r"(ab+)+"):
+    for evil in (
+        r"^(a+)+$",
+        r"(a*)*",
+        r"(a+)*",
+        r"(.*x)+",
+        r"(ab+)+",
+        # {n,} is unbounded in either position, so it belongs on both sides of the nesting.
+        r"(a{2,})+",
+        r"(a{1,}){2,}",
+        r"(a+){2,}",
+    ):
         assert ports.is_redos_prone(evil) is True, evil
     for ok in (r"^Po\d+$", r"^Port-channel\d+$", r"^ae\d+$", r"^Bundle-Ether\d+$", r"^(Po|Te)\d+$", r"bond\d+"):
         assert ports.is_redos_prone(ok) is False, ok

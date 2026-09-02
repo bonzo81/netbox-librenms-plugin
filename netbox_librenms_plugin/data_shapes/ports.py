@@ -52,7 +52,10 @@ _MAX_LAG_PATTERNS = 100
 # scan on a pathological all-``(`` string trivially small — an over-long pattern is garbage/suspect and
 # never needs LAG classification, so it's treated as ReDoS-prone (skipped) too.
 _MAX_LAG_PATTERN_LEN = 200
-_NESTED_QUANTIFIER_RE = re.compile(r"\([^()]*[*+][^()]*\)\s*[*+]|\([^()]*[*+][^()]*\)\{\d*,\}")
+# ``{n,}`` is unbounded too, on either side of the nesting: ``(a{2,})+`` and ``(a+){2,}`` both
+# backtrack the same way, so one alternative serves both positions.
+_UNBOUNDED_QUANTIFIER = r"(?:[*+]|\{\d*,\})"
+_NESTED_QUANTIFIER_RE = re.compile(rf"\([^()]*{_UNBOUNDED_QUANTIFIER}[^()]*\)\s*{_UNBOUNDED_QUANTIFIER}")
 
 
 def is_redos_prone(pattern):
