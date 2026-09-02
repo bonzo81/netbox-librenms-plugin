@@ -12,6 +12,24 @@ import pytest
 
 
 # =============================================================================
+# TestLocationMappingTable
+# =============================================================================
+
+
+class TestLocationMappingTable:
+    """Tests for LocationMappingTable configuration."""
+
+    def test_selection_column_uses_standard_checkbox_contract(self):
+        from netbox.tables import columns
+
+        from netbox_librenms_plugin.tables.mappings import LocationMappingTable
+
+        column = LocationMappingTable.base_columns["pk"]
+        assert isinstance(column, columns.ToggleColumn)
+        assert column.attrs["input"]["name"] == "select"
+
+
+# =============================================================================
 # TestLocationMappingModel
 # =============================================================================
 

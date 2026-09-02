@@ -292,6 +292,7 @@ class PlatformMappingTable(NetBoxTable):
 class LocationMappingTable(NetBoxTable):
     """Table for displaying LocationMapping data."""
 
+    pk = columns.ToggleColumn(attrs={"input": {"name": "select"}})
     field_type = tables.Column(verbose_name="Field Type")
     librenms_value = tables.Column(verbose_name="LibreNMS Value", linkify=True)
     netbox_object = tables.Column(verbose_name="NetBox Object", linkify=True, orderable=False)
