@@ -2671,6 +2671,40 @@ class TestResolvePortRelationships:
         assert result["sub_interfaces"] == {31: 34, 32: 31, 34: 33}
         assert 33 not in result["sub_interfaces"]
 
+    def test_a_stated_cycle_does_not_hang_the_walk(self, mock_librenms_api):
+        """A cycle the ifStack already stated must end the walk, not spin a worker forever."""
+        # The stated pass relates a pair on evidence from EITHER name field and rejects only a
+        # MUTUAL pair, so three rows that each look one-directional close a loop it accepts:
+        # x.1 under x (ifName), y.1 under y (ifDescr), x.1.2 under x.1 (ifName).
+        import threading
+
+        ports = [
+            {"port_id": 41, "ifName": "x.1", "ifDescr": "a1", "ifType": "propVirtual"},
+            {"port_id": 42, "ifName": "x", "ifDescr": "y.1", "ifType": "ethernetCsmacd"},
+            {"port_id": 43, "ifName": "x.1.2", "ifDescr": "y", "ifType": "propVirtual"},
+            # Outside the loop, but its name derives a parent inside it, so the cycle is walked.
+            {"port_id": 44, "ifName": "x.1.2.3", "ifDescr": "d1", "ifType": "propVirtual"},
+        ]
+        port_stack = [
+            {"high_port_id": 42, "low_port_id": 41},
+            {"high_port_id": 43, "low_port_id": 42},
+            {"high_port_id": 41, "low_port_id": 43},
+        ]
+        resolved = {}
+
+        def run():
+            resolved["value"] = mock_librenms_api.resolve_port_relationships(
+                ports, port_stack, lag_patterns={}, compiled_sap_patterns=[]
+            )
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(timeout=15)
+
+        assert not worker.is_alive(), "resolve_port_relationships did not terminate on a stated cycle"
+        # The stated edges stay as reported; only the derived edge into the loop is refused.
+        assert resolved["value"]["sub_interfaces"] == {41: 42, 42: 43, 43: 41}
+
     def test_name_derived_parents_still_resolve_a_deep_chain(self, mock_librenms_api):
         """The cycle walk must not reject a legitimate grandparent chain."""
         ports = [
