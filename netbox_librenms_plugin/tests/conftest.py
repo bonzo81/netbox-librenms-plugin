@@ -92,23 +92,33 @@ def _seeded_model_rows():
     yield PortStackLagPattern, "librenms_os", "lag_name_pattern", lag.INITIAL_LAG_PATTERNS
 
 
-def seed_migration_rows():
-    """Recreate every row the plugin's data migrations seed."""
+def _seeded_sap_rows():
+    """Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
+
+    Kept apart from :func:`_seeded_model_rows` because migration 0016 sets a second field on rows
+    0013 already created, so these rows are applied with ``update()`` rather than
+    ``get_or_create()``. Both the restore and its intactness check read this one definition.
+    """
     import importlib
 
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    sap = importlib.import_module("netbox_librenms_plugin.migrations.0016_portstacklagpattern_sap_name_pattern")
+    yield PortStackLagPattern, "librenms_os", "sap_name_pattern", sap.INITIAL_SAP_PATTERNS
+
+
+def seed_migration_rows():
+    """Recreate every row the plugin's data migrations seed."""
     for model, lookup_field, value_field, rows in _seeded_model_rows():
         for lookup, value in rows:
             model.objects.get_or_create(**{lookup_field: lookup}, defaults={value_field: value})
 
-    # 0016 sets a SECOND field on rows 0013 already created, so get_or_create above restores them
-    # with the model's blank default and the Nokia SAP rule silently disappears for every test
-    # after the first transactional one. Re-apply it from the migration's own seed data so the
-    # fixture cannot drift from what a real database holds.
-    from netbox_librenms_plugin.models import PortStackLagPattern
-
-    sap = importlib.import_module("netbox_librenms_plugin.migrations.0016_portstacklagpattern_sap_name_pattern")
-    for os_name, sap_pattern in sap.INITIAL_SAP_PATTERNS:
-        PortStackLagPattern.objects.filter(librenms_os=os_name).update(sap_name_pattern=sap_pattern)
+    # get_or_create above matches the 0013 row and leaves the 0016 field at the model's blank
+    # default, so the Nokia SAP rule silently disappears for every test after the first
+    # transactional one. Re-apply it from the migration's own seed data.
+    for model, lookup_field, value_field, rows in _seeded_sap_rows():
+        for lookup, value in rows:
+            model.objects.filter(**{lookup_field: lookup}).update(**{value_field: value})
 
 
 @pytest.fixture(autouse=True)
