@@ -41,3 +41,32 @@ def test_the_copy_fallback_removes_its_textarea_when_exec_command_throws(page):
     # Without this the clipboard path would satisfy every assertion above and never
     # exercise the fallback the test is named for.
     assert page.evaluate("() => window.execCommandCalls") == ["copy"]
+
+
+def test_the_copy_fallback_runs_when_the_clipboard_api_rejects(page):
+    """A rejected Clipboard API call must fall back to execCommand."""
+    page.set_content(PAGE)
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate(
+        """
+        () => {
+            Object.defineProperty(navigator, 'clipboard', {
+                value: {writeText: () => Promise.reject(new Error('denied'))},
+                configurable: true,
+            });
+            window.execCommandCalls = [];
+            document.execCommand = (command) => {
+                window.execCommandCalls.push(command);
+                return true;
+            };
+            wireCopyButton(document.querySelector('#copy-btn'), 'report', {
+                idle: 'Copy', done: 'Copied', err: 'Copy failed',
+            });
+        }
+        """
+    )
+
+    page.click("#copy-btn")
+
+    page.wait_for_function("document.querySelector('#copy-btn').innerHTML === 'Copied'")
+    assert page.evaluate("() => window.execCommandCalls") == ["copy"]

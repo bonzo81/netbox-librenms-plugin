@@ -3571,9 +3571,10 @@ let _activeVCReportController = null;
 /**
  * Wire a copy-to-clipboard button reading from a target element (textarea or any
  * text-bearing node). Uses navigator.clipboard.writeText when available; falls back to a
- * temporary textarea + execCommand for older browsers / insecure (plain-HTTP) contexts,
- * and flashes "Copy failed" instead of silently doing nothing. Shared by the VC report
- * modal and the capture-data-shape modal (which calls it from its inline script).
+ * temporary textarea + execCommand for older browsers / insecure (plain-HTTP) contexts.
+ * Clipboard API rejections use the same fallback. Failures flash "Copy failed" instead of
+ * silently doing nothing. Shared by the VC report modal and the capture-data-shape modal
+ * (which calls it from its inline script).
  */
 function wireCopyButton(btn, targetId, labels) {
     if (!btn || btn.dataset.copyInitialized) return;
@@ -3592,34 +3593,41 @@ function wireCopyButton(btn, targetId, labels) {
         const target = document.getElementById(targetId);
         if (!target) return;
         const text = target.value !== undefined ? target.value : target.textContent;
+        function copyThroughExecCommand() {
+            // Fallback for older browsers or insecure contexts: execCommand needs a selectable
+            // form control, so copy through a throwaway textarea when the target isn't one.
+            let temp = null;
+            try {
+                let ta = target;
+                if (typeof ta.select !== 'function') {
+                    temp = document.createElement('textarea');
+                    temp.value = text;
+                    temp.setAttribute('readonly', '');
+                    temp.style.position = 'fixed';
+                    temp.style.left = '-9999px';
+                    document.body.appendChild(temp);
+                    ta = temp;
+                }
+                ta.select();
+                const ok = document.execCommand('copy');
+                flash(ok ? doneHtml : errHtml);
+            } catch (e) {
+                flash(errHtml);
+            } finally {
+                if (temp) document.body.removeChild(temp);
+            }
+        }
+
         if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
             navigator.clipboard.writeText(text)
                 .then(() => flash(doneHtml))
-                .catch(() => flash(errHtml));
+                .catch(error => {
+                    console.debug(error.message);
+                    copyThroughExecCommand();
+                });
             return;
         }
-        // Fallback for older browsers or insecure contexts: execCommand needs a selectable
-        // form control, so copy through a throwaway textarea when the target isn't one.
-        let temp = null;
-        try {
-            let ta = target;
-            if (typeof ta.select !== 'function') {
-                temp = document.createElement('textarea');
-                temp.value = text;
-                temp.setAttribute('readonly', '');
-                temp.style.position = 'fixed';
-                temp.style.left = '-9999px';
-                document.body.appendChild(temp);
-                ta = temp;
-            }
-            ta.select();
-            const ok = document.execCommand('copy');
-            flash(ok ? doneHtml : errHtml);
-        } catch (e) {
-            flash(errHtml);
-        } finally {
-            if (temp) document.body.removeChild(temp);
-        }
+        copyThroughExecCommand();
     });
 }
 
