@@ -12,8 +12,6 @@ import re
 import pytest
 import requests
 
-from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-
 
 from netbox_librenms_plugin.tests import test_librenms_api_helpers
 
@@ -2117,15 +2115,6 @@ class TestGetPortVlanDetailsResponseShape:
 # =============================================================================
 # Test Class: get_port_stack()
 # =============================================================================
-
-
-@pytest.fixture
-def librenms_server(monkeypatch):
-    """A real HTTP LibreNMS whose responses this test controls."""
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
-    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-    with librenms_mock_server() as server:
-        yield server
 
 
 def test_invalid_utf8_json_body_reaches_the_registered_route(librenms_server):

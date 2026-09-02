@@ -1,7 +1,5 @@
 """Behavioral coverage for migration endpoint sync-page claims."""
 
-from copy import deepcopy
-
 import pytest
 from dcim.models import Device, Interface
 from django.apps import apps as django_apps
@@ -10,7 +8,7 @@ from ipam.models import IPAddress
 
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_every_tab, snapshot_state
-from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, ip_on, make_device, make_interface
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.utils import mark_librenms_migrated
 
@@ -19,14 +17,9 @@ SERVER_KEY = "primary"
 
 def _configure_server(settings):
     """Configure the mapped server used by the migration requests."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        SERVER_KEY: {
-            "librenms_url": "https://librenms.example.com",
-            "api_token": "test-token",
-        }
-    }
-    settings.PLUGINS_CONFIG = plugin_config
+    configure_librenms_servers(
+        settings, {SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
 
 
 def _mark_migrated(donor, winner):

@@ -8,6 +8,7 @@ from django.test import RequestFactory
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import (
+    configure_librenms_servers,
     make_device,
     make_interface,
     make_ip,
@@ -43,11 +44,7 @@ TEST_SERVERS = {
 
 def _configure_servers(settings, *server_keys):
     """Configure the requested test LibreNMS servers through Django settings."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        server_key: deepcopy(TEST_SERVERS[server_key]) for server_key in server_keys
-    }
-    settings.PLUGINS_CONFIG = plugin_config
+    configure_librenms_servers(settings, {server_key: TEST_SERVERS[server_key] for server_key in server_keys})
 
 
 def _librenms_get(device_name, *, device_id=42, inventory_payload=None, **device_overrides):

@@ -10,20 +10,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def librenms_server(monkeypatch):
-    """Provide a real HTTP LibreNMS server with test-specific responses."""
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
-    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-    with librenms_mock_server() as server:
-        yield server
 
 
 def configure_servers(settings, servers):

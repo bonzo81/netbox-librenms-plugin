@@ -5,34 +5,20 @@ reached are three different problems with three different fixes. Reporting all o
 "device not found" sends the user to remove a custom field that is correct.
 """
 
-from copy import deepcopy
-
 import pytest
 from django.urls import reverse
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
 
 ABSENT_DEVICE_ID = 4041
 ERRORING_DEVICE_ID = 1255
 
 
-@pytest.fixture
-def librenms_server(monkeypatch):
-    """A real HTTP LibreNMS whose responses this test controls."""
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
-    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-    with librenms_mock_server() as server:
-        yield server
-
-
 def _point_plugin_at(settings, url):
     """Configure one server and return the key, so no test hardcodes an environment's key."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "default": {"librenms_url": url, "api_token": "test-token", "verify_ssl": False}
-    }
-    settings.PLUGINS_CONFIG = plugin_config
+    configure_librenms_servers(
+        settings, {"default": {"librenms_url": url, "api_token": "test-token", "verify_ssl": False}}
+    )
     return "default"
 
 

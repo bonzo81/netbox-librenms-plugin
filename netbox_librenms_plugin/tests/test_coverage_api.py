@@ -6,17 +6,6 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-
-
-@pytest.fixture
-def librenms_server(monkeypatch):
-    """A real HTTP LibreNMS whose responses each test registers."""
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
-    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-    with librenms_mock_server() as server:
-        yield server
-
 
 def configure_servers(settings, servers):
     """Replace the plugin's configured servers, leaving the rest of PLUGINS_CONFIG intact."""

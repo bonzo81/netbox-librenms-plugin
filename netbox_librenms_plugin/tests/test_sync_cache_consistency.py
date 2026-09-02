@@ -1,7 +1,6 @@
 """Request-level tests for cross-tab cache consistency."""
 
 import json
-from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
@@ -31,6 +30,7 @@ from netbox_librenms_plugin.sync_cache import (
     sync_subject_key,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    configure_librenms_servers,
     configure_no_librenms_servers,
     ip_on,
     make_device,
@@ -59,13 +59,14 @@ def test_browser_contract_serializes_states_from_the_domain_enum():
 
 
 def _configure_servers(settings):
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "primary": {"librenms_url": "https://primary.example.com", "api_token": "test-token"},
-        "secondary": {"librenms_url": "https://secondary.example.com", "api_token": "test-token"},
-        "unmapped": {"librenms_url": "https://unmapped.example.com", "api_token": "test-token"},
-    }
-    settings.PLUGINS_CONFIG = plugin_config
+    configure_librenms_servers(
+        settings,
+        {
+            "primary": {"librenms_url": "https://primary.example.com", "api_token": "test-token"},
+            "secondary": {"librenms_url": "https://secondary.example.com", "api_token": "test-token"},
+            "unmapped": {"librenms_url": "https://unmapped.example.com", "api_token": "test-token"},
+        },
+    )
 
 
 def _configured_server_key(settings):

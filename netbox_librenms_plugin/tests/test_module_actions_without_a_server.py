@@ -1,13 +1,12 @@
 """Module sync actions must fail closed when no LibreNMS server can be bound."""
 
-from copy import deepcopy
-
 import pytest
 from dcim.models import Module
 from django.contrib.messages import get_messages
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import (
+    configure_librenms_servers,
     configure_no_librenms_servers,
     make_device,
     make_module_bay,
@@ -19,11 +18,9 @@ from netbox_librenms_plugin.views.sync.modules import NO_LIBRENMS_SERVER_MESSAGE
 
 def _configure_default_server(settings):
     """Configure one bindable server without depending on the devcontainer settings."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "default": {"librenms_url": "https://librenms.example.test", "api_token": "test-token"}
-    }
-    settings.PLUGINS_CONFIG = plugin_config
+    configure_librenms_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.test", "api_token": "test-token"}}
+    )
 
 
 def _seed_device_with_installed_module(name):
