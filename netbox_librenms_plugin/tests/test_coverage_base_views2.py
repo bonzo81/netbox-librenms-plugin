@@ -1577,19 +1577,25 @@ class TestPrepareContextInterfaceNameFieldNone:
 
     def test_non_dict_cached_entry_drops_to_none_not_500(self):
         """A stale/corrupt non-dict cached entry (e.g. a list from a legacy snapshot shape) must drop to None and render empty, not 500 on a .get() against a list — mirrors the interfaces/modules cached-path isinstance guard."""
+        from uuid import uuid4
+
+        from django.core.cache import cache
+
         view = self._make_view()
 
         obj = _mock_obj()
         request = _mock_request()
+        key = f"nblp-test-corrupt-{uuid4().hex}"
 
-        with (
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
-            patch.object(view, "get_cache_key", return_value="test-key"),
-        ):
-            mock_cache.get.return_value = ["not", "a", "dict"]  # corrupt non-dict cache entry
-            result = view._prepare_context(request, obj, "ifName", fetch_fresh=False)
+        cache.set(key, ["not", "a", "dict"])
+        try:
+            with patch.object(view, "get_cache_key", return_value=key):
+                result = view._prepare_context(request, obj, "ifName", fetch_fresh=False)
 
-        assert result is None
+            assert result is None
+            assert cache.get(key) is None
+        finally:
+            cache.delete(key)
 
     def test_prepare_context_uses_request_object_interface_name_fallback(self):
         """A missing explicit name field must use the request and object preference."""
