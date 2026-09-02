@@ -175,6 +175,21 @@ class TestDetermineDeviceName:
         result = _determine_device_name({"sysName": 7, "hostname": "sw02"})
         assert result == "sw02"
 
+    def test_resolve_device_name_reports_the_value_the_name_came_from(self):
+        """The source follows the post-strip decision: a stripped-empty sysName is the id fallback."""
+        from netbox_librenms_plugin.import_utils.device_operations import _resolve_device_name
+
+        assert _resolve_device_name({"sysName": "", "hostname": "sw01.example.com"}, strip_domain=True) == (
+            "sw01",
+            "hostname",
+        )
+        assert _resolve_device_name(
+            {"sysName": ".example.com", "hostname": "sw02"}, strip_domain=True, device_id=7
+        ) == (
+            "device-7",
+            "device-7",
+        )
+
     def test_none_hostname_falls_back_to_device_id(self):
         from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
 
@@ -723,6 +738,23 @@ class TestValidateDeviceForImport:
             "type": "network",
         }
         result = self._validate(libre_device)
+
+        assert result["resolved_name"] == "device-7"
+        assert result["naming_criteria"]["source"] == "device-7"
+
+    def test_naming_criteria_reports_the_id_fallback_when_stripping_empties_the_name(self):
+        """A sysName that strips to nothing resolves to device-<id>, and the source must say so."""
+        libre_device = {
+            "device_id": 7,
+            "hostname": "",
+            "sysName": ".example.com",
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "type": "network",
+        }
+        result = self._validate(libre_device, use_sysname=True, strip_domain=True)
 
         assert result["resolved_name"] == "device-7"
         assert result["naming_criteria"]["source"] == "device-7"
