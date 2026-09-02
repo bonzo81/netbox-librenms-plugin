@@ -97,7 +97,7 @@ LibreNMS location: NYC - R12
   → site = "NYC", rack = "R12"
 ```
 
-The pattern must contain at least one placeholder and use balanced braces. Separators are matched exactly — letters in a separator are case-sensitive, but commas and whitespace are unaffected.
+The pattern must contain at least one placeholder and use balanced braces. Separators, including their spaces and punctuation, are matched literally. For example, `{site} - {rack}` does not match `NYC-R12`.
 
 ### Regex Mode
 
@@ -109,6 +109,8 @@ LibreNMS location: NYC-R12
   → site = "NYC", rack = "R12"
 ```
 
+Regex mode searches within the LibreNMS location value. Add `^` and `$` when the entire value must follow the pattern.
+
 ### How Parsed Tokens Are Matched
 
 Each parsed token is resolved to a NetBox object during import. Matching is **case-insensitive**:
@@ -116,14 +118,14 @@ Each parsed token is resolved to a NetBox object during import. Matching is **ca
 | Token | Matched against | Scope |
 |-------|-----------------|-------|
 | `site` | Site name, then a [Location Mapping](../usage_tips/mapping_rules.md#location-mappings) | Global |
-| `location` | Location name within the matched site, then a Location Mapping | Scoped to the site |
+| `location` | Location name or ancestor name within the matched site, then a Location Mapping | Scoped to the site |
 | `rack` | Rack name within the matched site, then a Location Mapping | Scoped to the site |
 | `tenant` | Tenant name, then a Location Mapping | Global |
 
-When a token does not match a NetBox object's name exactly, add a [Location Mapping](../usage_tips/mapping_rules.md#location-mappings) to alias the LibreNMS value to a specific NetBox object.
+When a token does not match a NetBox object's name exactly, add a [Location Mapping](../usage_tips/mapping_rules.md#location-mappings) to alias the LibreNMS value to a specific NetBox object. Create the target NetBox Site, Location, Rack, or Tenant before creating its mapping.
 
 **Notes:**
 
 - A **rack** parsed from the location is only applied when you have not selected a rack manually in the validation details.
-- `{region}` is accepted in the pattern so you can consume a region segment when splitting the string, but it is not assigned to the device during import and has no Location Mapping — in NetBox the region is inherited from the site.
+- `{region}` is accepted in the pattern so you can consume a region segment when splitting the string, but it is not assigned to the device during import and has no Location Mapping. In NetBox, the device inherits its region from its site.
 - If a pattern is set but a particular location string does not match it, the plugin falls back to using the whole string for the site (and location), so unmatched devices still resolve a site.

@@ -55,14 +55,14 @@ Matching is case-insensitive and exact: the LibreNMS hardware string must equal 
 
 ## Location Mappings
 
-Maps a value parsed from the LibreNMS location string to a specific NetBox **Site**, **Location**, **Rack**, or **Tenant**. Use these when a parsed token does not match the NetBox object's name exactly (e.g. LibreNMS reports `NYC` but the NetBox site is named `New York`).
+Maps a value parsed from the LibreNMS location string to a specific NetBox **Site**, **Location**, **Rack**, or **Tenant**. Use these when a parsed token does not match the NetBox object's name exactly (e.g. LibreNMS reports `NYC` but the NetBox site is named `New York`). Create the NetBox object first, then add its mapping under **LibreNMS → Mappings → Location Mappings**.
 
 > `region` is a [parse token](../librenms_import/import_settings.md#location-parsing) only — it has no mapping type, because a device inherits its region from its site and there is no device-level region field to populate.
 
 **Used by:**
 - Device Import — resolves parsed location tokens after the [Location Parse Pattern](../librenms_import/import_settings.md#location-parsing) splits the LibreNMS location string
 
-Matching is case-insensitive. During import the plugin first tries an exact NetBox name match for each token; if none is found it falls back to a matching `LocationMapping`.
+Matching is case-insensitive. During import the plugin first tries an exact NetBox name match for each token; for locations, this also checks ancestor names in the site's location hierarchy. If no match is found, it falls back to a matching `LocationMapping`.
 
 **Scoping:**
 - **Site / Tenant** values are globally unique — a given LibreNMS value maps to exactly one object, and duplicate mappings are rejected.
@@ -83,7 +83,7 @@ Matching is case-insensitive. During import the plugin first tries an exact NetB
   description: "Rack alias scoped to a site"
 ```
 
-`netbox_object` is the **name** of the target NetBox object. For `location` and `rack`, include `parent_site` when the name is not unique across sites.
+`netbox_object` is the **name** of the target NetBox object. For `location` and `rack`, include `parent_site` when the name is not unique across sites. The `parent_site` value must be the NetBox Site name, rather than the parsed LibreNMS site token; it is used only to identify the target object during YAML import.
 
 ---
 

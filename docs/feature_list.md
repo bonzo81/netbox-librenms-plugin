@@ -3,7 +3,7 @@
 * Search and discover devices from LibreNMS using flexible filters
 * Validate device prerequisites before import (Site, Device Type, Device Role)
 * Import devices as physical Devices or Virtual Machines
-* Smart matching for Sites, Device Types, and Platforms (via [mapping rules](usage_tips/mapping_rules.md))
+* Smart matching for Sites, Device Types, and Platforms (via [mapping rules](usage_tips/mapping_rules.md)), including optional parsing of LibreNMS location strings into site, location, rack, and tenant values
 * Unified Platform creation modal — same experience on import page and device sync page
 * Bulk import support
 * Automatic Virtual Chassis creation for stackable devices
@@ -31,6 +31,7 @@
 
 * **Platform Mappings** — LibreNMS OS string to NetBox Platform
 * **Device Type Mappings** — LibreNMS hardware string to NetBox DeviceType
+* **Location Mappings** — parsed LibreNMS location value to a NetBox Site, Location, Rack, or Tenant
 * **Module Type Mappings** — LibreNMS entPhysicalModelName to NetBox ModuleType (with manufacturer scoping)
 * **Module Bay Mappings** — LibreNMS entPhysicalName to NetBox bay name (exact or regex, manufacturer scoping)
 * **Normalization Rules** — regex-based string transformation before matching (strips vendor suffixes etc.)
