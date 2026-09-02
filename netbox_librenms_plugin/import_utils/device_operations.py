@@ -1718,12 +1718,21 @@ def import_single_device(
             if not rack:
                 rack_token = parsed_location.get("rack")
                 if rack_token and rack_token != "-":
-                    rack = (
-                        Rack.objects.filter(Q(location__site=site) | Q(site=site), name__iexact=rack_token)
-                        .select_related("location", "site")
-                        .first()
+                    rack_matches = list(
+                        Rack.objects.filter(
+                            Q(location__site=site) | Q(site=site), name__iexact=rack_token
+                        ).select_related("location", "site")[:2]
                     )
-                    if rack is None:
+                    if len(rack_matches) > 1:
+                        logger.warning(
+                            "Multiple racks named %r in site %s; skipping automatic rack assignment",
+                            rack_token,
+                            site,
+                        )
+                        rack = None
+                    elif rack_matches:
+                        rack = rack_matches[0]
+                    else:
                         rack = resolve_location_mapping("rack", rack_token, parent_site=site)
                     if rack:
                         device_data["rack"] = rack

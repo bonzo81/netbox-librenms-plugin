@@ -1996,7 +1996,7 @@ class TestImportSingleDeviceMoreEdgeCases:
         mock_rack = MagicMock()
 
         with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack:
-            MockRack.objects.filter.return_value.select_related.return_value.first.return_value = mock_rack
+            MockRack.objects.filter.return_value.select_related.return_value.__getitem__.return_value = [mock_rack]
             with patch(
                 "netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping", return_value=None
             ):
@@ -2011,7 +2011,7 @@ class TestImportSingleDeviceMoreEdgeCases:
         mock_rack = MagicMock()
 
         with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack:
-            MockRack.objects.filter.return_value.select_related.return_value.first.return_value = None
+            MockRack.objects.filter.return_value.select_related.return_value.__getitem__.return_value = []
             with patch(
                 "netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping"
             ) as mock_resolve:
@@ -2023,6 +2023,24 @@ class TestImportSingleDeviceMoreEdgeCases:
         # Resolver was asked for the 'rack' field type with the parsed value.
         rack_calls = [c for c in mock_resolve.call_args_list if c.args and c.args[0] == "rack"]
         assert rack_calls and rack_calls[0].args[1] == "R1"
+
+    def test_ambiguous_rack_name_skips_automatic_assignment(self):
+        """Duplicate rack names within a site are not resolved arbitrarily."""
+        parsed = {"region": None, "site": None, "location": None, "rack": "R1", "tenant": None}
+        rack_matches = [MagicMock(), MagicMock()]
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack,
+            patch("netbox_librenms_plugin.import_utils.device_operations.resolve_location_mapping") as mock_resolve,
+            patch("netbox_librenms_plugin.import_utils.device_operations.logger") as mock_logger,
+        ):
+            MockRack.objects.filter.return_value.select_related.return_value.__getitem__.return_value = rack_matches
+            result, MockDevice = self._run_import_with_tokens(parsed_location=parsed)
+
+        assert result.get("success") is True
+        assert MockDevice.call_args.kwargs.get("rack") is None
+        mock_resolve.assert_not_called()
+        mock_logger.warning.assert_called_once()
 
     def test_manual_rack_not_overridden_by_parsed_token(self):
         """A rack chosen via validation is never overwritten by the parsed rack token."""
