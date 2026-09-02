@@ -1129,6 +1129,17 @@ class TestAcquireAdvisoryTransactionLock:
         with transaction.atomic(using="default"):
             acquire_advisory_transaction_lock("nblp-test:aliased", using="default")
 
+    def test_the_named_alias_selects_the_connection(self):
+        """The named alias must select its connection."""
+        from django.db import transaction
+        from django.utils.connection import ConnectionDoesNotExist
+
+        from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
+
+        with transaction.atomic(using="default"):
+            with pytest.raises(ConnectionDoesNotExist):
+                acquire_advisory_transaction_lock("nblp-test:unknown-alias", using="nblp-no-such-alias")
+
     def test_named_alias_outside_a_transaction_still_refuses(self):
         from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
 
