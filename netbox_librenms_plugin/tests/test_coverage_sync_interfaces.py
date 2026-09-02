@@ -298,7 +298,7 @@ def test_relationship_rows_are_matched_without_interpolated_selectors():
     """Requirement resolution indexes the rows instead of building a selector per port id.
 
     The behaviour this protects (a port id that carries selector metacharacters still cascades)
-    is exercised for real in tests/browser/test_interface_selection_browser.py; this pins the
+    is exercised for real in tests/browser/test_sync_cache_browser.py; this pins the
     structure that makes it safe, so a future rewrite cannot quietly reintroduce interpolation.
     """
     source = _js_source()

@@ -2,6 +2,7 @@
 
 import os
 from copy import deepcopy
+from itertools import chain
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -141,7 +142,9 @@ def _seeds_are_intact():
     from extras.models import CustomField
     from virtualization.models import VirtualMachine, VMInterface
 
-    for model, lookup_field, value_field, rows in _seeded_model_rows():
+    # Both seeds, or a corrupted sap_name_pattern reports the state as intact and
+    # restore_seeded_state(force=False) skips the repair it needs.
+    for model, lookup_field, value_field, rows in chain(_seeded_model_rows(), _seeded_sap_rows()):
         stored = set(model.objects.values_list(lookup_field, value_field))
         if not stored.issuperset(rows):
             return False
