@@ -1886,6 +1886,17 @@ class TestImportSingleDeviceMoreEdgeCases:
             "rack": {"rack": None},
         }
 
+    def _base_validation(self):
+        return self._validation("r01", MagicMock(), MagicMock(), MagicMock())
+
+    def _mock_tx(self):
+        return MagicMock()
+
+    def _make_api(self):
+        api = MagicMock()
+        api.server_key = "default"
+        return api
+
     @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_platform_manual_mapping(self, MockAPI):
         """manual_mappings platform_id resolves a real Platform and is persisted on the device."""
