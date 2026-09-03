@@ -217,6 +217,7 @@ def test_every_sync_pane_carries_one_htmx_fragment_loader(client, settings):
         )
         assert loader["hx-trigger"] == "librenms:load-fragment"
         assert loader["hx-target"] == f"#{TAB_SPECS[SyncTab(tab)].content_id}"
+        assert loader["hx-sync"] == f"#{TAB_SPECS[SyncTab(tab)].content_id}:abort"
         assert loader["hx-swap"] == "innerHTML"
 
 

@@ -822,7 +822,8 @@ that may well be correct.
         data-tab-id="interfaces">
         {% if sync_cache_fragment_urls.interfaces %}
         <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.interfaces }}"
-            hx-trigger="librenms:load-fragment" hx-target="#interface-sync-content" hx-swap="innerHTML"></span>
+            hx-trigger="librenms:load-fragment" hx-target="#interface-sync-content"
+            hx-sync="#interface-sync-content:abort" hx-swap="innerHTML"></span>
         {% endif %}
         {% include 'netbox_librenms_plugin/_interface_sync.html' %}
     </div>
@@ -832,7 +833,8 @@ that may well be correct.
         role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables">
         {% if sync_cache_fragment_urls.cables %}
         <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.cables }}"
-            hx-trigger="librenms:load-fragment" hx-target="#cable-sync-content" hx-swap="innerHTML"></span>
+            hx-trigger="librenms:load-fragment" hx-target="#cable-sync-content"
+            hx-sync="#cable-sync-content:abort" hx-swap="innerHTML"></span>
         {% endif %}
         {% include 'netbox_librenms_plugin/_cable_sync.html' %}
     </div>
@@ -843,7 +845,8 @@ that may well be correct.
         data-tab-id="ipaddresses">
         {% if sync_cache_fragment_urls.ipaddresses %}
         <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.ipaddresses }}"
-            hx-trigger="librenms:load-fragment" hx-target="#ipaddress-sync-content" hx-swap="innerHTML"></span>
+            hx-trigger="librenms:load-fragment" hx-target="#ipaddress-sync-content"
+            hx-sync="#ipaddress-sync-content:abort" hx-swap="innerHTML"></span>
         {% endif %}
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
@@ -854,7 +857,8 @@ that may well be correct.
         data-tab-id="modules">
         {% if sync_cache_fragment_urls.modules %}
         <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.modules }}"
-            hx-trigger="librenms:load-fragment" hx-target="#module-sync-content" hx-swap="innerHTML"></span>
+            hx-trigger="librenms:load-fragment" hx-target="#module-sync-content"
+            hx-sync="#module-sync-content:abort" hx-swap="innerHTML"></span>
         {% endif %}
         {% include 'netbox_librenms_plugin/_module_sync.html' %}
     </div>
@@ -867,7 +871,8 @@ that may well be correct.
         data-tab-id="vlans">
         {% if sync_cache_fragment_urls.vlans %}
         <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.vlans }}"
-            hx-trigger="librenms:load-fragment" hx-target="#vlan-sync-content" hx-swap="innerHTML"></span>
+            hx-trigger="librenms:load-fragment" hx-target="#vlan-sync-content"
+            hx-sync="#vlan-sync-content:abort" hx-swap="innerHTML"></span>
         {% endif %}
         {% include 'netbox_librenms_plugin/_vlan_sync.html' %}
     </div>

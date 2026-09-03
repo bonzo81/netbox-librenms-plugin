@@ -5,6 +5,7 @@ from html import escape
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
@@ -418,11 +419,18 @@ def _fragment_loader(tab, content_id):
     """Mirror the hidden loader element librenms_sync_base.html puts in every tab pane."""
     return (
         f'<span class="d-none" data-fragment-loader hx-get="https://plugin.example.com/fragment/{tab}"'
-        f' hx-trigger="librenms:load-fragment" hx-target="#{content_id}" hx-swap="innerHTML"></span>'
+        f' hx-trigger="librenms:load-fragment" hx-target="#{content_id}"'
+        f' hx-sync="#{content_id}:abort" hx-swap="innerHTML"></span>'
     )
 
 
-def _page_html(initial_state, contract=None, active_tab="interfaces", valid_states=None):
+def _page_html(
+    initial_state,
+    contract=None,
+    active_tab="interfaces",
+    valid_states=None,
+    action_form=False,
+):
     state = json.dumps(initial_state)
     contract = contract or {
         "interfaces": {"content_id": "interface-sync-content", "label": "Interface"},
@@ -440,6 +448,14 @@ def _page_html(initial_state, contract=None, active_tab="interfaces", valid_stat
     contract_json = json.dumps(serialized_contract)
     interface_content_id = contract["interfaces"]["content_id"]
     ip_content_id = contract["ipaddresses"]["content_id"]
+    interface_action = '<button id="interface-action">Sync</button>'
+    if action_form:
+        interface_action = (
+            '<form id="interface-action-form" hx-post="https://plugin.example.com/action/interfaces"'
+            ' hx-target="#interface-sync-content" hx-swap="innerHTML"'
+            ' hx-sync="#interface-sync-content:drop">'
+            '<button id="interface-action" type="submit">Sync</button></form>'
+        )
     return f"""
         <div id="librenms-sync-cache-state"
              data-status-url="https://plugin.example.com/status"
@@ -460,7 +476,7 @@ def _page_html(initial_state, contract=None, active_tab="interfaces", valid_stat
         <div id="interfaces" class="tab-pane{" active" if active_tab == "interfaces" else ""}"
              data-tab-id="interfaces">
           {_fragment_loader("interfaces", interface_content_id)}
-          <div id="{interface_content_id}"><button id="interface-action">Sync</button></div>
+          <div id="{interface_content_id}">{interface_action}</div>
         </div>
         <div id="ipaddresses" class="tab-pane{" active" if active_tab == "ipaddresses" else ""}"
              data-tab-id="ipaddresses">
@@ -1370,6 +1386,136 @@ def test_hung_cache_fragment_request_times_out_and_fails_closed(page):
     assert stalled_routes
     for route in stalled_routes:
         route.abort()
+
+
+FRAGMENT_URL_PREFIX = "https://plugin.example.com/fragment/interfaces"
+ACTION_URL = "https://plugin.example.com/action/interfaces"
+# Count the loader's htmx lifecycle events, so a test can tell a dropped restore from an issued one.
+LOADER_EVENT_COUNTER = """() => {
+    window.loaderEvents = { trigger: 0, request: 0 };
+    const loader = document.querySelector('#interfaces [data-fragment-loader]');
+    loader.addEventListener('htmx:trigger', () => { window.loaderEvents.trigger += 1; });
+    loader.addEventListener('htmx:beforeRequest', () => { window.loaderEvents.request += 1; });
+}"""
+
+
+def _race_states():
+    initial = {
+        "interfaces": _state("before-interfaces"),
+        "ipaddresses": _state("before-ip"),
+    }
+    return initial, {**initial, "interfaces": _state("after-interfaces")}
+
+
+def test_action_supersedes_an_in_flight_cache_restore(page):
+    """A module action must abort an in-flight cache restore so the older fragment cannot replace its response."""
+    initial, current = _race_states()
+    fragment_routes = []
+
+    page.set_content(_page_html(initial, action_form=True))
+    page.route(
+        "https://plugin.example.com/status?*",
+        lambda route: route.fulfill(json={"tabs": current}),
+    )
+    page.route(f"{FRAGMENT_URL_PREFIX}?*", lambda route: fragment_routes.append(route))
+    page.route(
+        ACTION_URL,
+        lambda route: route.fulfill(body='<span id="after-action">After action</span>'),
+    )
+    _add_page_scripts(page)
+    with page.expect_request(f"{FRAGMENT_URL_PREFIX}?*"):
+        page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
+    page.wait_for_function("document.querySelector('[data-fragment-loader]').classList.contains('htmx-request')")
+
+    # The fixed loader aborts its request when the action is posted; the unfixed one keeps it in flight.
+    try:
+        with page.expect_event(
+            "requestfailed", lambda request: request.url.startswith(FRAGMENT_URL_PREFIX), timeout=2_000
+        ):
+            page.locator("#interface-action").click()
+        restore_aborted = True
+    except PlaywrightTimeoutError:
+        restore_aborted = False
+    page.locator("#after-action").wait_for()
+    if not restore_aborted:
+        fragment_routes[0].fulfill(body='<span id="stale">Stale restore</span>')
+    page.wait_for_function("syncCacheController().checking === null")
+
+    assert page.locator("#stale").count() == 0
+    assert page.locator("#after-action").count() == 1
+    assert restore_aborted
+    assert page.evaluate("syncCacheController().lastCheckFailed") is False
+    assert "could not be restored" not in page.locator("#interface-sync-content").inner_text()
+    assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+
+
+def test_cache_restore_is_dropped_behind_an_in_flight_action(page):
+    """A restore that arrives during a module action must not be issued, so it cannot replace the action's response."""
+    initial, current = _race_states()
+    action_routes = []
+    fragment_routes = []
+
+    page.set_content(_page_html(initial, action_form=True))
+    page.route(
+        "https://plugin.example.com/status?*",
+        lambda route: route.fulfill(json={"tabs": current}),
+    )
+    page.route(ACTION_URL, lambda route: action_routes.append(route))
+    page.route(f"{FRAGMENT_URL_PREFIX}?*", lambda route: fragment_routes.append(route))
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncCacheConsistency()")
+    page.evaluate(LOADER_EVENT_COUNTER)
+    with page.expect_request(ACTION_URL):
+        page.locator("#interface-action").click()
+    page.evaluate("() => { checkSyncCacheStatus(); }")
+    page.wait_for_function("window.loaderEvents.trigger === 1")
+
+    assert page.evaluate("window.loaderEvents.request") == 0, "the restore was issued during the action"
+    action_routes[0].fulfill(body='<span id="after-action">After action</span>')
+    page.locator("#after-action").wait_for()
+    page.wait_for_function("syncCacheController().checking === null")
+
+    assert fragment_routes == []
+    assert page.locator("#after-action").count() == 1
+    assert "could not be restored" not in page.locator("#interface-sync-content").inner_text()
+    assert page.evaluate("syncCacheController().lastCheckFailed") is False
+    assert page.evaluate("syncCacheController().pendingRestores.size") == 0
+
+
+def test_failed_action_reissues_a_dropped_cache_restore(page):
+    """A restore dropped behind an action must run after the action fails, or the tab keeps stale rows."""
+    initial, current = _race_states()
+    action_routes = []
+    fragment_requests = []
+
+    def restore_fragment(route):
+        fragment_requests.append(route.request.url)
+        route.fulfill(body='<span id="restored">Restored</span>')
+
+    page.set_content(_page_html(initial, action_form=True))
+    page.route(
+        "https://plugin.example.com/status?*",
+        lambda route: route.fulfill(json={"tabs": current}),
+    )
+    page.route(ACTION_URL, lambda route: action_routes.append(route))
+    page.route(f"{FRAGMENT_URL_PREFIX}?*", restore_fragment)
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncCacheConsistency()")
+    page.evaluate(LOADER_EVENT_COUNTER)
+    with page.expect_request(ACTION_URL):
+        page.locator("#interface-action").click()
+    page.evaluate("() => { checkSyncCacheStatus(); }")
+    page.wait_for_function("window.loaderEvents.trigger === 1")
+
+    assert page.evaluate("window.loaderEvents.request") == 0, "the restore was issued during the action"
+    action_routes[0].fulfill(status=500)
+    page.locator("#restored").wait_for()
+    page.wait_for_function("syncCacheController().checking === null")
+
+    assert fragment_requests == [f"{FRAGMENT_URL_PREFIX}?server_key=primary"]
+    assert page.evaluate("window.loaderEvents") == {"trigger": 2, "request": 1}
+    assert page.evaluate("syncCacheController().lastCheckFailed") is False
+    assert page.evaluate("syncCacheController().pendingRestores.size") == 0
 
 
 def test_valid_status_recovers_when_the_initial_state_is_malformed(page):

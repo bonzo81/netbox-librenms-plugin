@@ -350,6 +350,7 @@ function syncCacheController() {
         invalidatedLocally: new Set(),
         failClosedTabs: new Set(),
         ownRevisions: new Set(),
+        pendingRestores: new Set(),
         requiredSourceFragments: new Set(),
         notifiedRevisions: new Set(),
         checking: null,
@@ -638,18 +639,22 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
     loader.setAttribute('hx-headers', JSON.stringify(fragmentHeaders));
     return new Promise((resolve, reject) => {
         let requestXhr = null;
+        let confirmFired = false;
+        const captureConfirm = () => { confirmFired = true; };
         const captureRequest = event => { requestXhr = event.detail.xhr; };
         const holdStaleResponse = event => {
             if (event.detail.xhr === requestXhr && controller.statusGeneration !== requestGeneration) {
                 event.detail.shouldSwap = false;
             }
         };
-        const abortRequest = () => loader.dispatchEvent(
-            new CustomEvent('htmx:abort', { bubbles: true, detail: { elt: loader } })
-        );
+        const abortRequest = () => requestXhr?.abort();
         const release = () => {
+            loader.removeEventListener('htmx:confirm', captureConfirm);
             loader.removeEventListener('htmx:beforeRequest', captureRequest);
             loader.removeEventListener('htmx:afterRequest', settleRequest);
+            loader.removeEventListener('htmx:sendAbort', settleAbort);
+            loader.removeEventListener('htmx:sendError', settleFailure);
+            loader.removeEventListener('htmx:timeout', settleFailure);
             content.removeEventListener('htmx:beforeSwap', holdStaleResponse);
             signal?.removeEventListener('abort', abortRequest);
         };
@@ -659,6 +664,7 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
         };
         function settleRequest(event) {
             if (event.detail.xhr !== requestXhr) return;
+            if (event.detail.xhr.status === 0) return;
             release();
             if (signal?.aborted) {
                 reject(new Error('Cache fragment request aborted'));
@@ -669,20 +675,47 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
                     delete content.dataset.cacheEmpty;
                     controller.invalidatedLocally.delete(tab);
                     controller.failClosedTabs.delete(tab);
+                    controller.pendingRestores.delete(tab);
                 } else {
-                    failClosed(event.detail.xhr.status ? `HTTP ${event.detail.xhr.status}` : 'Cache fragment failed');
+                    failClosed(`HTTP ${event.detail.xhr.status}`);
                 }
             }
             resolve();
         }
+        function settleAbort(event) {
+            if (event.detail.xhr !== requestXhr) return;
+            release();
+            if (signal?.aborted) {
+                reject(new Error('Cache fragment request aborted'));
+                return;
+            }
+            controller.pendingRestores.add(tab);
+            resolve();
+        }
+        function settleFailure(event) {
+            if (event.detail.xhr !== requestXhr) return;
+            release();
+            if (controller.statusGeneration === requestGeneration) failClosed('Cache fragment failed');
+            resolve();
+        }
+        loader.addEventListener('htmx:confirm', captureConfirm);
         loader.addEventListener('htmx:beforeRequest', captureRequest);
         loader.addEventListener('htmx:afterRequest', settleRequest);
+        loader.addEventListener('htmx:sendAbort', settleAbort);
+        loader.addEventListener('htmx:sendError', settleFailure);
+        loader.addEventListener('htmx:timeout', settleFailure);
         content.addEventListener('htmx:beforeSwap', holdStaleResponse);
         signal?.addEventListener('abort', abortRequest);
         loader.dispatchEvent(new CustomEvent('librenms:load-fragment'));
         if (requestXhr) return;
-        // htmx never issued the request, so it does not own this loader and the tab cannot be restored.
         release();
+        // htmx fires htmx:confirm after the target check and before hx-sync, so a confirm with no request is a drop.
+        if (confirmFired) {
+            controller.pendingRestores.add(tab);
+            resolve();
+            return;
+        }
+        // htmx never processed the loader, so the tab cannot be restored.
         if (controller.statusGeneration === requestGeneration) failClosed('Cache fragment loader is not bound');
         resolve();
     });
@@ -700,7 +733,8 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = 
 
     Object.entries(nextStatus || {}).forEach(([tab, state]) => {
         const prior = previous[tab] || {};
-        const revisionChanged = Boolean(state.revision && state.revision !== prior.revision);
+        const restoreOwed = controller.pendingRestores.has(tab);
+        const revisionChanged = restoreOwed || Boolean(state.revision && state.revision !== prior.revision);
         const refreshChanged = Boolean(
             state.refresh_error_timestamp &&
             state.refresh_error_timestamp !== prior.refresh_error_timestamp
@@ -736,6 +770,7 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = 
             state.snapshot_available &&
             revisionChanged &&
             (
+                restoreOwed ||
                 !controller.ownRevisions.has(state.revision) ||
                 controller.requiredSourceFragments.has(tab)
             )
@@ -3406,17 +3441,30 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
             controller.status = renderedStatus;
             controller.invalidatedLocally.clear();
             controller.requiredSourceFragments.clear();
+            controller.pendingRestores.clear();
         }
     }
     const swappedTab = syncCacheTabForContent(event.target);
     if (swappedTab) {
         controller.invalidatedLocally.delete(swappedTab);
         controller.failClosedTabs.delete(swappedTab);
+        controller.pendingRestores.delete(swappedTab);
         delete event.target.dataset.cacheEmpty;
         // A fragment load is the outcome of a status check, so its swap must not start another one.
         if (syncCacheFragmentGeneration(event) === null) checkSyncCacheStatus();
     }
     initializeScripts();
+});
+
+document.body.addEventListener('htmx:afterRequest', function (event) {
+    const controller = syncCacheController();
+    const requestedTab = syncCacheTabForContent(event.detail?.target);
+    if (
+        controller &&
+        requestedTab &&
+        syncCacheFragmentGeneration(event) === null &&
+        controller.pendingRestores.has(requestedTab)
+    ) checkSyncCacheStatus();
 });
 
 // Update HTMX modal accessible label after content loads so screen readers
