@@ -478,6 +478,68 @@ class TestHtmxSwapConvention:
         assert "data-active-tab" in guideline
 
 
+@pytest.mark.django_db
+class TestSyncCablesServerKey:
+    """Cable sync must reject invalid server keys before reading cached links."""
+
+    @pytest.mark.parametrize(
+        "server_key",
+        [
+            pytest.param(" primary ", id="whitespace-padded"),
+            pytest.param("bad__key", id="dunder"),
+        ],
+    )
+    def test_invalid_server_key_redirects_without_the_key(self, client, settings, server_key):
+        """An invalid posted key returns to the cable tab with an error."""
+        from django.contrib.messages import get_messages
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_default_librenms_server,
+            make_device,
+            make_superuser,
+        )
+
+        configure_default_librenms_server(settings)
+        device = make_device(f"cable-invalid-server-{server_key.strip().replace('_', '-')}")
+        client.force_login(make_superuser("cable-invalid-server-su"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk]),
+            {"server_key": server_key},
+        )
+
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+        assert response.status_code == 302
+        assert response.url == f"{sync_url}?tab=cables"
+        assert [str(message) for message in get_messages(response.wsgi_request)] == [
+            "Selected LibreNMS server is no longer configured."
+        ]
+
+    def test_valid_server_key_is_preserved_in_redirect(self, client, settings):
+        """A valid posted key remains on the cable-tab redirect."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_default_librenms_server,
+            make_device,
+            make_superuser,
+        )
+
+        server_key = configure_default_librenms_server(settings)
+        device = make_device("cable-valid-server")
+        client.force_login(make_superuser("cable-valid-server-su"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk]),
+            {"server_key": server_key},
+        )
+
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+        assert response.status_code == 302
+        assert response.url == f"{sync_url}?tab=cables&server_key={server_key}"
+
+
 class TestSingleCableVerifyServerKey:
     """SingleCableVerifyView.post() must thread server_key from the POST body into VC resolution + cache key."""
 
