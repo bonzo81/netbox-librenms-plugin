@@ -90,11 +90,15 @@ def test_single_non_default_mapping_redirects_before_query_and_then_uses_that_se
     servers,
     object_kind,
 ):
-    obj = make_device("one-mapped-server", librenms_cf={"secondary": {"id": 13401}})
+    from dcim.models import Device
+
     if object_kind == "virtualmachine":
         obj = make_vm("one-mapped-vm")
         obj.custom_field_data["librenms_id"] = {"secondary": {"id": 13402}}
         obj.save(update_fields=["custom_field_data"])
+    else:
+        obj = make_device("one-mapped-server", librenms_cf={"secondary": {"id": 13401}})
+    assert Device.objects.filter(name="one-mapped-server").exists() is (object_kind == "device")
     device_id = 13401 if object_kind == "device" else 13402
     observed = []
     _register_device(servers.secondary, device_id, obj.name, observed)
