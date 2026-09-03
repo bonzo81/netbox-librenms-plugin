@@ -2679,7 +2679,7 @@ def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
 
     page.route("https://plugin.example.com/verify-cable/", hold_verify_route)
     page.set_content(html)
-    page.add_script_tag(path=str(SCRIPT_PATH))
+    _add_page_scripts(page)
     # handleCableChange disables the row before it calls fetch, so waiting on the disabled
     # controls alone can outrun the route handler that captures pending_route.
     with page.expect_request("https://plugin.example.com/verify-cable/"):
@@ -2754,7 +2754,7 @@ def _cable_row_sharing_its_identity_html():
 def test_cable_verify_updates_the_row_that_owns_the_changed_select(page):
     """A row identity another loaded table also carries must not divert the verify."""
     page.set_content(_cable_row_sharing_its_identity_html())
-    page.add_script_tag(path=str(SCRIPT_PATH))
+    _add_page_scripts(page)
     page.evaluate(
         """() => {
             window.fetch = () => Promise.resolve({
@@ -2810,7 +2810,7 @@ def _cable_row_html(*, with_actions_cell):
 def test_cable_verify_completes_for_a_row_rendered_without_its_actions_cell(page):
     """A row missing the actions cell must still complete the verify instead of erroring out."""
     page.set_content(_cable_row_html(with_actions_cell=False))
-    page.add_script_tag(path=str(SCRIPT_PATH))
+    _add_page_scripts(page)
     page.evaluate(
         """() => {
             window.warnings = [];
@@ -2846,7 +2846,7 @@ def test_cable_verify_completes_for_a_row_rendered_without_its_actions_cell(page
 def test_cable_verify_updates_every_cell_of_a_complete_row(page):
     """The guarded update must still replace each cell a rendered row carries."""
     page.set_content(_cable_row_html(with_actions_cell=True))
-    page.add_script_tag(path=str(SCRIPT_PATH))
+    _add_page_scripts(page)
     page.evaluate(
         """() => {
             window.warnings = [];
