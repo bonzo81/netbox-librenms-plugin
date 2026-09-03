@@ -819,28 +819,43 @@ that may well be correct.
 <div class="tab-content mt-3" id="librenmsTabContent">
     <div class="tab-pane{% if active_sync_tab == 'interfaces' %} show active{% endif %}" id="interfaces"
         role="tabpanel" aria-labelledby="interfaces-tab"
-        data-tab-id="interfaces" data-fragment-url="{{ sync_cache_fragment_urls.interfaces }}">
+        data-tab-id="interfaces">
+        {% if sync_cache_fragment_urls.interfaces %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.interfaces }}"
+            hx-trigger="librenms:load-fragment" hx-target="#interface-sync-content" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_interface_sync.html' %}
     </div>
 
     {% if cable_sync %}
     <div class="tab-pane{% if active_sync_tab == 'cables' %} show active{% endif %}" id="cables"
-        role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables"
-        data-fragment-url="{{ sync_cache_fragment_urls.cables }}">
+        role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables">
+        {% if sync_cache_fragment_urls.cables %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.cables }}"
+            hx-trigger="librenms:load-fragment" hx-target="#cable-sync-content" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_cable_sync.html' %}
     </div>
     {% endif %}
 
     <div class="tab-pane{% if active_sync_tab == 'ipaddresses' %} show active{% endif %}" id="ipaddresses"
         role="tabpanel" aria-labelledby="ipaddresses-tab"
-        data-tab-id="ipaddresses" data-fragment-url="{{ sync_cache_fragment_urls.ipaddresses }}">
+        data-tab-id="ipaddresses">
+        {% if sync_cache_fragment_urls.ipaddresses %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.ipaddresses }}"
+            hx-trigger="librenms:load-fragment" hx-target="#ipaddress-sync-content" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
 
     {% if module_sync and object|meta:"model_name" == "device" %}
     <div class="tab-pane{% if active_sync_tab == 'modules' %} show active{% endif %}" id="modules"
         role="tabpanel" aria-labelledby="modules-tab"
-        data-tab-id="modules" data-fragment-url="{{ sync_cache_fragment_urls.modules }}">
+        data-tab-id="modules">
+        {% if sync_cache_fragment_urls.modules %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.modules }}"
+            hx-trigger="librenms:load-fragment" hx-target="#module-sync-content" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_module_sync.html' %}
     </div>
     {% endif %}
@@ -849,7 +864,11 @@ that may well be correct.
     {% if model_name == "device" %}
     <div class="tab-pane{% if active_sync_tab == 'vlans' %} show active{% endif %}" id="vlans"
         role="tabpanel" aria-labelledby="vlans-tab"
-        data-tab-id="vlans" data-fragment-url="{{ sync_cache_fragment_urls.vlans }}">
+        data-tab-id="vlans">
+        {% if sync_cache_fragment_urls.vlans %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.vlans }}"
+            hx-trigger="librenms:load-fragment" hx-target="#vlan-sync-content" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_vlan_sync.html' %}
     </div>
     {% endif %}

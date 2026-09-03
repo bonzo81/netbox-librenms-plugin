@@ -607,8 +607,11 @@ function syncCacheTabForContent(element) {
     return Object.entries(controller.contract || {}).find(([, spec]) => spec.content_id === element.id)?.[0];
 }
 
+// NetBox imports htmx as a module, so there is no htmx global and HTML written with innerHTML keeps
+// no hx- bindings. The pane's hidden [data-fragment-loader] lets htmx request and swap the fragment,
+// which binds the restored forms like every other swap.
 /**
- * Reload a tab's cached content through htmx, so the fragment gets a full swap lifecycle.
+ * Reload a tab's cached content through the pane's htmx loader, so the fragment gets a full swap lifecycle.
  *
  * @param {string} tab - Tab id to reload.
  * @param {?number} statusGeneration - Status generation this load belongs to.
@@ -619,53 +622,71 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
     const pane = document.getElementById(tab);
     const content = syncCacheContent(tab);
     const controller = syncCacheController();
-    if (!pane || !content || !controller || !pane.dataset.fragmentUrl) return Promise.resolve();
-    if (typeof htmx === 'undefined') {
-        console.error('htmx is unavailable');
-        clearSyncTabContent(tab, SYNC_CACHE_FRAGMENT_FAILED);
-        return Promise.resolve();
-    }
+    const loader = pane?.querySelector('[data-fragment-loader]');
+    if (!pane || !content || !controller || !loader) return Promise.resolve();
+    if (signal?.aborted) return Promise.reject(new Error('Cache fragment request aborted'));
     const requestGeneration = statusGeneration ?? controller.statusGeneration;
-    const url = new URL(pane.dataset.fragmentUrl, window.location.href);
-    url.searchParams.set('server_key', controller.root.dataset.serverKey);
-    // The document-level configRequest listener only exists after DOMContentLoaded, so send the token here.
-    const headers = { [SYNC_CACHE_GENERATION_HEADER]: String(requestGeneration) };
-    const csrfToken = getCsrfToken();
-    if (csrfToken) headers['X-CSRFToken'] = csrfToken;
+    loader.setAttribute('hx-vals', JSON.stringify({ server_key: controller.root.dataset.serverKey }));
+    // The fragment carries return_url links built from HX-Current-URL (tables/modules.py), which htmx sends itself.
+    // The generation header tells the body's htmx:afterSwap handler this swap answers a status check.
+    const fragmentHeaders = {
+        'X-Requested-With': 'XMLHttpRequest',
+        [SYNC_CACHE_GENERATION_HEADER]: String(requestGeneration),
+    };
+    const fragmentCsrf = getCsrfToken();
+    if (fragmentCsrf) fragmentHeaders['X-CSRFToken'] = fragmentCsrf;
+    loader.setAttribute('hx-headers', JSON.stringify(fragmentHeaders));
     return new Promise((resolve, reject) => {
-        const abort = () => {
-            htmx.trigger(content, 'htmx:abort');
-            reject(new Error('Cache fragment request aborted'));
+        let requestXhr = null;
+        const captureRequest = event => { requestXhr = event.detail.xhr; };
+        const holdStaleResponse = event => {
+            if (event.detail.xhr === requestXhr && controller.statusGeneration !== requestGeneration) {
+                event.detail.shouldSwap = false;
+            }
         };
-        if (signal?.aborted) {
-            abort();
-            return;
+        const abortRequest = () => loader.dispatchEvent(
+            new CustomEvent('htmx:abort', { bubbles: true, detail: { elt: loader } })
+        );
+        const release = () => {
+            loader.removeEventListener('htmx:beforeRequest', captureRequest);
+            loader.removeEventListener('htmx:afterRequest', settleRequest);
+            content.removeEventListener('htmx:beforeSwap', holdStaleResponse);
+            signal?.removeEventListener('abort', abortRequest);
+        };
+        const failClosed = message => {
+            console.error(message);
+            clearSyncTabContent(tab, SYNC_CACHE_FRAGMENT_FAILED);
+        };
+        function settleRequest(event) {
+            if (event.detail.xhr !== requestXhr) return;
+            release();
+            if (signal?.aborted) {
+                reject(new Error('Cache fragment request aborted'));
+                return;
+            }
+            if (controller.statusGeneration === requestGeneration) {
+                if (event.detail.successful) {
+                    delete content.dataset.cacheEmpty;
+                    controller.invalidatedLocally.delete(tab);
+                    controller.failClosedTabs.delete(tab);
+                } else {
+                    failClosed(event.detail.xhr.status ? `HTTP ${event.detail.xhr.status}` : 'Cache fragment failed');
+                }
+            }
+            resolve();
         }
-        signal?.addEventListener('abort', abort, { once: true });
-        // The failure listeners below already reported a non-2xx or transport failure.
-        htmx.ajax('GET', url.toString(), { source: content, target: content, swap: 'innerHTML', headers })
-            .then(() => resolve(), () => resolve())
-            .finally(() => signal?.removeEventListener('abort', abort));
+        loader.addEventListener('htmx:beforeRequest', captureRequest);
+        loader.addEventListener('htmx:afterRequest', settleRequest);
+        content.addEventListener('htmx:beforeSwap', holdStaleResponse);
+        signal?.addEventListener('abort', abortRequest);
+        loader.dispatchEvent(new CustomEvent('librenms:load-fragment'));
+        if (requestXhr) return;
+        // htmx never issued the request, so it does not own this loader and the tab cannot be restored.
+        release();
+        if (controller.statusGeneration === requestGeneration) failClosed('Cache fragment loader is not bound');
+        resolve();
     });
 }
-
-// Drop a response the caller no longer waits for: its generation is behind the current one.
-document.addEventListener('htmx:beforeSwap', event => {
-    const generation = syncCacheFragmentGeneration(event);
-    if (generation === null) return;
-    if (generation !== syncCacheController()?.statusGeneration) event.detail.shouldSwap = false;
-});
-
-['htmx:responseError', 'htmx:sendError', 'htmx:timeout'].forEach(name => {
-    document.addEventListener(name, event => {
-        const generation = syncCacheFragmentGeneration(event);
-        if (generation === null || generation !== syncCacheController()?.statusGeneration) return;
-        const tab = syncCacheTabForContent(event.detail.target);
-        if (!tab) return;
-        console.error(name === 'htmx:responseError' ? `HTTP ${event.detail.xhr.status}` : name);
-        clearSyncTabContent(tab, SYNC_CACHE_FRAGMENT_FAILED);
-    });
-});
 
 function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = null) {
     const controller = syncCacheController();

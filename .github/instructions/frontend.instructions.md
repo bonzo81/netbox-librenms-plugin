@@ -9,6 +9,7 @@ description: Frontend patterns for templates, HTMX, and static assets
 - HTMX 2.x is the primary async layer. Table row updates return `<tr hx-swap-oob="true">`.
 - Avoid `outerHTML` swaps; use OOB or targeted `innerHTML` swaps to keep table layout intact.
 - One recorded exception: the sync tab link (`inc/_sync_tab_link.html`) swaps `#librenms-sync-tabs` with `outerHTML`. That container carries `data-active-tab`, which `activeSyncTab()` in `librenms_sync.js` reads to resolve the active tab. A swap that keeps the element would leave the previous tab in that attribute. `test_the_swapped_tab_region_carries_the_active_tab_marker` pins the behaviour. Do not extend the exception to other nodes.
+- NetBox imports HTMX as a module, so a page has no `htmx` global and HTML written with `innerHTML` is never HTMX-bound: any HTML that carries `hx-` attributes must arrive through an HTMX swap. The sync tabs restore their cached content through the hidden `[data-fragment-loader]` element each pane renders in `librenms_sync_base.html`.
 - All HTMX requests and `fetch()` calls must include a CSRF token. The standard pattern is `document.querySelector('[name=csrfmiddlewaretoken]').value` (from a hidden form input). The import JS also uses `getCookie('csrftoken')` as a fallback — prefer the hidden input approach for consistency.
 
 ## Modal Implementation

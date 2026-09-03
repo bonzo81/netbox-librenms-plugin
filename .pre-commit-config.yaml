@@ -11,6 +11,7 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # The vendored htmx build must stay byte-identical to the upstream release.
       - id: trailing-whitespace
         exclude: ^netbox_librenms_plugin/tests/browser/vendor/
       - id: end-of-file-fixer
