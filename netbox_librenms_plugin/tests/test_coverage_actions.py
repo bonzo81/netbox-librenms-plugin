@@ -3647,7 +3647,10 @@ class TestBulkImportDevicesMorePaths:
         assert imported.role_id == mapping_source.role_id
         assert imported.rack_id is None
         assert response.status_code == 302
-        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-invalid-device-mapping"
+        )
 
     def test_valid_role_and_rack_values_applied(self, settings, monkeypatch):
         """The importer persists the selected role and rack on the new device."""
