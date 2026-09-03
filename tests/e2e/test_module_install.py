@@ -26,14 +26,10 @@ Run:
 """
 
 import os
-import subprocess
 
 import pytest
 
-NETBOX_URL = os.environ.get("NETBOX_URL", "http://172.22.0.4:8000")
-NETBOX_USER = os.environ.get("NETBOX_USER", "admin")
-NETBOX_PASS = os.environ.get("NETBOX_PASS", "admin")
-CONTAINER_NAME = None
+from .conftest import NETBOX_URL, netbox_shell as _netbox_shell
 
 E2E_ENABLED = os.environ.get("E2E_TESTS_ENABLED", "0") == "1"
 
@@ -42,60 +38,6 @@ if not E2E_ENABLED:
         "E2E tests skipped — set E2E_TESTS_ENABLED=1 to run against a live instance",
         allow_module_level=True,
     )
-
-
-def _get_container():
-    """Find the devcontainer name."""
-    global CONTAINER_NAME
-    if CONTAINER_NAME:
-        return CONTAINER_NAME
-    override = os.environ.get("NETBOX_CONTAINER")
-    if override:
-        CONTAINER_NAME = override
-        return override
-    result = subprocess.run(
-        ["docker", "ps", "--format", "{{.Names}}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"docker ps failed (rc={result.returncode}): {result.stderr}")
-    matches = [name for name in result.stdout.strip().split("\n") if "devcontainer-devcontainer" in name]
-    if len(matches) == 1:
-        CONTAINER_NAME = matches[0]
-        return CONTAINER_NAME
-    if len(matches) > 1:
-        raise RuntimeError(f"Multiple candidate devcontainers found: {matches}. Set NETBOX_CONTAINER.")
-    pytest.skip("No devcontainer found")
-
-
-def _netbox_shell(code):
-    """Run Python code in NetBox's Django shell."""
-    import shlex
-
-    container = _get_container()
-    escaped = shlex.quote(code)
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            container,
-            "bash",
-            "-c",
-            f"cd /opt/netbox/netbox && python3 manage.py shell -c {escaped}",
-        ],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PATH": "/usr/bin:/bin", "HOME": "/root"},
-    )
-    lines = [
-        line
-        for line in result.stdout.strip().split("\n")
-        if not line.startswith("🧬") and "objects imported automatically" not in line
-    ]
-    if result.returncode != 0:
-        raise RuntimeError(f"netbox shell command failed (rc={result.returncode}): {result.stderr}")
-    return "\n".join(lines).strip()
 
 
 def _detect_device_id():
@@ -146,33 +88,6 @@ def device_id():
     if env_id:
         return int(env_id)
     return _detect_device_id()
-
-
-@pytest.fixture(scope="module")
-def browser():
-    """Launch browser for the test module."""
-    from playwright.sync_api import sync_playwright
-
-    pw = sync_playwright().start()
-    b = pw.chromium.launch(headless=True)
-    yield b
-    b.close()
-    pw.stop()
-
-
-@pytest.fixture
-def page(browser):
-    """Create a new page and log in to NetBox."""
-    ctx = browser.new_context(ignore_https_errors=True)
-    pg = ctx.new_page()
-
-    pg.goto(f"{NETBOX_URL}/login/", timeout=10000)
-    pg.fill("#id_username", NETBOX_USER)
-    pg.fill("#id_password", NETBOX_PASS)
-    pg.click("button[type=submit]")
-    pg.wait_for_load_state("networkidle")
-    yield pg
-    ctx.close()
 
 
 class TestModuleInstallWorkflow:
