@@ -5279,6 +5279,53 @@ class TestModulesActionResponse:
             Module.objects.create(device=other, module_bay=other_bay, module_type=module_type, serial="ACTION-1")
         return device, module
 
+    @pytest.mark.parametrize(
+        ("conflict", "expected_action"),
+        [(False, "update-module-serial"), (True, "move-module")],
+        ids=["update_serial_only", "move"],
+    )
+    def test_the_mismatch_preview_answers_a_whole_modal_of_bound_forms(
+        self, client, settings, conflict, expected_action
+    ):
+        """The preview now fills #htmx-modal-content, so it must carry the header the JS used to build."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        self._configure_server(settings)
+        suffix = "move" if conflict else "serial"
+        device, module = self._seed_serial_mismatch(suffix, conflict=conflict, librenms_id=9210 + int(conflict))
+        client.force_login(make_superuser(f"modules-preview-{suffix}-user"))
+        url = reverse("plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": device.pk})
+
+        response = client.get(
+            url,
+            {
+                "module_id": str(module.pk),
+                "ent_index": "8201",
+                "server_key": self.SERVER_KEY,
+                "selected_device_id": str(device.pk),
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.content.decode()
+        assert 'id="htmx-modal-label"' in body
+        assert "closeHtmxModal()" in body
+        assert 'class="modal-body"' in body
+        forms = open_tags(body, "form")
+        # Both branches render the replace form plus the one the conflict state selects.
+        assert len(forms) == 2
+        assert any(expected_action in form["action"] for form in forms)
+        assert any("replace-module" in form["action"] for form in forms)
+        for form in forms:
+            # The forms are swapped into the modal, so their own target must be the module tab;
+            # the view's HX-Retarget stays the safety net for a classic post.
+            assert form["hx-target"] == "#module-sync-content"
+            assert form["hx-swap"] == "innerHTML"
+            assert form["hx-sync"] == "#module-sync-content:drop"
+
 
 class TestAddBayTemplateViewWiring:
     """AddBayTemplateView must have the right mixins and target kinds."""

@@ -7,6 +7,10 @@ bypassing __init__ with object.__new__.  No DB access required.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from netbox_librenms_plugin.tests._html_helpers import open_tags
+
 
 class TestLibreNMSModuleTable:
     """Direct unit tests for every render_* method on LibreNMSModuleTable."""
@@ -710,13 +714,56 @@ class TestLibreNMSModuleTable:
             "ent_physical_index": 200,
             "serial": "S1",
         }
-        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/replace-url/"):
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/preview-url/"):
             result = str(table.render_actions(None, record))
 
         assert "Replace" in result
-        assert "module-replace-btn" in result
         assert "mdi-swap-horizontal" in result
-        assert 'data-module-id="55"' in result
+        # The preview fragment carries hx- forms, so it must arrive through an HTMX swap: a
+        # fetch()+innerHTML load leaves them unbound and they fall back to a full page reload.
+        (button,) = [tag for tag in open_tags(result, "button") if tag.get("hx-get")]
+        assert button["hx-get"] == "/preview-url/?module_id=55&ent_index=200&server_key=&selected_device_id=9"
+        assert button["hx-target"] == "#htmx-modal-content"
+        assert button["hx-swap"] == "innerHTML"
+        # A newer click supersedes an older in-flight preview, as the AbortController did.
+        assert button["hx-sync"] == "#htmx-modal-content:replace"
+        assert button["hx-disabled-elt"] == "this"
+
+    # One record per row action that posts through HTMX.
+    _HTMX_ROW_ACTIONS = {
+        "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "serial": "S1"},
+        "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
+        "update_serial": {"can_update_serial": True, "installed_module_id": 42, "serial": "S2"},
+        "update_interface": {
+            "can_update_interface_binding": True,
+            "installed_module_id": 42,
+            "ent_physical_index": 77,
+            "librenms_port_id": 56284,
+        },
+        "carrier_install": {
+            "status": "No Bay",
+            "carrier_install_options": [
+                {"bay_id": 12, "module_type_id": 34, "module_type_name": "CARRIER-A", "bay_name": "Slot 0"}
+            ],
+        },
+    }
+
+    @pytest.mark.parametrize("record", _HTMX_ROW_ACTIONS.values(), ids=list(_HTMX_ROW_ACTIONS))
+    def test_render_actions_row_form_drops_a_concurrent_module_action(self, record):
+        """Two module actions in flight raced into one container: every row form takes the same lock."""
+        device = MagicMock()
+        device.pk = 12
+        table = self._make_table(device=device)
+
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        forms = [tag for tag in open_tags(result, "form") if tag.get("hx-post")]
+        assert forms
+        for form in forms:
+            assert form["hx-sync"] == "#module-sync-content:drop"
+            # The row spinner and the button lock stay: hx-sync only gates a SECOND action.
+            assert form["hx-disabled-elt"] == "find button"
 
     def test_render_actions_serial_mismatch_shows_both_update_and_replace(self):
         """Serial Mismatch row (can_update_serial + can_replace) shows both buttons."""

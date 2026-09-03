@@ -1,7 +1,13 @@
 {% load helpers %}
-{# Modal body fragment for the module replace / move dialog. #}
-{# Rendered server-side by ModuleMismatchPreviewView and injected into #htmx-modal-body via JS. #}
-
+{# Modal-content fragment for the module replace / move dialog. #}
+{# Rendered by ModuleMismatchPreviewView.get and swapped into #htmx-modal-content. #}
+<div class="modal-header">
+    <h5 id="htmx-modal-label" class="modal-title">
+        <i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch
+    </h5>
+    <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
+</div>
+<div class="modal-body">
 <p class="text-muted small mb-3">Comparing the module currently in NetBox with the LibreNMS inventory data.</p>
 
 <table class="table table-bordered table-sm mb-3">
@@ -90,8 +96,10 @@
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"
           hx-post="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"
+          hx-target="#module-sync-content"
+          hx-swap="innerHTML"
+          hx-sync="#module-sync-content:drop"
           hx-disabled-elt="find button[type=submit]"
-          hx-swap="none"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
@@ -109,8 +117,10 @@
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:move_module' pk=device_pk %}"
           hx-post="{% url 'plugins:netbox_librenms_plugin:move_module' pk=device_pk %}"
+          hx-target="#module-sync-content"
+          hx-swap="innerHTML"
+          hx-sync="#module-sync-content:drop"
           hx-disabled-elt="find button[type=submit]"
-          hx-swap="none"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk|default:'' }}">
@@ -129,8 +139,10 @@
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
           hx-post="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
+          hx-target="#module-sync-content"
+          hx-swap="innerHTML"
+          hx-sync="#module-sync-content:drop"
           hx-disabled-elt="find button[type=submit]"
-          hx-swap="none"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
@@ -145,4 +157,5 @@
         </button>
     </form>
     {% endif %}
+</div>
 </div>

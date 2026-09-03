@@ -2647,7 +2647,6 @@ function handleModuleChange(select, value) {
 
             // Re-bind listeners because row controls (select/buttons/forms) were replaced.
             initializeVCMemberSelect();
-            initializeModuleReplaceButtons();
             initializeVCReportButtons();
         })
         .catch(error => {
@@ -3180,101 +3179,6 @@ function initializeInstallSelectedForm() {
 }
 
 /**
- * Tracks the in-flight AbortController for the module replace preview fetch.
- * Cancelled when a new Replace button is clicked before the previous fetch completes.
- */
-let _activeReplaceController = null;
-
-/**
- * Initialize Replace buttons on the module sync table.
- * Each button carries module/ent_index/server_key as data attributes and opens
- * the mismatch comparison modal by fetching the preview fragment from the server.
- */
-function initializeModuleReplaceButtons() {
-    document.querySelectorAll('.module-replace-btn').forEach(btn => {
-        if (btn.dataset.replaceInitialized) return;
-        btn.dataset.replaceInitialized = 'true';
-
-        btn.addEventListener('click', function () {
-            // Cancel any in-flight preview request before starting a new one
-            if (_activeReplaceController) {
-                _activeReplaceController.abort();
-            }
-            _activeReplaceController = new AbortController();
-            const signal = _activeReplaceController.signal;
-
-            const previewUrl = this.dataset.previewUrl;
-            const moduleId = this.dataset.moduleId;
-            const entIndex = this.dataset.entIndex;
-            const serverKey = this.dataset.serverKey;
-            const selectedDeviceId = this.dataset.selectedDeviceId;
-
-            const params = new URLSearchParams({
-                module_id: moduleId,
-                ent_index: entIndex,
-                server_key: serverKey,
-                selected_device_id: selectedDeviceId,
-            });
-
-            // Show shared HTMX modal with loading state
-            const modalContent = document.getElementById('htmx-modal-content');
-            if (modalContent) {
-                modalContent.innerHTML =
-                    '<div class="modal-header">' +
-                    '<h5 id="htmx-modal-label" class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
-                    '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
-                    '</div>' +
-                    '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
-                    '<i class="mdi mdi-loading mdi-spin mdi-36px"></i>' +
-                    '<p class="mt-2">Loading\u2026</p>' +
-                    '</div>';
-            }
-
-            showModal(document.getElementById('htmx-modal'));
-
-            // Fetch preview content and inject into modal body
-            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
-            const fetchHeaders = {};
-            if (csrfToken) {
-                fetchHeaders['X-CSRFToken'] = csrfToken;
-            }
-            fetch(`${previewUrl}?${params.toString()}`, {
-                signal,
-                headers: fetchHeaders,
-            })
-                .then(response => {
-                    if (!response.ok) return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
-                    return response.text();
-                })
-                .then(html => {
-                    const modalBody = document.getElementById('htmx-modal-body');
-                    if (modalBody) {
-                        modalBody.innerHTML = html;
-                        if (typeof htmx !== 'undefined') {
-                            htmx.process(modalBody);
-                        }
-                        updateHtmxModalLabel();
-                    }
-                })
-                .catch(err => {
-                    if (err.name === 'AbortError') return; // Superseded by a newer click — ignore
-                    const modalBody = document.getElementById('htmx-modal-body');
-                    if (modalBody) {
-                        const alert = document.createElement('div');
-                        alert.className = 'alert alert-danger';
-                        const icon = document.createElement('i');
-                        icon.className = 'mdi mdi-alert me-1';
-                        alert.appendChild(icon);
-                        alert.appendChild(document.createTextNode(err.message || 'Failed to load preview.'));
-                        modalBody.textContent = '';
-                        modalBody.appendChild(alert);
-                    }
-                });
-        });
-    });
-}
-
-/**
  * Tracks the in-flight AbortController for the VC report fetch.
  * Cancelled when a new VC report button is clicked before the previous fetch completes,
  * so spam-clicks don't race.
@@ -3401,11 +3305,6 @@ function initializeVCReportButtons() {
 }
 
 function closeHtmxModal() {
-    // Abort any in-flight module-replace preview request
-    if (typeof _activeReplaceController !== 'undefined' && _activeReplaceController) {
-        _activeReplaceController.abort();
-        _activeReplaceController = null;
-    }
     // Abort any in-flight VC report fetch
     if (typeof _activeVCReportController !== 'undefined' && _activeVCReportController) {
         _activeVCReportController.abort();
@@ -3443,7 +3342,6 @@ function initializeScripts() {
     initializeSyncFormSpinners();
     initializeVlanSyncGroupSelects();
     initializeInstallSelectedForm();
-    initializeModuleReplaceButtons();
     initializeVCReportButtons();
     initializeSyncCacheConsistency();
 }
@@ -3549,6 +3447,55 @@ document.addEventListener('htmx:afterSettle', function (event) {
             showModal(htmxModal);
         }
     }
+});
+
+/**
+ * Extract a human-readable error message from a failed HTMX request, like fetchErrorMessage does.
+ * @param {XMLHttpRequest} xhr
+ * @returns {string}
+ */
+function xhrErrorMessage(xhr) {
+    const ct = (xhr.getResponseHeader('Content-Type') || '').toLowerCase();
+    let msg = xhr.responseText || `HTTP ${xhr.status}`;
+    if (ct.includes('application/json')) {
+        try { const d = JSON.parse(xhr.responseText); msg = d.error || d.message || d.detail || msg; } catch (_) {}
+    }
+    if (msg.length > 300) msg = msg.slice(0, 300) + '...';
+    return msg;
+}
+
+// HTMX never swaps a 4xx/5xx answer, so a failed modal fetch would leave the modal closed and silent.
+document.body.addEventListener('htmx:responseError', function (event) {
+    const modalContent = document.getElementById('htmx-modal-content');
+    if (!modalContent || event.detail.target !== modalContent) return;
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    const title = document.createElement('h5');
+    title.className = 'modal-title';
+    title.textContent = 'Request failed';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'btn-close';
+    close.setAttribute('aria-label', 'Close');
+    close.addEventListener('click', closeHtmxModal);
+    header.appendChild(title);
+    header.appendChild(close);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+    const alert = document.createElement('div');
+    alert.className = 'alert alert-danger';
+    const icon = document.createElement('i');
+    icon.className = 'mdi mdi-alert me-1';
+    alert.appendChild(icon);
+    alert.appendChild(document.createTextNode(xhrErrorMessage(event.detail.xhr)));
+    body.appendChild(alert);
+
+    modalContent.textContent = '';
+    modalContent.appendChild(header);
+    modalContent.appendChild(body);
+    showModal(document.getElementById('htmx-modal'));
 });
 
 // Event delegation for LAG and parent interface sync buttons.

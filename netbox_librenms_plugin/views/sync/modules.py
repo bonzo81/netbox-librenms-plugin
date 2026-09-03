@@ -62,10 +62,7 @@ OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
 def _modules_redirect_response(request, sync_url, server_key=None):
     """
-    Return a redirect back to the modules tab: ``HX-Redirect`` for an HTMX post, else a Django redirect.
-
-    The module actions answer their HTMX posts through :func:`_modules_action_response`
-    instead, so only classic posts reach the Django redirect from those views.
+    Return a Django redirect back to the modules tab for a classic (non-HTMX) form post.
 
     These module sync actions are server-scoped, so the follow-up page must stay on
     the server whose cache namespace this request just mutated/read. The active
@@ -74,13 +71,12 @@ def _modules_redirect_response(request, sync_url, server_key=None):
     keeps the server context without each caller having to thread it through.
 
     Args:
-        request: The current HTTP request (HTMX header + server_key source).
+        request: The current HTTP request (server_key source).
         sync_url (str): The base sync URL to redirect to.
         server_key: The active LibreNMS server key; read from the request when None.
 
     Returns:
-        HttpResponse: An HTMX ``HX-Redirect`` response, or a Django redirect for a
-            classic post.
+        HttpResponse: A Django redirect to the modules tab.
     """
     if server_key is None:
         server_key = request.POST.get("server_key") or request.GET.get("server_key") or ""
@@ -88,10 +84,6 @@ def _modules_redirect_response(request, sync_url, server_key=None):
     if server_key:
         target += f"&server_key={quote_plus(str(server_key))}"
     target += "#librenms-module-table"
-    if request.headers.get("HX-Request") == "true":
-        response = HttpResponse(status=204)
-        response["HX-Redirect"] = target
-        return apply_request_cache_transition(request, response)
     return apply_request_cache_transition(request, redirect(target))
 
 

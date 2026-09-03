@@ -68,16 +68,55 @@ def test_modules_redirect_response_propagates_server_key():
     assert "server_key=prod" in resp.url
 
 
-def test_modules_redirect_response_htmx_propagates_server_key():
-    """The HTMX variant carries server_key on the HX-Redirect header."""
-    from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+@pytest.mark.django_db
+def test_modules_action_fragment_keeps_the_server_key(client, settings):
+    """The HTMX variant re-renders the module tab with the acted-on server_key still wired in."""
+    from django.core.cache import cache
+    from django.urls import reverse
 
-    request = RequestFactory().post("/", HTTP_HX_REQUEST="true")
-    resp = _modules_redirect_response(request, "/plugins/librenms_plugin/x/", server_key="prod")
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_librenms_servers,
+        make_module_bay,
+        make_module_type,
+        make_superuser,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    target = resp["HX-Redirect"]
-    assert "tab=modules" in target
-    assert "server_key=prod" in target
+    configure_librenms_servers(
+        settings, {"prod": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    device = make_device("redir-modules-fragment")
+    bay = make_module_bay(device, "Redirect Bay")
+    module_type = make_module_type("REDIRECT-CARD")
+    cache.set(
+        DeviceModuleTableView().get_cache_key(device, "inventory", server_key="prod"),
+        trusted_module_inventory_payload(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 8401,
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalContainedIn": 0,
+                    "entPhysicalName": bay.name,
+                }
+            ],
+            server_key="prod",
+            librenms_id=9401,
+        ),
+        300,
+    )
+    client.force_login(make_superuser("redir-modules-fragment-user"))
+
+    resp = client.post(
+        reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk}),
+        {"server_key": "prod", "module_bay_id": str(bay.pk), "module_type_id": str(module_type.pk), "serial": ""},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert resp.status_code == 200
+    assert b'name="server_key" value="prod"' in resp.content
 
 
 @pytest.mark.django_db
