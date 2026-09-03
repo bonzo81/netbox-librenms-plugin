@@ -570,12 +570,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 " were loaded. Refresh Modules to try again. See server logs for details.",
             )
         if not refresh_incomplete:
-            messages.success(request, "Inventory data refreshed successfully.")
-            SyncCacheConsistency(obj).mark_refresh_success(
+            if SyncCacheConsistency(obj).mark_refresh_outcome(
                 SyncTab.MODULES,
                 server_key,
                 actor_id=request_actor_id(request),
-            )
+            ):
+                messages.success(request, "Inventory data refreshed successfully.")
+            else:
+                messages.error(
+                    request,
+                    "Inventory data could not be cached, so the tab has no snapshot to show. "
+                    "Refresh again; see server logs for details.",
+                )
         else:
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.MODULES,

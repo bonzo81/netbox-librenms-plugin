@@ -446,6 +446,14 @@ class SyncCacheConsistency:
             reason=reason,
         )
 
+    def mark_refresh_outcome(self, tab, server_key, *, actor_id=None):
+        """Publish READY when the tab's snapshot exists, else record a failed refresh; return whether it exists."""
+        if cache.has_key(self.snapshot_key(tab, server_key)):
+            self.mark_refresh_success(tab, server_key, actor_id=actor_id)
+            return True
+        self.mark_refresh_failure(tab, server_key, actor_id=actor_id)
+        return False
+
     def _remaining_state_timeout(self, state_key, record, server_key):
         """Return a state record's remaining lifetime without extending it."""
         remaining_timeout = cache_remaining_ttl(cache, state_key)

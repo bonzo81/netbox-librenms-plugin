@@ -2025,6 +2025,9 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            # The view's cache is mocked, so no snapshot reaches the real one; report it as
+            # present, which is the success case this test is about.
+            patch("netbox_librenms_plugin.sync_cache.cache.has_key", return_value=True),
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
             mock_render.return_value = MagicMock()
@@ -3430,6 +3433,9 @@ class TestBaseIPAddressTableViewPost:
                 "netbox_librenms_plugin.views.base.ip_addresses_view.get_interface_name_field",
                 return_value="ifName",
             ),
+            # _prepare_context is stubbed, so no snapshot reaches the cache; report it as
+            # present, which is the success case this test is about.
+            patch("netbox_librenms_plugin.sync_cache.cache.has_key", return_value=True),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):

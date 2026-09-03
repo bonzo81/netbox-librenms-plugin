@@ -402,18 +402,23 @@ class BaseInterfaceTableView(
             timezone.now(),
             timeout=self.librenms_api.cache_timeout,
         )
-        SyncCacheConsistency(obj).mark_refresh_success(
+        if SyncCacheConsistency(obj).mark_refresh_outcome(
             SyncTab.INTERFACES,
             _server_key,
             actor_id=request_actor_id(request),
-        )
-
-        # On an OOB-fetch failure the warning above already conveys the partial outcome;
-        # use an accurate success banner ("host" only) rather than a blanket "successfully".
-        if oob_ports_failed:
-            messages.success(request, "Host interface data refreshed successfully.")
+        ):
+            # On an OOB-fetch failure the warning above already conveys the partial outcome;
+            # use an accurate success banner ("host" only) rather than a blanket "successfully".
+            if oob_ports_failed:
+                messages.success(request, "Host interface data refreshed successfully.")
+            else:
+                messages.success(request, "Interface data refreshed successfully.")
         else:
-            messages.success(request, "Interface data refreshed successfully.")
+            messages.error(
+                request,
+                "Interface data could not be cached, so the tab has no snapshot to show. "
+                "Refresh again; see server logs for details.",
+            )
 
         context = self.get_context_data(
             request,

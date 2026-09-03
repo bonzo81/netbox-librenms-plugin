@@ -111,12 +111,18 @@ class BaseVLANTableView(
                 request, obj, server_key, {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key)}
             )
 
-        messages.success(request, "VLAN data refreshed successfully.")
-        SyncCacheConsistency(obj).mark_refresh_success(
+        if SyncCacheConsistency(obj).mark_refresh_outcome(
             SyncTab.VLANS,
             server_key,
             actor_id=request_actor_id(request),
-        )
+        ):
+            messages.success(request, "VLAN data refreshed successfully.")
+        else:
+            messages.error(
+                request,
+                "VLAN data could not be cached, so the tab has no snapshot to show. "
+                "Refresh again; see server logs for details.",
+            )
 
         return self.render_sync_partial(
             request, obj, server_key, {"vlan_sync": self.get_vlan_context(request, obj, server_key)}

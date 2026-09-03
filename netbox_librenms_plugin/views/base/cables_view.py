@@ -892,11 +892,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             )
             return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
-        # Decide the outcome before announcing it: the snapshot can be absent here (a rejected
-        # payload, or an eviction between the write and this read), and the tab is then marked
-        # REFRESH_FAILED below. Announcing success first would contradict the state we record.
+        # Decide the outcome before announcing it. cache.set() does not confirm that the
+        # snapshot exists, and an eviction can remove it before this check.
         coordinator = SyncCacheConsistency(obj)
-        snapshot_cached = cache.has_key(coordinator.snapshot_key(SyncTab.CABLES, server_key))
+        snapshot_cached = coordinator.mark_refresh_outcome(
+            SyncTab.CABLES,
+            server_key,
+            actor_id=request_actor_id(request),
+        )
         if snapshot_cached:
             messages.success(request, "Cable data refreshed successfully.")
         else:
@@ -926,10 +929,6 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 "Cables refreshed, but OOB controller links fetch failed; "
                 "showing host cables only. See server logs for details.",
             )
-        if snapshot_cached:
-            coordinator.mark_refresh_success(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
-        else:
-            coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
         return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
 
