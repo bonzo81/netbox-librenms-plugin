@@ -1121,9 +1121,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             # Device import mappings
             role_value = request.POST.get(f"role_{device_id}")
             if role_value:
-                try:
-                    mappings["device_role_id"] = int(role_value)
-                except (TypeError, ValueError):
+                role_id = coerce_model_pk(role_value)
+                if role_id is not None:
+                    mappings["device_role_id"] = role_id
+                else:
                     logger.warning(
                         "Ignoring invalid role id '%s' for device %s",
                         role_value,
@@ -1132,9 +1133,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
             rack_value = request.POST.get(f"rack_{device_id}")
             if rack_value:
-                try:
-                    mappings["rack_id"] = int(rack_value)
-                except (TypeError, ValueError):
+                rack_id = coerce_model_pk(rack_value)
+                if rack_id is not None:
+                    mappings["rack_id"] = rack_id
+                else:
                     logger.warning(
                         "Ignoring invalid rack id '%s' for device %s",
                         rack_value,

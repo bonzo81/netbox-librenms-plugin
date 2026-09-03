@@ -4983,6 +4983,52 @@ class TestBulkImportDevicesMorePaths:
         assert imported.role_id is None
         assert response.status_code == 302
 
+    def test_invalid_device_role_and_rack_ids_do_not_abort_valid_rows(self, settings, caplog, monkeypatch):
+        """Invalid device mapping IDs must not prevent a valid row from importing."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
+
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        invalid_id = str(_POSTGRES_BIGINT_MAX + 1)
+        mapping_source = make_device("bulk-more-invalid-device-mapping-source")
+        user = self._device_import_user("bulk-more-invalid-device-mapping-user")
+
+        with run_librenms_server() as server:
+            for device_id in (1, 2):
+                server.device_info_response(
+                    device_id=device_id,
+                    hostname=f"bulk-more-invalid-device-mapping-{device_id}",
+                    hardware=mapping_source.device_type.model,
+                    serial="",
+                    ip=f"198.18.0.{device_id}",
+                    location=mapping_source.site.name,
+                )
+                server.vc_inventory_callable(device_id, [], {})
+            view, request = self._make_base_request(
+                settings,
+                ["1", "2"],
+                user,
+                {
+                    "role_1": invalid_id,
+                    "role_2": str(mapping_source.role_id),
+                    "rack_2": invalid_id,
+                },
+                server_key="bulk-more-invalid-device-mapping",
+                server_url=server.url,
+            )
+            response = post_view(view, request)
+
+        assert f"Ignoring invalid role id '{invalid_id}' for device 1" in caplog.text
+        assert f"Ignoring invalid rack id '{invalid_id}' for device 2" in caplog.text
+        assert not Device.objects.filter(name="bulk-more-invalid-device-mapping-1").exists()
+        imported = Device.objects.get(name="bulk-more-invalid-device-mapping-2")
+        assert imported.role_id == mapping_source.role_id
+        assert imported.rack_id is None
+        assert response.status_code == 302
+        assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
+
     def test_valid_role_and_rack_values_applied(self, settings, monkeypatch):
         """The importer persists the selected role and rack on the new device."""
         from dcim.models import Device, Rack
