@@ -2286,6 +2286,56 @@ def test_opening_unavailable_tab_acknowledges_only_its_current_revision(client, 
     assert "sync-cache-unavailable" in _tab_classes(new_revision_page.content.decode(), "ipaddresses-tab")
 
 
+@pytest.mark.parametrize(
+    ("route_name", "extra_kwargs"),
+    [
+        ("sync_cache_status", {}),
+        ("sync_cache_fragment", {"tab": "interfaces"}),
+    ],
+    ids=("status", "fragment"),
+)
+@pytest.mark.django_db
+def test_cache_get_endpoint_requires_plugin_and_object_view_permissions(client, settings, route_name, extra_kwargs):
+    """Cache GET endpoints must require plugin and object view permissions only."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    _configure_servers(settings)
+    device = make_device("cache-read-permissions", librenms_cf={"primary": {"id": 657}})
+    _seed_snapshot("ports", device, "primary", {"ports": [], "port_stack_relationships": {}})
+    plugin_model = django_apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+    read_only_user = make_user_with_perms(
+        f"cache-read-{route_name}",
+        [("view", Device)],
+        plugin_write=False,
+    )
+    read_only_user = grant(read_only_user, "view", plugin_model)
+    plugin_only_user = make_user_with_perms(f"cache-plugin-only-{route_name}", [], plugin_write=False)
+    plugin_only_user = grant(plugin_only_user, "view", plugin_model)
+    object_only_user = make_user_with_perms(
+        f"cache-object-only-{route_name}",
+        [("view", Device)],
+        plugin_write=False,
+    )
+    url = reverse(
+        f"plugins:netbox_librenms_plugin:{route_name}",
+        kwargs={"object_type": "device", "pk": device.pk, **extra_kwargs},
+    )
+
+    client.force_login(read_only_user)
+    response = client.get(url, {"server_key": "primary"})
+    assert response.status_code == 200
+    if route_name == "sync_cache_status":
+        assert "tabs" in response.json()
+    else:
+        assert b"Interface Sync Table" in response.content
+
+    for user in (plugin_only_user, object_only_user):
+        client.force_login(user)
+        assert client.get(url, {"server_key": "primary"}).status_code == 403
+
+
 def test_cleanup_failure_payload_names_tabs_that_must_fail_closed():
     """A failed cleanup must tell the browser which stale controls to remove."""
     transition = CacheMutationTransition(

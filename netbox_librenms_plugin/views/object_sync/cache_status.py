@@ -30,7 +30,7 @@ class SyncCacheStatusView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     def get(self, request, object_type, pk):
         model = self._model(object_type)
         self.required_object_permissions = {"GET": [("view", model)]}
-        if error := self.require_all_permissions_json("GET"):
+        if error := self.require_object_permissions_json("GET"):
             return error
 
         obj = self.restrict_object_or_404(model, pk=pk)
@@ -60,7 +60,7 @@ class SyncCacheFragmentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
         else:
             raise Http404("Unsupported sync object type.")
         self.required_object_permissions = {"GET": [("view", model)]}
-        if error := self.require_all_permissions_json("GET"):
+        if error := self.require_object_permissions_json("GET"):
             return None, error
         return self.restrict_object_or_404(model, pk=pk), None
 
