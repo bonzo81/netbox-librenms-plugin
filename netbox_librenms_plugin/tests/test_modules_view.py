@@ -1468,6 +1468,53 @@ class TestPostInventoryRefresh:
             "oob_librenms_id": None,
         }
 
+    def test_post_treats_non_int_main_index_as_fetch_failure(self, librenms_server, server_keys):
+        """A main inventory row with a string index fails closed before the OOB offset."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-main-string-index", server_key)
+        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        device.save(update_fields=["custom_field_data"])
+        view = DeviceModuleTableView()
+        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
+        self._register_successful_refresh(
+            librenms_server,
+            inventory=[
+                {
+                    "entPhysicalIndex": "5",
+                    "entPhysicalName": "main-fan",
+                    "entPhysicalClass": "fan",
+                    "entPhysicalContainedIn": 0,
+                }
+            ],
+        )
+        librenms_server.register(
+            "/api/v0/inventory/999/all",
+            {
+                "status": "ok",
+                "inventory": [{"entPhysicalIndex": 1, "entPhysicalName": "oob-fan"}],
+            },
+            method="GET",
+        )
+        request = make_request("post", {"server_key": server_key})
+
+        response = post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert message_texts(request, "error") == [
+            "Failed to fetch inventory from LibreNMS; see server logs for details."
+        ]
+        assert message_texts(request, "success") == []
+        status = SyncCacheConsistency(device).status(server_key)[SyncTab.MODULES.value]
+        assert status["state"] == SyncTabState.REFRESH_FAILED.value
+        assert cache.get(cache_key) is None
+
     def test_post_treats_non_int_oob_index_as_fetch_failure(self, librenms_server, server_keys):
         """An OOB inventory row with a non-int entPhysicalIndex fails closed. It must not raise an offset TypeError or cache a partial snapshot."""
         from django.core.cache import cache

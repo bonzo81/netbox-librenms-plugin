@@ -80,27 +80,22 @@ def _clean_librenms_value(value) -> str:
     return "" if text.lower() in _PLACEHOLDER_VALUES else text
 
 
-def _oob_item_offsettable(item: dict) -> bool:
+def _inventory_item_offsettable(item: dict) -> bool:
     """
-    Return True if an OOB inventory item's index fields can be offset arithmetically.
+    Return True if an inventory item's index fields support offset arithmetic.
 
-    The OOB merge shifts ``entPhysicalIndex`` / ``entPhysicalContainedIn`` by a numeric
-    offset, so both must be an int (or absent / the 0 root). A non-int from a malformed
-    OOB payload would raise ``TypeError`` (e.g. ``"5" + offset``) and cause the
-    module tab to return HTTP 500.
-    Used to fail the whole OOB fetch closed to a host-only snapshot rather than crash the
-    offset loop. get_device_inventory already guarantees the container and element types.
+    Both fields must be integers or absent. The parent can also use zero for the root.
 
     Args:
-        item (dict): The OOB inventory item to check.
+        item (dict): The inventory item to check.
 
     Returns:
-        bool: True if the item's index fields can be offset arithmetically.
+        bool: True if both index fields support offset arithmetic.
     """
     idx = item.get("entPhysicalIndex")
     parent = item.get("entPhysicalContainedIn")
     idx_ok = idx is None or (isinstance(idx, int) and not isinstance(idx, bool))
-    parent_ok = parent in (None, 0) or (isinstance(parent, int) and not isinstance(parent, bool))
+    parent_ok = parent is None or (isinstance(parent, int) and not isinstance(parent, bool))
     return idx_ok and parent_ok
 
 
@@ -420,8 +415,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
 
-        # get_device_inventory only reports success for a list of dicts, so a malformed payload
-        # already arrives as a failure here (see its Returns contract).
+        # get_device_inventory validates the container, not the index types. A non-int index
+        # would crash the OOB offset.
+        if success and not all(_inventory_item_offsettable(item) for item in inventory_data):
+            success, inventory_data = (
+                False,
+                "inventory payload has a non-integer entPhysicalIndex or entPhysicalContainedIn",
+            )
+
+        # Treat transport errors, invalid containers, and invalid index types as fetch failures.
         if not success:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             SyncCacheConsistency(obj).mark_refresh_failure(
@@ -500,7 +502,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
             # entPhysicalIndex/entPhysicalContainedIn: a numeric string would crash the offset
             # loop below (TypeError on "5" + offset), so fail closed to a host-only snapshot.
-            if oob_success and all(_oob_item_offsettable(item) for item in oob_inventory):
+            if oob_success and all(_inventory_item_offsettable(item) for item in oob_inventory):
                 main_max_idx = max(
                     (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
                     default=0,
