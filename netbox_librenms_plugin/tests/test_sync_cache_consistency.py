@@ -927,13 +927,35 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
     transaction=True,
     available_apps=tuple(app.name for app in django_apps.get_app_configs()),
 )
-def test_same_page_htmx_module_action_queues_the_cache_notice_for_the_reload(client, settings):
-    """A module action that answers HX-Refresh must queue its cache notice for the reloaded page."""
+def test_htmx_module_action_delivers_the_cache_notice_with_the_fragment(client, settings):
+    """A module action swaps its tab in place, so the browser gets the cache notice from the trigger."""
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
     _configure_servers(settings)
     device = make_device("cache-modules-refresh-notice", librenms_cf={"primary": {"id": 612}})
     bay = make_module_bay(device, "Refresh Bay")
     module_type = make_module_type("REFRESH-CARD")
     _seed_snapshot("ports", device, "primary")
+    _seed_snapshot(
+        "inventory",
+        device,
+        "primary",
+        trusted_module_inventory_payload(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 8301,
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalContainedIn": 0,
+                    "entPhysicalName": bay.name,
+                    "entPhysicalSerialNum": "REFRESH-1",
+                }
+            ],
+            server_key="primary",
+            librenms_id=612,
+        ),
+    )
     client.force_login(make_superuser("cache-modules-refresh-user"))
     sync_page = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
     install_url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
@@ -945,14 +967,39 @@ def test_same_page_htmx_module_action_queues_the_cache_notice_for_the_reload(cli
         HTTP_HX_CURRENT_URL=f"http://testserver{sync_page}?tab=modules&server_key=primary#librenms-module-table",
     )
 
-    assert response.status_code == 204
-    assert response["HX-Refresh"] == "true"
-    assert "HX-Trigger" not in response
+    assert response.status_code == 200
+    assert "HX-Refresh" not in response
+    assert "HX-Redirect" not in response
+    assert json.loads(response["HX-Trigger"])["librenmsCacheChanged"]["removed"] is True
     assert Module.objects.filter(device=device, module_bay=bay).exists()
     assert cache.get(_cache_key("ports", device, "primary")) is None
+    assert b'id="librenms-module-table"' in response.content
     next_page = client.get(device.get_absolute_url())
     assert next_page.status_code == 200
-    assert b"Other sync tabs were cleared" in next_page.content
+    assert b"Other sync tabs were cleared" not in next_page.content
+
+
+@pytest.mark.django_db
+def test_hx_refresh_navigation_queues_the_cache_notice_instead_of_triggering_it():
+    """An HX-Refresh response (the migrate views) reloads the page, so its notice must be queued."""
+    from netbox_librenms_plugin.sync_cache import _write_transition_to_response
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
+
+    request = make_request("post", {}, path="/sync", HTTP_HX_REQUEST="true")
+    transition = CacheMutationTransition(
+        transition_id="refresh-transition",
+        removed_tabs={("primary", SyncTab.INTERFACES)},
+        revisions={("primary", SyncTab.INTERFACES): "refresh-revision"},
+        source_tab=SyncTab.MODULES,
+        completed=True,
+    )
+    response = HttpResponse()
+    response["HX-Refresh"] = "true"
+
+    _write_transition_to_response(request, response, transition)
+
+    assert "HX-Trigger" not in response
+    assert any("Other sync tabs were cleared" in text for text in message_texts(request))
 
 
 @pytest.mark.django_db
@@ -1657,6 +1704,8 @@ def test_htmx_module_cache_miss_replaces_active_tab_with_warning(client, setting
 
     assert response.status_code == 200
     assert "HX-Redirect" not in response
+    assert response["HX-Retarget"] == "#module-sync-content"
+    assert b"No cached inventory data" in response.content
     assert b"Refresh Modules" in response.content
     assert b'name="select"' not in response.content
 

@@ -720,7 +720,7 @@ class LibreNMSAPIMixin:
         # so live fetches and cache writes target the same server.
         return api.server_key
 
-    def resolve_get_render_server_key(self, request):
+    def resolve_get_render_server_key(self, request, server_key=None):
         """
         Resolve and rebind ``self.librenms_api`` for a GET-render cache read.
 
@@ -733,6 +733,8 @@ class LibreNMSAPIMixin:
 
         Args:
             request: The current request; ``?server_key`` is read from its GET params.
+            server_key: An already-resolved key used instead of the GET param, for a re-render
+                whose request carries the key outside the query string (the module actions).
 
         Returns:
             tuple[str | None, bool]: ``(scoped_key, unresolved)``. ``scoped_key`` is the key
@@ -741,7 +743,9 @@ class LibreNMSAPIMixin:
                 wants to short-circuit can render an empty table scoped to ``scoped_key`` rather
                 than fall back to the default server's cached data.
         """
-        requested = (request.GET.get("server_key") or "").strip()
+        if server_key is None:
+            server_key = request.GET.get("server_key") or ""
+        requested = server_key.strip()
         resolved = self.rebind_api_for_server(requested)
         if requested and resolved is None:
             return requested, True

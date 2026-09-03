@@ -1961,7 +1961,7 @@ class TestSingleInstallInterfaceBinding:
                 return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42, "changed": True},
             ) as mock_bind,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
@@ -2011,7 +2011,7 @@ class TestSingleInstallInterfaceBinding:
                 return_value={"status": "bound", "adopted_count": 0, "interfaces": []},
             ),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {
                 "inventory": [{"entPhysicalIndex": 78, "_librenms_port_id": 43, "_librenms_ifname": "Te1/1/2"}],
@@ -2184,7 +2184,7 @@ class TestSingleInstallInterfaceBinding:
                 "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
             ) as mock_adopt,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 587, "_librenms_ifname": "2/x1/1/c2"}],
@@ -4933,7 +4933,7 @@ class TestBuildTableRowsBayCollisionDetection:
 
 
 class TestModulesRedirectResponse:
-    """_modules_redirect_response: HX-Request → HX-Redirect; classic → redirect()."""
+    """_modules_redirect_response: the classic (non-HTMX) redirect back to the modules tab."""
 
     def test_classic_request_uses_redirect(self):
         from unittest.mock import MagicMock, patch
@@ -4949,107 +4949,6 @@ class TestModulesRedirectResponse:
             result = _modules_redirect_response(req, "/sync/")
         mock_redirect.assert_called_once_with("/sync/?tab=modules#librenms-module-table")
         assert result == "REDIRECT"
-
-    def test_htmx_request_returns_hx_redirect_header(self):
-        from unittest.mock import MagicMock
-
-        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
-
-        req = MagicMock()
-        req.headers = {"HX-Request": "true"}
-        req.POST = {}
-        req.GET = {}
-        response = _modules_redirect_response(req, "/sync/")
-        assert response.status_code == 204
-        assert response["HX-Redirect"] == "/sync/?tab=modules#librenms-module-table"
-
-    @pytest.mark.django_db
-    @pytest.mark.parametrize(
-        "current_url",
-        [
-            "http://[::1]:8000/sync/?tab=modules&server_key=production#librenms-module-table",
-            "http://[::1]:8000/sync/?tab=modules&server_key=production",
-        ],
-        ids=["with-fragment", "without-fragment"],
-    )
-    def test_htmx_request_sent_from_the_target_page_refreshes_instead_of_redirecting(self, current_url):
-        """An HX-Redirect to the page's own URL never navigates and htmx keeps the row spinner, so reload."""
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request
-        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
-
-        request = make_request(
-            "post",
-            {"server_key": "production"},
-            path="/sync/",
-            HTTP_HX_REQUEST="true",
-            HTTP_HX_CURRENT_URL=current_url,
-        )
-
-        response = _modules_redirect_response(request, "/sync/")
-
-        assert response.status_code == 204
-        assert response["HX-Refresh"] == "true"
-        assert "HX-Redirect" not in response
-
-    @pytest.mark.django_db
-    def test_htmx_request_sent_from_another_page_keeps_the_redirect(self):
-        """A target with a different query is a real navigation, so HX-Redirect stays."""
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request
-        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
-
-        request = make_request(
-            "post",
-            {"server_key": "production"},
-            path="/sync/",
-            HTTP_HX_REQUEST="true",
-            HTTP_HX_CURRENT_URL="http://[::1]:8000/sync/?tab=modules",
-        )
-
-        response = _modules_redirect_response(request, "/sync/")
-
-        assert response["HX-Redirect"] == "/sync/?tab=modules&server_key=production#librenms-module-table"
-        assert "HX-Refresh" not in response
-
-    @pytest.mark.django_db
-    def test_install_module_posted_from_its_own_page_reloads_that_page(self):
-        """End to end: a real install view answers a same-page HTMX post with HX-Refresh."""
-        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
-        from django.urls import reverse
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
-        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
-
-        device = make_device("install-refresh-same-page")
-        sync_path = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
-        user = make_user_with_perms(
-            "install-refresh-same-page",
-            [
-                ("view", Device),
-                ("view", ModuleBay),
-                ("view", ModuleType),
-                ("add", Module),
-                ("add", Interface),
-                ("change", Interface),
-                ("delete", Interface),
-            ],
-        )
-        request = make_request(
-            "post",
-            {"server_key": "prod"},
-            user=user,
-            path="/install-module/",
-            HTTP_HX_REQUEST="true",
-            HTTP_HX_CURRENT_URL=f"http://testserver{sync_path}?tab=modules&server_key=prod#librenms-module-table",
-        )
-        view = InstallModuleView()
-        view._librenms_api = SimpleNamespace(server_key="prod")
-
-        response = _post(view, request, pk=device.pk)
-
-        assert response.status_code == 204
-        assert response["HX-Refresh"] == "true"
-        assert "HX-Redirect" not in response
 
     def test_explicit_server_key_is_appended(self):
         """A server-scoped action must keep the active server_key in the follow-up URL so the user returns to the same cache namespace this request mutated/read."""
@@ -5077,6 +4976,265 @@ class TestModulesRedirectResponse:
         with patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect:
             _modules_redirect_response(req, "/sync/")
         mock_redirect.assert_called_once_with("/sync/?tab=modules&server_key=production#librenms-module-table")
+
+
+@pytest.mark.django_db
+class TestModulesActionResponse:
+    """Module actions swap the module tab in place over HTMX and keep the classic redirect."""
+
+    SERVER_KEY = "prod"
+
+    def _configure_server(self, settings):
+        """Configure one LibreNMS server the module actions can resolve."""
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+        configure_librenms_servers(
+            settings,
+            {self.SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}},
+        )
+
+    def _seed_inventory(self, device, bay, module_type, *, serial="ACTION-1", librenms_id=9201):
+        """Seed one inventory row matching *bay* and *module_type* under the module tab's cache key."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        payload = trusted_module_inventory_payload(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 8201,
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalContainedIn": 0,
+                    "entPhysicalName": bay.name,
+                    "entPhysicalSerialNum": serial,
+                }
+            ],
+            server_key=self.SERVER_KEY,
+            librenms_id=librenms_id,
+        )
+        cache_key = DeviceModuleTableView().get_cache_key(device, "inventory", server_key=self.SERVER_KEY)
+        cache.set(cache_key, payload, 300)
+
+    def test_htmx_install_swaps_the_module_tab_in_place(self, client, settings, django_capture_on_commit_callbacks):
+        """An HTMX install answers with the module tab fragment instead of navigating the browser."""
+        import json
+
+        from dcim.models import Module
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+
+        self._configure_server(settings)
+        device = make_device("modules-action-install")
+        bay = make_module_bay(device, "Action Bay")
+        module_type = make_module_type("ACTION-CARD")
+        self._seed_inventory(device, bay, module_type)
+        client.force_login(make_superuser("modules-action-install-user"))
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+
+        with django_capture_on_commit_callbacks(execute=True):
+            response = client.post(
+                url,
+                {
+                    "server_key": self.SERVER_KEY,
+                    "module_bay_id": str(bay.pk),
+                    "module_type_id": str(module_type.pk),
+                    "serial": "ACTION-1",
+                },
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert response.status_code == 200
+        assert response["HX-Retarget"] == "#module-sync-content"
+        assert response["HX-Reswap"] == "innerHTML"
+        assert "HX-Redirect" not in response
+        assert "HX-Refresh" not in response
+        trigger = json.loads(response["HX-Trigger"])
+        assert "closeModal" in trigger
+        assert "librenmsCacheChanged" in trigger
+        body = response.content.decode()
+        assert 'id="librenms-module-table"' in body
+        assert f'name="server_key" value="{self.SERVER_KEY}"' in body
+        assert f"Installed {module_type.model} in {bay.name}" in body
+        assert '<span class="badge bg-success text-white">Installed</span>' in body
+        assert Module.objects.filter(device=device, module_bay=bay, module_type=module_type).exists()
+
+    def test_htmx_action_keeps_the_page_and_sort_of_the_current_url(self, client, settings):
+        """The re-rendered table honours the page's own query (page, per_page), not the action URL's empty one."""
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        self._configure_server(settings)
+        device = make_device("modules-action-paged")
+        module_type = make_module_type("ACTION-CARD")
+        # NetBox's EnhancedPaginator folds up to 5 orphans into the last page, so 7 rows make a real page 2.
+        bays = [make_module_bay(device, f"Bay {number:02d}") for number in range(1, 8)]
+        payload = trusted_module_inventory_payload(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 8200 + number,
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalContainedIn": 0,
+                    "entPhysicalName": bay.name,
+                    "entPhysicalSerialNum": f"PAGED-{number}",
+                }
+                for number, bay in enumerate(bays, start=1)
+            ],
+            server_key=self.SERVER_KEY,
+            librenms_id=9204,
+        )
+        first_bay = bays[0]
+        cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key=self.SERVER_KEY), payload, 300)
+        client.force_login(make_superuser("modules-action-paged-user"))
+        sync_page = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+
+        response = client.post(
+            url,
+            {
+                "server_key": self.SERVER_KEY,
+                "module_bay_id": str(first_bay.pk),
+                "module_type_id": str(module_type.pk),
+                "serial": "PAGED-1",
+            },
+            HTTP_HX_REQUEST="true",
+            HTTP_HX_CURRENT_URL=(
+                f"http://testserver{sync_page}?tab=modules&server_key={self.SERVER_KEY}"
+                "&modules_per_page=1&modules_page=2#librenms-module-table"
+            ),
+        )
+
+        assert response.status_code == 200
+        table = response.content.decode().split('id="librenms-module-table"', 1)[1]
+        assert "Bay 02" in table
+        assert "Bay 01" not in table
+        assert "modules_page=1" in response.content.decode()
+
+    def test_classic_install_still_redirects_to_the_modules_tab(self, client, settings):
+        """Without the HTMX header the same install keeps the server-scoped redirect contract."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+
+        self._configure_server(settings)
+        device = make_device("modules-action-classic")
+        bay = make_module_bay(device, "Classic Bay")
+        module_type = make_module_type("CLASSIC-CARD")
+        self._seed_inventory(device, bay, module_type, librenms_id=9202)
+        client.force_login(make_superuser("modules-action-classic-user"))
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+
+        response = client.post(
+            url,
+            {
+                "server_key": self.SERVER_KEY,
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "serial": "ACTION-1",
+            },
+        )
+
+        assert response.status_code == 302
+        assert response.url.endswith(f"?tab=modules&server_key={self.SERVER_KEY}#librenms-module-table")
+
+    def test_htmx_serial_update_from_the_modal_is_retargeted(self, client, settings):
+        """A mismatch-modal action (which swaps nothing itself) is retargeted at the module tab."""
+        from dcim.models import Module
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+
+        self._configure_server(settings)
+        device = make_device("modules-action-serial")
+        bay = make_module_bay(device, "Serial Bay")
+        module_type = make_module_type("SERIAL-CARD")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD-SERIAL")
+        self._seed_inventory(device, bay, module_type, librenms_id=9203)
+        client.force_login(make_superuser("modules-action-serial-user"))
+        url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+
+        response = client.post(
+            url,
+            {"server_key": self.SERVER_KEY, "module_id": str(module.pk), "serial": "ACTION-1"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert response["HX-Retarget"] == "#module-sync-content"
+        assert response["HX-Reswap"] == "innerHTML"
+        body = response.content.decode()
+        assert 'id="librenms-module-table"' in body
+        assert f"Updated serial for {module_type.model} in {bay.name}" in body
+        module.refresh_from_db()
+        assert module.serial == "ACTION-1"
+
+    def test_htmx_action_without_a_snapshot_renders_the_empty_tab(self, client, settings):
+        """A missing inventory snapshot reports the error inside the re-rendered tab."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+
+        self._configure_server(settings)
+        device = make_device("modules-action-no-snapshot")
+        client.force_login(make_superuser("modules-action-no-snapshot-user"))
+        url = reverse("plugins:netbox_librenms_plugin:install_selected", kwargs={"pk": device.pk})
+
+        response = client.post(
+            url,
+            {"server_key": self.SERVER_KEY, "select": "8201"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert response["HX-Retarget"] == "#module-sync-content"
+        assert "HX-Redirect" not in response
+        body = response.content.decode()
+        assert "No cached inventory data" in body
+        assert "Refresh Modules" in body
+
+    def _seed_serial_mismatch(self, suffix, *, conflict, librenms_id):
+        """Seed a device whose installed module's serial differs from the cached LibreNMS serial."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+
+        device = make_device(f"modules-preview-{suffix}")
+        bay = make_module_bay(device, "Preview Bay")
+        module_type = make_module_type(f"PREVIEW-CARD-{suffix}")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD-SERIAL")
+        self._seed_inventory(device, bay, module_type, librenms_id=librenms_id)
+        if conflict:
+            other = make_device(f"modules-preview-{suffix}-holder")
+            other_bay = make_module_bay(other, "Holder Bay")
+            Module.objects.create(device=other, module_bay=other_bay, module_type=module_type, serial="ACTION-1")
+        return device, module
 
 
 class TestAddBayTemplateViewWiring:
@@ -5114,26 +5272,18 @@ class TestAddBayTemplateViewPostValidation:
         req.headers = {"HX-Request": "true"} if htmx else {}
         return req
 
-    def test_invalid_target_kind_returns_redirect(self):
+    def test_invalid_target_kind_returns_400(self):
+        """A tampered target_kind is refused before the permission gate, like the GET render."""
         view = self._make_view()
         req = self._make_request({"target_kind": "bogus", "target_pk": "1", "name": "Slot 1"})
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=MagicMock(),
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"
-            ) as mock_redir,
-        ):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=MagicMock(),
+        ) as mock_restrict:
             view.request = req
-            result = view.post(req, pk=1)
-        assert result == "REDIR"
-        assert mock_messages.error.called
-        assert "Invalid target_kind" in mock_messages.error.call_args[0][1]
-        mock_redir.assert_called_once()
+            response = view.post(req, pk=1)
+        assert response.status_code == 400
+        mock_restrict.assert_not_called()
 
     def test_missing_target_pk_returns_redirect(self):
         view = self._make_view()
@@ -5145,7 +5295,7 @@ class TestAddBayTemplateViewPostValidation:
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
         ):
             view.request = req
             view.post(req, pk=1)
@@ -5161,7 +5311,7 @@ class TestAddBayTemplateViewPostValidation:
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
         ):
             view.request = req
             view.post(req, pk=1)
@@ -5355,7 +5505,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5402,7 +5552,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5435,7 +5585,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5763,7 +5913,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5804,7 +5954,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5843,7 +5993,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5882,7 +6032,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -6428,7 +6578,7 @@ class TestModuleInterfaceUpdateMessage:
 
 @pytest.mark.django_db
 class TestReplaceModuleRedirectServerKey:
-    """ReplaceModuleView keeps its active server on a real validation redirect."""
+    """ReplaceModuleView keeps its active server on a real classic validation redirect."""
 
     def test_missing_module_id_preserves_fallback_server_key(self):
         from types import SimpleNamespace
@@ -6453,37 +6603,25 @@ class TestReplaceModuleRedirectServerKey:
                 ("delete", Interface),
             ],
         )
-        request = make_request(
-            "post",
-            {},
-            user=user,
-            path="/replace-module/",
-            HTTP_HX_REQUEST="true",
-        )
+        request = make_request("post", {}, user=user, path="/replace-module/")
         view = ReplaceModuleView()
         view._librenms_api = SimpleNamespace(server_key="prod")
 
         response = _post(view, request, pk=device.pk)
 
-        assert response.status_code == 204
-        assert "server_key=prod" in response["HX-Redirect"]
+        assert response.status_code == 302
+        assert "server_key=prod" in response.url
 
 
 @pytest.mark.django_db
 class TestUpdateModuleInterfaceRedirectServerKey:
-    """UpdateModuleInterfaceView keeps its resolved server on real redirects."""
+    """UpdateModuleInterfaceView keeps its resolved server on real classic redirects."""
 
     @staticmethod
     def _request(user, data):
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
-        return make_request(
-            "post",
-            data,
-            user=user,
-            path="/update-interface/",
-            HTTP_HX_REQUEST="true",
-        )
+        return make_request("post", data, user=user, path="/update-interface/")
 
     def test_invalid_module_id_preserves_fallback_server_key(self):
         from types import SimpleNamespace
@@ -6505,8 +6643,8 @@ class TestUpdateModuleInterfaceRedirectServerKey:
 
         response = _post(view, request, pk=device.pk)
 
-        assert response.status_code == 204
-        assert "server_key=prod" in response["HX-Redirect"]
+        assert response.status_code == 302
+        assert "server_key=prod" in response.url
 
     def test_success_preserves_fallback_server_key(self):
         from types import SimpleNamespace
@@ -6539,8 +6677,8 @@ class TestUpdateModuleInterfaceRedirectServerKey:
 
         response = _post(view, request, pk=device.pk)
 
-        assert response.status_code == 204
-        assert "server_key=prod" in response["HX-Redirect"]
+        assert response.status_code == 302
+        assert "server_key=prod" in response.url
 
 
 class TestStandaloneAdoptionAcrossEveryComponentType:

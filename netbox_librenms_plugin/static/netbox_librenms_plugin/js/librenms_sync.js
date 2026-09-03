@@ -3345,6 +3345,10 @@ function closeHtmxModal() {
     hideModal(document.getElementById('htmx-modal'));
 }
 
+// A module action posted from the mismatch modal answers HX-Trigger: closeModal, because the
+// module tab fragment is swapped outside the modal and leaves it open.
+document.body.addEventListener('closeModal', closeHtmxModal);
+
 // ============================================
 // INITIALIZATION
 // ============================================

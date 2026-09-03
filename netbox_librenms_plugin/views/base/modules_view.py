@@ -589,15 +589,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             {"module_sync": context},
         )
 
-    def get_context_data(self, request, obj):
-        """Get context from cache (used by the main sync view on initial page load)."""
+    def get_context_data(self, request, obj, server_key=None):
+        """Get context from cache (used on initial page load and by the module actions' in-place re-render)."""
         # Scope the cache read + OOB-fingerprint comparison to the active server from the request
         # (GET query), matching the server post() rebinds to and caches under. Without this the
         # GET render keys on the lazy default server_key, so a non-default-server tab cache-misses
         # (empty module table despite a successful refresh) and the OOB-invalidation guard no-ops.
         # The shared helper falls back to the session/default server when the query is blank, so
         # single-server and default-server renders are unchanged.
-        scoped_server, unresolved = self.resolve_get_render_server_key(request)
+        scoped_server, unresolved = self.resolve_get_render_server_key(request, server_key)
         if unresolved:
             # The query named a server that no longer resolves (deleted/misconfigured). Render an
             # empty table scoped to that key instead of silently falling back to the default
