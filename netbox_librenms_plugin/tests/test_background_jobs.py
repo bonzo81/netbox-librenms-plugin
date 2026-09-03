@@ -82,6 +82,43 @@ def _import_user(tag, *, devices=True, vms=True):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("job_kind", "legacy_kwargs"),
+    [
+        pytest.param(
+            "filter",
+            {
+                "filters": {},
+                "vc_detection_enabled": False,
+                "clear_cache": False,
+                "show_disabled": False,
+            },
+            id="filter-devices",
+        ),
+        pytest.param(
+            "import",
+            {"device_ids": [], "vm_imports": {}},
+            id="import-devices",
+        ),
+    ],
+)
+def test_legacy_job_payload_without_server_key_reaches_explicit_validation(job_kind, legacy_kwargs):
+    """The real NetBox runner must record the missing server instead of a signature error."""
+    from core.choices import JobStatusChoices
+
+    from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
+
+    job_class = FilterDevicesJob if job_kind == "filter" else ImportDevicesJob
+    job = _job(make_superuser(f"background-legacy-{job_kind}-owner"), f"legacy-{job_kind}")
+
+    job_class.handle(job=job, **legacy_kwargs)
+
+    job.refresh_from_db()
+    assert job.status == JobStatusChoices.STATUS_ERRORED
+    assert "The job does not reference one configured LibreNMS server." in job.error
+
+
+@pytest.mark.django_db
 class TestShouldUseBackgroundJob:
     @staticmethod
     def _view(user, data=None, *, cleaned_data=None):

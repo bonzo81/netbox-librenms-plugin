@@ -55,7 +55,7 @@ class FilterDevicesJob(JobRunner):
         vc_detection_enabled,
         clear_cache,
         show_disabled,
-        server_key,
+        server_key=None,
         exclude_existing=False,
         use_sysname=True,
         strip_domain=False,
@@ -72,7 +72,7 @@ class FilterDevicesJob(JobRunner):
             clear_cache: Whether to force cache refresh
             show_disabled: Whether to include disabled devices
             exclude_existing: Whether to exclude devices that already exist in NetBox
-            server_key: Exact configured LibreNMS server key captured when the job was queued
+            server_key: Exact configured LibreNMS server key, or None for a legacy queued job
             use_sysname: If True, prefer sysName over hostname for device name resolution
             strip_domain: If True, strip domain suffix from device names
             **kwargs: Additional job parameters
@@ -174,7 +174,7 @@ class ImportDevicesJob(JobRunner):
         self,
         device_ids,
         vm_imports,
-        server_key,
+        server_key=None,
         sync_options=None,
         manual_mappings_per_device=None,
         libre_devices_cache=None,
@@ -186,7 +186,7 @@ class ImportDevicesJob(JobRunner):
         Args:
             device_ids: List of LibreNMS device IDs to import as Devices
             vm_imports: Dict mapping device_id to cluster/role info for VM imports
-            server_key: Exact configured LibreNMS server key captured when the job was queued
+            server_key: Exact configured LibreNMS server key, or None for a legacy queued job
             sync_options: Dict with sync_interfaces, sync_cables,
                 use_sysname, strip_domain, and vc_detection_enabled
             manual_mappings_per_device: Dict mapping device_id to manual_mappings dict
