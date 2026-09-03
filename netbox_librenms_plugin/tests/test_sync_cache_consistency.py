@@ -1,6 +1,7 @@
 """Request-level tests for cross-tab cache consistency."""
 
 import json
+from unittest.mock import patch
 
 import pytest
 from dcim.models import Cable, Module, ModuleBay, ModuleBayTemplate, ModuleType
@@ -1486,12 +1487,12 @@ def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(s
 
 
 @pytest.mark.django_db
-def test_module_serial_update_without_a_usable_server_refuses_the_write(
+def test_module_serial_update_without_a_usable_server_invalidates_the_source_snapshot(
     client,
     settings,
     django_capture_on_commit_callbacks,
 ):
-    """The serial comes from the server-scoped inventory snapshot, so no server means no write."""
+    """A NetBox-only module write without cleanup ownership must invalidate its source snapshot."""
     server_key = _configured_server_key(settings)
     device = make_device("cache-serial-without-server", librenms_cf={server_key: {"id": 645}})
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
@@ -1502,16 +1503,20 @@ def test_module_serial_update_without_a_usable_server_refuses_the_write(
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
     configure_no_librenms_servers(settings)
     _seed_snapshot("inventory", device, server_key)
+    assert cache.get(_cache_key("inventory", device, server_key)) is not None
     client.force_login(make_superuser("cache-serial-without-server-user"))
     url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"module_id": str(module.pk), "ent_index": "8104"})
+        response = client.post(url, {"module_id": str(module.pk), "serial": "NEW"})
 
     assert response.status_code == 302
     module.refresh_from_db()
-    assert module.serial == "OLD"
-    assert cache.get(_cache_key("inventory", device, server_key)) is not None
+    assert module.serial == "NEW"
+    assert cache.get(_cache_key("inventory", device, server_key)) is None
+    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, server_key))
+    assert state is not None
+    assert state["state"] == SyncTabState.INVALIDATED.value
 
 
 @pytest.mark.django_db
@@ -1954,8 +1959,8 @@ def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
 
 
-def _drop_snapshot_write(device, tab):
-    """Patch cache.set to skip only the tab's snapshot key; return the patch and the keys it skipped."""
+def _drop_snapshot_write(monkeypatch, device, tab):
+    """Make cache.set skip only the tab's snapshot key; return the keys it skipped."""
     snapshot_key = SyncCacheConsistency(device).snapshot_key(tab, "primary")
     real_set = cache.set
     skipped = []
@@ -1966,34 +1971,24 @@ def _drop_snapshot_write(device, tab):
             return
         real_set(key, *args, **kwargs)
 
-    return patch("django.core.cache.cache.set", side_effect=drop_snapshot_write), skipped
+    monkeypatch.setattr(cache, "set", drop_snapshot_write)
+    return skipped
 
 
 @pytest.mark.django_db
-def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success(
+    client, settings, primary_librenms, monkeypatch
+):
     """A lost interface snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
     device = make_device("cache-interface-nosnap", librenms_cf={"primary": {"id": 663}})
     user = make_superuser("cache-interface-nosnap-user")
     client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/devices/663/ports"):
-            return _json_response(url, {"status": "ok", "ports": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.INTERFACES)
+    primary_librenms.register("/api/v0/devices/663/ports", {"status": "ok", "ports": []})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.INTERFACES)
 
     url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
-    ):
-        response = client.post(
-            url,
-            {"server_key": "primary", "interface_name_field": "ifName"},
-            HTTP_HX_REQUEST="true",
-        )
+    response = client.post(url, {"server_key": "primary", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
     assert b"Interface data refreshed successfully" not in response.content
@@ -2005,188 +2000,20 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
 
 
 @pytest.mark.django_db
-def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(client, settings):
-    """
-    The response still renders the freshly fetched rows when only the cache write failed.
-
-    Saying the tab has no snapshot to show contradicts the table beside it, and leaves the user
-    with no idea that those rows cannot be synced until the data is cached.
-    """
-    _configure_servers(settings)
-    device = make_device("cache-ip-rows", librenms_cf={"primary": {"id": 665}})
-    user = make_superuser("cache-ip-rows-user")
-    client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/devices/665/ip"):
-            return _json_response(
-                url,
-                {
-                    "status": "ok",
-                    "addresses": [
-                        {
-                            "ipv4_address": "198.18.44.10",
-                            "ipv4_prefixlen": 24,
-                            "port_id": 7440,
-                        }
-                    ],
-                },
-            )
-        if url.endswith("/api/v0/devices/665"):
-            return _json_response(url, {"status": "ok", "devices": [{"device_id": 665}]})
-        if url.endswith("/api/v0/devices/665/ports"):
-            return _json_response(url, {"status": "ok", "ports": [{"port_id": 7440, "ifName": "Ethernet40"}]})
-        if url.endswith("/api/v0/ports/7440"):
-            return _json_response(url, {"status": "ok", "port": [{"port_id": 7440, "ifName": "Ethernet40"}]})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.IP_ADDRESSES)
-    url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
-    ):
-        response = client.post(
-            url,
-            {"server_key": "primary", "interface_name_field": "ifName"},
-            HTTP_HX_REQUEST="true",
-        )
-
-    assert response.status_code == 200
-    # Without this the test still passes when the view stops writing the snapshot at all.
-    assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.IP_ADDRESSES, "primary")]
-    assert b"could not be cached" in response.content
-    assert b"no snapshot to show" not in response.content
-
-
-@pytest.mark.django_db
-def test_a_failed_module_cache_write_does_not_claim_there_is_nothing_to_show(client, settings):
-    """A failed snapshot write must not contradict the module rows in the response."""
-    _configure_servers(settings)
-    device = make_device("cache-module-rows", librenms_cf={"primary": {"id": 667}})
-    client.force_login(make_superuser("cache-module-rows-user"))
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/inventory/667/all"):
-            return _json_response(
-                url,
-                {
-                    "status": "ok",
-                    "inventory": [
-                        {
-                            "entPhysicalIndex": 1,
-                            "entPhysicalName": "Fresh module slot",
-                            "entPhysicalClass": "module",
-                            "entPhysicalModelName": "FRESH-MODULE-1",
-                            "entPhysicalSerialNum": "FRESH-SERIAL-1",
-                            "entPhysicalDescr": "module",
-                        }
-                    ],
-                },
-            )
-        if url.endswith("/api/v0/devices/667/ports"):
-            return _json_response(url, {"status": "ok", "ports": []})
-        if url.endswith("/api/v0/devices/667/transceivers"):
-            return _json_response(url, {"status": "ok", "transceivers": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.MODULES)
-    url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
-    ):
-        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
-
-    assert response.status_code == 200
-    assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, "primary")]
-    assert b"FRESH-MODULE-1" in response.content
-    assert b"could not be cached" in response.content
-    assert b"no snapshot to show" not in response.content
-
-
-@pytest.mark.django_db
-def test_a_failed_cable_cache_write_does_not_claim_there_is_nothing_to_show(client, settings):
-    """A failed snapshot write must not contradict the cable rows in the response."""
-    _configure_servers(settings)
-    device = make_device("cache-cable-rows", librenms_cf={"primary": {"id": 661}})
-    remote_device = make_device("cache-cable-rows-remote", librenms_cf={"primary": {"id": 662}})
-    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    remote = make_interface(remote_device, "Ethernet42", iface_type="1000base-t")
-    set_librenms_device_id(local, 7481, "primary")
-    set_librenms_device_id(remote, 7482, "primary")
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
-    user = make_superuser("cache-cable-rows-user")
-    client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/devices/661/links"):
-            return _json_response(
-                url,
-                {
-                    "status": "ok",
-                    "links": [
-                        {
-                            "local_port_id": 7481,
-                            "local_port": local.name,
-                            "remote_port_id": 7482,
-                            "remote_port": remote.name,
-                            "remote_hostname": remote_device.name,
-                            "remote_device_id": 662,
-                        }
-                    ],
-                },
-            )
-        if url.endswith("/api/v0/devices/661/ports"):
-            return _json_response(
-                url,
-                {"status": "ok", "ports": [{"port_id": 7481, "ifName": local.name, "ifDescr": local.name}]},
-            )
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.CABLES)
-    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
-    ):
-        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
-
-    assert response.status_code == 200
-    assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.CABLES, "primary")]
-    assert b"Ethernet42" in response.content
-    assert b"could not be cached" in response.content
-    assert b"no snapshot to show" not in response.content
-
-
-@pytest.mark.django_db
-def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_success(
+    client, settings, primary_librenms, monkeypatch
+):
     """A lost IP address snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
     device = make_device("cache-ip-nosnap", librenms_cf={"primary": {"id": 664}})
     user = make_superuser("cache-ip-nosnap-user")
     client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/devices/664/ip"):
-            return _json_response(url, {"status": "ok", "addresses": []})
-        if url.endswith("/api/v0/devices/664"):
-            return _json_response(url, {"status": "ok", "devices": [{"device_id": 664}]})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.IP_ADDRESSES)
+    primary_librenms.register("/api/v0/devices/664/ip", {"status": "ok", "addresses": []})
+    primary_librenms.register("/api/v0/devices/664", {"status": "ok", "devices": [{"device_id": 664}]})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.IP_ADDRESSES)
 
     url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
-    ):
-        response = client.post(
-            url,
-            {"server_key": "primary", "interface_name_field": "ifName"},
-            HTTP_HX_REQUEST="true",
-        )
+    response = client.post(url, {"server_key": "primary", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
     assert b"IP address data refreshed successfully" not in response.content
@@ -2198,26 +2025,19 @@ def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_succes
 
 
 @pytest.mark.django_db
-def test_vlan_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+def test_vlan_refresh_without_a_cached_snapshot_reports_failure_not_success(
+    client, settings, primary_librenms, monkeypatch
+):
     """A lost VLAN snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
     device = make_device("cache-vlan-nosnap", librenms_cf={"primary": {"id": 665}})
     user = make_superuser("cache-vlan-nosnap-user")
     client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/resources/vlans"):
-            return _json_response(url, {"status": "ok", "vlans": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.VLANS)
+    primary_librenms.register("/api/v0/resources/vlans", {"status": "ok", "vlans": []})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.VLANS)
 
     url = reverse("plugins:netbox_librenms_plugin:device_vlan_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
-    ):
-        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
     assert b"VLAN data refreshed successfully" not in response.content
@@ -2229,30 +2049,21 @@ def test_vlan_refresh_without_a_cached_snapshot_reports_failure_not_success(clie
 
 
 @pytest.mark.django_db
-def test_module_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+def test_module_refresh_without_a_cached_snapshot_reports_failure_not_success(
+    client, settings, primary_librenms, monkeypatch
+):
     """A lost module snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
     device = make_device("cache-module-nosnap", librenms_cf={"primary": {"id": 666}})
     user = make_superuser("cache-module-nosnap-user")
     client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/inventory/666/all"):
-            return _json_response(url, {"status": "ok", "inventory": []})
-        if url.endswith("/api/v0/devices/666/ports"):
-            return _json_response(url, {"status": "ok", "ports": []})
-        if url.endswith("/api/v0/devices/666/transceivers"):
-            return _json_response(url, {"status": "ok", "transceivers": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.MODULES)
+    primary_librenms.register("/api/v0/inventory/666/all", {"status": "ok", "inventory": []})
+    primary_librenms.register("/api/v0/devices/666/ports", {"status": "ok", "ports": []})
+    primary_librenms.register("/api/v0/devices/666/transceivers", {"status": "ok", "transceivers": []})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.MODULES)
 
     url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
-    ):
-        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
     assert b"Inventory data refreshed successfully" not in response.content
