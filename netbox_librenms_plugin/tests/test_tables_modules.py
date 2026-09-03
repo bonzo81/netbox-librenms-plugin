@@ -2,6 +2,7 @@
 
 import pytest
 from django.test import RequestFactory
+from django.urls import reverse
 
 from netbox_librenms_plugin.tests._html_helpers import open_tags
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
@@ -370,6 +371,60 @@ class TestActionRendering:
         for denied in ("can_add_module", "can_change_module", "can_delete_module"):
             assert "Replace" not in str(_table(device, **{denied: False}).render_actions(None, record))
         assert "Replace" in str(_table(device).render_actions(None, record))
+
+    def test_replace_opens_the_preview_through_an_htmx_swap(self):
+        device = make_device("table-replace-preview")
+        record = {"can_replace": True, "installed_module_id": 55, "ent_physical_index": 200, "serial": "S1"}
+        preview_url = reverse("plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": device.pk})
+
+        rendered = str(_table(device).render_actions(None, record))
+
+        assert "mdi-swap-horizontal" in rendered
+        # The preview fragment carries hx- forms, so it must arrive through an HTMX swap: a
+        # fetch()+innerHTML load leaves them unbound and they fall back to a full page reload.
+        (button,) = [tag for tag in open_tags(rendered, "button") if tag.get("hx-get")]
+        assert button["hx-get"] == (
+            f"{preview_url}?module_id=55&ent_index=200&server_key=production&selected_device_id={device.pk}"
+        )
+        assert button["hx-target"] == "#htmx-modal-content"
+        assert button["hx-swap"] == "innerHTML"
+        # A newer click supersedes an older in-flight preview, as the AbortController did.
+        assert button["hx-sync"] == "#htmx-modal-content:replace"
+        assert button["hx-disabled-elt"] == "this"
+
+    # One record per row action that posts through HTMX.
+    _HTMX_ROW_ACTIONS = {
+        "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "serial": "S1"},
+        "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
+        "update_serial": {"can_update_serial": True, "installed_module_id": 42, "serial": "S2"},
+        "update_interface": {
+            "can_update_interface_binding": True,
+            "installed_module_id": 42,
+            "ent_physical_index": 77,
+            "librenms_port_id": 56284,
+        },
+        "carrier_install": {
+            "status": "No Bay",
+            "carrier_install_options": [
+                {"bay_id": 12, "module_type_id": 34, "module_type_name": "CARRIER-A", "bay_name": "Slot 0"}
+            ],
+        },
+    }
+
+    @pytest.mark.parametrize("record", _HTMX_ROW_ACTIONS.values(), ids=list(_HTMX_ROW_ACTIONS))
+    def test_row_form_drops_a_concurrent_module_action(self, record):
+        """Two module actions in flight raced into one container: every row form takes the same lock."""
+        device = make_device("table-row-action-lock")
+
+        rendered = str(_table(device).render_actions(None, record))
+
+        forms = [tag for tag in open_tags(rendered, "form") if tag.get("hx-post")]
+        assert forms
+        for form in forms:
+            assert form["hx-sync"] == "#module-sync-content:drop"
+            assert form["hx-target"] == "#module-sync-content"
+            # The row spinner and the button lock stay: hx-sync only gates a SECOND action.
+            assert form["hx-disabled-elt"] == "find button"
 
     def test_add_and_change_permissions_gate_their_own_actions(self):
         device = make_device("table-split-permissions")
