@@ -2465,11 +2465,11 @@ def add_librenms_server_mapping(
         for mapped_key, entry in iter_server_mapping_entries(current_mapping)
         if mapped_key in configured_keys and resolve_server_mapping_display_id(entry)[0] is not None
     ]
-    adds_new_mapping = server_key not in current_mapping
+    adds_usable_mapping = server_key not in previous_usable_keys
 
     set_librenms_device_id(obj, normalized_device_id, server_key)
     updated_mapping = obj.custom_field_data["librenms_id"]
-    if adds_new_mapping and len(previous_usable_keys) == 1 and PREFERRED_SERVER_FIELD not in updated_mapping:
+    if adds_usable_mapping and len(previous_usable_keys) == 1 and PREFERRED_SERVER_FIELD not in updated_mapping:
         updated_mapping[PREFERRED_SERVER_FIELD] = previous_usable_keys[0]
         obj.custom_field_data["librenms_id"] = updated_mapping
 

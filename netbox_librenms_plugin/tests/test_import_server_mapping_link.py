@@ -155,6 +155,31 @@ def test_device_link_adds_secondary_mapping_and_prefers_the_previous_sole_mappin
 
 
 @pytest.mark.django_db
+def test_device_link_replacing_unusable_entry_prefers_the_previous_sole_mapping(client, servers):
+    """Replacing an unusable entry must preserve the previous usable server choice."""
+    device = make_device(
+        "edge-link-unusable-entry",
+        librenms_cf={"primary": 42, "secondary": None},
+    )
+    _register_import_device(servers.secondary, librenms_device(48202, device.name))
+    client.force_login(make_superuser("unusable-entry-device-linker"))
+
+    response = client.post(
+        _action_url(48202),
+        _link_payload(device),
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    device.refresh_from_db()
+    assert device.custom_field_data["librenms_id"] == {
+        "primary": 42,
+        "secondary": 48202,
+        "_preferred_server": "primary",
+    }
+
+
+@pytest.mark.django_db
 def test_vm_link_uses_the_same_second_server_mapping_contract(client, servers):
     vm = make_vm("edge-link-vm")
     vm.custom_field_data["librenms_id"] = {"primary": 48301}
