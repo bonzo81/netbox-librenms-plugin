@@ -159,6 +159,8 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
                 metadata["cache_key"] = cache_key
                 # Store numeric sort key so the final sort is unambiguous
                 metadata["cached_at_ts"] = cached_at.timestamp()
+                # The template hands this value to JavaScript, so it must be an ISO-8601 string.
+                metadata["cached_at"] = cached_at.isoformat()
 
                 # Enrich filters with human-readable display values
                 display_filters = metadata["filters"].copy()

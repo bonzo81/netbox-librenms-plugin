@@ -116,15 +116,17 @@ class TestGetActiveCachedSearches:
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
 
         filters = {"hostname": "edge"}
+        stored_timestamp = datetime.now(timezone.utc).isoformat()
         cache_key = _store_indexed_search(
             server_key,
-            _metadata(server_key, datetime.now(timezone.utc).isoformat(), filters),
+            _metadata(server_key, stored_timestamp, filters),
         )
 
         result = get_active_cached_searches(server_key)
 
         assert len(result) == 1
         assert result[0]["cache_key"] == cache_key
+        assert result[0]["cached_at"] == stored_timestamp
         assert 0 < result[0]["remaining_seconds"] <= 300
         assert result[0]["display_filters"] == {"hostname": "edge"}
         assert result[0]["display_filters"] is not result[0]["filters"]
@@ -208,14 +210,36 @@ class TestGetActiveCachedSearches:
     def test_datetime_timestamp_is_used_without_string_parsing(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
 
+        stored_datetime = datetime.now(timezone.utc)
         _store_indexed_search(
             server_key,
-            _metadata(server_key, datetime.now(timezone.utc), {"hostname": "datetime-edge"}),
+            _metadata(server_key, stored_datetime, {"hostname": "datetime-edge"}),
         )
 
         result = get_active_cached_searches(server_key)
 
+        assert result[0]["cached_at"] == stored_datetime.isoformat()
         assert result[0]["display_filters"] == {"hostname": "datetime-edge"}
+
+    def test_datetime_timestamp_renders_as_iso_8601(self, server_key):
+        """The cached-search timestamp must be safe for JavaScript date parsing."""
+        from django.template.loader import render_to_string
+
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches_for_servers
+
+        stored_datetime = datetime.now(timezone.utc)
+        _store_indexed_search(
+            server_key,
+            _metadata(server_key, stored_datetime, {"hostname": "datetime-edge"}),
+        )
+
+        cached_searches = get_active_cached_searches_for_servers({server_key: "Primary"})
+        output = render_to_string(
+            "netbox_librenms_plugin/inc/_cached_search_links.html",
+            {"cached_searches": cached_searches},
+        )
+
+        assert f'data-cache-timestamp="{stored_datetime.isoformat()}"' in output
 
     @pytest.mark.parametrize("cached_at", ["NOT_A_VALID_DATETIME", [], {}])
     def test_malformed_timestamp_expires_without_raising(self, server_key, cached_at):
