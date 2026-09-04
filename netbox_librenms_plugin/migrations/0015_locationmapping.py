@@ -13,7 +13,7 @@ class Migration(migrations.Migration):
     dependencies = [
         ("contenttypes", "0002_remove_content_type_name"),
         ("extras", "0122_charfield_null_choices"),
-        ("netbox_librenms_plugin", "0012_normalize_device_serials"),
+        ("netbox_librenms_plugin", "0014_portstacklagpattern_ci_unique"),
     ]
 
     operations = [
