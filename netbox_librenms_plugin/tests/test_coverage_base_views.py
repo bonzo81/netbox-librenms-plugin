@@ -19,6 +19,7 @@ import pytest
 from dcim.models import Device
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 # =============================================================================
@@ -2040,9 +2041,12 @@ class TestBaseInterfaceTableViewPost:
         mock_get_cache_key.assert_called_with(obj, "ports", "default")
         mock_get_last_fetched_key.assert_called_with(obj, "ports", "default")
 
-    def test_post_lag_inference_excludes_oob_ports(self, client, settings, mock_response_factory):
+    def test_post_lag_inference_excludes_oob_ports(self, client, settings, monkeypatch):
         """port_stack is scoped to the main device, so its lazy-fetch trigger must ignore OOB rows."""
         from copy import deepcopy
+
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
 
         from dcim.models import Interface
         from django.core.cache import cache as real_cache
@@ -2051,15 +2055,14 @@ class TestBaseInterfaceTableViewPost:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        # librenms_url is filled in below, once the loopback server has bound its port.
         plugin_config["netbox_librenms_plugin"]["servers"] = {
             "default": {
-                "librenms_url": "https://librenms.example.com",
                 "api_token": "test-token",
                 "cache_timeout": 300,
                 "verify_ssl": True,
             }
         }
-        settings.PLUGINS_CONFIG = plugin_config
 
         device = make_device(
             "lag-inference-host",
@@ -2073,22 +2076,45 @@ class TestBaseInterfaceTableViewPost:
         client.force_login(user)
 
         # Host ports carry no LAG signal; the OOB controller exposes a LAG-typed port.
-        responses = [
-            mock_response_factory(json_data={"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]}),
-            mock_response_factory(json_data={"ports": [{"port_id": 2, "ifName": "Po1", "ifType": "ieee8023adLag"}]}),
-        ]
-        url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
+        requested_paths = []
 
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=responses) as mock_http_get:
+        def _record(body, status=200):
+            """Register a route that records its path, so the URLs stay observable."""
+
+            def route(*, path, **_kwargs):
+                requested_paths.append(path)
+                return status, body
+
+            return route
+
+        with run_librenms_server() as server:
+            server.register(
+                "/api/v0/devices/42/ports",
+                _record({"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]}),
+            )
+            server.register(
+                "/api/v0/devices/99/ports",
+                _record({"ports": [{"port_id": 2, "ifName": "Po1", "ifType": "ieee8023adLag"}]}),
+            )
+            # Registered so a regression that fetches port_stack is RECORDED rather than 404ing
+            # silently; LibreNMS itself answers 404 for an empty list.
+            for device_id in (42, 99):
+                server.register(
+                    f"/api/v0/devices/{device_id}/port_stack",
+                    _record({"status": "error", "message": "no port_stack"}, status=404),
+                )
+            plugin_config["netbox_librenms_plugin"]["servers"]["default"]["librenms_url"] = server.url
+            settings.PLUGINS_CONFIG = plugin_config
+
+            url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
             response = client.post(url, {"server_key": "default", "interface_name_field": "ifName"})
 
         assert response.status_code == 200
-        requested_urls = [call.args[0] for call in mock_http_get.call_args_list]
 
         # Prove the OOB path actually ran end-to-end first — otherwise the assertions below
         # would also pass if OOB ports were never fetched or merged (the whole point of the
         # filter being that there *was* an OOB LAG row to exclude).
-        assert any(request_url.endswith("/api/v0/devices/99/ports") for request_url in requested_urls)
+        assert "/api/v0/devices/99/ports" in requested_paths
         cache_key = DeviceInterfaceTableView().get_cache_key(device, "ports", "default")
         try:
             cached_snapshot = real_cache.get(cache_key)
@@ -2098,7 +2124,7 @@ class TestBaseInterfaceTableViewPost:
             )
 
             # The OOB LAG row does not trigger the main-device port_stack fetch.
-            assert not any(request_url.endswith("/port_stack") for request_url in requested_urls)
+            assert not [path for path in requested_paths if path.endswith("/port_stack")]
         finally:
             real_cache.delete(cache_key)
 

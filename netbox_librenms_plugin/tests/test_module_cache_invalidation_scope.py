@@ -223,6 +223,12 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         make_module_bay(sibling, "Bay 1")
 
         shared_key = SyncCacheConsistency(page_device).snapshot_key(SyncTab.MODULES, "default")
+        # snapshot_key resolves its owner through get_librenms_sync_device(), so "shared" is a claim
+        # about both members; without this the survival assert reads a key the sibling mutation
+        # never targeted and passes vacuously.
+        assert shared_key == SyncCacheConsistency(sibling).snapshot_key(SyncTab.MODULES, "default"), (
+            "the members no longer share one module snapshot key, so this test never exercises the claim"
+        )
         sibling_only_key = SyncCacheConsistency(sibling).snapshot_key(SyncTab.IP_ADDRESSES, "default")
         cache.set(shared_key, [{"seeded": "modules"}], timeout=300)
         cache.set(sibling_only_key, [{"seeded": "ipaddresses"}], timeout=300)

@@ -40,23 +40,47 @@ def _plugins_config_with_servers(servers):
 
 @pytest.mark.django_db
 class TestUnresolvedServerKeyVCLeak:
-    def test_unresolved_server_key_does_not_leak_default_vc_linkage(self, client):
+    def _vc_member(self, name):
+        """Build a VC member carrying a real, valid host id on the DEFAULT server.
+
+        On an unresolved ``?server_key`` the client stays bound to "default", so an
+        un-guarded VC block would resolve *this* linkage and leak it.
+        """
         from dcim.models import VirtualChassis
 
-        vc = VirtualChassis.objects.create(name="unresolved-leak-vc")
-        member = make_device("unresolved-leak-m1")
+        vc = VirtualChassis.objects.create(name=f"{name}-vc")
+        member = make_device(f"{name}-m1")
         member.virtual_chassis = vc
         member.vc_position = 1
-        # A real, valid host id on the DEFAULT server. On an unresolved ?server_key the client
-        # stays bound to "default", so the un-guarded VC block would resolve *this* linkage.
         member.custom_field_data["librenms_id"] = {"default": {"id": 55}}
         member.save()
+        return member
 
-        user = make_user_with_perms("unresolved-vc-viewer", [("view", Device)])
+    def _get(self, client, member, server_key):
+        """Render the sync page for *member* under ``?server_key=<server_key>``."""
+        user = make_user_with_perms(f"vc-viewer-{server_key}", [("view", Device)])
         client.force_login(user)
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[member.pk])
         with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(DEFAULT_ONLY)):
-            response = client.get(url, {"server_key": "ghost"})
+            return client.get(url, {"server_key": server_key})
+
+    def test_resolved_server_key_reports_the_vc_linkage(self, client):
+        """Positive control: the same page on a RESOLVED key must publish the VC linkage.
+
+        Without it the unresolved assertion below passes even if the VC block stopped
+        setting the key for every request.
+        """
+        member = self._vc_member("resolved-control")
+
+        response = self._get(client, member, "default")
+
+        assert response.status_code == 200
+        assert response.context["sync_device_has_librenms_id"] is True
+
+    def test_unresolved_server_key_does_not_leak_default_vc_linkage(self, client):
+        member = self._vc_member("unresolved-leak")
+
+        response = self._get(client, member, "ghost")
 
         assert response.status_code == 200
         ctx = response.context
