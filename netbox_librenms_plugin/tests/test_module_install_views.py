@@ -42,19 +42,24 @@ def _drive(view_class, device, data, live_librenms):
 class TestInstallModuleView:
     """The single-row install reports its identity fallback and the binding it made."""
 
-    def test_a_non_numeric_bay_or_type_is_rejected(self, live_librenms):
+    @pytest.mark.parametrize("broken_field", ["module_bay_id", "module_type_id"])
+    def test_a_non_numeric_bay_or_type_is_rejected(self, live_librenms, broken_field):
+        """Each id is parsed separately, so each one has to be rejected on its own."""
         from dcim.models import Module
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("install-bad-ids", librenms_cf={"default": 61})
+        device = make_device(f"install-bad-{broken_field}", librenms_cf={"default": 61})
+        bay = make_module_bay(device, "Bad Input Bay")
+        module_type = make_module_type(f"BAD-INPUT-CARD-{broken_field}")
+        data = {
+            "module_bay_id": str(bay.pk),
+            "module_type_id": str(module_type.pk),
+            "server_key": "default",
+        }
+        data[broken_field] = "not-a-pk"
 
-        _view, request, response = _drive(
-            InstallModuleView,
-            device,
-            {"module_bay_id": "not-a-pk", "module_type_id": "1", "server_key": "default"},
-            live_librenms,
-        )
+        _view, request, response = _drive(InstallModuleView, device, data, live_librenms)
 
         assert response.status_code == 302
         assert "Missing or invalid module bay/module type ID." in message_texts(request, "error")

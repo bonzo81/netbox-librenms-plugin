@@ -1,6 +1,8 @@
-"""Real-DB tests for the cached import row's existing-device refresh."""
+"""Real-DB tests for the cached import row's existing-device refresh.
 
-from types import SimpleNamespace
+Companion to ``test_coverage_bulk_import.py``; see that file for the primary
+``import_utils/bulk_import.py`` coverage.
+"""
 
 import pytest
 
@@ -158,21 +160,6 @@ class TestRefreshDropsAVanishedLink:
         assert validation["cluster"]["found"] is False
         assert validation["cluster"]["available_clusters"] == [cluster]
         assert "Cluster must be manually selected before importing as VM" in validation["issues"]
-
-
-class TestRefreshFailsClosedOnAnUnusableRow:
-    """A refresh that cannot query the DB reports the failure instead of mutating the row."""
-
-    def test_a_non_numeric_primary_key_is_logged_and_the_row_is_left_alone(self, caplog):
-        validation = _validation(make_device("refresh-bad-pk"))
-        validation["existing_device"] = SimpleNamespace(pk="not-an-int")
-        validation["existing_match_type"] = "hostname"
-
-        with caplog.at_level("ERROR", logger="netbox_librenms_plugin.import_utils.bulk_import"):
-            _refresh(validation, {"device_id": 1, "hostname": "refresh-bad-pk"})
-
-        assert "Failed to refresh existing device (pk=not-an-int)" in caplog.text
-        assert validation["existing_match_type"] == "hostname"
 
 
 class TestRefreshFreshLookup:

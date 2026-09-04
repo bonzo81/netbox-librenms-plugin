@@ -52,6 +52,8 @@ class TestInterfacePortBinding:
         assert get_librenms_device_id(bound, "default", auto_save=False) == 8801
 
     def test_a_lone_module_interface_is_used_when_nothing_else_narrows_it(self):
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
         device = make_device_with_module_bays("bind-lone", ["Slot 1"])
         module = _module_with_interfaces(device, "Slot 1", "BIND-LONE-CARD", ["Uplink"])
         item = {"_librenms_port_id": 8802, "_librenms_ifdescr": "Unmatched Label"}
@@ -60,6 +62,8 @@ class TestInterfacePortBinding:
 
         assert result["status"] == "bound"
         assert result["interface"] == "Uplink"
+        # The identity has to reach the database, not just the returned dict.
+        assert get_librenms_device_id(module.interfaces.get(name="Uplink"), "default", auto_save=False) == 8802
 
     def test_no_module_context_and_no_name_match_reports_a_skip(self):
         device = make_device("bind-nothing")

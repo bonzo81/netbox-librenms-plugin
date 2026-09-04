@@ -220,13 +220,14 @@ class TestAddBayTemplateSubmission:
     def _post(self, client, device, **data):
         return client.post(_url(device), data)
 
-    def test_non_numeric_target_pk_writes_nothing(self, client):
+    @pytest.mark.parametrize("target_pk", ["", "not-a-pk"])
+    def test_non_numeric_target_pk_writes_nothing(self, client, target_pk):
         from dcim.models import ModuleBayTemplate
 
         device = make_device("bay-post-bad-pk")
         client.force_login(make_superuser())
 
-        response = self._post(client, device, target_kind="device_type", target_pk="", name="Slot 1")
+        response = self._post(client, device, target_kind="device_type", target_pk=target_pk, name="Slot 1")
 
         assert response.status_code == 302
         assert "Missing or invalid target_pk for bay template." in _messages(response)

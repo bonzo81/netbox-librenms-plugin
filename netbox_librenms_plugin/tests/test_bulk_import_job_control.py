@@ -1,4 +1,9 @@
-"""Cancellation, permission, and virtual-chassis behaviour of the bulk import paths."""
+"""Cancellation, permission, and virtual-chassis behaviour of the bulk import paths.
+
+Companion to ``test_coverage_bulk_import.py`` (the primary home for
+``import_utils/bulk_import.py``), split out the way ``test_collisions.py`` and
+``test_bulk_import_review_regressions.py`` already are.
+"""
 
 import logging
 import operator
@@ -104,6 +109,28 @@ def _register_stack(live_librenms, device_id, row, members):
     live_librenms.server.vc_inventory_callable(device_id, [_stack_root(1)], {1: members})
 
 
+_CLOSED_PORT_URL = "http://127.0.0.1:9"
+
+
+def _dead_cache_settings():
+    """The real cache configuration pointed at a closed port, so Redis calls raise for real."""
+    from copy import deepcopy
+
+    from django.conf import settings as django_settings
+
+    caches = deepcopy(django_settings.CACHES)
+    caches["default"]["LOCATION"] = "redis://127.0.0.1:9/0"
+    return caches
+
+
+def _messages_from(caplog, logger_name):
+    """Return only the records emitted by *logger_name*, so a re-routed log cannot pass."""
+    return [record.getMessage() for record in caplog.records if record.name == logger_name]
+
+
+_MODULE_LOGGER = "netbox_librenms_plugin.import_utils.bulk_import"
+
+
 def _prerequisites(tag):
     """Return site/device-type/role ids that let an import succeed, without leaving a device behind."""
     seed = make_device(f"bulk-prereq-{tag}")
@@ -137,11 +164,14 @@ class TestJobCancellationState:
     def test_a_job_context_without_an_rq_id_is_logged_and_not_cancelled(self, caplog):
         from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
 
-        with caplog.at_level("WARNING", logger="netbox_librenms_plugin.import_utils.bulk_import"):
+        with caplog.at_level("WARNING", logger=_MODULE_LOGGER):
             cancelled = _is_job_cancelled(SimpleNamespace(job=object()))
 
         assert cancelled is False
-        assert "Unexpected error checking RQ job cancellation state" in caplog.text
+        assert any(
+            "Unexpected error checking RQ job cancellation state" in message
+            for message in _messages_from(caplog, _MODULE_LOGGER)
+        )
 
 
 class TestCollisionScanCancellation:
@@ -183,37 +213,67 @@ class TestCollisionScanCancellation:
 
 
 class TestCollisionScanFetchFailure:
-    """A raising LibreNMS client fails the row closed instead of aborting the batch."""
+    """A LibreNMS lookup that cannot complete fails the row closed instead of aborting the batch."""
 
-    def test_an_exception_marks_the_row_unresolved(self, caplog):
+    def test_an_unreachable_server_marks_the_row_unresolved(self, settings):
+        """A real client against a closed port: get_device_info reports the failure, it does not raise."""
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
 
-        def _boom(device_id, use_cache=False):
-            raise RuntimeError("transport exploded")
+        configure_librenms_servers(
+            settings,
+            {"default": {"librenms_url": _CLOSED_PORT_URL, "api_token": "t", "cache_timeout": 0, "verify_ssl": False}},
+        )
 
-        api = SimpleNamespace(server_key="default", get_device_info=_boom)
-
-        with caplog.at_level("WARNING", logger="netbox_librenms_plugin.import_utils.bulk_import"):
-            collisions, unresolved = detect_collisions_for_device_ids([301], api, libre_devices_cache={})
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [301], LibreNMSAPI(server_key="default"), libre_devices_cache={}
+        )
 
         assert collisions == []
         assert unresolved == [301]
-        assert "Collision pre-check couldn't fetch device 301" in caplog.text
 
-    def test_the_job_logger_receives_the_same_report(self, rq_job, caplog):
+    def test_a_cache_backend_failure_mid_lookup_marks_the_row_unresolved(self, live_librenms, caplog):
+        """get_device_info writes its result to Redis; a real Redis outage raises out of the client."""
+        from django.test import override_settings
+
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 
-        def _boom(device_id, use_cache=False):
-            raise RuntimeError("transport exploded")
+        live_librenms.server.register(
+            "/api/v0/devices/302", {"status": "ok", "devices": [_libre_device(302, "cache-down")]}
+        )
 
-        api = SimpleNamespace(server_key="default", get_device_info=_boom)
+        with caplog.at_level("WARNING", logger=_MODULE_LOGGER), override_settings(CACHES=_dead_cache_settings()):
+            collisions, unresolved = detect_collisions_for_device_ids([302], live_librenms.api, libre_devices_cache={})
+
+        assert collisions == []
+        assert unresolved == [302]
+        assert any(
+            "Collision pre-check couldn't fetch device 302" in message
+            for message in _messages_from(caplog, _MODULE_LOGGER)
+        )
+
+    def test_the_job_logger_receives_the_same_report(self, live_librenms, rq_job, caplog):
+        from django.test import override_settings
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        live_librenms.server.register(
+            "/api/v0/devices/303", {"status": "ok", "devices": [_libre_device(303, "cache-down-job")]}
+        )
         job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("collision-scan-job"))
 
-        with caplog.at_level("WARNING", logger="collision-scan-job"):
-            _collisions, unresolved = detect_collisions_for_device_ids([302], api, libre_devices_cache={}, job=job)
+        with caplog.at_level("WARNING", logger="collision-scan-job"), override_settings(CACHES=_dead_cache_settings()):
+            _collisions, unresolved = detect_collisions_for_device_ids(
+                [303], live_librenms.api, libre_devices_cache={}, job=job
+            )
 
-        assert unresolved == [302]
-        assert "Collision pre-check couldn't fetch device 302" in caplog.text
+        assert unresolved == [303]
+        assert any(
+            "Collision pre-check couldn't fetch device 303" in message
+            for message in _messages_from(caplog, "collision-scan-job")
+        )
+        assert not _messages_from(caplog, _MODULE_LOGGER)
 
 
 class TestBulkImportCancellation:
@@ -238,12 +298,12 @@ class TestBulkImportCancellation:
 
         job = _JobContext(rq_job(JobStatus.STOPPED), stop_after=99)
 
-        with caplog.at_level("WARNING", logger="netbox_librenms_plugin.import_utils.bulk_import"):
+        with caplog.at_level("WARNING", logger=_MODULE_LOGGER):
             result = self._run(job, live_librenms)
 
         assert result["cancelled"] is True
         assert result["success"] == []
-        assert "Import cancelled at device 1 of 1" in caplog.text
+        assert "Import cancelled at device 1 of 1" in _messages_from(caplog, _MODULE_LOGGER)
         assert not Device.objects.filter(name="cancelled-import").exists()
 
     def test_a_job_logger_reports_the_stop_itself(self, live_librenms, rq_job, caplog):
@@ -255,7 +315,8 @@ class TestBulkImportCancellation:
             result = self._run(job, live_librenms)
 
         assert result["cancelled"] is True
-        assert "Import job stopped at device 1 of 1" in caplog.text
+        assert "Import job stopped at device 1 of 1" in _messages_from(caplog, "bulk-import-job")
+        assert not _messages_from(caplog, _MODULE_LOGGER)
 
 
 class TestBulkImportIdentityAndMappings:
@@ -455,7 +516,7 @@ class TestStackImportPermission:
     def test_the_row_fails_and_no_device_is_created(self, live_librenms, caplog):
         from dcim.models import Device
 
-        with caplog.at_level("ERROR", logger="netbox_librenms_plugin.import_utils.bulk_import"):
+        with caplog.at_level("ERROR", logger=_MODULE_LOGGER):
             result = self._import_without_vc_permission(live_librenms, 401)
 
         assert result["success"] == []
@@ -465,7 +526,10 @@ class TestStackImportPermission:
                 "error": "Cannot import stack device 401: missing permission dcim.add_virtualchassis",
             }
         ]
-        assert "missing permission dcim.add_virtualchassis" in caplog.text
+        assert any(
+            "missing permission dcim.add_virtualchassis" in message
+            for message in _messages_from(caplog, _MODULE_LOGGER)
+        )
         assert not Device.objects.filter(name="stack-noperm-401").exists()
 
     def test_a_job_logger_receives_the_refusal(self, live_librenms, rq_job, caplog):
@@ -475,19 +539,23 @@ class TestStackImportPermission:
             result = self._import_without_vc_permission(live_librenms, 402, job=job)
 
         assert result["failed"][0]["device_id"] == 402
-        assert "missing permission dcim.add_virtualchassis" in caplog.text
+        assert any(
+            "missing permission dcim.add_virtualchassis" in message
+            for message in _messages_from(caplog, "stack-perm-job")
+        )
+        assert not _messages_from(caplog, _MODULE_LOGGER)
 
 
 class TestStackImportCreatesTheVirtualChassis:
     """A stack row imports the master and materialises the chassis once per physical stack."""
 
-    def _import(self, live_librenms, device_ids, members, *, tag, job=None, user=None):
+    def _import(self, live_librenms, members_by_device, *, tag, job=None, user=None):
         from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
 
         prerequisites = _prerequisites(tag)
         mappings = {}
         cache_rows = {}
-        for device_id in device_ids:
+        for device_id, members in members_by_device.items():
             row = _libre_device(
                 device_id,
                 f"{tag}-{device_id}",
@@ -498,7 +566,7 @@ class TestStackImportCreatesTheVirtualChassis:
             mappings[device_id] = prerequisites
             cache_rows[device_id] = row
         return bulk_import_devices_shared(
-            list(device_ids),
+            list(members_by_device),
             server_key="default",
             manual_mappings_per_device=mappings,
             libre_devices_cache=cache_rows,
@@ -511,56 +579,118 @@ class TestStackImportCreatesTheVirtualChassis:
 
         members = [_chassis(100, "SN-VC-A", position=1), _chassis(200, "SN-VC-B", position=2)]
 
-        with caplog.at_level("INFO", logger="netbox_librenms_plugin.import_utils.bulk_import"):
-            result = self._import(live_librenms, [411], members, tag="stack-ok")
+        with caplog.at_level("INFO", logger=_MODULE_LOGGER):
+            result = self._import(live_librenms, {411: members}, tag="stack-ok")
 
         assert result["failed"] == []
         assert result["virtual_chassis_created"] == 1
-        assert "Created VC" in caplog.text
+        assert any("Created VC" in message for message in _messages_from(caplog, _MODULE_LOGGER))
         chassis = VirtualChassis.objects.get(domain="librenms-default-411")
         members_in_netbox = Device.objects.filter(virtual_chassis=chassis)
         # The imported master keeps its blank serial; both detected members are created beside it.
         assert set(members_in_netbox.values_list("serial", flat=True)) == {"", "SN-VC-A", "SN-VC-B"}
 
-    def test_two_librenms_rows_for_one_physical_stack_create_one_chassis(self, live_librenms):
+    def test_one_serial_set_under_two_different_member_labels_creates_one_chassis(self, live_librenms):
+        """The dedup key is the member SERIAL set, not the member names, models or positions."""
         from dcim.models import VirtualChassis
 
-        members = [_chassis(100, "SN-DEDUP-A", position=1), _chassis(200, "SN-DEDUP-B", position=2)]
+        first_labels = [_chassis(100, "SN-DEDUP-A", position=1), _chassis(200, "SN-DEDUP-B", position=2)]
+        # Same physical stack seen through a second LibreNMS device: same serials, everything
+        # else different. Keying on name/model/position would make this a second chassis.
+        second_labels = [
+            _chassis(300, "SN-DEDUP-B", model="WS-C3850", position=1),
+            _chassis(400, "SN-DEDUP-A", model="WS-C3850", position=2),
+        ]
 
-        result = self._import(live_librenms, [421, 422], members, tag="stack-dedup")
+        result = self._import(live_librenms, {421: first_labels, 422: second_labels}, tag="stack-dedup")
 
         assert len(result["success"]) == 2
         assert result["virtual_chassis_created"] == 1
         assert VirtualChassis.objects.filter(domain__startswith="librenms-default-42").count() == 1
 
     def test_members_without_serials_are_keyed_by_a_name_model_fingerprint(self, live_librenms):
+        """With no serials the key falls back to a member name/model/position fingerprint."""
         from dcim.models import VirtualChassis
 
         members = [_chassis(100, "-", position=1), _chassis(200, "", position=2)]
 
-        result = self._import(live_librenms, [431, 432], members, tag="stack-fingerprint")
+        result = self._import(live_librenms, {431: members, 432: list(members)}, tag="stack-fingerprint")
 
         assert len(result["success"]) == 2
         assert result["virtual_chassis_created"] == 1
         assert VirtualChassis.objects.filter(domain__startswith="librenms-default-43").count() == 1
+
+    def test_a_cached_stack_with_no_members_is_keyed_per_device(self, live_librenms, settings):
+        """A cached is_stack payload with an empty member list has no fingerprint, so each row keys alone."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+        # The import builds its own client, so the non-zero timeout has to come from the config.
+        configure_librenms_servers(
+            settings,
+            {
+                "default": {
+                    "librenms_url": live_librenms.server.url,
+                    "api_token": "test-token",
+                    "cache_timeout": 300,
+                    "verify_ssl": False,
+                }
+            },
+        )
+        prerequisites = _prerequisites("stack-memberless")
+        api = LibreNMSAPI(server_key="default")
+        mappings = {}
+        cache_rows = {}
+        for device_id in (441, 442):
+            row = _libre_device(
+                device_id,
+                f"stack-memberless-{device_id}",
+                hardware=prerequisites["hardware"],
+                location=prerequisites["location"],
+            )
+            live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+            live_librenms.server.register(f"/api/v0/inventory/{device_id}", {"status": "ok", "inventory": []})
+            # The shape a real cache round-trip preserves: is_stack survives an empty member list.
+            cache.set(
+                _vc_cache_key(api, device_id),
+                {"is_stack": True, "member_count": 2, "members": [], "detection_error": None},
+                300,
+            )
+            mappings[device_id] = prerequisites
+            cache_rows[device_id] = row
+
+        result = bulk_import_devices_shared(
+            [441, 442],
+            server_key="default",
+            manual_mappings_per_device=mappings,
+            libre_devices_cache=cache_rows,
+            user=make_superuser("stack-memberless-user"),
+        )
+
+        assert len(result["success"]) == 2
+        assert result["virtual_chassis_created"] == 2
+        assert VirtualChassis.objects.filter(domain__startswith="librenms-default-44").count() == 2
 
     def test_the_job_logger_reports_the_created_chassis(self, live_librenms, rq_job, caplog):
         job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("stack-create-job"))
         members = [_chassis(100, "SN-JOB-A", position=1), _chassis(200, "SN-JOB-B", position=2)]
 
         with caplog.at_level("INFO", logger="stack-create-job"):
-            result = self._import(live_librenms, [441], members, tag="stack-joblog", job=job)
+            result = self._import(live_librenms, {451: members}, tag="stack-joblog", job=job)
 
         assert result["virtual_chassis_created"] == 1
-        assert "Created VC" in caplog.text
+        assert any("Created VC" in message for message in _messages_from(caplog, "stack-create-job"))
+        assert not any("Created VC" in message for message in _messages_from(caplog, _MODULE_LOGGER))
 
 
 class TestVirtualChassisPrefetch:
-    """Filtering with VC detection warms the chassis cache before validating each row."""
+    """Filtering with VC detection warms the chassis cache before any row is validated."""
 
-    def _run(self, live_librenms, device_id, *, job=None):
-        from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
-
+    def _register(self, live_librenms, device_id):
         row = _libre_device(device_id, f"prefetch-{device_id}")
         live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [row]})
         _register_stack(
@@ -569,32 +699,62 @@ class TestVirtualChassisPrefetch:
             row,
             [_chassis(100, f"SN-PF-{device_id}-A", position=1), _chassis(200, f"SN-PF-{device_id}-B", position=2)],
         )
-        return process_device_filters(
-            live_librenms.api,
-            {"hostname": row["hostname"]},
-            vc_detection_enabled=True,
-            clear_cache=True,
-            show_disabled=True,
-            job=job,
-        )
+        return row
 
-    def test_the_stack_is_detected_and_reported_to_the_job(self, live_librenms, rq_job, caplog):
-        job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("vc-prefetch-job"))
+    def test_the_chassis_cache_is_warm_before_validation_starts(self, live_librenms, rq_job, caplog):
+        """Stopping at the pre-validation poll leaves the cache as the only proof the prefetch ran."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+
+        # get_virtual_chassis_data bypasses the cache entirely when the timeout is 0.
+        live_librenms.api.cache_timeout = 300
+        row = self._register(live_librenms, 451)
+        cache.delete(_vc_cache_key(live_librenms.api, 451))
+        # Polls run before the fetch, before the prefetch, then before validation: stop on the third.
+        job = _JobContext(rq_job(), stop_after=2, logger=logging.getLogger("vc-prefetch-job"))
 
         with caplog.at_level("INFO", logger="vc-prefetch-job"):
-            rows = self._run(live_librenms, 451, job=job)
+            rows = process_device_filters(
+                live_librenms.api,
+                {"hostname": row["hostname"]},
+                vc_detection_enabled=True,
+                clear_cache=True,
+                show_disabled=True,
+                job=job,
+            )
+
+        # Validation never ran, so nothing but the prefetch can have populated this key.
+        assert rows == []
+        cached = cache.get(_vc_cache_key(live_librenms.api, 451))
+        assert cached is not None
+        assert cached["is_stack"] is True
+        assert cached["member_count"] == 2
+        job_messages = _messages_from(caplog, "vc-prefetch-job")
+        assert any("Pre-fetching virtual chassis data for 1 devices" in m for m in job_messages)
+        assert any("Virtual chassis data pre-fetch completed" in m for m in job_messages)
+
+    def test_without_a_job_the_module_logger_announces_the_prefetch(self, live_librenms, caplog):
+        """The no-job branch has only its log line; pin which logger emits it."""
+        from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+        live_librenms.api.cache_timeout = 300
+        row = self._register(live_librenms, 452)
+
+        with caplog.at_level("INFO", logger=_MODULE_LOGGER):
+            rows = process_device_filters(
+                live_librenms.api,
+                {"hostname": row["hostname"]},
+                vc_detection_enabled=True,
+                clear_cache=True,
+                show_disabled=True,
+            )
 
         assert rows[0]["_validation"]["virtual_chassis"]["is_stack"] is True
-        assert rows[0]["_validation"]["virtual_chassis"]["member_count"] == 2
-        assert "Pre-fetching virtual chassis data for 1 devices" in caplog.text
-        assert "Virtual chassis data pre-fetch completed" in caplog.text
-
-    def test_without_a_job_the_module_logger_reports_the_prefetch(self, live_librenms, caplog):
-        with caplog.at_level("INFO", logger="netbox_librenms_plugin.import_utils.bulk_import"):
-            rows = self._run(live_librenms, 452)
-
-        assert rows[0]["_validation"]["virtual_chassis"]["is_stack"] is True
-        assert "Pre-fetching VC data for 1 devices" in caplog.text
+        assert any(
+            "Pre-fetching VC data for 1 devices" in message for message in _messages_from(caplog, _MODULE_LOGGER)
+        )
 
 
 class TestFailedImportReporting:
@@ -621,5 +781,6 @@ class TestFailedImportReporting:
 
         assert result["success"] == []
         assert result["failed"][0]["device_id"] == 461
-        assert "Failed to import device 461" in caplog.text
+        assert any("Failed to import device 461" in message for message in _messages_from(caplog, "failed-import-job"))
+        assert not _messages_from(caplog, _MODULE_LOGGER)
         assert not Device.objects.filter(name="unresolvable-import").exists()
