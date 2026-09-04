@@ -134,6 +134,32 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
 
 
 @pytest.mark.django_db
+def test_configure_servers_removes_legacy_default_server(settings):
+    """Replacing servers must remove the legacy default server settings."""
+    from netbox_librenms_plugin.server_selection import build_server_mappings
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.import_server_helpers import configure_servers
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["librenms_url"] = "https://legacy.example.com"
+    plugin_settings["api_token"] = "legacy-test-token"
+    settings.PLUGINS_CONFIG = plugin_config
+    configure_servers(settings)
+    device = make_device("legacy-default-server", librenms_cf={"default": 7})
+
+    configured_plugin_settings = settings.PLUGINS_CONFIG["netbox_librenms_plugin"]
+    default_mapping = next(mapping for mapping in build_server_mappings(device) if mapping.server_key == "default")
+
+    assert "librenms_url" not in configured_plugin_settings
+    assert "api_token" not in configured_plugin_settings
+    assert default_mapping.is_configured is False
+    assert default_mapping.librenms_url is None
+    assert default_mapping.device_url is None
+    assert default_mapping.is_selectable is False
+
+
+@pytest.mark.django_db
 def test_import_starts_on_installation_default_and_offers_transient_server_switches(client, settings, servers):
     """The import selector lists configured servers without changing installation settings."""
     installation_settings, _created = LibreNMSSettings.objects.update_or_create(

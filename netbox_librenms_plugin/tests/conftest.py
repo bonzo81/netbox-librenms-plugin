@@ -367,7 +367,10 @@ def make_ip(address, *, assigned_object=None, status="active"):
 def configure_librenms_servers(settings, servers):
     """Replace the plugin's configured LibreNMS servers with *servers*."""
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = deepcopy(servers)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["servers"] = deepcopy(servers)
+    plugin_settings.pop("librenms_url", None)
+    plugin_settings.pop("api_token", None)
     settings.PLUGINS_CONFIG = plugin_config
 
 

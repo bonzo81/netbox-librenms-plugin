@@ -5,27 +5,29 @@ payloads and the same rendered selector, so the stub shape lives here rather tha
 """
 
 import json
-from copy import deepcopy
 
 from requests import Response
+
+from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
 
 
 def configure_servers(settings):
     """Configure two usable LibreNMS servers, primary and secondary."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "primary": {
-            "display_name": "Primary LibreNMS",
-            "librenms_url": "https://primary.example.com",
-            "api_token": "test-token",
+    configure_librenms_servers(
+        settings,
+        {
+            "primary": {
+                "display_name": "Primary LibreNMS",
+                "librenms_url": "https://primary.example.com",
+                "api_token": "test-token",
+            },
+            "secondary": {
+                "display_name": "Secondary LibreNMS",
+                "librenms_url": "https://secondary.example.com",
+                "api_token": "test-token",
+            },
         },
-        "secondary": {
-            "display_name": "Secondary LibreNMS",
-            "librenms_url": "https://secondary.example.com",
-            "api_token": "test-token",
-        },
-    }
-    settings.PLUGINS_CONFIG = plugin_config
+    )
 
 
 def json_response(url, payload, status=200):
