@@ -182,6 +182,30 @@ def test_the_sync_page_reports_an_ambiguous_id_claim(client, librenms_server, se
 
 
 @pytest.mark.django_db
+def test_ip_refresh_reports_a_discovered_id_conflict(client, librenms_server, settings):
+    """An IP refresh must render the discovered LibreNMS ID conflict."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-ip-refresh-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-ip-refresh-target.example.test", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-ip-refresh-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[target.pk]),
+        {"server_key": server_key},
+        headers={"HX-Request": "true"},
+    )
+    body = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in body
+
+
+@pytest.mark.django_db
 def test_location_update_reports_a_discovered_id_conflict(client, librenms_server, settings):
     """A POST action must redirect with the discovery conflict and make no LibreNMS write."""
     server_key = _point_plugin_at(settings, librenms_server.url)
