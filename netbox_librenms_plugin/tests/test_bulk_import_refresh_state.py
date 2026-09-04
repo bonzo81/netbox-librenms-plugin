@@ -162,6 +162,39 @@ class TestRefreshDropsAVanishedLink:
         assert "Cluster must be manually selected before importing as VM" in validation["issues"]
 
 
+class TestRefreshFailsClosedOnADatabaseError:
+    """A refresh whose query fails reports it and leaves the cached row untouched."""
+
+    def test_a_database_error_mid_refresh_is_logged_and_the_row_is_left_alone(self, caplog):
+        from django.db import DatabaseError, connection
+
+        device = make_device("refresh-db-error")
+        validation = _validation(device)
+        validation["existing_match_type"] = "hostname"
+        validation["serial_action"] = "update_serial"
+
+        def _fail_device_reads(execute, sql, params, many, context):
+            if "dcim_device" in sql and sql.lstrip().upper().startswith("SELECT"):
+                raise DatabaseError("connection lost mid-refresh")
+            return execute(sql, params, many, context)
+
+        with (
+            caplog.at_level("ERROR", logger="netbox_librenms_plugin.import_utils.bulk_import"),
+            connection.execute_wrapper(_fail_device_reads),
+        ):
+            _refresh(validation, {"device_id": 1, "hostname": device.name})
+
+        assert any(
+            f"Failed to refresh existing device (pk={device.pk})" in record.getMessage()
+            for record in caplog.records
+            if record.name == "netbox_librenms_plugin.import_utils.bulk_import"
+        )
+        # The guard returns instead of falling through, so nothing derived from the match moved.
+        assert validation["existing_device"] == device
+        assert validation["existing_match_type"] == "hostname"
+        assert validation["serial_action"] == "update_serial"
+
+
 class TestRefreshFreshLookup:
     """The fresh re-check binds by id, name, and IP, and fails closed on duplicates."""
 
