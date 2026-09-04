@@ -7,6 +7,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -282,6 +283,45 @@ class PlatformMappingTable(NetBoxTable):
             "id",
             "librenms_os",
             "netbox_platform",
+            "description",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class LocationMappingTable(NetBoxTable):
+    """Table for displaying LocationMapping data."""
+
+    pk = columns.ToggleColumn(attrs={"input": {"name": "select"}})
+    field_type = tables.Column(verbose_name="Field Type")
+    librenms_value = tables.Column(verbose_name="LibreNMS Value", linkify=True)
+    netbox_object = tables.Column(verbose_name="NetBox Object", linkify=True, orderable=False)
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    def render_field_type(self, record):
+        """Render the human-readable field type label."""
+        return record.get_field_type_display()
+
+    class Meta:
+        """Meta options for LocationMappingTable."""
+
+        model = LocationMapping
+        fields = (
+            "pk",
+            "id",
+            "field_type",
+            "librenms_value",
+            "netbox_object",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "pk",
+            "id",
+            "field_type",
+            "librenms_value",
+            "netbox_object",
             "description",
             "actions",
         )

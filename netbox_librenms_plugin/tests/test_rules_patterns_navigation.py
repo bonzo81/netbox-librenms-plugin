@@ -13,7 +13,7 @@ import pytest
 from django.urls import reverse
 
 # Tab orders mirror the old menu order; each group's single nav entry lands on the
-# first tab. Branches that add a new rule/pattern model extend these lists (and the
+# first tab. Branches that add a new mapping/rule model extend these lists (and the
 # switcher include) in the same commit that adds the model.
 MAPPING_LIST_ROUTES = [
     "interfacetypemapping_list",
@@ -21,6 +21,7 @@ MAPPING_LIST_ROUTES = [
     "moduletypemapping_list",
     "modulebaymapping_list",
     "platformmapping_list",
+    "locationmapping_list",
 ]
 RULE_LIST_ROUTES = [
     "inventoryignorerule_list",

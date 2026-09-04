@@ -135,16 +135,31 @@
 
               {# Show only for non-VM contexts: true when no existing device (new import, not VM) OR when existing device is not a VM. #}
               {% if not validation.existing_device and not validation.import_as_vm or validation.existing_device and existing_device_model_name != "virtualmachine" %}
+                {# Region row #}
+                <tr>
+                  <td style="padding-left: 0.75rem;">Region</td>
+                  <td>
+                    {% if validation.existing_device and validation.existing_device.site.region %}
+                      <a href="{{ validation.existing_device.site.region.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.site.region }}</a>
+                    {% elif validation.region.region %}
+                      <a href="{{ validation.region.region.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ validation.region.region }}</a>
+                    {% else %}
+                      <span class="text-muted">-</span>
+                    {% endif %}
+                  </td>
+                  <td><span class="text-muted">-</span></td>
+                </tr>
+
               <tr>
                 <td style="padding-left: 0.75rem;">Site</td>
                 <td>
                   {% if validation.existing_device and validation.existing_device.site %}
-                    {{ validation.existing_device.site }}
+                    <a href="{{ validation.existing_device.site.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.site }}</a>
                     {% if validation.site.site and validation.existing_device.site.pk == validation.site.site.pk %}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% elif validation.site.site %}
-                    {{ validation.site.site.name }}
+                    <a href="{{ validation.site.site.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ validation.site.site.name }}</a>
                     <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching site</span>
@@ -152,6 +167,73 @@
                 </td>
                 <td>{{ libre_device.location|default:"—" }}</td>
               </tr>
+
+                {# Location row #}
+                <tr>
+                  <td style="padding-left: 0.75rem;">Location</td>
+                  <td>
+                    {% if validation.existing_device and validation.existing_device.location %}
+                      {% with location_hierarchy=validation.existing_device.location %}
+                        <a href="{{ location_hierarchy.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ location_hierarchy.name }}</a>
+                      {% endwith %}
+                    {% elif validation.location.location %}
+                      {% for location in validation.location.hierarchy %}
+                        <div{% if not forloop.first %} class="ms-3"{% endif %}>
+                          {% if not forloop.first %}<span class="text-muted">&#9492; </span>{% endif %}
+                          <a href="{{ location.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ location.name }}</a>
+                        </div>
+                      {% endfor %}
+                      {% if validation.location.match_type == "mapping" %}
+                        <span class="badge bg-info-lt">Mapped</span>
+                      {% endif %}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% elif validation.location.token %}
+                      <span class="text-muted">-</span>
+                    {% else %}
+                      <span class="text-muted">-</span>
+                    {% endif %}
+                  </td>
+                  <td><span class="text-muted">-</span></td>
+                </tr>
+
+                {# Rack row #}
+                <tr>
+                  <td style="padding-left: 0.75rem;">Rack</td>
+                  <td>
+                    {% if validation.rack.rack %}
+                      {% if validation.rack.rack.location %}
+                        {{ validation.rack.rack.location.name }} — {{ validation.rack.rack.name }}
+                      {% else %}
+                        {{ validation.rack.rack.name }}
+                      {% endif %}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% else %}
+                      <span class="text-muted">-</span>
+                    {% endif %}
+                  </td>
+                  <td><span class="text-muted">-</span></td>
+                </tr>
+
+                {# Tenant row #}
+                <tr>
+                  <td style="padding-left: 0.75rem;">Tenant</td>
+                  <td>
+                    {% if validation.existing_device and validation.existing_device.tenant %}
+                      <a href="{{ validation.existing_device.tenant.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.tenant }}</a>
+                    {% elif validation.tenant.tenant %}
+                      <a href="{{ validation.tenant.tenant.get_absolute_url }}" target="_blank" rel="noopener noreferrer">{{ validation.tenant.tenant }}</a>
+                      {% if validation.tenant.match_type == "mapping" %}
+                        <span class="badge bg-info-lt">Mapped</span>
+                      {% endif %}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% elif validation.tenant.token %}
+                      <span class="text-muted">-</span>
+                    {% else %}
+                      <span class="text-muted">-</span>
+                    {% endif %}
+                  </td>
+                  <td><span class="text-muted">-</span></td>
+                </tr>
 
               {# Device Type row #}
               <tr>
@@ -361,23 +443,6 @@
                 <td><span class="text-muted">—</span></td>
               </tr>
               {% else %}
-              {# Rack row #}
-              <tr>
-                <td style="padding-left: 0.75rem;">Rack</td>
-                <td>
-                  {% if validation.rack.rack %}
-                    {% if validation.rack.rack.location %}
-                      {{ validation.rack.rack.location.name }} — {{ validation.rack.rack.name }}
-                    {% else %}
-                      {{ validation.rack.rack.name }}
-                    {% endif %}
-                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
-                  {% else %}
-                    <span class="text-muted">Optional</span>
-                  {% endif %}
-                </td>
-                <td><span class="text-muted">—</span></td>
-              </tr>
               {% endif %}
 
               {# Primary IP row #}

@@ -1,5 +1,5 @@
 {% comment %}
-Switcher across the five type-mapping object lists. The sidebar has ONE "Mappings"
+Switcher across the six type-mapping object lists. The sidebar has ONE "Mappings"
 entry, so the lists cross-link here, rendered above the native Results/Filters tabs.
 Plain page links (no data-bs-toggle): every tab is the full generic list view of its
 model, keeping filters / bulk ops / import / export intact. `mapping_tab_active` is
@@ -23,5 +23,8 @@ attribute order is not part of that contract.
     </li>
     <li class="nav-item">
         <a class="nav-link{% if mapping_tab_active == "platformmapping" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:platformmapping_list' %}"{% if mapping_tab_active == "platformmapping" %} aria-current="page"{% endif %}>Platform Mappings</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if mapping_tab_active == "locationmapping" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:locationmapping_list' %}"{% if mapping_tab_active == "locationmapping" %} aria-current="page"{% endif %}>Location Mappings</a>
     </li>
 </ul>

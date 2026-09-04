@@ -69,3 +69,63 @@ This allows you to:
 - Import some devices with sysName and others with hostname
 - Apply domain stripping selectively based on device type or location
 - Test different naming conventions — your last choice is remembered automatically
+
+## Location Parsing
+
+LibreNMS stores a device's location as a single free-text string (the SNMP `sysLocation`, e.g. `NYC, Suite 400, R12`). The **Location Parse Pattern** tells the plugin how to split that string into separate NetBox fields — **site**, **location**, **rack**, and **tenant** — during device import.
+
+Configure it under **Plugins → LibreNMS Plugin → Settings → Plugin Settings**:
+
+- **Location Parse Pattern** — describes the structure of your location string
+- **Use regex** — treat the pattern as a raw regular expression instead of placeholders
+
+Leave the pattern blank to keep the original behaviour: the whole location string is matched against the site (and location) name.
+
+### Placeholder Mode (default)
+
+Write the pattern using placeholders for the parts you want to extract. Any literal text between placeholders (commas, dashes, spaces) is treated as a separator.
+
+Available placeholders: `{region}`, `{site}`, `{location}`, `{rack}`, `{tenant}`
+
+```
+Pattern: {site}, {location}, {rack}
+LibreNMS location: NYC, Suite 400, R12
+  → site = "NYC", location = "Suite 400", rack = "R12"
+
+Pattern: {site} - {rack}
+LibreNMS location: NYC - R12
+  → site = "NYC", rack = "R12"
+```
+
+The pattern must contain at least one placeholder and use balanced braces. Separators, including their spaces and punctuation, are matched literally. For example, `{site} - {rack}` does not match `NYC-R12`.
+
+### Regex Mode
+
+Enable **Use regex** to supply a raw regular expression with named groups instead of placeholders. Group names must be one of the supported tokens (`region`, `site`, `location`, `rack`, `tenant`).
+
+```
+Pattern (regex): (?P<site>[^-]+)-(?P<rack>.+)
+LibreNMS location: NYC-R12
+  → site = "NYC", rack = "R12"
+```
+
+Regex mode searches within the LibreNMS location value. Add `^` and `$` when the entire value must follow the pattern.
+
+### How Parsed Tokens Are Matched
+
+Each parsed token is resolved to a NetBox object during import. Matching is **case-insensitive**:
+
+| Token | Matched against | Scope |
+|-------|-----------------|-------|
+| `site` | Site name, then a [Location Mapping](../usage_tips/mapping_rules.md#location-mappings) | Global |
+| `location` | Location name or ancestor name within the matched site, then a Location Mapping | Scoped to the site |
+| `rack` | Rack name within the matched site, then a Location Mapping | Scoped to the site |
+| `tenant` | Tenant name, then a Location Mapping | Global |
+
+When a token does not match a NetBox object's name exactly, add a [Location Mapping](../usage_tips/mapping_rules.md#location-mappings) to alias the LibreNMS value to a specific NetBox object. Create the target NetBox Site, Location, Rack, or Tenant before creating its mapping.
+
+**Notes:**
+
+- A **rack** parsed from the location is only applied when you have not selected a rack manually in the validation details.
+- `{region}` is accepted in the pattern so you can consume a region segment when splitting the string, but it is not assigned to the device during import and has no Location Mapping. In NetBox, the device inherits its region from its site.
+- If a pattern is set but a particular location string does not match it, the plugin falls back to using the whole string for the site (and location), so unmatched devices still resolve a site.

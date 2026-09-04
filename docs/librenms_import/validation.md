@@ -17,15 +17,17 @@ Link to Existing Device
 
 NetBox requires three fields before importing a device: **Site**, **Device Type**, and **Device Role**. The plugin attempts to match Site and Device Type automatically by comparing LibreNMS data to existing NetBox objects. Device Role must always be selected manually.
 
-Click the validation details button to review what's missing and select values from the dropdowns. The validation status updates immediately.
+Click the validation details button to review what is missing. The validation status updates immediately when you select a Device Role or a Rack in the import table. The details dialog previews the Region, Location, Rack, and Tenant values that will be used during import; a manually selected rack takes precedence over the parsed rack. The Site row displays the LibreNMS sysLocation; the other placement rows display `-` in the LibreNMS value column.
+
+Region is inherited from the resolved Site because NetBox does not assign a region directly to a device. When a Location resolves, its table value displays the parent-to-child NetBox Location hierarchy. A **Mapped** badge identifies Location and Tenant values resolved through a Location Mapping instead of a direct name match. Tenant is shown as a separate value because NetBox assigns it directly to the device rather than placing it within the physical-location hierarchy. Location, Rack, and Tenant are optional, so an unresolved value is displayed as `-` and does not prevent import.
 
 ### Import as Device
 
-- **Site** (required) - Auto-matched from LibreNMS location
+- **Site** (required) - Auto-matched from LibreNMS location. See [Location Parsing](import_settings.md#location-parsing) for splitting the location string into site, location, rack, and tenant.
 - **Device Type** (required) - Auto-matched from LibreNMS hardware string, or via [Device Type Mapping](../usage_tips/mapping_rules.md#device-type-mappings)
 - **Device Role** (required) - Must be selected manually
 - **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mapping_rules.md#platform-mappings). If no mapping exists and the platform is not found, a **Create Platform** button opens a modal to create a new NetBox Platform and mapping in one step.
-- **Rack** (optional) - Available if Site has racks
+- **Region, Location, Rack, and Tenant** (optional) - Previewed in the validation comparison table. Region is inherited from the matched Site; Location, Rack, and Tenant are applied from parsed location tokens when they resolve uniquely. Location displays its NetBox hierarchy when it has parent locations. Rack selection is available when the site has racks, and an explicit selection takes precedence over the parsed rack. See [Location Parsing](import_settings.md#location-parsing) and [Location Mappings](../usage_tips/mapping_rules.md#location-mappings).
 
 ### Import as Virtual Machine
 

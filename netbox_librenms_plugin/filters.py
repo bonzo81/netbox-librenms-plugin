@@ -7,6 +7,7 @@ from .models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -120,6 +121,20 @@ class PlatformMappingFilterSet(django_filters.FilterSet):
 
         model = PlatformMapping
         fields = ["librenms_os", "description"]
+
+
+class LocationMappingFilterSet(django_filters.FilterSet):
+    """Filter set for LocationMapping model."""
+
+    field_type = django_filters.CharFilter(lookup_expr="iexact")
+    librenms_value = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
+    class Meta:
+        """Meta options for LocationMappingFilterSet."""
+
+        model = LocationMapping
+        fields = ["field_type", "librenms_value", "description"]
 
 
 class CarrierAutoInstallRuleFilterSet(django_filters.FilterSet):

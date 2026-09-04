@@ -8,14 +8,22 @@ from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from tenancy.models import Tenant
 from virtualization.models import Cluster  # noqa: F401 — used by test mock.patch targets
 
+from ..constants import normalize_oob_type
+from ..import_validation_helpers import (
+    apply_merge_candidates,
+    apply_oob_detection_result,
+    clear_match_derived_action_fields,
+)
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     AmbiguousLibreNMSIdError,
     cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
+    find_matching_location,
     find_matching_platform,
     find_matching_site,
     get_librenms_device_id,
@@ -23,13 +31,9 @@ from ..utils import (
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     normalize_serial,
+    parse_location_for_import,
+    resolve_location_mapping,
     set_librenms_device_id,
-)
-from ..constants import normalize_oob_type
-from ..import_validation_helpers import (
-    apply_merge_candidates,
-    apply_oob_detection_result,
-    clear_match_derived_action_fields,
 )
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
@@ -47,6 +51,38 @@ logger = logging.getLogger(__name__)
 # not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
 # apart — a silent text change would otherwise defeat the fail-closed guarantee.
 VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
+
+
+def _resolve_rack_for_import(site, rack_token):
+    """Resolve an unambiguous parsed rack token within a NetBox site."""
+    if not rack_token or rack_token == "-":
+        return None
+
+    rack_matches = list(
+        Rack.objects.filter(Q(location__site=site) | Q(site=site), name__iexact=rack_token).select_related(
+            "location", "site"
+        )[:2]
+    )
+    if len(rack_matches) > 1:
+        logger.warning(
+            "Multiple racks named %r in site %s; skipping automatic rack assignment",
+            rack_token,
+            site,
+        )
+        return None
+    if rack_matches:
+        return rack_matches[0]
+    return resolve_location_mapping("rack", rack_token, parent_site=site)
+
+
+def _get_location_hierarchy(location):
+    """Return a NetBox Location's ancestry from root to the resolved location."""
+    hierarchy = []
+    current = location
+    while current is not None:
+        hierarchy.append(current)
+        current = getattr(current, "parent", None)
+    return list(reversed(hierarchy))
 
 
 def _detect_oob_type_from_name(name):
@@ -549,6 +585,10 @@ def validate_device_for_import(
                     'match_type': str,  # 'exact' or None
                     'suggestions': List[Site]  # Alternative suggestions
                 },
+                'region': {
+                    'found': bool,
+                    'region': Region or None
+                },
                 'device_type': {  # Only for devices
                     'found': bool,
                     'device_type': DeviceType or None,
@@ -574,6 +614,19 @@ def validate_device_for_import(
                     'found': bool,
                     'rack': Rack or None,
                     'available_racks': List[Rack]
+                },
+                'location': {
+                    'found': bool,
+                    'location': Location or None,
+                    'match_type': str,  # 'exact', 'mapping', or None
+                    'token': str or None,
+                    'hierarchy': List[Location]
+                },
+                'tenant': {
+                    'found': bool,
+                    'tenant': Tenant or None,
+                    'match_type': str,  # 'exact', 'mapping', or None
+                    'token': str or None
                 }
             }
 
@@ -612,6 +665,10 @@ def validate_device_for_import(
             "match_type": None,
             "suggestions": [],
         },
+        "region": {
+            "found": False,
+            "region": None,
+        },
         "device_type": {
             "found": False,
             "device_type": None,
@@ -633,6 +690,19 @@ def validate_device_for_import(
             "found": False,
             "rack": None,
             "available_racks": [],
+        },
+        "location": {
+            "found": False,
+            "location": None,
+            "match_type": None,
+            "token": None,
+            "hierarchy": [],
+        },
+        "tenant": {
+            "found": False,
+            "tenant": None,
+            "match_type": None,
+            "token": None,
         },
         "naming_criteria": None,  # Populated after resolved_name is set
     }
@@ -1288,7 +1358,9 @@ def validate_device_for_import(
         else:
             # 2. For Devices: Validate Site (required)
             location = libre_device.get("location", "")
-            site_match = find_matching_site(location)
+            parsed_location = parse_location_for_import(location)
+            site_token = parsed_location.get("site") or ""
+            site_match = find_matching_site(site_token)
             result["site"] = site_match
 
             if not site_match["found"]:
@@ -1362,6 +1434,48 @@ def validate_device_for_import(
             # 4b. Rack (optional) - Provide available racks for the matched site
             if site_match["found"] and site_match["site"]:
                 site = site_match["site"]
+                region = getattr(site, "region", None)
+                result["region"].update(found=region is not None, region=region)
+                location_token = parsed_location.get("location")
+                result["location"]["token"] = location_token
+                if location_token and location_token != "-":
+                    matched_location = find_matching_location(site, location_token)
+                    if matched_location is not None:
+                        result["location"].update(
+                            found=True,
+                            location=matched_location,
+                            match_type="exact",
+                            hierarchy=_get_location_hierarchy(matched_location),
+                        )
+                    else:
+                        mapped_location = resolve_location_mapping("location", location_token, parent_site=site)
+                        if mapped_location is not None:
+                            result["location"].update(
+                                found=True,
+                                location=mapped_location,
+                                match_type="mapping",
+                                hierarchy=_get_location_hierarchy(mapped_location),
+                            )
+
+                tenant_token = parsed_location.get("tenant")
+                result["tenant"]["token"] = tenant_token
+                if tenant_token and tenant_token != "-":
+                    tenant = Tenant.objects.filter(name__iexact=tenant_token).first()
+                    if tenant is not None:
+                        result["tenant"].update(
+                            found=True,
+                            tenant=tenant,
+                            match_type="exact",
+                        )
+                    else:
+                        mapped_tenant = resolve_location_mapping("tenant", tenant_token)
+                        if mapped_tenant is not None:
+                            result["tenant"].update(
+                                found=True,
+                                tenant=mapped_tenant,
+                                match_type="mapping",
+                            )
+
                 # Use cache to optimize rack lookups per site
                 cache_key = f"librenms_import_racks_site_{site.pk}"
                 available_racks = cache.get(cache_key)
@@ -1380,6 +1494,8 @@ def validate_device_for_import(
                     cache.set(cache_key, available_racks, cache_timeout)
 
                 result["rack"]["available_racks"] = available_racks
+                parsed_location = parse_location_for_import(libre_device.get("location", ""))
+                result["rack"]["rack"] = _resolve_rack_for_import(site, parsed_location.get("rack"))
                 # Rack is optional, don't add to issues
                 result["rack"]["found"] = True  # Mark as "found" even if None (optional field)
 
@@ -1608,7 +1724,8 @@ def import_single_device(
         device_type = validation["device_type"].get("device_type")
         device_role = validation["device_role"].get("role")
         platform = validation["platform"].get("platform")
-        rack = validation.get("rack", {}).get("rack")
+        rack = None
+        rack_explicitly_selected = False
 
         if manual_mappings:
             site = Site.objects.filter(id=manual_mappings.get("site_id")).first() or site
@@ -1623,7 +1740,8 @@ def import_single_device(
 
             rack_id = manual_mappings.get("rack_id")
             if rack_id:
-                rack = Rack.objects.select_related("location", "site").filter(id=rack_id).first() or rack
+                rack = Rack.objects.select_related("location", "site").filter(id=rack_id).first()
+                rack_explicitly_selected = rack is not None
 
         # Validate required fields
         if not site:
@@ -1687,22 +1805,42 @@ def import_single_device(
             if platform:
                 device_data["platform"] = platform
 
-            if rack:
-                device_data["rack"] = rack
-
             # Persist the canonical serial used by the exact indexed match lookups.
             serial = normalize_serial(libre_device.get("serial"))
             if serial and serial != "-":
                 device_data["serial"] = serial
 
             location_name = libre_device.get("location", "")
-            if location_name and location_name != "-":
-                from dcim.models import Location
-
-                # Try to find matching location within the site
-                location = Location.objects.filter(site=site, name__iexact=location_name).first()
+            parsed_location = parse_location_for_import(location_name)
+            location_token = parsed_location.get("location")
+            if location_token and location_token != "-":
+                # Try to find matching location within the site, including stacked parent/ancestor
+                # locations, then fall back to a mapping alias.
+                location = find_matching_location(site, location_token)
+                if location is None:
+                    location = resolve_location_mapping("location", location_token, parent_site=site)
                 if location:
                     device_data["location"] = location
+
+            # Resolve the rack from the parsed location token after applying any
+            # site override. An explicit table selection takes precedence.
+            if not rack_explicitly_selected:
+                rack_token = parsed_location.get("rack")
+                rack = _resolve_rack_for_import(site, rack_token)
+            if rack:
+                device_data["rack"] = rack
+
+            # Resolve the tenant from the parsed location token. Tenants are
+            # globally unique in NetBox, so no site scoping is required.
+            tenant_token = parsed_location.get("tenant")
+            if tenant_token and tenant_token != "-":
+                from tenancy.models import Tenant
+
+                tenant = Tenant.objects.filter(name__iexact=tenant_token).first()
+                if tenant is None:
+                    tenant = resolve_location_mapping("tenant", tenant_token)
+                if tenant:
+                    device_data["tenant"] = tenant
 
             # Create the device
             device = Device(**device_data)
