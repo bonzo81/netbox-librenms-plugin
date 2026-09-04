@@ -5578,15 +5578,13 @@ class TestBulkImportConfirmCollisions:
         view._librenms_api = _make_api()
         return view
 
-    def _run_with_two_devices(self, validation_a, validation_b, *, real_render):
+    def _run_with_two_devices(self, validation_a, validation_b):
         """Drive the real BulkImportConfirmView.post over two LibreNMS rows.
 
         ``validation_a/b`` carry real NetBox Device objects so the real
         detect_bulk_collisions + _model_name_of run; only validate_device_for_import (an
-        expensive VC-detection call covered by its own tests) is stubbed. When
-        ``real_render`` is True the real template engine renders (returning an HttpResponse);
-        otherwise render() is captured so the chosen template can be asserted without
-        building the full confirm-table context.
+        expensive VC-detection call covered by its own tests) is stubbed. render() is captured
+        so the chosen template can be asserted without building the full confirm-table context.
         """
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]})
@@ -5623,8 +5621,6 @@ class TestBulkImportConfirmCollisions:
                 return_value=(True, False),
             ),
         ):
-            if real_render:
-                return view.post(request)
             with patch("netbox_librenms_plugin.views.imports.actions.render") as mock_render:
                 mock_render.side_effect = lambda req, tpl, ctx, status=200: MagicMock(
                     status_code=status, template_name=tpl, context=ctx
@@ -5647,10 +5643,56 @@ class TestBulkImportConfirmCollisions:
         }
         # render captured (not the heavy confirm table) — assert no collision block fired and the
         # confirm template was chosen.
-        response = self._run_with_two_devices(validation_a, validation_b, real_render=False)
+        response = self._run_with_two_devices(validation_a, validation_b)
         assert response is not None
         assert "bulk_import_confirm.html" in response.template_name
         assert response.status_code == 200
+
+    def test_collision_batch_renders_collision_template(self):
+        """A real authorized request can reach and render the collision interstitial."""
+        from dcim.models import Device
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, post
+        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
+
+        target = make_device("nb-collision-target")
+        device_ids = (97001, 97002)
+        rows = {
+            device_id: {
+                "device_id": device_id,
+                "hostname": target.name,
+                "sysName": target.name,
+                "serial": "",
+                "hardware": "Collision hardware",
+                "location": "Collision location",
+                "os": "collision-os",
+            }
+            for device_id in device_ids
+        }
+        for device_id, row in rows.items():
+            cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+
+        user = make_user_with_perms("bulk-confirm-collision", [("view", Device)])
+        request = make_request(
+            data={"select": [str(device_id) for device_id in device_ids]},
+            user=user,
+            path="/device-import/bulk/confirm/",
+            HTTP_HX_REQUEST="true",
+        )
+        api = _make_api()
+        api.get_device_info.side_effect = lambda device_id, **_kwargs: (True, rows[device_id])
+        api.get_inventory_filtered.return_value = (True, [])
+        view = BulkImportConfirmView()
+        view._librenms_api = api
+
+        response = post(view, request)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert "Bulk import blocked: NetBox object collisions" in html
+        assert target.name in html
 
 
 @pytest.mark.django_db
