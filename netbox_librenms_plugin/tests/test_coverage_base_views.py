@@ -2373,6 +2373,61 @@ class TestBaseInterfaceTableViewGetContextData:
         # A complete snapshot is not flagged incomplete.
         assert ctx["oob_incomplete"] is False
 
+    def test_hidden_interface_state_is_not_rendered_outside_view_grant(self, db):
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("interface-context-hidden")
+        hidden = make_interface(device, "Ethernet1")
+        set_librenms_device_id(hidden, 101, "default")
+        hidden.save()
+        decoy = make_interface(make_device("interface-context-visible"), "Ethernet2")
+        user = make_user_with_perms(
+            "interface-context-scoped-viewer",
+            [("view", Device)],
+            constraints={"pk": device.pk},
+        )
+        user = grant(user, "view", Interface, constraints={"pk": decoy.pk})
+        request = make_request("get", user=user, path=f"/plugins/librenms/device/{device.pk}/interfaces/")
+
+        view, _default_request = self._make_real_device_view(device)
+        view.setup(request)
+        context = view.get_context_data(
+            request,
+            device,
+            "ifName",
+            "default",
+            fresh_data={
+                "ports": [
+                    {
+                        "port_id": 101,
+                        "ifName": hidden.name,
+                        "ifDescr": hidden.name,
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                    }
+                ]
+            },
+            sync_device=device,
+        )
+        response = view.render_sync_partial(
+            request,
+            device,
+            "default",
+            {"interface_sync": context},
+        )
+        html = response.content.decode()
+
+        assert context["table"].data[0]["netbox_interface"] is None
+        assert '<span class="text-success">Enabled</span>' not in html
+        assert '<span class="text-danger">Enabled</span>' in html
+
     def test_get_context_data_survives_cache_backend_without_ttl(self, db):
         """cache.ttl() is Redis-specific and not part of the Django cache API."""
         device = make_device("interface-context-cache-without-ttl")

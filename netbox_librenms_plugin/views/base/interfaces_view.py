@@ -686,11 +686,11 @@ class BaseInterfaceTableView(
                 "by_lnms_id": catalog_interfaces_by_port_id,
                 "by_name": catalog_interfaces_by_name,
             }
-            display_index = catalog_index
             related_index = {
                 "by_lnms_id": related_interfaces_by_port_id,
                 "by_name": related_interfaces_by_name,
             }
+            display_index = related_index
             relationship_context = RelationshipResolutionContext(
                 obj=obj,
                 server_key=server_key,
