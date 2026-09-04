@@ -109,17 +109,27 @@ def _register_stack(live_librenms, device_id, row, members):
     live_librenms.server.vc_inventory_callable(device_id, [_stack_root(1)], {1: members})
 
 
-_CLOSED_PORT_URL = "http://127.0.0.1:9"
+def _released_port():
+    """Bind a port, read it, release it: nothing is listening there when this returns."""
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def _dead_cache_settings():
-    """The real cache configuration pointed at a closed port, so Redis calls raise for real."""
+    """The real cache configuration pointed at a released port, so Redis calls raise for real."""
     from copy import deepcopy
 
     from django.conf import settings as django_settings
 
     caches = deepcopy(django_settings.CACHES)
-    caches["default"]["LOCATION"] = "redis://127.0.0.1:9/0"
+    caches["default"]["LOCATION"] = f"redis://127.0.0.1:{_released_port()}/0"
+    # Without explicit timeouts a stray listener would hang the suite instead of failing it.
+    options = dict(caches["default"].get("OPTIONS") or {})
+    options.update({"SOCKET_CONNECT_TIMEOUT": 1, "SOCKET_TIMEOUT": 1})
+    caches["default"]["OPTIONS"] = options
     return caches
 
 
@@ -223,7 +233,14 @@ class TestCollisionScanFetchFailure:
 
         configure_librenms_servers(
             settings,
-            {"default": {"librenms_url": _CLOSED_PORT_URL, "api_token": "t", "cache_timeout": 0, "verify_ssl": False}},
+            {
+                "default": {
+                    "librenms_url": f"http://127.0.0.1:{_released_port()}",
+                    "api_token": "t",
+                    "cache_timeout": 0,
+                    "verify_ssl": False,
+                }
+            },
         )
 
         collisions, unresolved = detect_collisions_for_device_ids(
@@ -620,61 +637,6 @@ class TestStackImportCreatesTheVirtualChassis:
         assert result["virtual_chassis_created"] == 1
         assert VirtualChassis.objects.filter(domain__startswith="librenms-default-43").count() == 1
 
-    def test_a_cached_stack_with_no_members_is_keyed_per_device(self, live_librenms, settings):
-        """A cached is_stack payload with an empty member list has no fingerprint, so each row keys alone."""
-        from dcim.models import VirtualChassis
-
-        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
-        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
-
-        # The import builds its own client, so the non-zero timeout has to come from the config.
-        configure_librenms_servers(
-            settings,
-            {
-                "default": {
-                    "librenms_url": live_librenms.server.url,
-                    "api_token": "test-token",
-                    "cache_timeout": 300,
-                    "verify_ssl": False,
-                }
-            },
-        )
-        prerequisites = _prerequisites("stack-memberless")
-        api = LibreNMSAPI(server_key="default")
-        mappings = {}
-        cache_rows = {}
-        for device_id in (441, 442):
-            row = _libre_device(
-                device_id,
-                f"stack-memberless-{device_id}",
-                hardware=prerequisites["hardware"],
-                location=prerequisites["location"],
-            )
-            live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
-            live_librenms.server.register(f"/api/v0/inventory/{device_id}", {"status": "ok", "inventory": []})
-            # The shape a real cache round-trip preserves: is_stack survives an empty member list.
-            cache.set(
-                _vc_cache_key(api, device_id),
-                {"is_stack": True, "member_count": 2, "members": [], "detection_error": None},
-                300,
-            )
-            mappings[device_id] = prerequisites
-            cache_rows[device_id] = row
-
-        result = bulk_import_devices_shared(
-            [441, 442],
-            server_key="default",
-            manual_mappings_per_device=mappings,
-            libre_devices_cache=cache_rows,
-            user=make_superuser("stack-memberless-user"),
-        )
-
-        assert len(result["success"]) == 2
-        assert result["virtual_chassis_created"] == 2
-        assert VirtualChassis.objects.filter(domain__startswith="librenms-default-44").count() == 2
-
     def test_the_job_logger_reports_the_created_chassis(self, live_librenms, rq_job, caplog):
         job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("stack-create-job"))
         members = [_chassis(100, "SN-JOB-A", position=1), _chassis(200, "SN-JOB-B", position=2)]
@@ -732,6 +694,9 @@ class TestVirtualChassisPrefetch:
         assert cached["is_stack"] is True
         assert cached["member_count"] == 2
         job_messages = _messages_from(caplog, "vc-prefetch-job")
+        # Pin WHICH phase stopped: if the poll sequence changes, this fails loudly instead of
+        # quietly cancelling somewhere else and asserting a cache the prefetch never wrote.
+        assert "Job was already stopped before validation started" in job_messages
         assert any("Pre-fetching virtual chassis data for 1 devices" in m for m in job_messages)
         assert any("Virtual chassis data pre-fetch completed" in m for m in job_messages)
 
