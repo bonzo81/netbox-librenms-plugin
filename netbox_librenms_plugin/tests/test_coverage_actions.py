@@ -5790,6 +5790,28 @@ class TestResolveOOBInterface:
         # the message chain would otherwise tell the operator to choose one.
         assert result_iface is None and reason == "name_out_of_scope"
 
+    def test_explicit_pk_outside_the_view_grant_reports_the_scope_reason(self):
+        """An explicit PK the caller may not view must report the scope reason, not "no selection"."""
+        from dcim.models import Interface
+        from django.db import transaction
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+
+        view = self._view()
+        device = make_device("oob-res-pk-scope")
+        hidden = make_interface(device, "idrac0")
+        allowed = make_interface(device, "eth0")
+        user = make_user_with_perms("oob-interface-pk-scope", [("add", Interface)])
+        user = grant(user, "view", Interface, constraints={"pk": allowed.pk})
+        request = make_request("post", {"oob_interface_id": str(hidden.pk)}, user=user)
+
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(request, device)
+
+        # The caller DID select an interface, so the "no selection made" pair would make the
+        # message chain tell the operator to choose one.
+        assert result_iface is None and reason == "name_out_of_scope"
+
     def test_create_without_add_perm_returns_permission_add(self):
         """No existing row + user lacks Interface 'add' → the write-time re-check refuses the create rather than silently creating it."""
         from django.db import transaction
