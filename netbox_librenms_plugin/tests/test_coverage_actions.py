@@ -1118,6 +1118,41 @@ class TestBulkImportConfirmViewIntegration:
         assert b"Import 2 devices" in response.content
         assert view_message_texts(request, "error") == []
 
+    def test_colliding_rows_render_the_collision_block(self, settings, librenms_server):
+        """Two LibreNMS rows that resolve to one NetBox device are blocked by the collision gate."""
+        server_key = "confirm-integration-collision"
+        target = make_device("confirm-integration-collision-target")
+        for device_id, ip in ((71, "198.18.0.71"), (72, "198.18.0.72")):
+            librenms_server.device_info_response(
+                device_id=device_id,
+                hostname=target.name,
+                hardware="Test collision hardware",
+                os="test-collision-os",
+                serial="",
+                ip=ip,
+            )
+            librenms_server.vc_inventory_callable(device_id, [], {})
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-collision-user", [])
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["71", "72"],
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"Bulk import blocked" in response.content
+        assert target.name.encode() in response.content
+        assert b"Confirm Import" not in response.content
+
 
 @pytest.mark.django_db
 class TestBulkImportDevicesViewPost:
