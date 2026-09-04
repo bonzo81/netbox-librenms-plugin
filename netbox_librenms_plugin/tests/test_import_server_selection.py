@@ -240,6 +240,20 @@ def test_import_rejects_invalid_server_without_querying_a_fallback(client, setti
 
 
 @pytest.mark.django_db
+def test_import_omits_server_key_inputs_when_no_server_is_active(client, settings, servers):
+    """A page without an active server must not submit an unresolved server value."""
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
+    client.force_login(make_superuser("inactive-import-server"))
+    import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
+
+    response = client.get(import_url, {"server_key": "retired"})
+
+    assert response.status_code == 200
+    assert _requests_by_server(servers) == []
+    assert b'<input type="hidden" name="server_key"' not in response.content
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "view_name",
     ["bulk_import_confirm", "bulk_import_devices"],
