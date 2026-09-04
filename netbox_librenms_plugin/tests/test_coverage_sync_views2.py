@@ -389,6 +389,35 @@ class TestVLANWriteFailures:
         assert response.status_code == 302
         assert VLAN.objects.filter(vid=3131, name="Application", group=group).exists()
 
+    def test_created_vlan_outside_add_grant_is_rolled_back(self, client, live_librenms):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+        device = make_device("vlan-add-scope", librenms_cf={SERVER_KEY: {"id": 135}})
+        _seed(SyncVLANsView(), device, "vlans", [{"vlan_vlan": 3136, "vlan_name": "Outside add scope"}])
+        user = make_user_with_perms(
+            "vlan-add-scope-user",
+            [("view", Device), ("change", VLAN)],
+        )
+        user = grant(user, "add", VLAN, constraints={"vid": 3137})
+        client.force_login(user)
+
+        response = client.post(
+            _vlan_url(device),
+            {
+                "server_key": SERVER_KEY,
+                "action": "create_vlans",
+                "select": "3136",
+            },
+        )
+
+        assert response.status_code == 302
+        assert not VLAN.objects.filter(vid=3136).exists()
+        assert _response_messages(response, "error") == [
+            "VLAN 3136: the new VLAN is outside your add permission constraints; skipped."
+        ]
+
     def test_missing_group_fails_closed_instead_of_creating_global_vlan(self, client, live_librenms):
         device = make_device("vlan-group-missing", librenms_cf={SERVER_KEY: {"id": 132}})
         _seed(SyncVLANsView(), device, "vlans", [{"vlan_vlan": 3132, "vlan_name": "Application"}])

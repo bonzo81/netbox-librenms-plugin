@@ -404,6 +404,79 @@ class TestInterfaceViewWithRealObjects:
         assert context["netbox_only_interfaces"] == []
         assert live_librenms.server.requests == []
 
+    def test_hidden_interface_state_is_not_rendered_outside_view_grant(self, client, live_librenms, settings):
+        from dcim.models import Device, Interface
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["default"]["cache_timeout"] = 300
+        device = _mapped_device("interface-constrained-view")
+        visible = make_interface(device, "Ethernet1")
+        hidden = make_interface(device, "Ethernet2")
+        _set_librenms_id(visible, 101)
+        _set_librenms_id(hidden, 102)
+        _register_ports(
+            live_librenms,
+            ports=[
+                {
+                    "port_id": 101,
+                    "ifName": visible.name,
+                    "ifDescr": visible.name,
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifAdminStatus": "up",
+                    "ifOperStatus": "up",
+                    "ifAlias": "",
+                    "ifPhysAddress": "02:00:00:00:00:01",
+                    "ifMtu": 1500,
+                    "ifVlan": 1,
+                    "ifTrunk": 0,
+                },
+                {
+                    "port_id": 102,
+                    "ifName": hidden.name,
+                    "ifDescr": hidden.name,
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifAdminStatus": "up",
+                    "ifOperStatus": "up",
+                    "ifAlias": "",
+                    "ifPhysAddress": "02:00:00:00:00:02",
+                    "ifMtu": 1500,
+                    "ifVlan": 1,
+                    "ifTrunk": 0,
+                },
+            ],
+        )
+        user = make_user_with_perms(
+            "interface-constrained-view-user",
+            [("view", Device)],
+            constraints={"pk": device.pk},
+        )
+        user = grant(user, "view", Interface, constraints={"pk": visible.pk})
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk]),
+            {"server_key": "default"},
+            HTTP_HX_REQUEST="true",
+        )
+        assert response.status_code == 200
+        html = response.content.decode()
+
+        def interface_row(interface):
+            marker = f'data-interface="{interface.name}"'
+            marker_index = html.index(marker)
+            return html[html.rindex("<tr", 0, marker_index) : html.index("</tr>", marker_index)]
+
+        visible_row = interface_row(visible)
+        hidden_row = interface_row(hidden)
+        assert [item["path"] for item in live_librenms.server.requests] == ["/api/v0/devices/42/ports"]
+        assert '<span class="text-success">Enabled</span>' in visible_row
+        assert '<span class="text-success">Enabled</span>' not in hidden_row
+        assert '<span class="text-danger">Enabled</span>' in hidden_row
+
 
 class TestIPAddressHTTPAndORM:
     def _device(self):
