@@ -2339,6 +2339,30 @@ def _vlan_group(name):
     return VLANGroup.objects.create(name=name, slug=name.lower().replace(" ", "-"))
 
 
+class TestSyncVLANsViewAddConstraints:
+    def test_created_vlan_outside_add_grant_is_rolled_back(self):
+        from dcim.models import Device
+        from ipam.models import VLAN
+
+        dev = make_device("vlan-add-scope")
+        user = make_user_with_perms(
+            "vlan-add-scope",
+            [("view", Device), ("change", VLAN)],
+        )
+        user = grant(user, "add", VLAN, constraints={"vid": 200})
+        req = _make_request(
+            post_data={"action": "create_vlans", "select": ["201"]},
+            user=user,
+        )
+        view = _vlan_view(req, dev, [{"vlan_vlan": 201, "vlan_name": "Outside add scope"}])
+
+        response = _post(view, req, object_type="device", object_id=dev.pk)
+
+        assert response.status_code == 302
+        assert not VLAN.objects.filter(vid=201).exists()
+        assert any("add permission" in text.lower() for text in message_texts(req, "error"))
+
+
 class TestSyncVLANsViewWithGroup:
     def test_vlan_created_in_group(self):
         from ipam.models import VLAN
