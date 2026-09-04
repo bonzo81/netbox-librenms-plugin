@@ -189,6 +189,9 @@ class DeviceImportTable(tables.Table):
                 "title": lambda record: (
                     None if record.get("_validation", {}).get("can_import", False) else "Cannot import this device"
                 ),
+                "aria-label": lambda record: (
+                    f"Select {record.get('hostname') or record.get('sysName') or record.get('device_id')}"
+                ),
                 "data-device-id": lambda record: record.get("device_id"),
                 "data-hostname": lambda record: record.get("hostname", ""),
                 "data-sysname": lambda record: record.get("sysName", ""),

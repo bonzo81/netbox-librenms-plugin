@@ -161,6 +161,24 @@ class TestDeviceImportTable:
 
         assert isinstance(table.columns["selection"].column, ToggleColumn)
 
+    @pytest.mark.parametrize(
+        ("hostname", "sysname", "device_id", "accessible_name"),
+        [
+            ("edge.example.test", "edge", 4101, "edge.example.test"),
+            ("", "edge", 4102, "edge"),
+            ("", "", 4103, "4103"),
+        ],
+    )
+    def test_selection_has_an_accessible_name(self, hostname, sysname, device_id, accessible_name):
+        record = _import_record(device_id, can_import=True)
+        record["hostname"] = hostname
+        record["sysName"] = sysname
+        table = self._table([record])
+
+        html = str(table.rows[0].get_cell("selection"))
+
+        assert f'aria-label="Select {accessible_name}"' in html
+
     def test_selection_and_hostname_escape_librenms_values(self):
         record = _import_record(5, can_import=True)
         record["hostname"] = '"><script>alert(1)</script>'
