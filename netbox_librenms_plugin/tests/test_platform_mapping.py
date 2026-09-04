@@ -462,6 +462,7 @@ class TestBulkExportYAMLView:
 
         mock_qs = MagicMock()
         mock_qs.filter.return_value.order_by.return_value = [mock_mapping, mock_mapping]
+        mock_qs.model.objects.restrict.return_value = mock_qs
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
@@ -481,6 +482,7 @@ class TestBulkExportYAMLView:
 
         mock_qs = MagicMock()
         mock_qs.filter.return_value.order_by.return_value = [mock_mapping]
+        mock_qs.model.objects.restrict.return_value = mock_qs
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
@@ -497,6 +499,7 @@ class TestBulkExportYAMLView:
         request = self._make_request(["3", "7"])
 
         mock_qs = MagicMock()
+        mock_qs.model.objects.restrict.return_value = mock_qs
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
