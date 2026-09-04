@@ -284,6 +284,10 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
         [("view", type(device)), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)],
     )
 
+    with connection.cursor() as cursor:
+        cursor.execute("SHOW lock_timeout")
+        initial_lock_timeout = cursor.fetchone()[0]
+
     read_done, resume = Event(), Event()
 
     def sync_as_caller():
@@ -310,8 +314,15 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
             VLAN.objects.filter(pk=vlan.pk).delete()
         finally:
             resume.set()
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = DEFAULT")
         recorded = syncing.result(timeout=20)
 
+    with connection.cursor() as cursor:
+        cursor.execute("SHOW lock_timeout")
+        final_lock_timeout = cursor.fetchone()[0]
+
+    assert final_lock_timeout == initial_lock_timeout
     joined = " || ".join(text for _level, text in recorded)
     assert "concurrent VLAN change" in joined, joined
     assert not any(level == "success" for level, _text in recorded), joined
