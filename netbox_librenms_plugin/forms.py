@@ -15,6 +15,7 @@ from dcim.models import (
     Site,
 )
 from django import forms
+from django.core.exceptions import MultipleObjectsReturned
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
@@ -888,6 +889,40 @@ class LocationMappingForm(NetBoxModelForm):
         return cleaned_data
 
 
+# Target model per LocationMapping.field_type, used to bind the import field's queryset.
+LOCATION_MAPPING_IMPORT_MODELS = {
+    "site": Site,
+    "location": Location,
+    "rack": Rack,
+    "tenant": Tenant,
+}
+
+
+class CaseInsensitiveCSVModelChoiceField(CSVModelChoiceField):
+    """Resolve a CSV value against ``to_field_name`` without case sensitivity.
+
+    Resolution stays on ``self.queryset`` so NetBox's ``restrict_form_fields()``
+    still scopes the lookup to objects the importing user may view.
+    """
+
+    def to_python(self, value):
+        if value in self.empty_values:
+            return None
+        value = str(value).strip()
+        try:
+            return self.queryset.get(**{f"{self.to_field_name}__iexact": value})
+        except self.queryset.model.DoesNotExist:
+            raise forms.ValidationError(
+                self.error_messages["invalid_choice"],
+                code="invalid_choice",
+                params={"value": value},
+            )
+        except MultipleObjectsReturned:
+            raise forms.ValidationError(
+                f'"{value}" is not a unique value for this field; specify parent_site to disambiguate.'
+            )
+
+
 class LocationMappingImportForm(NetBoxModelImportForm):
     """Form for bulk importing location mappings.
 
@@ -900,7 +935,11 @@ class LocationMappingImportForm(NetBoxModelImportForm):
         choices=LocationMapping.FIELD_TYPE_CHOICES,
         help_text="Type of NetBox object the value maps to (site, location, rack, tenant)",
     )
-    netbox_object = forms.CharField(help_text="Name of the target NetBox object")
+    netbox_object = CaseInsensitiveCSVModelChoiceField(
+        queryset=Site.objects.none(),
+        to_field_name="name",
+        help_text="Name of the target NetBox object",
+    )
     parent_site = CSVModelChoiceField(
         queryset=Site.objects.all(),
         to_field_name="name",
@@ -914,54 +953,36 @@ class LocationMappingImportForm(NetBoxModelImportForm):
         model = LocationMapping
         fields = ["field_type", "librenms_value", "description"]
 
+    def __init__(self, data=None, *args, **kwargs):
+        """Point netbox_object at the model named by field_type, scoped to parent_site."""
+        super().__init__(data, *args, **kwargs)
+        if not data:
+            return
+
+        model = LOCATION_MAPPING_IMPORT_MODELS.get(data.get("field_type"))
+        if model is None:
+            return
+
+        queryset = model.objects.all()
+        parent_site = data.get("parent_site")
+        if parent_site and data.get("field_type") in ("location", "rack"):
+            site_field = self.fields["parent_site"].to_field_name
+            if data.get("field_type") == "rack":
+                queryset = queryset.filter(
+                    Q(**{f"site__{site_field}": parent_site}) | Q(**{f"location__site__{site_field}": parent_site})
+                )
+            else:
+                queryset = queryset.filter(**{f"site__{site_field}": parent_site})
+        self.fields["netbox_object"].queryset = queryset
+
     def clean(self):
-        """Resolve the named target object into a generic foreign key on the instance."""
+        """Attach the resolved target object to the instance as a generic foreign key."""
         super().clean()
         cleaned_data = self.cleaned_data
-        field_type = cleaned_data.get("field_type")
-        name = (cleaned_data.get("netbox_object") or "").strip()
-        cleaned_data["netbox_object"] = name
-        if not field_type or not name:
-            return cleaned_data
-
-        parent_site = cleaned_data.get("parent_site")
-        obj = self._resolve_object(field_type, name, parent_site)
-        if obj is not None:
-            self.instance.netbox_object = obj
+        target = cleaned_data.get("netbox_object")
+        if target is not None:
+            self.instance.netbox_object = target
         return cleaned_data
-
-    def _resolve_object(self, field_type, name, parent_site):
-        """Look up the target NetBox object by name, scoping location/rack to a site."""
-        model_map = {
-            "site": Site,
-            "location": Location,
-            "rack": Rack,
-            "tenant": Tenant,
-        }
-        model = model_map.get(field_type)
-        if model is None:
-            self.add_error("field_type", f"Unknown field type '{field_type}'.")
-            return None
-
-        queryset = model.objects.filter(name__iexact=name)
-        if field_type in ("location", "rack"):
-            if parent_site is not None:
-                if field_type == "rack":
-                    queryset = queryset.filter(Q(site=parent_site) | Q(location__site=parent_site))
-                else:
-                    queryset = queryset.filter(site=parent_site)
-
-        matches = list(queryset[:2])
-        if not matches:
-            self.add_error("netbox_object", f"No {field_type} named '{name}' found.")
-            return None
-        if len(matches) > 1:
-            self.add_error(
-                "netbox_object",
-                f"Multiple {field_type} objects named '{name}' found; specify parent_site to disambiguate.",
-            )
-            return None
-        return matches[0]
 
 
 class LocationMappingFilterForm(NetBoxModelFilterSetForm):

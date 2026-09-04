@@ -414,3 +414,64 @@ class TestGetObjectSiteId:
         obj = MagicMock(site_id=None)
         obj.location = MagicMock(site_id=8)
         assert get_object_site_id(obj) == 8
+
+
+# =============================================================================
+# TestCaseInsensitiveCSVModelChoiceField
+# =============================================================================
+
+
+class TestCaseInsensitiveCSVModelChoiceField:
+    """Tests for the import field that resolves targets by name."""
+
+    def _make_field(self, queryset_mock):
+        from dcim.models import Site
+
+        from netbox_librenms_plugin.forms import CaseInsensitiveCSVModelChoiceField
+
+        field = CaseInsensitiveCSVModelChoiceField(queryset=Site.objects.none(), to_field_name="name")
+        queryset_mock.model = Site
+        queryset_mock.all.return_value = queryset_mock
+        field.queryset = queryset_mock
+        return field
+
+    def test_resolves_case_insensitively_from_the_field_queryset(self):
+        """Lookup runs against self.queryset so restrict_form_fields() still applies."""
+        target = MagicMock()
+        qs = MagicMock()
+        qs.get.return_value = target
+
+        field = self._make_field(qs)
+        assert field.to_python("new york") is target
+        qs.get.assert_called_once_with(name__iexact="new york")
+
+    def test_strips_surrounding_whitespace(self):
+        qs = MagicMock()
+        field = self._make_field(qs)
+        field.to_python("  New York  ")
+        qs.get.assert_called_once_with(name__iexact="New York")
+
+    def test_missing_object_raises_validation_error(self):
+        from dcim.models import Site
+        from django.forms import ValidationError
+
+        qs = MagicMock()
+        qs.get.side_effect = Site.DoesNotExist
+        field = self._make_field(qs)
+        with pytest.raises(ValidationError):
+            field.to_python("Nowhere")
+
+    def test_ambiguous_name_raises_validation_error(self):
+        from django.core.exceptions import MultipleObjectsReturned
+        from django.forms import ValidationError
+
+        qs = MagicMock()
+        qs.get.side_effect = MultipleObjectsReturned
+        field = self._make_field(qs)
+        with pytest.raises(ValidationError) as exc_info:
+            field.to_python("Hall A")
+        assert "parent_site" in str(exc_info.value)
+
+    def test_empty_value_returns_none(self):
+        field = self._make_field(MagicMock())
+        assert field.to_python("") is None
