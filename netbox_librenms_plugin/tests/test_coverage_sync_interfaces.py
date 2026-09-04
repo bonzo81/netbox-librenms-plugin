@@ -502,7 +502,7 @@ class TestSyncInterfacesViewGetCachedPortsData:
 class TestInterfaceContextOOBRows:
     """get_context_data must not let OOB-controller rows hide / falsely-match main-device interfaces in the netbox-only reconciliation set."""
 
-    def _make_view(self):
+    def _make_view(self, *, real_cache_keys=False):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
@@ -527,9 +527,10 @@ class TestInterfaceContextOOBRows:
         view._add_vlan_group_selection = MagicMock()
         view._add_missing_vlans_info = MagicMock()
         view.get_table = MagicMock(return_value=MagicMock())
-        view.get_cache_key = MagicMock(return_value="ports-key")
-        view.get_last_fetched_key = MagicMock(return_value="lf-key")
-        view.get_vlan_overrides_key = MagicMock(return_value="ov-key")
+        if not real_cache_keys:
+            view.get_cache_key = MagicMock(return_value="ports-key")
+            view.get_last_fetched_key = MagicMock(return_value="lf-key")
+            view.get_vlan_overrides_key = MagicMock(return_value="ov-key")
         return view
 
     @staticmethod
@@ -589,14 +590,11 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
         from django.utils import timezone
 
-        view = self._make_view()
+        view = self._make_view(real_cache_keys=True)
         obj = self._host_with_idrac()
         cached = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
         req = _make_request()
 
-        del view.get_cache_key
-        del view.get_last_fetched_key
-        del view.get_vlan_overrides_key
         cache_key = view.get_cache_key(obj, "ports", "default")
         last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
         cache.set(cache_key, cached)
@@ -1562,13 +1560,10 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
         from django.utils import timezone
 
-        view = self._make_view()
+        view = self._make_view(real_cache_keys=True)
         obj = self._host_with_idrac()
         req = _make_request()
 
-        del view.get_cache_key
-        del view.get_last_fetched_key
-        del view.get_vlan_overrides_key
         cache_key = view.get_cache_key(obj, "ports", "default")
         last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
         try:
@@ -1591,13 +1586,10 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
         from django.utils import timezone
 
-        view = self._make_view()
+        view = self._make_view(real_cache_keys=True)
         obj = self._host_with_idrac()
         req = _make_request()
 
-        del view.get_cache_key
-        del view.get_last_fetched_key
-        del view.get_vlan_overrides_key
         cache_key = view.get_cache_key(obj, "ports", "default")
         last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
         try:
