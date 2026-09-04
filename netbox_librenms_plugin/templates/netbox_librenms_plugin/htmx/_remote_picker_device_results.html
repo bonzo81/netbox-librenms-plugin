@@ -16,14 +16,3 @@ Device search results for the remote-end picker. Each hit loads its port list in
     <div class="list-group-item rounded-2 text-muted small py-1">No devices match “{{ q }}”.</div>
   {% endif %}
 {% endfor %}
-<script>
-  {# A new device search invalidates any previously loaded port list + selection — #}
-  {# unconditionally, or a stale port (and enabled Save) from the PREVIOUS device would #}
-  {# silently submit while the user is looking at fresh search results. #}
-  (function () {
-    var ports = document.getElementById('remote-picker-ports');
-    var save = document.getElementById('remote-picker-save');
-    if (ports) { ports.innerHTML = ''; }
-    if (save) { save.disabled = true; }
-  })();
-</script>
