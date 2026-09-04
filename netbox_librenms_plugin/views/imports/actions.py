@@ -3109,7 +3109,7 @@ class AddAsOOBView(
                 selection was made, ``(None, "permission_add")`` when creating is
                 required but the user lacks Interface ``add``, ``(None, "invalid_name")``
                 for a malformed new name, or ``(None, "name_out_of_scope")`` when the
-                requested name belongs to an interface outside the caller's view scope.
+                requested interface is outside the caller's view scope.
         """
         from django.core.exceptions import ValidationError
         from dcim.models import Interface
@@ -3169,16 +3169,22 @@ class AddAsOOBView(
                 return (existing, None) if existing is not None else (None, "name_out_of_scope")
         if iface_id:
             try:
+                iface_pk = int(iface_id)
+            except ValueError:
+                return None, None
+            try:
                 # Lock the reused row too (same orphan-on-concurrent-delete reasoning).
                 # Scoped like every other client-supplied id: the device filter proves where the
                 # interface sits, not that the caller's grant covers it.
-                return (
+                interface = (
                     Interface.objects.restrict(request.user, "view")
                     .select_for_update(of=("self",))
-                    .get(pk=int(iface_id), device=device),
-                    None,
+                    .get(pk=iface_pk, device=device)
                 )
-            except (Interface.DoesNotExist, ValueError):
+                return interface, None
+            except Interface.DoesNotExist:
+                if Interface.objects.filter(pk=iface_pk, device=device).exists():
+                    return None, "name_out_of_scope"
                 return None, None
         return None, None
 

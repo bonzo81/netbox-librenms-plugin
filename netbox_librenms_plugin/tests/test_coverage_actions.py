@@ -7390,6 +7390,54 @@ class TestResolveOOBInterface:
         assert device.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 4444
         assert device.oob_ip_id is None
 
+    def test_out_of_scope_pk_tells_the_operator_what_actually_blocked_it(self):
+        from dcim.models import Interface
+        from django.http import HttpResponse
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, messages_on
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        device = make_device("oob-msg-pk-scope")
+        hidden = make_interface(device, "idrac0")
+        visible = make_interface(device, "eth0")
+        user = _scoped_device_writer(device, "oob-msg-pk-scope-writer")
+        user = grant(user, "view", Interface, constraints={"pk": visible.pk})
+        user = grant(user, "add", IPAddress)
+        request = make_request(
+            "post",
+            {
+                "existing_device_id": str(device.pk),
+                "server_key": "default",
+                "oob_interface_id": str(hidden.pk),
+            },
+            user=user,
+            path="/add-as-oob/",
+        )
+        view = AddAsOOBView()
+        view.kwargs = {}
+        view._librenms_api = _make_api()
+        view.request = request
+        libre_device = {"device_id": 4445, "hostname": f"{device.name}-oob", "sysName": f"{device.name}-oob"}
+        validation = {"oob_candidate": {"device": device, "type": "idrac", "ip": "198.18.0.7"}}
+
+        with (
+            patch.object(
+                AddAsOOBView, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
+            ),
+            patch.object(AddAsOOBView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(AddAsOOBView, "rebind_api_for_server", return_value=view._librenms_api),
+        ):
+            view.post(request, device_id=4445)
+
+        queued_messages = messages_on(request)
+        warnings = [text for level, text in queued_messages if level == "warning"]
+        assert any("outside your view scope" in text for text in warnings), warnings
+        assert not any("Choose an interface" in text for _level, text in queued_messages)
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 4445
+        assert device.oob_ip_id is None
+
     def test_create_without_add_perm_returns_permission_add(self):
         """No existing row + user lacks Interface 'add' → the write-time re-check refuses the create rather than silently creating it."""
         from django.db import transaction
