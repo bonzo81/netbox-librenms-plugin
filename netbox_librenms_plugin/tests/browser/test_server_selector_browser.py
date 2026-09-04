@@ -4,11 +4,30 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
-from django.template import Context, Engine
+
+def test_browser_modules_defer_their_django_imports():
+    """No browser module may import Django at collection time, so the suite runs without settings."""
+    import ast
+
+    def django_imports(path):
+        module = ast.parse(path.read_text())
+        names = []
+        for node in module.body:
+            if isinstance(node, ast.Import):
+                names += [alias.name for alias in node.names if alias.name.startswith("django")]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("django"):
+                names.append(node.module)
+        return names
+
+    offenders = {path.name: names for path in Path(__file__).parent.glob("*.py") if (names := django_imports(path))}
+
+    assert offenders == {}
 
 
 def _render_server_selector(active_server_key):
     """Render the production selector include with two transient server options."""
+    from django.template import Context, Engine
+
     template_root = Path(__file__).parents[2] / "templates"
     template = Engine(dirs=[template_root]).get_template("netbox_librenms_plugin/inc/_server_selector.html")
     options = [
@@ -34,6 +53,8 @@ def _render_server_selector(active_server_key):
 
 def _render_cached_search_links():
     """Render production cached-search links for two servers with identical filters."""
+    from django.template import Context, Engine
+
     template_root = Path(__file__).parents[2] / "templates"
     template = Engine(dirs=[template_root]).get_template("netbox_librenms_plugin/inc/_cached_search_links.html")
     searches = [
