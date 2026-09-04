@@ -244,6 +244,28 @@ class LibreNMSWritePermissionMixin(LibreNMSPermissionMixin):
     permission_required = PERM_CHANGE_PLUGIN
 
 
+class LibreNMSGenericPermissionMixin:
+    """Add plugin read access to a NetBox generic view's object permission gate.
+
+    Use this only with NetBox generic views that inherit
+    ``ObjectPermissionRequiredMixin`` and define a queryset. It deliberately
+    does not inherit Django's ``PermissionRequiredMixin``: doing so would
+    shadow NetBox's ``has_permission()`` and prevent ``queryset.restrict()``
+    from enforcing object-level constraints.
+
+    Plain/cache-backed views must instead use ``LibreNMSPermissionMixin`` and
+    explicitly require permissions for each NetBox object they access.
+    """
+
+    additional_permissions = (PERM_VIEW_PLUGIN,)
+
+
+class LibreNMSGenericWritePermissionMixin(LibreNMSGenericPermissionMixin):
+    """Add plugin read and write access to a NetBox generic mutation view."""
+
+    additional_permissions = (PERM_VIEW_PLUGIN, PERM_CHANGE_PLUGIN)
+
+
 def relock_scoped_row(model, **lookup):
     """
     Re-lock a row whose id came from an ALREADY-RESOLVED object: the single audited exception.

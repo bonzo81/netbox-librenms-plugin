@@ -133,6 +133,34 @@ class TestPermissionMixinWiring:
         self._assert_has_permission_mixin(AddDeviceToLibreNMSView)
 
 
+class TestGenericViewPermissionWiring:
+    """Generic views must retain NetBox's queryset-restricting permission mixin."""
+
+    def test_generic_views_use_netbox_object_permission_mixin(self):
+        from django.contrib.auth.mixins import PermissionRequiredMixin
+        from utilities.views import ObjectPermissionRequiredMixin
+
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+        from netbox_librenms_plugin.views.mapping_views import (
+            LocationMappingCreateView,
+            LocationMappingListView,
+        )
+        from netbox_librenms_plugin.views.status_check import DeviceStatusListView, VMStatusListView
+
+        generic_views = (
+            LocationMappingListView,
+            LocationMappingCreateView,
+            LibreNMSImportView,
+            DeviceStatusListView,
+            VMStatusListView,
+        )
+
+        for view_class in generic_views:
+            assert view_class.has_permission is ObjectPermissionRequiredMixin.has_permission
+            assert ObjectPermissionRequiredMixin in view_class.__mro__
+            assert PermissionRequiredMixin not in view_class.__mro__
+
+
 class TestRequiredObjectPermissionsWiring:
     """
     POST-only sync views that modify NetBox objects must declare required_object_permissions

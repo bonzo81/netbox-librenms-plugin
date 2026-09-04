@@ -22,7 +22,7 @@ A user needs both tiers of permissions to complete an action. For example, to vi
 1. **Tier 1: Plugin permission**: User needs View AND Change permission on **LibreNMS Settings**
 
     - View: allows access to the plugin pages and pulling data from LibreNMS.
-    - Change: allows performing actions that modify Netbox or Librenms data
+    - Change: together with View, allows performing actions that modify NetBox or LibreNMS data
 
 The Plugin also enforces Netbox object permissions so the following permission would also be required:
 
@@ -53,14 +53,15 @@ To grant a user or group access to the plugin:
 
 NetBox object permissions are created similarly but for different object types (DCIM, IPAM, VIRTUALIZATION, etc.).
 
-### Interface Type Mapping Permissions
+### Mapping & Rule Permissions
 
-The Interface Type Mapping feature uses its own object permissions in addition to the plugin permissions. To manage interface mappings, users need:
+Each mapping and rule feature uses its own object permissions in addition to the plugin permissions. To manage a mapping or rule, users need:
 
 - **Plugin permission**: View permission on LibreNMS Settings (to access the page)
-- **Object permissions**: `netbox_librenms_plugin.add_interfacetypemapping`, `netbox_librenms_plugin.change_interfacetypemapping`, or `netbox_librenms_plugin.delete_interfacetypemapping` as needed
+- **Plugin write permission**: Change permission on LibreNMS Settings, in addition to View, for create, edit, delete, bulk import, and bulk delete actions
+- **Object permissions**: the matching `netbox_librenms_plugin.add_*`, `change_*`, `delete_*`, or `view_*` permission as needed
 
-These permissions are enforced automatically by NetBox's generic views.
+NetBox's generic views enforce both the plugin gate and the mapping/rule model permission. Where an object permission is constrained, NetBox also filters the queryset so a user can see and act on only the permitted records.
 
 
 ## Example Scenarios
@@ -89,13 +90,13 @@ Plugins permissions use the **LibreNMS Settings** model permissions:
 | Permission | NetBox UI Selection | Grants |
 |------------|---------------------|--------|
 | `view_librenmssettings` | LibreNMS Settings → ☑ Can view | Access all plugin pages, view LibreNMS data |
-| `change_librenmssettings` | LibreNMS Settings → ☑ Can change | Import devices, sync data, save settings |
+| `change_librenmssettings` | LibreNMS Settings → ☑ Can change | Together with View: import devices, sync data, save settings, and manage plugin mapping/rule records |
 
-Users without View permission won't see the LibreNMS menu or the LibreNMS Sync tab. Users with **View** but not **Change** can browse all plugin pages but cannot perform import or sync actions that modify Netbox data and Librenms data like Locations and Adding devices.
+Users without View permission won't see the LibreNMS menu or the LibreNMS Sync tab. Users with **View** but not **Change** can use read-only plugin features, subject to the applicable NetBox object permissions, but cannot perform actions that modify NetBox or LibreNMS data.
 
 ### Tier 2: NetBox Object Permissions
 
-When the plugin creates or modifies NetBox objects (devices, interfaces, cables, IP addresses, VLANs), NetBox enforces its standard object permissions. The plugin checks these permissions and will block operations if the user lacks the required access.
+When the plugin lists, reads, creates, or modifies NetBox objects (including devices, interfaces, cables, IP addresses, VLANs, virtual machines, and plugin mapping/rule records), NetBox enforces its standard object permissions. The plugin checks these permissions and will block operations if the user lacks the required access. Object permission constraints also limit the NetBox objects returned by plugin pages.
 
 | Plugin Action | Required Object Permissions |
 |---------------|----------------------------|
@@ -125,6 +126,12 @@ To control access to these pages, the plugin uses the **LibreNMS Settings** mode
 - **Single permission per access level** — One "View" permission for read access, one "Change" permission for write access
 
 While using a settings model for access control may seem unconventional, it provides a simple and maintainable way to gate plugin access without introducing custom permission infrastructure.
+
+### Cached LibreNMS Data and NetBox Objects
+
+LibreNMS API responses and validation data are cached plugin data rather than NetBox database models, so NetBox cannot apply queryset-based object permissions directly to those cache entries. The LibreNMS Settings permissions therefore gate access to the integration and its cached data.
+
+When a page also reads or presents NetBox objects, both permission tiers apply. For example, the import page requires plugin View and `dcim.view_device`; Device and VM status pages require plugin View plus `dcim.view_device` or `virtualization.view_virtualmachine`. This preserves the integration gate without allowing a cached-data feature to bypass the user's NetBox object scope.
 
 
 ## Special note: Background Jobs and Superuser Access
