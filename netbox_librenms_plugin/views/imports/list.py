@@ -16,12 +16,12 @@ from netbox_librenms_plugin.import_utils import (
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import get_user_pref
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGenericPermissionMixin
 
 logger = logging.getLogger(__name__)
 
 
-class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
+class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """Import devices from LibreNMS into NetBox with validation metadata."""
 
     queryset = Device.objects.none()

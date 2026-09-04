@@ -137,6 +137,36 @@ class TestLibreNMSPermissionMixin:
         assert content["error"] == "Custom denied message"
 
 
+class TestLibreNMSGenericPermissionMixins:
+    """Generic view mixins must supplement NetBox permissions without replacing them."""
+
+    def test_read_mixin_requires_plugin_view_permission(self):
+        from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
+        from netbox_librenms_plugin.views.mixins import LibreNMSGenericPermissionMixin
+
+        assert LibreNMSGenericPermissionMixin.additional_permissions == (PERM_VIEW_PLUGIN,)
+
+    def test_write_mixin_requires_plugin_view_and_change_permissions(self):
+        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+        from netbox_librenms_plugin.views.mixins import LibreNMSGenericWritePermissionMixin
+
+        assert LibreNMSGenericWritePermissionMixin.additional_permissions == (
+            PERM_VIEW_PLUGIN,
+            PERM_CHANGE_PLUGIN,
+        )
+
+    def test_generic_mixins_do_not_inherit_django_permission_required_mixin(self):
+        from django.contrib.auth.mixins import PermissionRequiredMixin
+
+        from netbox_librenms_plugin.views.mixins import (
+            LibreNMSGenericPermissionMixin,
+            LibreNMSGenericWritePermissionMixin,
+        )
+
+        assert PermissionRequiredMixin not in LibreNMSGenericPermissionMixin.__mro__
+        assert PermissionRequiredMixin not in LibreNMSGenericWritePermissionMixin.__mro__
+
+
 class TestAPIPermissions:
     """Tests for API permission class."""
 
