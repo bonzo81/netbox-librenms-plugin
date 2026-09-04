@@ -1094,10 +1094,11 @@ class TestUpdateDeviceLocationView:
         mock_msgs.error.assert_called_once()
 
     def test_device_no_site_shows_warning(self):
-        view, _mock_api = self._view_with_api()
+        view, mock_api = self._view_with_api()
 
         mock_device = MagicMock()
         mock_device.site = None
+        mock_api.get_librenms_id.return_value = 42
 
         with (
             patch(

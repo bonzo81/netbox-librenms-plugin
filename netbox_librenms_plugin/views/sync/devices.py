@@ -168,6 +168,10 @@ class UpdateDeviceLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.error(request, lookup_error.message)
             return _device_sync_redirect(request, pk, server_key)
 
+        if not self.librenms_id:
+            messages.error(request, "Device not found in LibreNMS")
+            return _device_sync_redirect(request, pk, server_key)
+
         if device.site:
             librenms_api = self.librenms_api
             field_data = {

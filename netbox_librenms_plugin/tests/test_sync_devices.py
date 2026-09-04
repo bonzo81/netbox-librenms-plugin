@@ -273,6 +273,25 @@ class TestUpdateDeviceLocationView:
         ]
         assert _messages(response, "success") == ["Device location updated in LibreNMS to TestSite"]
 
+    def test_unlinked_device_does_not_patch_a_missing_id(self, client, librenms_server):
+        """An unlinked device must stop before the LibreNMS update request."""
+        device = make_device("location-update-unlinked", librenms_cf={SERVER_KEY: None})
+        client.force_login(make_superuser("location-update-unlinked-writer"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk]),
+            {"server_key": SERVER_KEY},
+        )
+
+        assert response.status_code == 302
+        assert response.url == (
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}"
+            f"?server_key={SERVER_KEY}"
+        )
+        assert _messages(response, "error") == ["Device not found in LibreNMS"]
+        assert all("/devices/None" not in request["path"] for request in librenms_server.requests)
+        assert all(request["method"] != "PATCH" for request in librenms_server.requests)
+
 
 @pytest.mark.django_db
 class TestRemoveServerMappingView:
