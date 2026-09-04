@@ -551,7 +551,9 @@ class LibreNMSAPI:
             return False, LibreNMSLookupError("The LibreNMS server could not be reached.")
 
         if response.status_code == HTTP_NOT_FOUND:
-            # The only answer that means the device is genuinely absent.
+            # The only answer that means the device is genuinely absent, so an earlier cached
+            # hit is now wrong: drop it rather than serve it until the TTL expires.
+            cache.delete(cache_key)
             return False, None
         # Checked explicitly rather than through raise_for_status(), which lets a terminal 3xx
         # through and would let its body be read as a device.

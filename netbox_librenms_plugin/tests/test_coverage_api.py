@@ -611,6 +611,31 @@ class TestGetDeviceInfoErrors:
 
         assert ok is False
 
+    def test_a_404_drops_a_cached_device_so_a_later_read_cannot_serve_it(self, settings, librenms_server):
+        """An authoritative 404 invalidates the cached device instead of leaving it readable until the TTL."""
+        from django.core.cache import cache
+
+        device_id = 909091
+        cache.delete(f"librenms_device_info_default_{device_id}")
+        answers = [
+            (200, {"status": "ok", "devices": [{"device_id": device_id, "hostname": "present"}]}),
+            (404, {"status": "error", "message": "Device does not exist"}),
+        ]
+        librenms_server.register(
+            f"/api/v0/devices/{device_id}",
+            lambda **_: answers.pop(0) if answers else (404, {"status": "error"}),
+            method="GET",
+        )
+        api = api_for(settings, librenms_server.url)
+
+        # A sync-tab render caches the device...
+        assert api.get_device_info(device_id) == (True, {"device_id": device_id, "hostname": "present"})
+        # ...then the import path reads live and LibreNMS denies the device.
+        assert api.get_device_info(device_id, use_cache=False) == (False, None)
+
+        # A cache-only read (the partial refresh) must not resurrect the deleted device.
+        assert api.get_device_info(device_id, cache_only=True) == (False, None)
+
     def test_request_exception_reports_the_lookup_failure(self, settings, librenms_server):
         """A transport failure is not an answer about the device, so it is not "not found"."""
         from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
