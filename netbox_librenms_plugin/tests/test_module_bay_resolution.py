@@ -13,8 +13,8 @@ from netbox_librenms_plugin.tests.conftest import (
 pytestmark = pytest.mark.django_db
 
 
-def _item(index, model, name, *, parent=0, descr=None, phys_class="module", serial=""):
-    return {
+def _item(index, model, name, *, parent=0, descr=None, phys_class="module", serial="", **extra):
+    row = {
         "entPhysicalIndex": index,
         "entPhysicalModelName": model,
         "entPhysicalName": name,
@@ -23,6 +23,8 @@ def _item(index, model, name, *, parent=0, descr=None, phys_class="module", seri
         "entPhysicalContainedIn": parent,
         "entPhysicalSerialNum": serial,
     }
+    row.update(extra)
+    return row
 
 
 def _bays(device):
@@ -232,14 +234,27 @@ class TestMatchBay:
 
         assert matched == bay
 
-    def test_an_unmatchable_row_reaches_the_positional_fallback_and_finds_nothing(self):
+    @pytest.mark.parametrize(
+        ("container_index", "expected_bay"),
+        [(10, "SFP 1"), (11, "SFP 2")],
+    )
+    def test_an_unnamed_container_slot_is_matched_by_its_position(self, container_index, expected_bay):
+        """A transceiver in an unnamed cage resolves by which cage slot it sits in."""
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
-        device = make_device("match-bay-miss")
-        bay = make_module_bay(device, "Slot 1")
-        item = _item(30, "SFP-X", "Totally Unrelated", phys_class="module")
+        device = make_device(f"match-bay-position-{container_index}")
+        bays = {name: make_module_bay(device, name) for name in ("SFP 1", "SFP 2")}
+        rows = [
+            _item(1, "LC-CARD", "Slot 1", phys_class="module"),
+            _item(10, "", "Cage A", parent=1, phys_class="container", entPhysicalParentRelPos=1),
+            _item(11, "", "Cage B", parent=1, phys_class="container", entPhysicalParentRelPos=2),
+            _item(30, "SFP-X", "Transceiver", parent=container_index, phys_class="module"),
+        ]
+        index_map = {row["entPhysicalIndex"]: row for row in rows}
 
-        assert InstallBranchView._match_bay(item, {30: item}, {bay.name: bay}, [], []) is None
+        matched = InstallBranchView._match_bay(index_map[30], index_map, dict(bays), [], [])
+
+        assert matched == bays[expected_bay]
 
 
 class TestInstallSingleResolutionPaths:
