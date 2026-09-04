@@ -14,7 +14,7 @@ from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
-from netbox_librenms_plugin.utils import validate_regex_field
+from netbox_librenms_plugin.utils import get_object_site_id, validate_regex_field
 
 logger = logging.getLogger(__name__)
 
@@ -872,6 +872,42 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
                     {
                         "librenms_value": (
                             f"A {self.get_field_type_display()} mapping for '{self.librenms_value}' already exists."
+                        )
+                    }
+                )
+        elif self.field_type in ("location", "rack"):
+            self._validate_no_scoped_collision()
+
+    def _validate_no_scoped_collision(self):
+        """Reject a location/rack alias that already maps to another object in the same site.
+
+        Parent-site scoping only disambiguates duplicates across *different* sites;
+        two aliases resolving within one site leave resolution with no tiebreak.
+        """
+        target = self.netbox_object
+        if target is None:
+            return
+        target_site_id = get_object_site_id(target)
+        if target_site_id is None:
+            return
+
+        qs = LocationMapping.objects.filter(
+            field_type=self.field_type,
+            librenms_value__iexact=self.librenms_value,
+        ).select_related("content_type")
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+
+        for other in qs:
+            other_target = other.netbox_object
+            if other_target is None or other_target == target:
+                continue
+            if get_object_site_id(other_target) == target_site_id:
+                raise ValidationError(
+                    {
+                        "librenms_value": (
+                            f"A {self.get_field_type_display()} mapping for '{self.librenms_value}' "
+                            f"already exists in this site (maps to '{other_target}')."
                         )
                     }
                 )

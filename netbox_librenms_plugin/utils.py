@@ -1199,7 +1199,8 @@ def resolve_location_mapping(field_type: str, librenms_value: str, parent_site=N
             objects belonging to this site (NetBox scopes these to a parent site).
 
     Returns:
-        The matched NetBox object, or None if no mapping applies.
+        The matched NetBox object, or None if no mapping applies or if several
+        mappings resolve to different objects (ambiguous — see below).
     """
     if not librenms_value:
         return None
@@ -1214,20 +1215,37 @@ def resolve_location_mapping(field_type: str, librenms_value: str, parent_site=N
         librenms_value__iexact=librenms_value,
     ).select_related("content_type")
 
+    candidates = []
     for mapping in mappings:
         obj = mapping.netbox_object
         if obj is None:
             continue
         if parent_site is not None and field_type in ("location", "rack"):
-            obj_site_id = _get_object_site_id(obj)
-            if obj_site_id != parent_site.pk:
+            if get_object_site_id(obj) != parent_site.pk:
                 continue
-        return obj
+        candidates.append(obj)
 
-    return None
+    if not candidates:
+        return None
+
+    # LocationMapping.clean() rejects colliding aliases, but data predating that
+    # check (or created concurrently) could still yield several candidates.
+    # Picking one arbitrarily would assign a different object run to run, so
+    # refuse to guess and leave the field unset.
+    distinct = {(type(obj), obj.pk) for obj in candidates}
+    if len(distinct) > 1:
+        logger.warning(
+            "Ambiguous LocationMapping for %s '%s': %d candidates; skipping",
+            field_type,
+            librenms_value,
+            len(distinct),
+        )
+        return None
+
+    return candidates[0]
 
 
-def _get_object_site_id(obj):
+def get_object_site_id(obj):
     """Return the site id an object belongs to (directly or via its location)."""
     site_id = getattr(obj, "site_id", None)
     if site_id is None:

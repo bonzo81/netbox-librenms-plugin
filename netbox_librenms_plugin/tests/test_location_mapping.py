@@ -64,10 +64,13 @@ class TestLocationMappingModel:
 
     def test_clean_strips_whitespace(self):
         """clean() strips leading/trailing whitespace from librenms_value."""
+        from netbox_librenms_plugin.models import LocationMapping
+
         # Use a parent-scoped type so no global uniqueness query runs.
         mapping = self._make(field_type="location", librenms_value="  Aisle 1  ")
         with patch("netbox.models.NetBoxModel.clean"):
-            mapping.clean()
+            with patch.object(LocationMapping, "_validate_no_scoped_collision"):
+                mapping.clean()
         assert mapping.librenms_value == "Aisle 1"
 
     def test_clean_raises_on_blank(self):
@@ -161,11 +164,66 @@ class TestLocationMappingModel:
         from netbox_librenms_plugin.models import LocationMapping
 
         mapping = self._make(field_type="rack", librenms_value="R1")
+        mapping.object_id = 1
         with patch("netbox.models.NetBoxModel.clean"):
-            with patch.object(LocationMapping, "objects") as mock_objects:
-                mapping.clean()
-                # Uniqueness query must not be run for rack
-                mock_objects.filter.assert_not_called()
+            with patch.object(LocationMapping, "_validate_no_scoped_collision") as mock_check:
+                with patch.object(LocationMapping, "objects") as mock_objects:
+                    mapping.clean()
+                    # The global uniqueness query must not run for rack
+                    mock_objects.filter.assert_not_called()
+        mock_check.assert_called_once()
+
+    def test_clean_raises_on_same_site_scoped_collision(self):
+        """clean() rejects a location alias already mapped to another object in the same site."""
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.models import LocationMapping
+
+        target = MagicMock(name="hall-a")
+        other_target = MagicMock(name="hall-b")
+
+        mapping = self._make(field_type="location", librenms_value="Hall A")
+        mapping.object_id = 1
+        with pytest.raises(ValidationError) as exc_info:
+            with patch("netbox.models.NetBoxModel.clean"):
+                with patch("netbox_librenms_plugin.models.get_object_site_id", return_value=7):
+                    with patch.object(
+                        LocationMapping,
+                        "netbox_object",
+                        new_callable=lambda: property(lambda s: target),
+                    ):
+                        with patch.object(LocationMapping, "objects") as mock_objects:
+                            mock_objects.filter.return_value.select_related.return_value = [
+                                MagicMock(netbox_object=other_target)
+                            ]
+                            mapping.clean()
+        assert "librenms_value" in str(exc_info.value)
+
+    def test_clean_allows_scoped_alias_in_different_site(self):
+        """clean() permits the same location alias when the objects sit in different sites."""
+        from netbox_librenms_plugin.models import LocationMapping
+
+        target = MagicMock(name="hall-a")
+        other_target = MagicMock(name="hall-b")
+
+        mapping = self._make(field_type="location", librenms_value="Hall A")
+        mapping.object_id = 1
+        with patch("netbox.models.NetBoxModel.clean"):
+            with patch(
+                "netbox_librenms_plugin.models.get_object_site_id",
+                side_effect=lambda obj: 7 if obj is target else 9,
+            ):
+                with patch.object(
+                    LocationMapping,
+                    "netbox_object",
+                    new_callable=lambda: property(lambda s: target),
+                ):
+                    with patch.object(LocationMapping, "objects") as mock_objects:
+                        mock_objects.filter.return_value.select_related.return_value = [
+                            MagicMock(netbox_object=other_target)
+                        ]
+                        mapping.clean()
+        assert mapping.librenms_value == "Hall A"
 
     def test_get_absolute_url(self):
         """get_absolute_url returns the detail URL."""
@@ -295,6 +353,46 @@ class TestResolveLocationMapping:
             result = utils.resolve_location_mapping("rack", "R1", parent_site=parent_site)
         assert result is None
 
+    def test_returns_none_when_candidates_are_ambiguous(self):
+        """Two mappings resolving to different objects in the same site yield no result."""
+        from netbox_librenms_plugin import utils
+
+        parent_site = MagicMock(pk=7)
+        first = MagicMock(site_id=7, pk=1)
+        second = MagicMock(site_id=7, pk=2)
+
+        fake_model = MagicMock()
+        fake_model.objects.filter.return_value.select_related.return_value = [
+            MagicMock(netbox_object=first),
+            MagicMock(netbox_object=second),
+        ]
+
+        with patch.dict(
+            "sys.modules",
+            {"netbox_librenms_plugin.models": MagicMock(LocationMapping=fake_model)},
+        ):
+            result = utils.resolve_location_mapping("location", "Hall A", parent_site=parent_site)
+        assert result is None
+
+    def test_duplicate_mappings_to_same_object_are_not_ambiguous(self):
+        """Several mappings pointing at one object still resolve."""
+        from netbox_librenms_plugin import utils
+
+        target = MagicMock(site_id=7, pk=1)
+
+        fake_model = MagicMock()
+        fake_model.objects.filter.return_value.select_related.return_value = [
+            MagicMock(netbox_object=target),
+            MagicMock(netbox_object=target),
+        ]
+
+        with patch.dict(
+            "sys.modules",
+            {"netbox_librenms_plugin.models": MagicMock(LocationMapping=fake_model)},
+        ):
+            result = utils.resolve_location_mapping("location", "Hall A", parent_site=MagicMock(pk=7))
+        assert result is target
+
 
 # =============================================================================
 # Test_GetObjectSiteId
@@ -302,17 +400,17 @@ class TestResolveLocationMapping:
 
 
 class TestGetObjectSiteId:
-    """Tests for the _get_object_site_id() helper."""
+    """Tests for the get_object_site_id() helper."""
 
     def test_direct_site_id(self):
-        from netbox_librenms_plugin.utils import _get_object_site_id
+        from netbox_librenms_plugin.utils import get_object_site_id
 
         obj = MagicMock(site_id=3)
-        assert _get_object_site_id(obj) == 3
+        assert get_object_site_id(obj) == 3
 
     def test_via_location(self):
-        from netbox_librenms_plugin.utils import _get_object_site_id
+        from netbox_librenms_plugin.utils import get_object_site_id
 
         obj = MagicMock(site_id=None)
         obj.location = MagicMock(site_id=8)
-        assert _get_object_site_id(obj) == 8
+        assert get_object_site_id(obj) == 8
