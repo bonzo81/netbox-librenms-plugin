@@ -749,14 +749,15 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
             relationship_future = executor.submit(write_relationship)
             assert validation_reached.wait(5), "relationship sync did not reach validation"
             update_future = executor.submit(update_unrelated)
-            updated_while_relationship_open = unrelated_updated.wait(0.75)
+            # Bounded, so a lock that wrongly blocks this update fails the test instead of hanging it.
+            update_future.result(timeout=10)
+            assert unrelated_updated.is_set()
+            assert not relationship_future.done()
             release_relationship.set()
             relationship_future.result(timeout=10)
-            update_future.result(timeout=10)
     finally:
         cache.delete(cache_key)
 
-    assert updated_while_relationship_open
     child.refresh_from_db()
     unrelated.refresh_from_db()
     assert child.parent_id == parent.pk
