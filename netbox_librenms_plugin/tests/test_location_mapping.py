@@ -109,12 +109,38 @@ class TestLocationMappingModel:
 
         mapping = self._make(field_type="site", librenms_value="NYC")
         mapping.content_type_id = 5
+        mapping.object_id = 1
         mapping._state.fields_cache["content_type"] = MagicMock(app_label="dcim", model="site")
         with patch("netbox.models.NetBoxModel.clean"):
-            with patch.object(LocationMapping, "objects") as mock_objects:
-                mock_objects.filter.return_value.exists.return_value = False
-                mapping.clean()
+            with patch.object(
+                LocationMapping,
+                "netbox_object",
+                new_callable=lambda: property(lambda s: MagicMock()),
+            ):
+                with patch.object(LocationMapping, "objects") as mock_objects:
+                    mock_objects.filter.return_value.exists.return_value = False
+                    mapping.clean()
         assert mapping.librenms_value == "NYC"
+
+    def test_clean_raises_on_unresolved_object(self):
+        """clean() raises when object_id does not resolve to an existing object."""
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.models import LocationMapping
+
+        mapping = self._make(field_type="site", librenms_value="NYC")
+        mapping.content_type_id = 5
+        mapping.object_id = 999999
+        mapping._state.fields_cache["content_type"] = MagicMock(app_label="dcim", model="site")
+        with pytest.raises(ValidationError) as exc_info:
+            with patch("netbox.models.NetBoxModel.clean"):
+                with patch.object(
+                    LocationMapping,
+                    "netbox_object",
+                    new_callable=lambda: property(lambda s: None),
+                ):
+                    mapping.clean()
+        assert "object_id" in str(exc_info.value)
 
     def test_clean_enforces_uniqueness_for_site(self):
         """clean() raises when a duplicate site mapping value already exists."""
@@ -174,6 +200,30 @@ class TestLocationMappingModel:
             "librenms_value": "NYC",
             "netbox_object": "New York",
             "description": "east coast",
+        }
+
+    def test_to_yaml_includes_parent_site_for_scoped_types(self):
+        """to_yaml() emits parent_site for location/rack so the export can be re-imported."""
+        import yaml
+
+        target = MagicMock()
+        target.__str__ = lambda s: "Data Hall A"
+        target.site.__str__ = lambda s: "New York"
+
+        mapping = self._make(field_type="location", librenms_value="Hall A")
+        mapping.object_id = 1
+        with patch.object(
+            type(mapping),
+            "netbox_object",
+            new_callable=lambda: property(lambda s: target),
+        ):
+            data = yaml.safe_load(mapping.to_yaml())
+        assert data == {
+            "field_type": "location",
+            "librenms_value": "Hall A",
+            "netbox_object": "Data Hall A",
+            "parent_site": "New York",
+            "description": "",
         }
 
 

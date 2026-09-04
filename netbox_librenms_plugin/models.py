@@ -849,6 +849,12 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
             ct = self.content_type
             if (ct.app_label, ct.model) != expected:
                 raise ValidationError({"content_type": f"Target object must be a {self.get_field_type_display()}."})
+            # A GenericForeignKey has no database constraint, so a stale or invented
+            # object_id (e.g. via the REST API) would otherwise save a dangling mapping.
+            if self.object_id is not None and self.netbox_object is None:
+                raise ValidationError(
+                    {"object_id": f"No {self.get_field_type_display()} with ID {self.object_id} exists."}
+                )
 
         # site/tenant names are globally unique, so the same LibreNMS value
         # mapping to two different objects of the same type would be ambiguous.
@@ -900,8 +906,14 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
             "field_type": self.field_type,
             "librenms_value": self.librenms_value,
             "netbox_object": str(self.netbox_object) if self.netbox_object else "",
-            "description": self.description,
         }
+        # location/rack names are only unique within a site, so the export must carry
+        # the parent site or re-import rejects the record as ambiguous.
+        if self.field_type in ("location", "rack"):
+            parent_site = getattr(self.netbox_object, "site", None)
+            if parent_site is not None:
+                data["parent_site"] = str(parent_site)
+        data["description"] = self.description
         return yaml.dump(data, sort_keys=False)
 
 
