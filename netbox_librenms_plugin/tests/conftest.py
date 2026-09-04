@@ -1,11 +1,16 @@
 """Shared pytest fixtures for NetBox LibreNMS Plugin tests."""
 
+import os
 from copy import deepcopy
-from urllib.parse import urlsplit, urlunsplit
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
+
+from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
+
+
+_TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
 
 
 def clear_test_cache(cache_backend):
@@ -16,30 +21,10 @@ def clear_test_cache(cache_backend):
         cache_backend.clear()
 
 
-def _isolated_cache_location(location):
-    """Move Redis cache URLs to database 9 without changing other locations."""
-    if isinstance(location, list):
-        return [_isolated_cache_location(item) for item in location]
-    if isinstance(location, tuple):
-        return tuple(_isolated_cache_location(item) for item in location)
-    if not isinstance(location, str):
-        return location
-
-    parsed = urlsplit(location)
-    if parsed.scheme not in {"redis", "rediss"}:
-        return location
-
-    database = parsed.path.strip("/")
-    if database and not database.isdigit():
-        return location
-    return urlunsplit(parsed._replace(path="/9"))
-
-
 def _isolated_cache_config(caches_config):
-    """Return a cache config with a unique per-test namespace."""
+    """Return the worker cache config with a unique per-test namespace."""
     isolated = deepcopy(caches_config)
     default = isolated.setdefault("default", {})
-    default["LOCATION"] = _isolated_cache_location(default.get("LOCATION", ""))
     unique_prefix = f"nblp-test-{uuid4().hex}"
     configured_prefix = default.get("KEY_PREFIX")
     default["KEY_PREFIX"] = f"{configured_prefix}:{unique_prefix}" if configured_prefix else unique_prefix
@@ -48,18 +33,27 @@ def _isolated_cache_config(caches_config):
 
 @pytest.fixture(autouse=True)
 def _isolate_test_cache(settings):
-    """Run every test in a unique cache namespace outside the dev-server database.
+    """Run every test in a unique namespace inside its worker cache database.
 
-    The devcontainer test settings point the cache at the SAME Redis DB the dev runserver
-    uses, and NetBox's DEBUG startup runs ``cache.clear()`` on every auto-reload (any ``.py``
-    edit under the workspace restarts it). A restart landing mid-test wiped seeded snapshots
-    and made cache-dependent tests flake nondeterministically. Rehoming tests to a sibling
-    Redis DB keeps django-redis semantics (``ttl()``, pickling) while being invisible to the
-    dev server. A unique key prefix isolates this test from other pytest processes and avoids
-    clearing a shared Redis database.
+    The isolated settings assign each pytest worker its own Redis database. A unique key
+    prefix then isolates individual tests without changing that worker assignment or clearing
+    another test process's cache.
     """
     settings.CACHES = _isolated_cache_config(settings.CACHES)
     yield
+
+
+@pytest.fixture(scope="session")
+def django_db_modify_db_settings(django_db_modify_db_settings):
+    """Give each pytest worker a private PostgreSQL database."""
+    from django.conf import settings
+
+    test_config = dict(settings.DATABASES["default"].get("TEST") or {})
+    test_config["NAME"] = isolated_test_database_name(
+        _TEST_DATABASE_BASE_NAME,
+        os.environ.get("PYTEST_XDIST_WORKER"),
+    )
+    settings.DATABASES["default"]["TEST"] = test_config
 
 
 @pytest.fixture(autouse=True)
@@ -98,11 +92,33 @@ def _seeded_model_rows():
     yield PortStackLagPattern, "librenms_os", "lag_name_pattern", lag.INITIAL_LAG_PATTERNS
 
 
+def _seeded_sap_rows():
+    """Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
+
+    Kept apart from :func:`_seeded_model_rows` because migration 0016 sets a second field on rows
+    0013 already created, so these rows are applied with ``update()`` rather than
+    ``get_or_create()``. Both the restore and its intactness check read this one definition.
+    """
+    import importlib
+
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    sap = importlib.import_module("netbox_librenms_plugin.migrations.0016_portstacklagpattern_sap_name_pattern")
+    yield PortStackLagPattern, "librenms_os", "sap_name_pattern", sap.INITIAL_SAP_PATTERNS
+
+
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed."""
     for model, lookup_field, value_field, rows in _seeded_model_rows():
         for lookup, value in rows:
             model.objects.get_or_create(**{lookup_field: lookup}, defaults={value_field: value})
+
+    # get_or_create above matches the 0013 row and leaves the 0016 field at the model's blank
+    # default, so the Nokia SAP rule silently disappears for every test after the first
+    # transactional one. Re-apply it from the migration's own seed data.
+    for model, lookup_field, value_field, rows in _seeded_sap_rows():
+        for lookup, value in rows:
+            model.objects.filter(**{lookup_field: lookup}).update(**{value_field: value})
 
 
 @pytest.fixture(autouse=True)
@@ -133,7 +149,25 @@ def _restore_migration_seeded_rows(request):
         if not model.objects.exists():
             seed_migration_rows()
             break
+    _restore_librenms_id_custom_field()
     yield
+
+
+def _restore_librenms_id_custom_field():
+    """Recreate the librenms_id custom field a transactional flush removed.
+
+    The handler short-circuits on its own ``_executed_aliases`` guard, so after a flush it will
+    not recreate the field by itself. Only act when the field is actually gone, which keeps this
+    to one cheap existence check for the non-transactional majority.
+    """
+    from extras.models import CustomField
+
+    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+    if CustomField.objects.filter(name="librenms_id").exists():
+        return
+    _ensure_librenms_id_custom_field._executed_aliases.discard("default")
+    _ensure_librenms_id_custom_field(sender=None, using="default")
 
 
 @pytest.fixture(scope="session", autouse=True)

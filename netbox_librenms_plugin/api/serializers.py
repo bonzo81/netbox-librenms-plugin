@@ -150,5 +150,5 @@ class PortStackLagPatternSerializer(NetBoxModelSerializer):
         """Meta options for PortStackLagPatternSerializer."""
 
         model = PortStackLagPattern
-        fields = ["id", "url", "display", "librenms_os", "lag_name_pattern", "description"]
+        fields = ["id", "url", "display", "librenms_os", "lag_name_pattern", "sap_name_pattern", "description"]
         brief_fields = ("id", "url", "display", "librenms_os", "lag_name_pattern", "description")

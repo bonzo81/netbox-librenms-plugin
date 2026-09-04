@@ -616,6 +616,7 @@ class LibreNMSAPI:
         device_os: str | None = None,
         interface_name_field: str = "ifName",
         compiled_lag_patterns: list | None = None,
+        compiled_sap_patterns: list | None = None,
     ) -> dict:
         """
         Resolve LAG membership and sub-interface parent relationships from LibreNMS data.
@@ -623,13 +624,12 @@ class LibreNMSAPI:
         Universal rules (vendor-agnostic, hardcoded):
           1. The LAG aggregate is normally the 'low' entry in a port_stack pair, but the
              aggregate side is determined authoritatively by _is_lag_aggregate() (ifType
-             ieee8023adLag or a configured name pattern), not by position — so a pair whose
+             ieee8023adLag or a configured name pattern), not by position, so a pair whose
              aggregate is on the 'high' side is still mapped member->aggregate correctly.
-          2. Skip any pair where either port name contains ':' (Nokia SAP entries).
-          3. Strip '.N' suffix to resolve Junos sub-unit names to physical-level ports.
-          4. Sub-interface detection: a pair where one name is the other plus a numeric '.N'
-             suffix is a parent/child pair — and, like the LAG rule, the relationship is
-             position-independent, so the child may be on either the high or the low side.
+          2. Skip a pair when a SAP pattern matches either port's ifName or ifDescr.
+          3. Strip a '.N' suffix in the active name field to resolve a physical-level port.
+          4. A pair in the active name field where one name is the other plus a numeric '.N'
+             suffix is a parent/child pair. The child may be on either side.
 
         Configurable via PortStackLagPattern model:
           - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
@@ -647,14 +647,19 @@ class LibreNMSAPI:
                        can't misclassify an interface on another platform. When None, all
                        stored patterns are loaded (legacy, unscoped behaviour).
             interface_name_field: Interface-name field selected for this device
-                                  ('ifName' or 'ifDescr'). Names are scanned across this
-                                  field first, then ifName and ifDescr as fallbacks, so an
-                                  ifDescr-mode device still resolves its LAG and sub-interface
-                                  relationships.
+                                  ('ifName' or 'ifDescr'). Each relationship map is built from
+                                  this field alone. A map this field leaves empty is taken from
+                                  the other field alone.
             compiled_lag_patterns: Optional list of pre-compiled name-pattern regexes. When
                                    provided, the PortStackLagPattern DB read and per-call
                                    compile are skipped and this list is used directly, taking
                                    priority over lag_patterns/device_os.
+            compiled_sap_patterns: Optional list of pre-compiled SAP-name regexes. A port_stack
+                                   row whose ifName or ifDescr names a SAP describes a service,
+                                   not an interface relationship, so it is skipped. Read from the
+                                   rows stored for device_os only when the LAG patterns are read
+                                   from there too, so a caller that supplies its own patterns
+                                   stays DB-free; an empty list disables the skip.
 
         Returns:
             dict with keys (port_ids are canonical normalized positive ints, so every
@@ -663,31 +668,13 @@ class LibreNMSAPI:
                 'lag_members':    {member_port_id: aggregate_port_id}
                 'sub_interfaces': {child_port_id: parent_port_id}
         """
-        # Guard against malformed payload items (non-dict) so a single bad entry from
-        # LibreNMS doesn't crash the whole relationship resolution with AttributeError.
-        safe_ports = [p for p in ports if isinstance(p, dict)]
-
-        # Scan names across the selected interface_name_field plus ifName/ifDescr, mirroring
-        # the refresh relationship signal. On an ifDescr-mode device the aggregate or sub-unit name lives in
-        # ifDescr (ifName may be empty), so keying only on ifName here would drop every such port
-        # from the lookup maps and silently resolve no relationships even though the port_stack
-        # fetch was triggered. dict.fromkeys de-dups while preserving precedence order.
-        name_fields = tuple(dict.fromkeys((interface_name_field or "ifName", "ifName", "ifDescr")))
-
-        def _port_name_items(port: dict) -> list[tuple[str, str]]:
-            return [(field, name) for field in name_fields if isinstance(name := port.get(field), str) and name]
-
-        def _port_names(port: dict) -> list[str]:
-            return [name for _, name in _port_name_items(port)]
-
+        from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS
         from netbox_librenms_plugin.utils import normalize_librenms_port_id
 
-        # by_id indexes EVERY port with a usable port_id, even a nameless one: a port_stack pair
-        # references ports by id, and _is_lag_aggregate classifies an aggregate authoritatively by
-        # ifType (ieee8023adLag) which needs no name. Excluding nameless ports here would drop a
-        # LAG relationship the port_stack + ifType define, even though ifType alone is enough to
-        # resolve it. (All downstream NAME ops iterate _port_names(port), which is empty for a
-        # nameless port, so it simply won't match any name-based rule — no string op sees a None.)
+        # Ignore malformed port items without losing valid relationships from the same payload.
+        safe_ports = [port for port in ports if isinstance(port, dict)]
+
+        # Keep nameless ports because ifType can identify a LAG aggregate without a name.
         by_id = {}
         ambiguous_port_ids = set()
         for port in safe_ports:
@@ -700,37 +687,10 @@ class LibreNMSAPI:
                 continue
             by_id[port_id] = port
         ports_with_id = list(by_id.values())
-        # Index each name field separately. A sub-unit in ifName must resolve only through an
-        # ifName base. An unrelated ifDescr with the same text is not evidence that both rows
-        # describe one physical interface. Drop names that are ambiguous within one field.
-        by_name_by_field: dict[str, dict[str, dict]] = {field: {} for field in name_fields}
-        ambiguous_names_by_field: dict[str, set[str]] = {field: set() for field in name_fields}
-        for p in ports_with_id:
-            for field, name in _port_name_items(p):
-                field_index = by_name_by_field[field]
-                ambiguous_names = ambiguous_names_by_field[field]
-                if name in ambiguous_names:
-                    continue
-                existing = field_index.get(name)
-                if existing is not None and normalize_librenms_port_id(
-                    existing.get("port_id")
-                ) != normalize_librenms_port_id(p.get("port_id")):
-                    del field_index[name]
-                    ambiguous_names.add(name)
-                    continue
-                field_index[name] = p
 
         if compiled_lag_patterns is not None:
-            # Caller (e.g. the interface-refresh gating) already loaded + compiled the OS-scoped
-            # patterns for this device_os and shares them here, so the DB read + regex compile
-            # happen once per refresh instead of once in the signal check and again here.
             compiled_patterns = compiled_lag_patterns
         elif lag_patterns is None:
-            # OS-scoped pattern loading + compile-with-skip lives on the model so the resolver
-            # and the refresh fetch trigger can't diverge on which patterns apply. A
-            # PRESENT but unusable device_os disables name-pattern matching (returns []), so a
-            # stale vendor regex can't be re-globalized; structural ieee8023adLag detection is
-            # unaffected. device_os None preserves the legacy unscoped behaviour.
             from netbox_librenms_plugin.models import PortStackLagPattern
 
             compiled_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
@@ -742,199 +702,177 @@ class LibreNMSAPI:
                 try:
                     compiled_patterns.append(_re.compile(pattern_str))
                 except (_re.error, TypeError) as exc:
-                    # A configured pattern with a typo'd regex (re.error) or a non-string value
-                    # (TypeError — the caller-supplied dict isn't guaranteed strings like the
-                    # DB-backed path is) is skipped rather than crashing resolution — logged so the
-                    # user can tell why LAG detection isn't working.
                     logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
-        lag_members: dict = {}
-        sub_interfaces: dict = {}
-        conflicted_lag_members: set = set()
-        conflicted_sub_interfaces: set = set()
+        if compiled_sap_patterns is None:
+            if compiled_lag_patterns is None and lag_patterns is None:
+                from netbox_librenms_plugin.models import PortStackLagPattern
 
-        def _is_lag_aggregate(port: dict) -> bool:
-            if port.get("ifType") == "ieee8023adLag":
-                return True
-            return any(pat.search(name) for pat in compiled_patterns for name in _port_names(port))
+                compiled_sap_patterns = PortStackLagPattern.compiled_sap_patterns_for_os(device_os)
+            else:
+                # A caller that supplies LAG patterns also supplies the SAP policy.
+                compiled_sap_patterns = []
 
-        def _relate(mapping: dict, conflicted_keys: set, key_port: dict, value_port: dict) -> None:
-            """
-            Store a normalized ``port_id -> port_id`` edge in ``mapping``.
-
-            The maps are keyed AND valued by the canonical normalized port_id (a positive int
-            via ``normalize_librenms_port_id``), so every consumer can look up by the same
-            normalizer without re-deriving str/int fallbacks per call. ports and port_stack are
-            independent LibreNMS payloads (one may carry string ids, the other ints);
-            normalizing both sides at the source makes the maps type-agnostic and
-            self-consistent. A side whose id won't normalize is dropped rather than stored raw.
-            """
-            key_id = normalize_librenms_port_id(key_port.get("port_id"))
-            value_id = normalize_librenms_port_id(value_port.get("port_id"))
-            if key_id is None or value_id is None or key_id in conflicted_keys:
-                return
-            existing = mapping.get(key_id)
-            if existing is None:
-                mapping[key_id] = value_id
-            elif existing != value_id:
-                mapping.pop(key_id, None)
-                conflicted_keys.add(key_id)
-
-        def _resolve_physical_port(port: dict):
-            """
-            Resolve a port to its physical-level port, stripping a Junos sub-unit ``.N`` suffix.
-
-            Scans ALL known names (not just the primary), mirroring the SAP and sub-unit guards:
-            with interface_name_field="ifDescr" the structured ``xe-0/0/0.0`` / ``ae1.0`` name can
-            live in ifName while the primary (ifDescr) carries an arbitrary label. A primary-only
-            check would then fail to collapse the logical pair, and LAG sync would bind the wrong
-            (logical) ports — e.g. ``202 -> 204`` instead of the physical ``201 -> 203``.
-            """
-            for field, name in _port_name_items(port):
-                if "." not in name:
-                    continue
-                base, suffix = name.rsplit(".", 1)
-                # Only treat a NUMERIC suffix as a sub-unit (e.g. Gi0/1.100, ae1.0). A dotted name
-                # whose suffix isn't a number is a legitimate physical name, not a sub-interface,
-                # so it must not be remapped to a spurious base.
-                if suffix.isdigit() and base in by_name_by_field[field]:
-                    return by_name_by_field[field][base]
-            return port
-
-        def _is_sub_unit_of(child_name: str, parent_name: str) -> bool:
-            """True when child_name is parent_name + '.<digits>' (a numeric sub-interface)."""
-            if not child_name.startswith(parent_name + "."):
-                return False
-            return child_name[len(parent_name) + 1 :].isdigit()
-
-        def _has_sub_unit_relationship(child_port: dict, parent_port: dict) -> bool:
-            """
-            Return True when child_port has a numeric sub-unit name relationship to parent_port.
-
-            Scans ALL known names of each port (not just the primary), mirroring the SAP guard
-            below: with interface_name_field="ifDescr" the ``.N`` sub-unit marker can live in ifName
-            while the primary (ifDescr) carries a clean name, so a primary-only check would miss it.
-            """
-            return any(
-                _is_sub_unit_of(child_name, parent_name)
-                for field in name_fields
-                if isinstance(child_name := child_port.get(field), str)
-                and isinstance(parent_name := parent_port.get(field), str)
-                and child_name
-                and parent_name
-            )
-
+        # Validate and remove SAP rows once so fallback cannot reconsider them.
+        filtered_port_pairs = []
         for entry in port_stack:
             if not isinstance(entry, dict):
                 continue
-            # LibreNMS returns the ports_stack rows verbatim (api_success($device->portsStack)),
-            # so the keys are the table columns: high_port_id / low_port_id. The API docs show
-            # port_id_high / port_id_low, which no server actually sends — verified against a live
-            # instance, where an entry is {id, device_id, high_ifIndex, high_port_id, low_ifIndex,
-            # low_port_id, ifStackStatus}. Reading the documented spelling silently resolved every
-            # relationship to nothing.
+            # Rows carry the ports_stack columns high_port_id/low_port_id; the documented port_id_high spelling is never sent.
             if "high_port_id" not in entry and "low_port_id" not in entry:
-                # Neither key present: a shape change would otherwise zero out every LAG and
-                # sub-interface relationship without a single error.
                 logger.warning("Unrecognized port_stack entry shape, keys: %s", sorted(entry))
                 continue
-            high_id = entry.get("high_port_id")
-            low_id = entry.get("low_port_id")
-            # 0 (int OR string) is the ifStack sentinel for "no port" (stack top/bottom).
-            # normalize_librenms_port_id treats 0/negative/non-numeric as invalid whether the API
-            # returned the id as an int or a string, so the sentinel skip stays consistent with the
-            # canonical integer keys in by_id. A bare ``not low_id`` would let a truthy string "0"
-            # fall through to the by_id lookup.
-            normalized_high_id = normalize_librenms_port_id(high_id)
-            normalized_low_id = normalize_librenms_port_id(low_id)
-            if normalized_high_id is None or normalized_low_id is None:
+            high_id = normalize_librenms_port_id(entry.get("high_port_id"))
+            low_id = normalize_librenms_port_id(entry.get("low_port_id"))
+            if high_id is None or low_id is None:
                 continue
-
-            high_port = by_id.get(normalized_high_id)
-            low_port = by_id.get(normalized_low_id)
+            high_port = by_id.get(high_id)
+            low_port = by_id.get(low_id)
             if not high_port or not low_port:
                 continue
-
-            # Universal rule: skip Nokia SAP entries (colon notation: lag1:0, lag-1:10). Check
-            # ALL known names, not just the primary: when interface_name_field="ifDescr" a SAP port
-            # can carry a clean ifDescr but the real lag1:0 marker in ifName, so a primary-only
-            # check would miss it and misclassify the row as a LAG/sub-interface relationship.
-            if any(":" in name for name in _port_names(high_port)) or any(
-                ":" in name for name in _port_names(low_port)
-            ):
+            names = tuple(
+                name
+                for port in (high_port, low_port)
+                for field in INTERFACE_NAME_FIELDS
+                if isinstance(name := port.get(field), str) and name
+            )
+            if any(pattern.search(name) for pattern in compiled_sap_patterns for name in names):
                 continue
+            filtered_port_pairs.append((high_port, low_port))
 
-            # Sub-interface detection: the child name is parent + '.<digits>'. port_stack
-            # ordering is NOT guaranteed (the LAG branch below is already position-independent,
-            # and ifStack can emit the sub-interface as either the high or the low side), so
-            # check BOTH directions. Without the reverse check a parent=low/child=high pair
-            # falls through to the LAG branch, where _resolve_physical_port collapses both ports to
-            # the same base and the self-reference guard silently drops the relationship.
-            low_is_child = _has_sub_unit_relationship(low_port, high_port)
-            high_is_child = _has_sub_unit_relationship(high_port, low_port)
-            if low_is_child and high_is_child:
-                continue
-            if low_is_child:
-                _relate(
-                    sub_interfaces,
-                    conflicted_sub_interfaces,
-                    low_port,
-                    high_port,
-                )  # low is the child, high the parent
-                continue
-            if high_is_child:
-                _relate(
-                    sub_interfaces,
-                    conflicted_sub_interfaces,
-                    high_port,
-                    low_port,
-                )  # high is the child, low the parent
-                continue
+        def _resolve_with(field: str) -> tuple[dict, dict]:
+            by_name: dict[str, dict] = {}
+            ambiguous_names: set[str] = set()
+            for port in ports_with_id:
+                name = port.get(field)
+                if not isinstance(name, str) or not name or name in ambiguous_names:
+                    continue
+                existing = by_name.get(name)
+                if existing is not None and normalize_librenms_port_id(
+                    existing.get("port_id")
+                ) != normalize_librenms_port_id(port.get("port_id")):
+                    by_name.pop(name)
+                    ambiguous_names.add(name)
+                    continue
+                by_name[name] = port
 
-            # LAG membership: resolve each side to its physical-level port (strips the Junos
-            # sub-unit .N suffix), checking every known name so an ifDescr-mode device whose
-            # structured name lives in ifName still collapses to the physical port.
-            high_phys = _resolve_physical_port(high_port)
-            low_phys = _resolve_physical_port(low_port)
-            if not high_phys or not low_phys:
-                continue
+            lag_members: dict = {}
+            sub_interfaces: dict = {}
+            conflicted_lag_members: set = set()
+            conflicted_sub_interfaces: set = set()
 
-            if normalize_librenms_port_id(high_phys.get("port_id")) == normalize_librenms_port_id(
-                low_phys.get("port_id")
-            ):
-                continue  # Same port after physical resolution — skip self-references
+            def _is_lag_aggregate(port: dict) -> bool:
+                if port.get("ifType") == "ieee8023adLag":
+                    return True
+                name = port.get(field)
+                return isinstance(name, str) and any(pattern.search(name) for pattern in compiled_patterns)
 
-            low_is_agg = _is_lag_aggregate(low_phys)
-            high_is_agg = _is_lag_aggregate(high_phys)
+            def _relate(mapping: dict, conflicted_keys: set, key_port: dict, value_port: dict) -> None:
+                """Store a normalized edge and drop keys that have conflicting targets."""
+                key_id = normalize_librenms_port_id(key_port.get("port_id"))
+                value_id = normalize_librenms_port_id(value_port.get("port_id"))
+                if key_id is None or value_id is None or key_id in conflicted_keys:
+                    return
+                existing = mapping.get(key_id)
+                if existing is None:
+                    mapping[key_id] = value_id
+                elif existing != value_id:
+                    mapping.pop(key_id, None)
+                    conflicted_keys.add(key_id)
 
-            if low_is_agg and high_is_agg:
-                # Both sides look like aggregates — a too-broad configured lag_name_pattern
-                # matched the member's name too (e.g. 'bond' matching both bond0 and
-                # bond0-slave). Disambiguate with the authoritative STRUCTURAL signal: the port
-                # whose ifType is ieee8023adLag is the real aggregate. Resolve only when exactly
-                # one side is structural; if neither (or both) is, we genuinely can't tell which
-                # is the aggregate, so skip rather than guess a wrong membership.
-                low_struct = low_phys.get("ifType") == "ieee8023adLag"
-                high_struct = high_phys.get("ifType") == "ieee8023adLag"
-                if low_struct and not high_struct:
+            def _resolve_physical_port(port: dict) -> dict:
+                """Resolve the physical-level port named by the active field."""
+                name = port.get(field)
+                if not isinstance(name, str):
+                    return port
+                base, separator, suffix = name.rpartition(".")
+                if separator and suffix.isdigit():
+                    return by_name.get(base, port)
+                return port
+
+            def _name_derived_parent(port: dict) -> dict | None:
+                """Resolve the parent named by a numeric suffix in the active field."""
+                name = port.get(field)
+                if not isinstance(name, str):
+                    return None
+                base, separator, suffix = name.rpartition(".")
+                if not separator or not suffix.isdigit():
+                    return None
+                candidate = by_name.get(base)
+                return candidate if candidate is not port else None
+
+            def _is_sub_unit_of(child_port: dict, parent_port: dict) -> bool:
+                """Return whether the active field names child_port as a sub-unit."""
+                child_name = child_port.get(field)
+                parent_name = parent_port.get(field)
+                if not isinstance(child_name, str) or not isinstance(parent_name, str) or not parent_name:
+                    return False
+                return child_name.startswith(parent_name + ".") and child_name[len(parent_name) + 1 :].isdigit()
+
+            for high_port, low_port in filtered_port_pairs:
+                # ifStack ordering does not determine which side is the child.
+                if _is_sub_unit_of(low_port, high_port):
+                    _relate(sub_interfaces, conflicted_sub_interfaces, low_port, high_port)
+                    continue
+                if _is_sub_unit_of(high_port, low_port):
+                    _relate(sub_interfaces, conflicted_sub_interfaces, high_port, low_port)
+                    continue
+
+                high_phys = _resolve_physical_port(high_port)
+                low_phys = _resolve_physical_port(low_port)
+                if normalize_librenms_port_id(high_phys.get("port_id")) == normalize_librenms_port_id(
+                    low_phys.get("port_id")
+                ):
+                    continue
+
+                low_is_agg = _is_lag_aggregate(low_phys)
+                high_is_agg = _is_lag_aggregate(high_phys)
+                if low_is_agg and high_is_agg:
+                    # Structural ifType disambiguates a pair where both names match a LAG pattern.
+                    low_struct = low_phys.get("ifType") == "ieee8023adLag"
+                    high_struct = high_phys.get("ifType") == "ieee8023adLag"
+                    if low_struct and not high_struct:
+                        _relate(lag_members, conflicted_lag_members, high_phys, low_phys)
+                    elif high_struct and not low_struct:
+                        _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
+                elif low_is_agg:
                     _relate(lag_members, conflicted_lag_members, high_phys, low_phys)
-                elif high_struct and not low_struct:
+                elif high_is_agg:
                     _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
-            elif low_is_agg:
-                _relate(
-                    lag_members,
-                    conflicted_lag_members,
-                    high_phys,
-                    low_phys,
-                )  # high is the member, low the aggregate
-            elif high_is_agg:
-                _relate(
-                    lag_members,
-                    conflicted_lag_members,
-                    low_phys,
-                    high_phys,
-                )  # low is the member, high the aggregate
 
+            # Every sub-interface edge shortens the active-field name, so the graph cannot contain a cycle.
+            for port in ports_with_id:
+                child_id = normalize_librenms_port_id(port.get("port_id"))
+                if child_id is None or child_id in sub_interfaces or child_id in conflicted_sub_interfaces:
+                    continue
+                parent_port = _name_derived_parent(port)
+                if parent_port is None or normalize_librenms_port_id(parent_port.get("port_id")) is None:
+                    continue
+                _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
+
+            return lag_members, sub_interfaces
+
+        if not isinstance(interface_name_field, str) or interface_name_field not in INTERFACE_NAME_FIELDS:
+            interface_name_field = DEFAULT_INTERFACE_NAME_FIELD
+        lag_members, sub_interfaces = _resolve_with(interface_name_field)
+        # Take each empty map from the other field without mixing fields within a map.
+        if not lag_members or not sub_interfaces:
+            fallback_field = next(field for field in INTERFACE_NAME_FIELDS if field != interface_name_field)
+            fallback_lag_members, fallback_sub_interfaces = _resolve_with(fallback_field)
+            if not lag_members:
+                logger.debug(
+                    "The lag_members map from %s is empty. The resolver uses %s alone.",
+                    interface_name_field,
+                    fallback_field,
+                )
+                lag_members = fallback_lag_members
+            if not sub_interfaces:
+                logger.debug(
+                    "The sub_interfaces map from %s is empty. The resolver uses %s alone.",
+                    interface_name_field,
+                    fallback_field,
+                )
+                sub_interfaces = fallback_sub_interfaces
         return {"lag_members": lag_members, "sub_interfaces": sub_interfaces}
 
     def add_device(self, data):

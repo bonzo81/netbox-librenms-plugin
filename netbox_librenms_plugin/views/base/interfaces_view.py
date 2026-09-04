@@ -180,7 +180,7 @@ class BaseInterfaceTableView(
         """Handle POST request to fetch and cache LibreNMS interface data for an object."""
         obj = self.get_object(pk)
 
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
 
         # Rebind the API to the POSTed server BEFORE fetching the id/ports, so the live
         # lookups AND the cache writes below all target the same server in a multi-server
@@ -412,26 +412,36 @@ class BaseInterfaceTableView(
         """Fetch and resolve host port relationships when the snapshot has a relevant signal."""
         from netbox_librenms_plugin.models import PortStackLagPattern
 
-        structural_signal = self._has_structural_relationship_signals(host_ports, interface_name_field)
+        # One pass over the ports feeds all three signal checks below.
+        names_per_port = self._relationship_port_names(host_ports, interface_name_field)
+        structural_signal = self._has_structural_relationship_signals(host_ports, interface_name_field, names_per_port)
         unscoped_patterns = PortStackLagPattern.compiled_patterns_for_os(None)
-        name_signal = self._has_lag_name_signals(host_ports, interface_name_field, unscoped_patterns)
+        name_signal = self._has_lag_name_signals(host_ports, interface_name_field, unscoped_patterns, names_per_port)
 
+        # The OS scopes the LAG name patterns AND the SAP colon skip in
+        # resolve_port_relationships, so resolve it for a structural snapshot too. Leaving it
+        # unknown there made every Junos breakout port read as a Nokia SAP. get_device_info is
+        # cached per server/device, so the sync-tab header render usually already paid for this.
         device_os = ""
         device_os_known = False
         scoped_patterns = []
-        if name_signal:
+        if structural_signal or name_signal:
             info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if info_success and isinstance(device_info, dict):
                 raw_device_os = device_info.get("os")
                 if isinstance(raw_device_os, str) and raw_device_os.strip():
                     device_os = raw_device_os.strip()
                     device_os_known = True
+        if name_signal:
             scoped_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
+        # Read the OS's SAP rule here too, so the resolver does not repeat the query per call.
+        scoped_sap_patterns = PortStackLagPattern.compiled_sap_patterns_for_os(device_os)
 
         scoped_name_signal = self._has_lag_name_signals(
             host_ports,
             interface_name_field,
             scoped_patterns,
+            names_per_port,
         )
         relationship_fetch_failed = False
         if structural_signal or scoped_name_signal:
@@ -443,6 +453,7 @@ class BaseInterfaceTableView(
                     device_os=device_os,
                     interface_name_field=interface_name_field,
                     compiled_lag_patterns=scoped_patterns,
+                    compiled_sap_patterns=scoped_sap_patterns,
                 )
             else:
                 relationship_fetch_failed = True
@@ -456,8 +467,10 @@ class BaseInterfaceTableView(
                 )
 
         # A structural signal still gives a useful partial snapshot when the OS lookup fails.
-        # Mark it incomplete because OS-scoped name patterns could describe additional edges.
-        if name_signal and not device_os_known and not relationship_fetch_failed:
+        # Mark it incomplete because OS-scoped name patterns could describe additional edges, and
+        # because the SAP rule is OS-scoped too: an unknown OS applies every vendor's rule, which
+        # can suppress a relationship this device really has.
+        if (structural_signal or name_signal) and not device_os_known and not relationship_fetch_failed:
             logger.warning("Could not determine the LibreNMS device OS for device %s", self.librenms_id)
             librenms_data["relationship_data_incomplete"] = True
             messages.warning(
@@ -523,7 +536,7 @@ class BaseInterfaceTableView(
         netbox_only_interfaces = []
 
         if interface_name_field is None:
-            interface_name_field = get_interface_name_field(request)
+            interface_name_field = get_interface_name_field(request, obj)
 
         unresolved = False
         if server_key is None:
@@ -592,10 +605,19 @@ class BaseInterfaceTableView(
         vlan_groups_by_device = {
             device.pk: self.filter_vlan_groups_for_device(vlan_groups, device) for device in vlan_scope_devices
         }
-        vlan_lookup_maps_by_device = {
-            device_id: self.restrict_vlan_lookup_maps(lookup_maps, device_vlan_groups)
-            for device_id, device_vlan_groups in vlan_groups_by_device.items()
-        }
+        # Restrict a member's maps on first use. Most rows resolve to one member, so rebuilding
+        # every lookup dictionary for each member of a large chassis repeated the same indexing.
+        restricted_lookup_maps = {}
+
+        def member_lookup_maps(device_id):
+            if device_id not in restricted_lookup_maps:
+                device_vlan_groups = vlan_groups_by_device.get(device_id)
+                restricted_lookup_maps[device_id] = (
+                    self.restrict_vlan_lookup_maps(lookup_maps, device_vlan_groups)
+                    if device_vlan_groups is not None
+                    else {}
+                )
+            return restricted_lookup_maps[device_id]
 
         # Load any user VLAN group overrides from cache (set by "apply to all")
         # Read overrides under the same VC-scoped key SaveVlanGroupOverridesView writes
@@ -752,7 +774,7 @@ class BaseInterfaceTableView(
                 # Add VLAN group auto-selection data to port, applying any user overrides
                 if chassis_member.pk in actionable_owner_ids:
                     row_vlan_groups = vlan_groups_by_device.get(chassis_member.pk, [])
-                    row_lookup_maps = vlan_lookup_maps_by_device.get(chassis_member.pk, {})
+                    row_lookup_maps = member_lookup_maps(chassis_member.pk)
                 else:
                     row_vlan_groups = []
                     row_lookup_maps = {}
@@ -837,129 +859,16 @@ class BaseInterfaceTableView(
             "relationship_data_incomplete": relationship_data_incomplete,
         }
 
-    def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):
-        """
-        Add per-VLAN group auto-selection data to port record.
-
-        Sets:
-        - vlan_group_map: {vid: {"group_id": str, "group_name": str, "is_ambiguous": bool}}
-          Maps each VID to its auto-selected VLAN group based on scope hierarchy.
-          If vlan_group_overrides contains a user selection for a VID, that takes
-          precedence over auto-selection.
-        """
-        vid_to_groups = lookup_maps.get("vid_to_groups", {})
-        untagged_vid = port.get("untagged_vlan")
-        tagged_vids = port.get("tagged_vlans", [])
-
-        all_vids = []
-        if untagged_vid:
-            all_vids.append(untagged_vid)
-        all_vids.extend(tagged_vids)
-
-        vlan_group_map = {}
-        for vid in all_vids:
-            groups = vid_to_groups.get(vid, [])
-            if len(groups) == 1:
-                vlan_group_map[vid] = {
-                    "group_id": str(groups[0].pk),
-                    "group_name": groups[0].name,
-                    "is_ambiguous": False,
-                }
-            elif len(groups) > 1:
-                most_specific = self._select_most_specific_group(groups, device)
-                if most_specific:
-                    vlan_group_map[vid] = {
-                        "group_id": str(most_specific.pk),
-                        "group_name": most_specific.name,
-                        "is_ambiguous": False,
-                    }
-                else:
-                    vlan_group_map[vid] = {
-                        "group_id": "",
-                        "group_name": "Ambiguous",
-                        "is_ambiguous": True,
-                    }
-            else:
-                vlan_group_map[vid] = {
-                    "group_id": "",
-                    "group_name": "Global",
-                    "is_ambiguous": False,
-                }
-
-        # Apply user overrides from "apply to all" selections (persisted in cache)
-        if vlan_group_overrides:
-            from ipam.models import VLANGroup
-
-            # Batch-fetch all referenced override group IDs to avoid N+1 queries
-            override_group_ids = {
-                vlan_group_overrides[str(vid)]
-                for vid in all_vids
-                if str(vid) in vlan_group_overrides and vlan_group_overrides[str(vid)]
-            }
-            override_groups_by_id = {}
-            if override_group_ids:
-                override_groups_by_id = VLANGroup.objects.in_bulk(list(override_group_ids))
-
-            for vid in all_vids:
-                vid_str = str(vid)
-                if vid_str in vlan_group_overrides:
-                    override_group_id = vlan_group_overrides[vid_str]
-                    if override_group_id:
-                        try:
-                            group = override_groups_by_id.get(int(override_group_id))
-                        except (TypeError, ValueError):
-                            group = None
-                        # The row's in-scope groups, not only groups that already carry the VID:
-                        # "apply to all" exists to put the VLAN into a group that lacks it.
-                        allowed_group_ids = {candidate.pk for candidate in port.get("vlan_groups", [])}
-                        if group and group.pk in allowed_group_ids:
-                            vlan_group_map[vid] = {
-                                "group_id": str(group.pk),
-                                "group_name": group.name,
-                                "is_ambiguous": False,
-                            }
-                        # Keep auto-selection when the group was deleted or is out of the row's scope.
-                    elif (vid, None) in lookup_maps.get("vid_group_to_vlan", {}):
-                        # User explicitly chose "No Group (Global)"
-                        vlan_group_map[vid] = {
-                            "group_id": "",
-                            "group_name": "Global",
-                            "is_ambiguous": False,
-                        }
-
-        port["vlan_group_map"] = vlan_group_map
-
-    def _add_missing_vlans_info(self, port, lookup_maps):
-        """
-        Add missing VLANs info to port record for warning display.
-
-        Sets:
-        - missing_vlans: List of VIDs not found in any NetBox VLAN group
-        """
-        vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
-        missing_vlans = []
-
-        untagged_vid = port.get("untagged_vlan")
-        tagged_vids = port.get("tagged_vlans", [])
-
-        if untagged_vid and untagged_vid not in vid_to_vlans:
-            missing_vlans.append(untagged_vid)
-
-        for vid in tagged_vids:
-            if vid not in vid_to_vlans:
-                missing_vlans.append(vid)
-
-        port["missing_vlans"] = missing_vlans
-
     @staticmethod
     def _relationship_port_names(ports, interface_name_field):
         """Return each port's distinct string names from the active and canonical fields."""
         name_fields = {"ifName", "ifDescr", interface_name_field}
         return [[name for field in name_fields if isinstance(name := port.get(field), str) and name] for port in ports]
 
-    def _has_structural_relationship_signals(self, ports, interface_name_field="ifName"):
+    def _has_structural_relationship_signals(self, ports, interface_name_field="ifName", names_per_port=None):
         """Return true for an explicit LAG type or a child name whose parent also exists."""
-        names_per_port = self._relationship_port_names(ports, interface_name_field)
+        if names_per_port is None:
+            names_per_port = self._relationship_port_names(ports, interface_name_field)
         port_names = {name for names in names_per_port for name in names}
         sub_iface_re = re.compile(r"^(.+)\.\d+$")
         return any(
@@ -968,7 +877,8 @@ class BaseInterfaceTableView(
             for port, names in zip(ports, names_per_port)
         )
 
-    def _has_lag_name_signals(self, ports, interface_name_field, lag_patterns):
+    def _has_lag_name_signals(self, ports, interface_name_field, lag_patterns, names_per_port=None):
         """Return true when an interface name matches one of the supplied OS-scoped patterns."""
-        names_per_port = self._relationship_port_names(ports, interface_name_field)
+        if names_per_port is None:
+            names_per_port = self._relationship_port_names(ports, interface_name_field)
         return any(pat.search(name) for names in names_per_port for pat in lag_patterns for name in names)

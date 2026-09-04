@@ -17,6 +17,79 @@ class TestPortStackLagPattern:
         """Migration 0013's RunPython seed actually committed rows through the ORM (e.g. the lower-cased 'ios' default) — a real-DB check the __new__/patched-clean stand-in could never make."""
         assert self._model().objects.filter(librenms_os="ios", lag_name_pattern=r"^Po\d+$").exists()
 
+    def test_migration_seeded_the_nokia_sap_pattern_only(self):
+        """Migration 0016 gives Nokia SR OS a SAP rule and leaves every other OS without one."""
+        model = self._model()
+        assert model.objects.get(librenms_os="timos").sap_name_pattern == ":"
+        # A vendor that spells a real interface with a colon (junos xe-1/1/3:1) must not inherit
+        # Nokia's notation, or its whole breakout chassis resolves no relationships.
+        assert model.objects.get(librenms_os="junos").sap_name_pattern == ""
+
+    def test_compiled_sap_patterns_are_scoped_to_the_os(self):
+        """The SAP rule is read per OS, like the LAG rule, so one vendor's notation stays its own."""
+        model = self._model()
+        assert [pattern.pattern for pattern in model.compiled_sap_patterns_for_os("timos")] == [":"]
+        # A KNOWN OS with no SAP notation gets no rule, so its colon-bearing interface names
+        # (a Junos breakout is xe-1/1/3:1) keep their relationships. An OS that cannot be
+        # resolved is a different case, covered by the test below.
+        assert model.compiled_sap_patterns_for_os("junos") == []
+
+    def test_an_unknown_os_applies_every_stored_sap_rule(self):
+        """The SAP reader over-skips rather than under-skips, the opposite of the LAG reader.
+
+        An unmatched LAG regex invents a relationship; an unmatched SAP regex only suppresses
+        one. So an OS this model cannot resolve must keep every vendor's SAP rule, which is also
+        what the unconditional colon skip it replaced did.
+        """
+        model = self._model()
+
+        # A non-blank OS with no row of its own is unknown too: LibreNMS reporting an unseeded
+        # name for a Nokia-like platform must not read as "this platform has no SAP notation".
+        for unknown in (None, "", "   ", "sros-unregistered"):
+            assert ":" in [pattern.pattern for pattern in model.compiled_sap_patterns_for_os(unknown)], unknown
+        # A REGISTERED OS whose row says it has no SAP notation is answered, not unknown.
+        assert model.compiled_sap_patterns_for_os("junos") == []
+        # The LAG reader keeps its opposite default: a blank OS matches nothing.
+        assert model.compiled_patterns_for_os("") == []
+
+    def test_a_transactional_flush_restores_the_sap_rule_too(self, django_db_reset_sequences):
+        """The reseed fixture must restore BOTH fields, or one transactional test disarms the SAP rule for the rest of the run."""
+        from netbox_librenms_plugin.tests.conftest import seed_migration_rows
+
+        model = self._model()
+        model.objects.all().delete()
+
+        seed_migration_rows()
+
+        assert model.objects.get(librenms_os="timos").sap_name_pattern == ":"
+
+    def test_yaml_export_carries_the_sap_pattern(self):
+        """A customized SAP rule has to survive export and re-import, or it silently reverts to blank."""
+        import yaml
+
+        obj = self._model().objects.get(librenms_os="timos")
+        obj.sap_name_pattern = r":\d+$"
+        obj.save()
+
+        data = yaml.safe_load(obj.to_yaml())
+
+        assert data["sap_name_pattern"] == r":\d+$"
+
+    def test_save_rejects_an_invalid_sap_regex(self):
+        """A SAP pattern that will not compile is refused at save, like the LAG pattern."""
+        model = self._model()
+        with pytest.raises(ValidationError) as excinfo:
+            model.objects.create(librenms_os="zzsap", lag_name_pattern=r"^Po\d+$", sap_name_pattern="[")
+        assert "sap_name_pattern" in excinfo.value.message_dict
+        assert not model.objects.filter(librenms_os="zzsap").exists()
+
+    def test_a_blank_sap_pattern_is_allowed_and_contributes_no_rule(self):
+        """Most operating systems have no SAP notation, so blank must stay a valid answer."""
+        model = self._model()
+        model.objects.create(librenms_os="zzblank", lag_name_pattern=r"^Po\d+$", sap_name_pattern="  ")
+        assert model.objects.get(librenms_os="zzblank").sap_name_pattern == ""
+        assert model.compiled_sap_patterns_for_os("zzblank") == []
+
     def test_save_normalizes_os_and_pattern(self):
         """A real save lower-cases/strips librenms_os and strips lag_name_pattern; the normalized row round-trips from the DB."""
         obj = self._model().objects.create(librenms_os="  ZZNORM  ", lag_name_pattern=r"  ^Po\d+$  ")
@@ -511,6 +584,33 @@ class TestLagPatternSharedLoad:
         assert result["lag_members"] == {11: 12}
         assert self._no_pattern_query(ctx)
 
+    def test_resolver_reads_the_stored_sap_rule_from_device_os_alone(self, mock_librenms_api):
+        """Given only device_os, the resolver applies that OS's stored SAP rule from the database."""
+        # The other SAP tests inject a compiled pattern, so none of them prove the stored rule is
+        # ever read. This one passes no pattern overrides at all.
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        # A pattern that is NOT a colon: the rule this commit replaced skipped colons
+        # unconditionally, so a colon pattern here would pass without the database ever being read.
+        PortStackLagPattern.objects.update_or_create(
+            librenms_os="storedos",
+            defaults={"lag_name_pattern": r"^lag-\d+$", "sap_name_pattern": r"^svc-"},
+        )
+        ports = [
+            {"port_id": 101, "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 102, "ifName": "lag-1", "ifType": "ieee8023adLag"},
+            {"port_id": 200, "ifName": "svc-100", "ifType": "ipForward"},
+        ]
+        port_stack = [
+            {"high_port_id": 101, "low_port_id": 102},
+            {"high_port_id": 200, "low_port_id": 102},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, device_os="storedos")
+
+        assert result["lag_members"] == {101: 102}
+        assert 200 not in result["lag_members"], "the stored SAP rule was not read"
+
     def test_string_zero_high_id_sentinel_is_skipped(self, mock_librenms_api):
         """A string "0" port ID (the ifStack 'no port' sentinel) is skipped, not looked up."""
         compiled = self._seed_and_compile()
@@ -529,3 +629,31 @@ class TestLagPatternSharedLoad:
         # The sentinel entry created no relationship at all (nothing references the phantom port 0).
         assert result["lag_members"] == {}
         assert result["sub_interfaces"] == {}
+
+
+@pytest.mark.django_db
+def test_mapping_bulk_import_routes_resolve_without_the_model_view_registry():
+    """urls.py owns every mapping bulk-import route, so no register_model_view is needed.
+
+    The decorators added no URL because urls.py never includes get_model_urls(). This pins the
+    explicit routes, so removing them cannot silently take the Import views offline.
+    """
+    from django.urls import resolve, reverse
+
+    from netbox_librenms_plugin.views import mapping_views
+
+    expected = {
+        "interfacetypemapping_bulk_import": mapping_views.InterfaceTypeMappingBulkImportView,
+        "devicetypemapping_bulk_import": mapping_views.DeviceTypeMappingBulkImportView,
+        "moduletypemapping_bulk_import": mapping_views.ModuleTypeMappingBulkImportView,
+        "modulebaymapping_bulk_import": mapping_views.ModuleBayMappingBulkImportView,
+        "normalizationrule_bulk_import": mapping_views.NormalizationRuleBulkImportView,
+        "inventoryignorerule_bulk_import": mapping_views.InventoryIgnoreRuleBulkImportView,
+        "platformmapping_bulk_import": mapping_views.PlatformMappingBulkImportView,
+        "carrierautoinstallrule_bulk_import": mapping_views.CarrierAutoInstallRuleBulkImportView,
+        "portstacklagpattern_bulk_import": mapping_views.PortStackLagPatternBulkImportView,
+    }
+
+    for route, view_class in expected.items():
+        url = reverse(f"plugins:netbox_librenms_plugin:{route}")
+        assert resolve(url).func.view_class is view_class, route

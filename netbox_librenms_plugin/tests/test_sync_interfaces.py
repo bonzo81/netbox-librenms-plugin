@@ -1,6 +1,4 @@
-"""Unit tests for SyncInterfacesView: update_interface_attributes and handle_mac_address."""
-
-from unittest.mock import MagicMock, patch
+"""Integration tests for shared interface attribute and MAC synchronization."""
 
 import pytest
 
@@ -8,247 +6,78 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_interface, m
 from netbox_librenms_plugin.tests.view_test_helpers import make_view
 
 
+@pytest.mark.django_db
 class TestUpdateInterfaceAttributes:
-    """update_interface_attributes() must set fields respecting exclude_columns."""
+    """The interface writer must persist the real NetBox model state."""
 
     @pytest.fixture
-    def view(self, mock_librenms_api):
-        """Return a SyncInterfacesView wired to the shared mock API fixture."""
+    def view(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        v = object.__new__(SyncInterfacesView)
-        v._librenms_api = mock_librenms_api
-        v.request = MagicMock()
-        v._lookup_maps = {}
-        return v
+        view = make_view(SyncInterfacesView)
+        view._post_server_key = "default"
+        return view
 
-    def _make_device_interface(self, **extra):
-        """Return a MagicMock mimicking a dcim.Interface."""
-        from dcim.models import Interface  # noqa: F401
+    def test_updates_fields_and_stable_port_identity(self, view):
+        from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        iface = MagicMock(
-            spec=[
-                "name",
-                "type",
-                "speed",
-                "description",
-                "mtu",
-                "enabled",
-                "save",
-                "cf",
-                "custom_field_data",
-                "mac_addresses",
-                "primary_mac_address",
-            ]
+        interface = make_interface(make_device("interface-fields"), "old-name")
+
+        view.update_interface_attributes(
+            interface,
+            {
+                "ifName": "eth0",
+                "ifType": "ethernetCsmacd",
+                "ifSpeed": 1_000_000_000,
+                "ifAlias": "uplink",
+                "ifMtu": 1500,
+                "ifAdminStatus": "down",
+                "port_id": 77,
+            },
+            "1000base-t",
+            set(),
+            "ifName",
         )
-        iface.cf = {"librenms_id": {"default": 1}}
-        iface.__class__ = Interface
-        for k, v in extra.items():
-            setattr(iface, k, v)
-        return iface
 
-    def test_sets_speed_via_convert(self, view):
-        iface = self._make_device_interface()
-        librenms_data = {"ifName": "eth0", "ifSpeed": 1_000_000_000}
+        interface.refresh_from_db()
+        assert interface.name == "eth0"
+        assert interface.type == "1000base-t"
+        assert interface.speed == 1_000_000
+        assert interface.description == "uplink"
+        assert interface.mtu == 1500
+        assert interface.enabled is False
+        assert get_librenms_device_id(interface, "default", auto_save=False) == 77
 
-        with patch(
-            "netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1_000_000
-        ) as mock_convert:
-            with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id"):
-                view.update_interface_attributes(iface, librenms_data, "1000base-t", set(), "ifName")
+    def test_excluded_fields_and_mac_remain_unchanged(self, view):
+        from dcim.models import MACAddress
 
-        mock_convert.assert_called_once_with(1_000_000_000)
-        assert iface.speed == 1_000_000
+        interface = make_interface(make_device("interface-exclusions"), "keep-name", iface_type="1000base-t")
+        interface.speed = 1000
+        interface.description = "keep-description"
+        interface.mtu = 9000
+        interface.enabled = True
+        interface.save()
 
-    def test_skips_excluded_columns(self, view):
-        speed_sentinel = object()
-        iface = self._make_device_interface(speed=speed_sentinel)
-        librenms_data = {"ifName": "eth0", "ifSpeed": 1_000_000_000, "ifAlias": "uplink"}
+        view.update_interface_attributes(
+            interface,
+            {
+                "ifName": "new-name",
+                "ifType": "ethernetCsmacd",
+                "ifSpeed": 1_000_000_000,
+                "ifAlias": "new-description",
+                "ifMtu": 1500,
+                "ifAdminStatus": "down",
+                "ifPhysAddress": "aa:bb:cc:dd:ee:ff",
+            },
+            "other",
+            {"name", "type", "speed", "description", "mtu", "enabled", "mac_address"},
+            "ifName",
+        )
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1_000_000):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id"):
-                view.update_interface_attributes(iface, librenms_data, "1000base-t", {"speed"}, "ifName")
-
-        # speed should NOT have been mutated (excluded)
-        assert iface.speed is speed_sentinel
-
-    def test_sets_type_for_device_interface(self, view):
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-        librenms_data = {"ifName": "eth0", "ifType": "ethernetCsmacd"}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(iface, librenms_data, "1000base-t", set(), "ifName")
-
-        assert iface.type == "1000base-t"
-
-    def test_does_not_set_type_for_vm_interface(self, view):
-        from virtualization.models import VMInterface
-
-        iface = MagicMock()
-        iface.__class__ = VMInterface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-        original_type = "some_type"
-        iface.type = original_type
-        librenms_data = {"ifName": "eth0", "ifType": "ethernetCsmacd"}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(iface, librenms_data, "1000base-t", set(), "ifName")
-
-        # type is NOT in the mapping for non-device interfaces (type set only if is_device_interface)
-        assert iface.type == original_type
-
-    def test_sets_description_only_when_alias_differs_from_name(self, view):
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-        desc_sentinel = object()
-        iface.description = desc_sentinel
-
-        # ifAlias == interface name field value → description should NOT be set
-        librenms_data = {"ifName": "eth0", "ifAlias": "eth0"}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
-
-        assert iface.description is desc_sentinel  # untouched: alias == name, no update
-
-    def test_sets_description_when_alias_differs(self, view):
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-
-        librenms_data = {"ifName": "eth0", "ifAlias": "uplink-port"}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
-
-        assert iface.description == "uplink-port"
-
-    def test_sets_librenms_id_when_port_id_present(self, view):
-        """
-        set_librenms_device_id() is called unconditionally when port_id is not None.
-
-        Historically the call was guarded by ``"librenms_id" in interface.cf``, which
-        prevented the mapping from being created for brand-new interfaces. This test
-        ensures the mapping is created even when no existing custom-field mapping is present.
-        """
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}  # empty — first-time write, no existing mapping
-        iface.mac_addresses = MagicMock()
-        librenms_data = {"ifName": "eth0", "port_id": 77}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=None):
-                with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set:
-                    view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
-
-        mock_set.assert_called_once_with(iface, 77, view._librenms_api.server_key)
-
-    def test_does_not_set_librenms_id_when_port_id_none(self, view):
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {"librenms_id": {"default": 1}}
-        iface.mac_addresses = MagicMock()
-        librenms_data = {"ifName": "eth0", "port_id": None}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set:
-                view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
-
-        mock_set.assert_not_called()
-
-    def test_sets_enabled_true_when_admin_status_none(self, view):
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-        librenms_data = {"ifName": "eth0", "ifAdminStatus": None}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
-
-        assert iface.enabled is True
-
-    def test_sets_enabled_based_on_admin_status_string(self, view):
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-        librenms_data = {"ifName": "eth0", "ifAdminStatus": "down"}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
-
-        assert iface.enabled is False
-
-    def test_calls_save_at_end(self, view):
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-        librenms_data = {"ifName": "eth0"}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
-
-        iface.save.assert_called_once()
-
-    def test_update_interface_attributes_preserves_existing_module_link(self, view):
-        """Interface sync should not clear or rewrite existing module assignment."""
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-        existing_module = MagicMock()
-        iface.module = existing_module
-        iface.module_id = 321
-        librenms_data = {"ifName": "eth0", "ifAlias": "uplink"}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
-
-        assert iface.module is existing_module
-        assert iface.module_id == 321
-
-    def test_excludes_mac_address_when_in_excluded(self, view):
-        from dcim.models import Interface
-
-        iface = MagicMock()
-        iface.__class__ = Interface
-        iface.cf = {}
-        iface.mac_addresses = MagicMock()
-        librenms_data = {"ifName": "eth0", "ifPhysAddress": "aa:bb:cc:dd:ee:ff"}
-
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            with patch.object(view, "handle_mac_address") as mock_mac:
-                view.update_interface_attributes(iface, librenms_data, None, {"mac_address"}, "ifName")
-
-        mock_mac.assert_not_called()
+        interface.refresh_from_db()
+        assert (interface.name, interface.type, interface.speed) == ("keep-name", "1000base-t", 1000)
+        assert (interface.description, interface.mtu, interface.enabled) == ("keep-description", 9000, True)
+        assert not MACAddress.objects.exists()
 
 
 @pytest.mark.django_db
@@ -334,3 +163,81 @@ class TestHandleMacAddress:
 
         assert not MACAddress.objects.exists()
         assert not iface.mac_addresses.exists()
+
+
+@pytest.mark.django_db
+def test_interface_delete_does_not_expose_database_error_details(client):
+    """A failed delete does not roll back an earlier success or expose details."""
+    from django.db import DatabaseError, connection
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    device = make_device("interface-delete-error")
+    deleted_interface = make_interface(device, "Ethernet1")
+    failed_interface = make_interface(device, "Ethernet2")
+    client.force_login(make_superuser("interface-delete-error-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+    sensitive_detail = "private database constraint detail"
+
+    def fail_interface_delete(execute, sql, params, many, context):
+        if (
+            sql.lstrip().upper().startswith("DELETE")
+            and '"dcim_interface"' in sql
+            and failed_interface.pk in (params or ())
+        ):
+            raise DatabaseError(sensitive_detail)
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(fail_interface_delete):
+        response = client.post(
+            url,
+            {"interface_ids": [str(deleted_interface.pk), str(failed_interface.pk)]},
+        )
+
+    assert response.status_code == 200
+    assert sensitive_detail.encode() not in response.content
+    assert response.json()["deleted_count"] == 1
+    assert response.json()["errors"] == ["Error deleting interface Ethernet2. Check server logs."]
+    assert not type(deleted_interface).objects.filter(pk=deleted_interface.pk).exists()
+    assert type(failed_interface).objects.filter(pk=failed_interface.pk).exists()
+
+
+@pytest.mark.django_db
+def test_interface_delete_counts_only_committed_savepoints(client):
+    """A savepoint release failure does not count or persist the deletion."""
+    from django.db import DatabaseError, connection
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    device = make_device("interface-delete-savepoint-error")
+    interface = make_interface(device, "Ethernet1")
+    client.force_login(make_superuser("interface-delete-savepoint-error-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+    delete_executed = False
+    release_failed = False
+
+    def fail_savepoint_release(execute, sql, params, many, context):
+        nonlocal delete_executed, release_failed
+        normalized_sql = sql.lstrip().upper()
+        if normalized_sql.startswith("DELETE") and '"DCIM_INTERFACE"' in normalized_sql:
+            delete_executed = True
+        if delete_executed and not release_failed and normalized_sql.startswith("RELEASE SAVEPOINT"):
+            release_failed = True
+            raise DatabaseError("private savepoint failure detail")
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(fail_savepoint_release):
+        response = client.post(url, {"interface_ids": [str(interface.pk)]})
+
+    assert response.status_code == 200
+    assert response.json()["deleted_count"] == 0
+    assert response.json()["errors"] == ["Error deleting interface Ethernet1. Check server logs."]
+    assert type(interface).objects.filter(pk=interface.pk).exists()

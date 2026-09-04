@@ -12,7 +12,7 @@ from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.utils import is_list_of_dicts
+from netbox_librenms_plugin.utils import coerce_model_pk, is_list_of_dicts
 
 
 def parse_request_json(request):
@@ -939,6 +939,119 @@ class VlanAssignmentMixin:
             if vlan.group_id is None or vlan.group_id in group_ids
         }
         return self._index_vlans(vlans.values())
+
+    def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):
+        """
+        Add per-VLAN group auto-selection data to port record.
+
+        Sets:
+        - vlan_group_map: {vid: {"group_id": str, "group_name": str, "is_ambiguous": bool}}
+          Maps each VID to its auto-selected VLAN group based on scope hierarchy.
+          If vlan_group_overrides contains a user selection for a VID, that takes
+          precedence over auto-selection.
+        """
+        vid_to_groups = lookup_maps.get("vid_to_groups", {})
+        untagged_vid = port.get("untagged_vlan")
+        tagged_vids = port.get("tagged_vlans", [])
+
+        all_vids = []
+        if untagged_vid:
+            all_vids.append(untagged_vid)
+        all_vids.extend(tagged_vids)
+
+        vlan_group_map = {}
+        for vid in all_vids:
+            groups = vid_to_groups.get(vid, [])
+            if len(groups) == 1:
+                vlan_group_map[vid] = {
+                    "group_id": str(groups[0].pk),
+                    "group_name": groups[0].name,
+                    "is_ambiguous": False,
+                }
+            elif len(groups) > 1:
+                most_specific = self._select_most_specific_group(groups, device)
+                if most_specific:
+                    vlan_group_map[vid] = {
+                        "group_id": str(most_specific.pk),
+                        "group_name": most_specific.name,
+                        "is_ambiguous": False,
+                    }
+                else:
+                    vlan_group_map[vid] = {
+                        "group_id": "",
+                        "group_name": "Ambiguous",
+                        "is_ambiguous": True,
+                    }
+            else:
+                vlan_group_map[vid] = {
+                    "group_id": "",
+                    "group_name": "Global",
+                    "is_ambiguous": False,
+                }
+
+        # Apply user overrides from "apply to all" selections (persisted in cache)
+        if vlan_group_overrides:
+            from ipam.models import VLANGroup
+
+            # Batch-fetch all referenced override group IDs to avoid N+1 queries
+            override_group_ids = {
+                group_id
+                for vid in all_vids
+                if str(vid) in vlan_group_overrides
+                and (group_id := coerce_model_pk(vlan_group_overrides[str(vid)])) is not None
+            }
+            override_groups_by_id = {}
+            if override_group_ids:
+                override_groups_by_id = VLANGroup.objects.in_bulk(list(override_group_ids))
+
+            for vid in all_vids:
+                vid_str = str(vid)
+                if vid_str in vlan_group_overrides:
+                    raw_override_group_id = vlan_group_overrides[vid_str]
+                    override_group_id = coerce_model_pk(raw_override_group_id)
+                    if override_group_id is not None:
+                        group = override_groups_by_id.get(override_group_id)
+                        # The row's in-scope groups, not only groups that already carry the VID:
+                        # "apply to all" exists to put the VLAN into a group that lacks it.
+                        allowed_group_ids = {candidate.pk for candidate in port.get("vlan_groups", [])}
+                        if group and group.pk in allowed_group_ids:
+                            vlan_group_map[vid] = {
+                                "group_id": str(group.pk),
+                                "group_name": group.name,
+                                "is_ambiguous": False,
+                            }
+                        # Keep auto-selection when the group was deleted or is out of the row's scope.
+                    elif raw_override_group_id == "" and (vid, None) in lookup_maps.get("vid_group_to_vlan", {}):
+                        # User explicitly chose "No Group (Global)"
+                        vlan_group_map[vid] = {
+                            "group_id": "",
+                            "group_name": "Global",
+                            "is_ambiguous": False,
+                        }
+
+        port["vlan_group_map"] = vlan_group_map
+
+    def _add_missing_vlans_info(self, port, lookup_maps):
+        """
+        Add missing VLANs info to port record for warning display.
+
+        Sets:
+        - missing_vlans: List of VIDs not found in any NetBox VLAN group
+        """
+        vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
+        missing_vlans = []
+
+        untagged_vid = port.get("untagged_vlan")
+        tagged_vids = port.get("tagged_vlans", [])
+
+        if untagged_vid and untagged_vid not in vid_to_vlans:
+            missing_vlans.append(untagged_vid)
+
+        for vid in tagged_vids:
+            if vid not in vid_to_vlans:
+                missing_vlans.append(vid)
+
+        port["missing_vlans"] = missing_vlans
 
     def _select_most_specific_group(self, groups, device):
         """

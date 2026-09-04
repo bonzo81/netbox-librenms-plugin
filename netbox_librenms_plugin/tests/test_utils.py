@@ -935,6 +935,23 @@ class TestInterfaceNameField:
         """Falls back to plugin config."""
         from netbox_librenms_plugin.utils import get_interface_name_field
 
+        mock_plugin_config.return_value = "ifDescr"
+        mock_request = MagicMock()
+        mock_request.GET = {}
+        mock_request.POST = {}
+        mock_request.user.config.get.return_value = None
+
+        result = get_interface_name_field(mock_request)
+
+        assert result == "ifDescr"
+        mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")
+
+    @patch("netbox_librenms_plugin.utils.get_plugin_config")
+    def test_unsupported_config_value_falls_back_to_the_default(self, mock_plugin_config):
+        """A configured field the readers reject must not reach a cached snapshot."""
+        from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
+        from netbox_librenms_plugin.utils import get_interface_name_field
+
         mock_plugin_config.return_value = "ifAlias"
         mock_request = MagicMock()
         mock_request.GET = {}
@@ -943,8 +960,7 @@ class TestInterfaceNameField:
 
         result = get_interface_name_field(mock_request)
 
-        assert result == "ifAlias"
-        mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")
+        assert result == DEFAULT_INTERFACE_NAME_FIELD
 
     @patch("netbox_librenms_plugin.utils.get_plugin_config")
     def test_get_interface_name_field_from_user_pref(self, mock_plugin_config):
@@ -962,8 +978,12 @@ class TestInterfaceNameField:
         mock_plugin_config.assert_not_called()
 
     @patch("netbox_librenms_plugin.utils.get_plugin_config")
-    def test_get_interface_name_field_persists_to_user_pref(self, mock_plugin_config):
-        """Explicit GET param should be persisted to user preferences."""
+    def test_get_interface_name_field_does_not_persist_the_param(self, mock_plugin_config):
+        """The read path honours the parameter without writing it.
+
+        get_context_data() calls this on every GET render, so persisting here made a read mutate
+        stored user state. The selector posts to the save_user_pref endpoint instead.
+        """
         from netbox_librenms_plugin.utils import get_interface_name_field
 
         mock_request = MagicMock()
@@ -973,9 +993,7 @@ class TestInterfaceNameField:
         result = get_interface_name_field(mock_request)
 
         assert result == "ifDescr"
-        mock_request.user.config.set.assert_called_once_with(
-            "plugins.netbox_librenms_plugin.interface_name_field", "ifDescr", commit=True
-        )
+        mock_request.user.config.set.assert_not_called()
 
     @pytest.mark.django_db
     def test_persisting_the_preference_does_not_leak_to_other_users(self):
@@ -991,22 +1009,25 @@ class TestInterfaceNameField:
         from django.test import RequestFactory
         from netbox.config import get_config
 
-        from netbox_librenms_plugin.utils import get_interface_name_field
+        from netbox_librenms_plugin.utils import save_interface_name_preference
 
         user_model = get_user_model()
+        pref_path = "plugins.netbox_librenms_plugin.interface_name_field"
+        baseline = user_model.objects.create_user(username="pref-baseline")
+        baseline_value = baseline.config.get(pref_path)
         chooser = user_model.objects.create_user(username="pref-chooser")
         defaults_before = deepcopy(get_config().DEFAULT_USER_PREFERENCES)
+        # The writer, not the reader: get_interface_name_field no longer persists.
         request = RequestFactory().get("/", {"interface_name_field": "ifDescr"})
         request.user = chooser
 
-        assert get_interface_name_field(request) == "ifDescr"
+        assert save_interface_name_preference(request, "ifDescr") is True
 
-        pref_path = "plugins.netbox_librenms_plugin.interface_name_field"
         stored = user_model.objects.get(pk=chooser.pk)
         assert stored.config.get(pref_path) == "ifDescr"
         assert get_config().DEFAULT_USER_PREFERENCES == defaults_before
         later = user_model.objects.create_user(username="pref-later")
-        assert later.config.get(pref_path) is None
+        assert later.config.get(pref_path) == baseline_value
 
 
 # =============================================================================
@@ -1875,3 +1896,23 @@ class TestGetVirtualChassisMemberNoneName:
         assert get_virtual_chassis_member(dev, None) is dev
         # The prefetched-map variant must survive the same input.
         assert get_virtual_chassis_member(dev, None, members_by_position={2: member}) is dev
+
+
+def test_whitespace_only_names_do_not_count_as_unambiguous():
+    """A blank-after-strip name is not a name, the same rule the sync path applies.
+
+    ``get_interface_port_identity_sets`` used a bare truthiness test while every other site
+    stripped first, so "   " counted as a distinct interface name here and as unsyncable
+    there. Two readers of one rule cannot disagree.
+    """
+    from netbox_librenms_plugin.utils import get_interface_port_identity_sets
+
+    ports = [
+        {"port_id": 10, "ifDescr": "   "},
+        {"port_id": 20, "ifDescr": "Unique"},
+    ]
+
+    unique_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(ports, "ifDescr")
+
+    assert unique_port_ids == {10, 20}
+    assert unambiguous_name_port_ids == {20}

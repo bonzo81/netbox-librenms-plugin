@@ -7,8 +7,15 @@ with particular focus on HTTP method correctness to prevent regression bugs.
 
 from unittest.mock import MagicMock, patch
 
+import re
+
 import pytest
 import requests
+
+
+# pytest only honours this at module scope; a class-scope declaration is ignored, which left
+# `mock_librenms_config` visible only when another module registered the helper first.
+pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
 
 # =============================================================================
@@ -852,8 +859,6 @@ class TestLibreNMSAPIDeviceLookup:
 class TestLibreNMSAPIDeviceOperations:
     """Test device CRUD operations."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
     def test_add_device_success(self, mock_post, mock_librenms_config):
         """Verify successful device addition."""
@@ -1105,8 +1110,6 @@ class TestLibreNMSAPIDeviceOperations:
 class TestLibreNMSAPILocationOperations:
     """Test location CRUD operations."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_locations_success(self, mock_get, mock_librenms_config):
         """Verify retrieving all locations."""
@@ -1199,8 +1202,6 @@ class TestLibreNMSAPILocationOperations:
 
 class TestLibreNMSAPIPortsAndInventory:
     """Test ports and inventory operations."""
-
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_ports_all(self, mock_get, mock_librenms_config):
@@ -1423,8 +1424,6 @@ class TestLibreNMSAPIPortsAndInventory:
 class TestLibreNMSAPIPollerAndDevices:
     """Test poller groups and device listing operations."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_poller_groups_success(self, mock_get, mock_librenms_config):
         """Verify retrieving poller groups."""
@@ -1498,8 +1497,6 @@ class TestLibreNMSAPIPollerAndDevices:
 
 class TestLibreNMSAPIErrorHandling:
     """Test error handling and edge cases."""
-
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_network_error_handling(self, mock_get, mock_librenms_config):
@@ -1716,8 +1713,6 @@ class TestVlanEntryDictGuard:
 class TestGetDeviceInfoResponseShape:
     """Cover response-shape branches in get_device_info()."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_non_dict_device_entry_returns_failure(self, mock_get, mock_librenms_config):
         """A non-dict entry in the devices list must not propagate as truthy data."""
@@ -1749,8 +1744,6 @@ class TestGetDeviceInfoResponseShape:
 
 class TestGetDeviceTransceiversResponseShape:
     """Cover response-shape branches in get_device_transceivers()."""
-
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_success_returns_transceiver_list(self, mock_get, mock_librenms_config):
@@ -1876,8 +1869,6 @@ class TestGetDeviceTransceiversResponseShape:
 class TestGetDeviceVlansResponseShape:
     """Cover response-shape branches in get_device_vlans()."""
 
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_success_filters_by_device_id(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
@@ -1986,8 +1977,6 @@ class TestGetDeviceVlansResponseShape:
 
 class TestGetPortVlanDetailsResponseShape:
     """Cover response-shape branches in get_port_vlan_details()."""
-
-    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_success_returns_port_dict(self, mock_get, mock_librenms_config):
@@ -2406,7 +2395,7 @@ class TestResolvePortRelationships:
         assert result["sub_interfaces"] == {2: 1}
 
     def test_lag_aggregate_matched_from_ifdescr_name_pattern(self, mock_librenms_api):
-        """A name-pattern LAG aggregate whose name lives in ifDescr (ifName empty) is still detected via the ifDescr fallback."""
+        """A name-pattern LAG aggregate is detected from the configured ifDescr field."""
         ports = [
             {"port_id": 11, "ifName": "", "ifDescr": "Gi0/1", "ifType": "ethernetCsmacd"},
             {"port_id": 12, "ifName": "", "ifDescr": "Po1", "ifType": "propVirtual"},
@@ -2478,9 +2467,23 @@ class TestResolvePortRelationships:
         # normalized to ints at the source so the map is self-consistent for every consumer.
         assert result["sub_interfaces"] == {206: 205}
 
+    def test_an_empty_name_field_is_not_a_sap_match(self, mock_librenms_api):
+        """A SAP pattern that matches the empty string must not drop a row over a blank name field."""
+        ports = [
+            {"port_id": 201, "ifName": "1/1/c1/1", "ifDescr": "", "ifType": "ethernetCsmacd"},
+            {"port_id": 202, "ifName": "", "ifDescr": "", "ifType": "ieee8023adLag"},
+        ]
+        port_stack = [{"high_port_id": 201, "low_port_id": 202}]
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={}, compiled_sap_patterns=[re.compile("^$")]
+        )
+        assert result["lag_members"] == {201: 202}
+
     def test_nokia_sap_excluded_when_colon_in_name(self, mock_librenms_api):
         """Nokia SAP entries (colon in name) must be excluded from output."""
-        result = mock_librenms_api.resolve_port_relationships(NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={})
+        result = mock_librenms_api.resolve_port_relationships(
+            NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={}, compiled_sap_patterns=[re.compile(":")]
+        )
         assert result["lag_members"] == {101: 102}
         assert 200 not in result["lag_members"].values()
 
@@ -2497,7 +2500,11 @@ class TestResolvePortRelationships:
             {"high_port_id": 200, "low_port_id": 102},  # SAP row: must be skipped
         ]
         result = mock_librenms_api.resolve_port_relationships(
-            ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
+            ports,
+            port_stack,
+            lag_patterns={},
+            interface_name_field="ifDescr",
+            compiled_sap_patterns=[re.compile(":")],
         )
         assert result["lag_members"] == {101: 102}
         assert 200 not in result["lag_members"]
@@ -2508,49 +2515,150 @@ class TestResolvePortRelationships:
         assert result["lag_members"].get(201) == 203
 
     def test_junos_ae_sub_interface(self, mock_librenms_api):
-        """Junos: ae10 -> ae10.2221 detected as sub-interface."""
+        """Junos: ae10 -> ae10.2221 from the ifStack, and every other unit from its own name."""
         result = mock_librenms_api.resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[1:], lag_patterns={})
-        assert result["sub_interfaces"] == {206: 205}
+        # 206 is the pair the ifStack states. The other two are units LibreNMS never parents:
+        # xe-0/0/0.0 is only stacked onto ae1.0, and ae1.0 appears in no row of its own.
+        assert result["sub_interfaces"] == {202: 201, 204: 203, 206: 205}
 
     def test_sub_interface_detected_via_ifname_when_namefield_is_ifdescr(self, mock_librenms_api):
-        """With interface_name_field='ifDescr', a clean ifDescr must not hide the .N sub-unit that ifName carries."""
+        """The resolver falls back to ifName when ifDescr yields no sub-interface edge."""
         ports = [
-            # Parent: ifName xe-0/0/0, but ifDescr (the primary in this mode) is a clean unrelated label.
+            # The ifDescr labels have no sub-unit structure.
             {"port_id": 401, "ifName": "xe-0/0/0", "ifDescr": "uplink-core", "ifType": "ethernetCsmacd"},
-            # Child: the .N marker lives in ifName; its ifDescr is NOT a sub-unit of the parent's ifDescr.
             {"port_id": 402, "ifName": "xe-0/0/0.100", "ifDescr": "vlan-100-svc", "ifType": "l2vlan"},
         ]
         port_stack = [{"high_port_id": 401, "low_port_id": 402}]
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
         )
-        # The ifDescr primaries have no .N relationship; only ifName does. A primary-only check (the
-        # old behaviour) scanned ifDescr alone and left sub_interfaces empty — child 402 -> parent 401.
+        # The fallback resolves child 402 from ifName alone.
         assert result["sub_interfaces"] == {402: 401}
 
     def test_lag_physical_resolution_uses_ifname_when_namefield_is_ifdescr(self, mock_librenms_api):
-        """LAG physical resolution must scan ifName for the .N structure in ifDescr mode, not just the primary name."""
-        # With interface_name_field='ifDescr' the structured xe-/ae- name can live in ifName while
-        # the primary (ifDescr) is an arbitrary label. A primary-only check leaves the Junos logical
-        # units uncollapsed and binds the wrong (logical) ports: 202 -> 204 instead of 201 -> 203.
+        """The resolver falls back to ifName alone when ifDescr yields no LAG edge."""
+        # The ifDescr labels yield no relationship, while ifName has the Junos structure.
         ports = [
-            # Physical member + its logical unit. The .N structure is in ifName; ifDescr (the
-            # primary in this mode) is an arbitrary label with no dotted relationship.
+            # Physical member and logical unit.
             {"port_id": 201, "ifName": "xe-0/0/0", "ifDescr": "member-phys", "ifType": "ethernetCsmacd"},
             {"port_id": 202, "ifName": "xe-0/0/0.0", "ifDescr": "member-unit", "ifType": "l2vlan"},
-            # Aggregate + its logical unit, likewise structured only in ifName.
+            # Aggregate and logical unit.
             {"port_id": 203, "ifName": "ae1", "ifDescr": "bundle-core", "ifType": "ieee8023adLag"},
             {"port_id": 204, "ifName": "ae1.0", "ifDescr": "bundle-unit", "ifType": "l2vlan"},
         ]
-        # ifStack relates the LOGICAL units (their ifDescr primaries are arbitrary labels).
+        # ifStack relates the logical units.
         port_stack = [{"high_port_id": 204, "low_port_id": 202}]
         result = mock_librenms_api.resolve_port_relationships(
             ports, port_stack, lag_patterns={"junos": r"^ae\d"}, interface_name_field="ifDescr"
         )
-        # Both sides collapse to their physical ports via the ifName .N suffix: member 201 -> ae1 203.
+        # The ifName fallback collapses both units to their physical ports.
         assert result["lag_members"] == {201: 203}
-        # The uncollapsed logical member must NOT be the one bound.
+        # The logical member is not bound directly.
         assert 202 not in result["lag_members"]
+
+    def test_other_field_evidence_is_not_added_when_configured_field_yields_relationships(self, mock_librenms_api):
+        """The resolver keeps only configured-field edges when that field yields a relationship."""
+        ports = [
+            {"port_id": 1, "ifName": "et-0/0/0", "ifDescr": "primary", "ifType": "ethernetCsmacd"},
+            {"port_id": 2, "ifName": "et-0/0/0.1", "ifDescr": "unit", "ifType": "propVirtual"},
+            {"port_id": 3, "ifName": "service-parent", "ifDescr": "service", "ifType": "ethernetCsmacd"},
+            {"port_id": 4, "ifName": "service-child", "ifDescr": "service.1", "ifType": "propVirtual"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [], lag_patterns={}, interface_name_field="ifName", compiled_sap_patterns=[]
+        )
+
+        assert result == {"lag_members": {}, "sub_interfaces": {2: 1}}
+
+    def test_fallback_uses_other_field_alone_when_configured_field_yields_nothing(self, mock_librenms_api):
+        """The resolver uses only ifDescr when configured ifName yields no relationship."""
+        ports = [
+            {"port_id": 1, "ifName": "uplink", "ifDescr": "xe-0/0/0", "ifType": "ethernetCsmacd"},
+            {"port_id": 2, "ifName": "customer", "ifDescr": "xe-0/0/0.1", "ifType": "propVirtual"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [], lag_patterns={}, interface_name_field="ifName", compiled_sap_patterns=[]
+        )
+
+        assert result == {"lag_members": {}, "sub_interfaces": {2: 1}}
+
+    def test_each_empty_relationship_map_falls_back_independently(self, mock_librenms_api):
+        """Each empty configured-field map falls back without replacing a populated map."""
+        ports = [
+            {"port_id": 1, "ifName": "ethernet-1", "ifDescr": "member", "ifType": "ethernetCsmacd"},
+            {"port_id": 2, "ifName": "lag-1", "ifDescr": "aggregate", "ifType": "ieee8023adLag"},
+            {"port_id": 3, "ifName": "xe-0/0/0", "ifDescr": "physical", "ifType": "ethernetCsmacd"},
+            {"port_id": 4, "ifName": "xe-0/0/0.1", "ifDescr": "logical", "ifType": "propVirtual"},
+        ]
+        port_stack = [{"high_port_id": 1, "low_port_id": 2}]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={}, interface_name_field="ifDescr", compiled_sap_patterns=[]
+        )
+
+        assert result == {"lag_members": {1: 2}, "sub_interfaces": {4: 3}}
+
+    def test_ifname_lag_pattern_resolves_in_ifdescr_mode(self, mock_librenms_api):
+        """An ifName LAG pattern still resolves LAG members in ifDescr mode."""
+        ports = [
+            {
+                "port_id": 17343,
+                "ifName": "Te0/1/0",
+                "ifDescr": "TenGigabitEthernet0/1/0",
+                "ifType": "ethernetCsmacd",
+            },
+            {
+                "port_id": 23722,
+                "ifName": "Po1",
+                "ifDescr": "Port-channel1",
+                "ifType": "propVirtual",
+            },
+            {
+                "port_id": 23723,
+                "ifName": "Po1.100",
+                "ifDescr": "Port-channel1.100",
+                "ifType": "l2vlan",
+            },
+        ]
+        port_stack = [
+            {"high_port_id": 17343, "low_port_id": 23722},
+            {"high_port_id": 23722, "low_port_id": 23723},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports,
+            port_stack,
+            lag_patterns={"iosxe": r"^Po\d+$"},
+            interface_name_field="ifDescr",
+            compiled_sap_patterns=[],
+        )
+
+        assert result == {
+            "lag_members": {17343: 23722},
+            "sub_interfaces": {23723: 23722},
+        }
+
+    def test_empty_configured_lag_map_falls_back_without_replacing_sub_interfaces(self, mock_librenms_api):
+        """An empty LAG map falls back without replacing configured sub-interfaces."""
+        ports = [
+            {"port_id": 1, "ifName": "member", "ifDescr": "ethernet-1", "ifType": "ethernetCsmacd"},
+            {"port_id": 2, "ifName": "aggregate", "ifDescr": "bundle-1", "ifType": "propVirtual"},
+            {"port_id": 3, "ifName": "xe-0/0/0", "ifDescr": "physical", "ifType": "ethernetCsmacd"},
+            {"port_id": 4, "ifName": "xe-0/0/0.1", "ifDescr": "logical", "ifType": "l2vlan"},
+        ]
+        port_stack = [{"high_port_id": 1, "low_port_id": 2}]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports,
+            port_stack,
+            lag_patterns={"x": r"^bundle-\d+$"},
+            interface_name_field="ifName",
+            compiled_sap_patterns=[],
+        )
+
+        assert result == {"lag_members": {1: 2}, "sub_interfaces": {4: 3}}
 
     def test_cisco_ios_lag_via_name_pattern(self, mock_librenms_api, ios_lag_patterns):
         """Cisco IOS: Po10 has propVirtual type but is a LAG via name pattern."""
@@ -2590,6 +2698,161 @@ class TestResolvePortRelationships:
         result = mock_librenms_api.resolve_port_relationships(ARCOS_PORTS, ARCOS_PORT_STACK[1:], lag_patterns={})
         assert result["sub_interfaces"] == {404: 403}
 
+    def test_junos_aggregate_unit_gets_its_aggregate_as_parent(self, mock_librenms_api):
+        """Junos never stacks ae2.0 on ae2, so the aggregate unit's parent must come from its name."""
+        # Verbatim shape from a live MX304 (LibreNMS device 20): ifStack carries
+        # et-0/0/6 <-> et-0/0/6.0 and et-0/0/6.0 <-> ae2.0, and no row at all for ae2.0 <-> ae2.
+        ports = [
+            {"port_id": 4301, "ifName": "et-0/0/6", "ifType": "ethernetCsmacd"},
+            {"port_id": 4302, "ifName": "et-0/0/6.0", "ifType": "propVirtual"},
+            {"port_id": 4303, "ifName": "ae2", "ifType": "ieee8023adLag"},
+            {"port_id": 4304, "ifName": "ae2.0", "ifType": "ieee8023adLag"},
+        ]
+        port_stack = [
+            {"high_port_id": 4301, "low_port_id": 4302},
+            {"high_port_id": 4302, "low_port_id": 4304},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={}, device_os="junos")
+
+        assert result["lag_members"] == {4301: 4303}
+        assert result["sub_interfaces"] == {4302: 4301, 4304: 4303}
+
+    def test_name_derived_parent_uses_configured_field_only(self, mock_librenms_api):
+        """A name-derived parent comes from ifDescr without adding the ifName parent."""
+        ports = [
+            {"port_id": 11, "ifName": "primary", "ifDescr": "xe-0/0/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 12, "ifName": "alternate", "ifDescr": "secondary", "ifType": "ethernetCsmacd"},
+            {"port_id": 13, "ifName": "alternate.1", "ifDescr": "xe-0/0/1.1", "ifType": "propVirtual"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [], lag_patterns={}, interface_name_field="ifDescr", compiled_sap_patterns=[]
+        )
+
+        assert result == {"lag_members": {}, "sub_interfaces": {13: 11}}
+
+    def test_mutual_cross_field_names_resolve_from_ifname_only(self, mock_librenms_api):
+        """A cross-field mutual pair resolves from ifName only."""
+        ports = [
+            {"port_id": 1, "ifName": "Eth1.1", "ifDescr": "service", "ifType": "l2vlan"},
+            {"port_id": 2, "ifName": "Eth1", "ifDescr": "service.1", "ifType": "ethernetCsmacd"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={})
+
+        assert result["sub_interfaces"] == {1: 2}
+
+    def test_disagreeing_name_fields_resolve_from_ifname_only(self, mock_librenms_api):
+        """A child whose fields name different parents resolves from ifName only."""
+        ports = [
+            {"port_id": 11, "ifName": "Gi0/1", "ifDescr": "core-a", "ifType": "ethernetCsmacd"},
+            {"port_id": 12, "ifName": "Gi0/2", "ifDescr": "core-b", "ifType": "ethernetCsmacd"},
+            {"port_id": 13, "ifName": "Gi0/1.100", "ifDescr": "core-b.100", "ifType": "l2vlan"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={})
+
+        assert result["sub_interfaces"] == {13: 11}
+
+    def test_name_derived_parents_use_ifname_only(self, mock_librenms_api):
+        """Name-derived parents form the hierarchy described by ifName only."""
+        ports = [
+            {"port_id": 1, "ifName": "a.1", "ifDescr": "x", "ifType": "propVirtual"},
+            {"port_id": 2, "ifName": "a", "ifDescr": "b.1", "ifType": "ethernetCsmacd"},
+            {"port_id": 3, "ifName": "a.1.9", "ifDescr": "b", "ifType": "propVirtual"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={}, compiled_sap_patterns=[])
+
+        assert result["sub_interfaces"] == {1: 2, 3: 1}
+
+    def test_unrelated_stated_row_does_not_mix_name_fields(self, mock_librenms_api):
+        """An ifDescr-only stated row does not enter the ifName relationship graph."""
+        ports = [
+            {"port_id": 31, "ifName": "ae0", "ifDescr": "q.7", "ifType": "ethernetCsmacd"},
+            {"port_id": 32, "ifName": "ae0.1", "ifDescr": "a-desc", "ifType": "propVirtual"},
+            {"port_id": 34, "ifName": "ae0.2.3", "ifDescr": "q", "ifType": "propVirtual"},
+            {"port_id": 33, "ifName": "ae0.2", "ifDescr": "c-desc", "ifType": "propVirtual"},
+        ]
+        port_stack = [{"high_port_id": 34, "low_port_id": 31}]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={}, compiled_sap_patterns=[]
+        )
+
+        assert result["sub_interfaces"] == {32: 31, 33: 31, 34: 33}
+
+    def test_stated_relationships_use_ifname_only(self, mock_librenms_api):
+        """Stated relationships form the hierarchy described by ifName only."""
+        ports = [
+            {"port_id": 41, "ifName": "x.1", "ifDescr": "a1", "ifType": "propVirtual"},
+            {"port_id": 42, "ifName": "x", "ifDescr": "y.1", "ifType": "ethernetCsmacd"},
+            {"port_id": 43, "ifName": "x.1.2", "ifDescr": "y", "ifType": "propVirtual"},
+            {"port_id": 44, "ifName": "x.1.2.3", "ifDescr": "d1", "ifType": "propVirtual"},
+        ]
+        port_stack = [
+            {"high_port_id": 42, "low_port_id": 41},
+            {"high_port_id": 43, "low_port_id": 42},
+            {"high_port_id": 41, "low_port_id": 43},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={}, compiled_sap_patterns=[]
+        )
+
+        assert result["sub_interfaces"] == {41: 42, 43: 41, 44: 43}
+
+    def test_name_derived_parents_still_resolve_a_deep_chain(self, mock_librenms_api):
+        """Single-field name derivation resolves a legitimate grandparent chain."""
+        ports = [
+            {"port_id": 21, "ifName": "et-0/0/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 22, "ifName": "et-0/0/1.1", "ifType": "propVirtual"},
+            {"port_id": 23, "ifName": "et-0/0/1.1.2", "ifType": "propVirtual"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={}, compiled_sap_patterns=[])
+
+        assert result["sub_interfaces"] == {22: 21, 23: 22}
+
+    def test_name_derived_parent_needs_a_real_base_port(self, mock_librenms_api):
+        """A dotted name whose base is not a port on the device gets no invented parent."""
+        ports = [
+            {"port_id": 4501, "ifName": "ae7.0", "ifType": "ieee8023adLag"},
+            {"port_id": 4502, "ifName": "lo0.16385", "ifType": "softwareLoopback"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, [], lag_patterns={})
+
+        assert result["sub_interfaces"] == {}
+
+    @pytest.mark.django_db
+    def test_junos_channelized_colon_ports_keep_their_relationships(self, mock_librenms_api):
+        """A Junos breakout port (xe-1/1/3:1) must not be caught by another vendor's SAP rule."""
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        # The colon SAP rule must actually be stored, or OS scoping is not what keeps these edges.
+        assert PortStackLagPattern.objects.filter(librenms_os="timos", sap_name_pattern=":").exists()
+        # Verbatim shape from a live MX480 (LibreNMS device 9), where the colon guard dropped
+        # 77 of 156 usable ifStack rows and left ten aggregates with no members at all.
+        ports = [
+            {"port_id": 4601, "ifName": "xe-1/1/3:1", "ifType": "ethernetCsmacd"},
+            {"port_id": 4602, "ifName": "xe-1/1/3:1.0", "ifType": "propVirtual"},
+            {"port_id": 4603, "ifName": "ae0", "ifType": "ieee8023adLag"},
+            {"port_id": 4604, "ifName": "ae0.0", "ifType": "ieee8023adLag"},
+        ]
+        port_stack = [
+            {"high_port_id": 4601, "low_port_id": 4602},
+            {"high_port_id": 4602, "low_port_id": 4604},
+        ]
+
+        # lag_patterns stays unset: supplying it skips the OS-scoped SAP read, which is the
+        # exact decision this test guards.
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, device_os="junos")
+
+        assert result["lag_members"] == {4601: 4603}
+        assert result["sub_interfaces"][4602] == 4601
+
     def test_sub_interface_detected_when_parent_is_low(self, mock_librenms_api):
         """Sub-interface parenting is position-independent: a pair emitted child=high/parent=low must resolve, not fall through to the LAG branch and get dropped by the self-reference guard."""
         ports = [
@@ -2614,7 +2877,10 @@ class TestResolvePortRelationships:
             (2, 1),
         ],
     )
-    def test_conflicting_sub_interface_directions_are_dropped(self, mock_librenms_api, high_id, low_id):
+    def test_cross_field_mutual_pair_resolves_from_ifname_in_either_stack_order(
+        self, mock_librenms_api, high_id, low_id
+    ):
+        """A stated cross-field mutual pair resolves from ifName in either row order."""
         ports = [
             {
                 "port_id": 1,
@@ -2633,7 +2899,7 @@ class TestResolvePortRelationships:
 
         result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
 
-        assert result["sub_interfaces"] == {}
+        assert result["sub_interfaces"] == {1: 2}
 
     def test_both_aggregate_disambiguated_by_structural_iftype(self, mock_librenms_api):
         """A too-broad name pattern that matches the member too marks both sides as aggregates; the structural ieee8023adLag signal must break the tie instead of dropping the membership."""

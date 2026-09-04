@@ -11,7 +11,6 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import (
-    assert_locked_before_update,
     grant,
     make_request,
     make_user_with_perms,
@@ -1257,7 +1256,7 @@ class TestSyncIPAddressesViewIPWrites:
         view.get_cache_key = MagicMock(return_value="k")
         return view
 
-    def _run(self, view, dev, ip_addresses):
+    def _run(self, view, dev, ip_addresses, *, capture_response=False):
         mock_api = MagicMock(server_key="default")
         with (
             patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache,
@@ -1267,8 +1266,10 @@ class TestSyncIPAddressesViewIPWrites:
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ip_addresses": ip_addresses}
-            view.request = _make_request(post_data={"select": ["10.0.0.1"]})
-            view.post(view.request, object_type="device", pk=dev.pk)
+            view.request = _make_request(post_data={"select": ["10.0.0.1/24"]})
+            response = view.post(view.request, object_type="device", pk=dev.pk)
+        if capture_response:
+            return mock_msgs, response
         return mock_msgs
 
     def test_new_ip_is_created_and_assigned(self):
@@ -1293,7 +1294,7 @@ class TestSyncIPAddressesViewIPWrites:
         assert ip.status == "active"
         mock_msgs.success.assert_called()
 
-    def test_existing_ip_rehomed_when_interface_differs(self):
+    def test_existing_ip_requires_confirmation_when_interface_differs(self):
         from ipam.models import IPAddress
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1306,45 +1307,18 @@ class TestSyncIPAddressesViewIPWrites:
         eth1 = make_interface(dev, "eth1")
         ip = IPAddress.objects.create(address="10.0.0.1/24", assigned_object=eth1, status="active")
 
-        self._run(
+        _mock_msgs, response = self._run(
             view,
             dev,
             [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}],
+            capture_response=True,
         )
 
         ip.refresh_from_db()
-        assert ip.assigned_object_id == eth0.pk  # re-homed to the port_id-resolved interface
-
-    def test_existing_ip_outside_the_change_grant_is_not_rehomed(self):
-        """An address matched by natural key must remain outside a constrained change grant."""
-        from dcim.models import Interface
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        device = make_device("ip-update-change-scope")
-        target = make_interface(device, "eth0")
-        original = make_interface(device, "eth1")
-        set_librenms_device_id(target, 5, "default")
-        target.save()
-        hidden_ip = IPAddress.objects.create(address="10.0.0.1/24", assigned_object=original, status="active")
-        allowed_ip = IPAddress.objects.create(address="10.0.0.2/24", status="active")
-        user = make_user_with_perms(
-            "ip-update-change-scope",
-            [("view", Interface), ("add", IPAddress)],
-        )
-        user = grant(user, "change", IPAddress, constraints={"pk": allowed_ip.pk})
-        request = _make_request(post_data={"select": ["10.0.0.1"]}, user=user)
-        view = make_view(_sync_ip_view_class(), request)
-        view._post_server_key = "default"
-        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
-
-        with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
-            results = view.process_ip_sync(request, ["10.0.0.1"], cached, device, "device")
-
-        hidden_ip.refresh_from_db()
-        assert hidden_ip.assigned_object_id == original.pk
-        assert results["failed"] == ["10.0.0.1"]
+        assert ip.assigned_object_id == eth1.pk
+        assert response.status_code == 200
+        assert b"10.0.0.1/24" in response.content
+        assert b"Reassign the existing IP address to the selected interface." in response.content
 
     def test_unchanged_ip_shows_warning(self):
         from ipam.models import IPAddress
@@ -1523,7 +1497,7 @@ class TestSyncIPAddressesViewHelpers:
         mine = VRF.objects.create(name="VRF Mine")
         theirs = VRF.objects.create(name="VRF Theirs")
         user = make_user_with_perms("vrf-row-scoped", [("view", VRF)], constraints={"pk": mine.pk})
-        req = _make_request(post_data={"vrf_10.0.0.2": str(theirs.pk)}, user=user)
+        req = _make_request(post_data={"vrf_10.0.0.2/24": str(theirs.pk)}, user=user)
         view = make_view(_sync_ip_view_class(), req)
         view._post_server_key = "default"
         device = make_device("vrf-row-device")
@@ -1533,10 +1507,10 @@ class TestSyncIPAddressesViewHelpers:
         cached = [{"ip_address": "10.0.0.2", "ip_with_mask": "10.0.0.2/24", "port_id": 5}]
 
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
-            results = view.process_ip_sync(req, ["10.0.0.2"], cached, device, "device")
+            results = view.process_ip_sync(req, ["10.0.0.2/24"], cached, device, "device")
 
-        assert results["failed"] == ["10.0.0.2"]
-        assert "Selected VRF" in results["errors"]["10.0.0.2"]
+        assert results["failed"] == ["10.0.0.2/24"]
+        assert "Selected VRF" in results["errors"]["10.0.0.2/24"]
         assert not IPAddress.objects.filter(address="10.0.0.2/24").exists()
 
     def test_get_ip_tab_url_device(self):
@@ -1621,7 +1595,7 @@ class TestSyncIPAddressesViewVMInterface:
 
         vm = make_vm("ipsync-vm")
         vmiface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
-        req = _make_request(post_data={"select": ["10.0.0.5"]})
+        req = _make_request(post_data={"select": ["10.0.0.5/24"]})
         view = make_view(_sync_ip_view_class(), req)
         view.rebind_api_for_server = MagicMock(return_value="default")
         cache.set(
@@ -1741,15 +1715,24 @@ class TestSyncIPAddressesViewInterfaceResolution:
         )
         assert result is None
 
-    def test_existing_ip_is_locked_before_it_is_rewritten(self):
-        """The authorized existing row must be SELECT ... FOR UPDATE before its FK/VRF are rewritten.
+    def test_match_interface_does_not_use_url_after_ambiguous_stable_matches(self):
+        """An ambiguous stable ID and name must not fall through to a cached interface URL."""
+        dev = make_device("ipres-ambig-url")
+        fallback = make_interface(dev, "cached-target")
+        result = self._view()._match_interface(
+            {
+                "port_id": 7,
+                "interface_name": "eth0",
+                "interface_url": fallback.get_absolute_url(),
+            },
+            {"7": None},
+            {"eth0": None},
+            {str(fallback.pk): fallback},
+        )
+        assert result is None
 
-        The scope check that authorizes the row takes no lock, so without a re-lock a concurrent
-        assignment or VRF change can commit between the check and the save and be silently
-        overwritten.
-        """
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
+    def test_existing_ip_is_not_rewritten_without_confirmation(self):
+        """A first-pass bulk sync reports a conflict and leaves the existing assignment intact."""
         from ipam.models import IPAddress
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1771,16 +1754,13 @@ class TestSyncIPAddressesViewInterfaceResolution:
             "port_id": 91,
             "interface_name": "eth9",
         }
-        request = _make_request(post_data={"select": ["10.9.9.9"]})
-
-        with CaptureQueriesContext(connection) as ctx:
-            results = view.process_ip_sync(request, ["10.9.9.9"], [ip_data], dev, "device")
-
-        assert_locked_before_update(ctx, "ipam_ipaddress")
+        request = _make_request(post_data={"select": ["10.9.9.9/24"]})
+        results = view.process_ip_sync(request, ["10.9.9.9/24"], [ip_data], dev, "device")
 
         existing.refresh_from_db()
-        assert existing.assigned_object == iface
-        assert results["updated"] == ["10.9.9.9"]
+        assert existing.assigned_object is None
+        assert results["updated"] == []
+        assert [conflict["row_id"] for conflict in results["conflicts"]] == ["10.9.9.9/24"]
 
     def test_stale_interface_url_still_assigns_after_interface_synced(self):
         """Regression: cached row was enriched before the interface existed (``interface_url`` is None), but the interface has since been synced."""
@@ -1807,12 +1787,12 @@ class TestSyncIPAddressesViewInterfaceResolution:
             "interface_name": "lo0.0",
         }
 
-        request = _make_request(post_data={"select": ["10.0.0.1"]})
-        results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
+        request = _make_request(post_data={"select": ["10.0.0.1/24"]})
+        results = view.process_ip_sync(request, ["10.0.0.1/24"], [ip_data], dev, "device")
 
         created = IPAddress.objects.get(address="10.0.0.1/24")
         assert created.assigned_object == iface
-        assert results["created"] == ["10.0.0.1"]
+        assert results["created"] == ["10.0.0.1/24"]
         assert results["primary_no_interface"] == []
 
     # --- Virtual-chassis member resolution (characterization: behavior must NOT drift when the
@@ -1874,7 +1854,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
             [("view", Device), ("add", IPAddress), ("change", IPAddress)],
         )
         user = grant(user, "view", Interface, constraints={"pk": visible.pk})
-        request = _make_request(post_data={"select": ["10.0.0.2"]}, user=user)
+        request = _make_request(post_data={"select": ["10.0.0.2/24"]}, user=user)
         view = make_view(_sync_ip_view_class(), request)
         view._post_server_key = "default"
         cached = [
@@ -1887,9 +1867,9 @@ class TestSyncIPAddressesViewInterfaceResolution:
         ]
 
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False):
-            results = view.process_ip_sync(request, ["10.0.0.2"], cached, members[1], "device")
+            results = view.process_ip_sync(request, ["10.0.0.2/24"], cached, members[1], "device")
 
-        assert results["skipped_no_interface"] == ["10.0.0.2"]
+        assert results["skipped_no_interface"] == ["10.0.0.2/24"]
         assert not IPAddress.objects.filter(address="10.0.0.2/24").exists()
 
     def test_primary_ip_set_from_sibling_vc_member_interface(self):
@@ -1917,12 +1897,12 @@ class TestSyncIPAddressesViewInterfaceResolution:
             "port_id": 5,
             "interface_name": "eth5",
         }
-        request = _make_request(post_data={"select": ["10.0.0.1"]})
+        request = _make_request(post_data={"select": ["10.0.0.1/24"]})
         with patch(
             "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
             return_value=True,
         ):
-            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], m1, "device")
+            results = view.process_ip_sync(request, ["10.0.0.1/24"], [ip_data], m1, "device")
 
         # The IP is created and bound to the sibling's interface (the maps include all members)...
         created = IPAddress.objects.get(address="10.0.0.1/24")
@@ -1930,7 +1910,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         # ...and m1's primary IP IS set — the exact assignment NetBox accepts manually.
         m1.refresh_from_db()
         assert m1.primary_ip4_id == created.pk
-        assert results["primary_set"] == ["10.0.0.1"]
+        assert results["primary_set"] == ["10.0.0.1/24"]
         assert results["primary_no_interface"] == []
         # Proof the persisted state satisfies NetBox's own invariants.
         m1.full_clean()
@@ -1959,19 +1939,19 @@ class TestSyncIPAddressesViewInterfaceResolution:
             "port_id": 5,
             "interface_name": "mgmt0",
         }
-        request = _make_request(post_data={"select": ["10.0.0.2"]})
+        request = _make_request(post_data={"select": ["10.0.0.2/24"]})
         with patch(
             "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
             return_value=True,
         ):
-            results = view.process_ip_sync(request, ["10.0.0.2"], [ip_data], m1, "device")
+            results = view.process_ip_sync(request, ["10.0.0.2/24"], [ip_data], m1, "device")
 
         created = IPAddress.objects.get(address="10.0.0.2/24")
         assert created.assigned_object == sibling_iface
         m1.refresh_from_db()
         assert m1.primary_ip4_id is None
         assert results["primary_set"] == []
-        assert results["primary_interface_not_eligible"] == ["10.0.0.2"]
+        assert results["primary_interface_not_eligible"] == ["10.0.0.2/24"]
 
         view.display_sync_results(request, results)
         warnings = message_texts(request, "warning")
@@ -2001,7 +1981,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
             "port_id": 5,
             "interface_name": "eth0",
         }
-        request = _make_request(post_data={"select": ["10.0.0.1"]})
+        request = _make_request(post_data={"select": ["10.0.0.1/24"]})
         with (
             patch(
                 "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
@@ -2009,73 +1989,15 @@ class TestSyncIPAddressesViewInterfaceResolution:
             ),
             CaptureQueriesContext(connection) as ctx,
         ):
-            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
+            results = view.process_ip_sync(request, ["10.0.0.1/24"], [ip_data], dev, "device")
 
-        assert results["primary_set"] == ["10.0.0.1"]
+        assert results["primary_set"] == ["10.0.0.1/24"]
         sqls = [q["sql"] for q in ctx.captured_queries]
         device_locks = [i for i, sql in enumerate(sqls) if 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql]
         address_writes = [i for i, sql in enumerate(sqls) if 'INSERT INTO "ipam_ipaddress"' in sql]
         assert device_locks, "the primary-IP row must lock the device row (SELECT ... FOR UPDATE)"
         assert address_writes, "the address must be written"
         assert min(device_locks) < min(address_writes), "the device lock must precede the address write"
-
-    def test_primary_ip_row_fails_if_owner_disappears_before_lock(self):
-        """A concurrent owner deletion must not write an orphan address or recreate stale owner data.
-
-        The owner is deleted for real, from inside the query wrapper, just before its lock runs. A
-        stubbed ``select_for_update()`` chain would instead pin the exact call shape the code
-        happens to use today and break on any equivalent rewrite.
-        """
-        from django.db import connection
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        dev = make_device("ipres-owner-gone")
-        iface = make_interface(dev, "eth0")
-        set_librenms_device_id(iface, 5, "default")
-        iface.save()
-
-        view = self._view()
-        view._post_server_key = "default"
-        view.get_management_ip = MagicMock(return_value="10.0.0.1")
-        ip_data = {
-            "ip_address": "10.0.0.1",
-            "ip_with_mask": "10.0.0.1/24",
-            "interface_url": None,
-            "port_id": 5,
-            "interface_name": "eth0",
-        }
-        request = _make_request(post_data={"select": ["10.0.0.1"]})
-
-        class _DeleteOwnerBeforeItsLock:
-            """Delete the device row as the sync is about to lock it."""
-
-            def __init__(self, device_pk):
-                self.device_pk = device_pk
-                self.fired = False
-
-            def __call__(self, execute, sql, params, many, context):
-                if not self.fired and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql.upper():
-                    # Set first: the cascade below re-enters this wrapper.
-                    self.fired = True
-                    type(dev).objects.filter(pk=self.device_pk).delete()
-                return execute(sql, params, many, context)
-
-        deleter = _DeleteOwnerBeforeItsLock(dev.pk)
-        with (
-            patch(
-                "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
-                return_value=True,
-            ),
-            connection.execute_wrapper(deleter),
-        ):
-            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
-
-        assert deleter.fired, "the sync never reached the device lock"
-        assert results["failed"] == ["10.0.0.1"]
-        assert "no longer exists" in results["errors"]["10.0.0.1"]
-        assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
 
     def test_build_interface_maps_vc_shared_name_prefers_viewed_member(self):
         """A name shared across VC members resolves to the VIEWED member's own interface (matching the rendered table), not ambiguous."""

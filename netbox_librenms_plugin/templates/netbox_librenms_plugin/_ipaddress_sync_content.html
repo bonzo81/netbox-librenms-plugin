@@ -8,12 +8,15 @@
 {% if migrated_to_marker %}
 <div>
 {% else %}
-<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}">
+<form method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}"
+      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}"
+      hx-target="#htmx-modal-content"
+      hx-swap="innerHTML">
 {% endif %}
 {% endwith %}
     {% csrf_token %}
     {% if ip_sync.server_key %}<input type="hidden" name="server_key" value="{{ ip_sync.server_key }}">{% endif %}
-    <input type="hidden" id="selected_ip" name="select" value="">
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div class="d-flex align-items-center gap-3">
             {% if not migrated_to_marker %}
@@ -31,6 +34,16 @@
                        title="When the synced IP equals the device's LibreNMS management IP and is assigned to an interface, set it as the Primary IP.">
                 <label class="form-check-label small" for="set-primary-ip-toggle-cb">
                     Set Primary IP
+                </label>
+            </div>
+            <div class="form-check form-switch mb-0">
+                <input type="hidden" name="create-missing-interfaces-toggle" value="off">
+                <input class="form-check-input" type="checkbox" id="create-missing-interfaces-toggle-cb"
+                       name="create-missing-interfaces-toggle" value="on" {% if ip_sync.create_missing_interfaces %}checked{% endif %}
+                       data-bs-toggle="tooltip"
+                       title="Create a missing NetBox interface from the cached LibreNMS port before assigning the selected IP address.">
+                <label class="form-check-label small" for="create-missing-interfaces-toggle-cb">
+                    Create missing interfaces
                 </label>
             </div>
             {% endif %}

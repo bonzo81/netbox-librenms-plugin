@@ -1725,6 +1725,7 @@ function initializeTabs() {
     const urlParams = new URLSearchParams(window.location.search);
     const activeTab = urlParams.get('tab') || 'interfaces'; // Set default tab
     const interfaceNameField = urlParams.get('interface_name_field');
+    updateInterfaceNameFieldVisibility(activeTab);
 
     // Activate the tab based on the 'tab' parameter in the URL
     if (activeTab) {
@@ -1743,6 +1744,7 @@ function initializeTabs() {
         tab.addEventListener('shown.bs.tab', function (e) {
             const tabId = this.getAttribute('aria-controls');
             const url = new URL(window.location);
+            updateInterfaceNameFieldVisibility(tabId);
 
             // Update the 'tab' parameter in the URL
             url.searchParams.set('tab', tabId);
@@ -1756,6 +1758,13 @@ function initializeTabs() {
             window.history.replaceState({}, '', url);
         });
     });
+}
+
+function updateInterfaceNameFieldVisibility(tabId) {
+    const selector = document.getElementById('interface-name-field-selector');
+    if (!selector) return;
+    const visibleTabs = (selector.dataset.visibleTabs || '').split(',').filter(Boolean);
+    selector.classList.toggle('d-none', !visibleTabs.includes(tabId));
 }
 
 // ============================================
@@ -1827,15 +1836,27 @@ function updateInterfaceNameField() {
             }
 
             // Persist to user preferences via API
-            const savePrefUrl = this.closest('[data-save-pref-url]')?.dataset.savePrefUrl;
+            const preferenceSelector = this.closest('[data-save-pref-url]');
+            const savePrefUrl = preferenceSelector?.dataset.savePrefUrl;
             if (savePrefUrl) {
-                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
-                if (csrfToken) {
+                const csrfToken = getCsrfToken();
+                if (!csrfToken) {
+                    console.debug('Failed to save interface_name_field pref: missing CSRF token');
+                } else {
+                    const platformId = preferenceSelector.dataset.platformId || null;
                     fetch(savePrefUrl, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
-                        body: JSON.stringify({key: 'interface_name_field', value: this.value})
-                    }).catch(err => console.debug('Failed to save interface_name_field pref:', err));
+                        body: JSON.stringify({
+                            key: 'interface_name_field',
+                            value: this.value,
+                            platform_id: platformId
+                        })
+                    }).then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+                    }).catch(error => console.debug('Failed to save interface_name_field pref:', error.message));
                 }
             }
 

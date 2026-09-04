@@ -1,11 +1,10 @@
-import hashlib
 from urllib.parse import quote_plus
 
 from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, connection, transaction
+from django.db import IntegrityError, transaction
 from django.http import Http404
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -13,6 +12,7 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.exceptions import PermissionsViolation
 
+from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -23,20 +23,8 @@ from netbox_librenms_plugin.views.mixins import (
 
 def _acquire_global_vlan_locks(vids):
     """Lock global VLAN VIDs in stable order for the current transaction."""
-    if not connection.in_atomic_block:
-        raise RuntimeError("_acquire_global_vlan_locks() requires an open transaction")
-
-    with connection.cursor() as cursor:
-        for vid in sorted(set(vids)):
-            lock_key = int.from_bytes(
-                hashlib.blake2b(
-                    f"netbox-librenms-plugin:global-vlan:{vid}".encode(),
-                    digest_size=8,
-                ).digest(),
-                byteorder="big",
-                signed=True,
-            )
-            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+    for vid in sorted(set(vids)):
+        acquire_advisory_transaction_lock(f"netbox-librenms-plugin:global-vlan:{vid}")
 
 
 class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):

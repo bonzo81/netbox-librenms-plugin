@@ -1575,42 +1575,59 @@ class TestPrepareContextInterfaceNameFieldNone:
         assert view.librenms_id is None
         view._librenms_api.get_device_info.assert_not_called()
 
-    def test_calls_get_interface_name_field_when_none(self):
-        """When interface_name_field=None, _prepare_context calls get_interface_name_field."""
+    def test_non_dict_cached_entry_drops_to_none_not_500(self):
+        """A stale/corrupt non-dict cached entry (e.g. a list from a legacy snapshot shape) must drop to None and render empty, not 500 on a .get() against a list — mirrors the interfaces/modules cached-path isinstance guard."""
+        from uuid import uuid4
+
+        from django.core.cache import cache
+
         view = self._make_view()
 
         obj = _mock_obj()
         request = _mock_request()
+        key = f"nblp-test-corrupt-{uuid4().hex}"
+
+        cache.set(key, ["not", "a", "dict"])
+        try:
+            with patch.object(view, "get_cache_key", return_value=key):
+                result = view._prepare_context(request, obj, "ifName", fetch_fresh=False)
+
+            assert result is None
+            assert cache.get(key) is None
+        finally:
+            cache.delete(key)
+
+    def test_prepare_context_uses_request_object_interface_name_fallback(self):
+        """A missing explicit name field must use the request and object preference."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+        # The cached field differs from the resolver's, so only the resolved value can
+        # satisfy the assertion below.
+        cached = {
+            "ip_addresses": [],
+            "mgmt_ip": "",
+            "ports_by_id": {},
+            "interface_name_field": "ifName",
+        }
 
         with (
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
             patch(
                 "netbox_librenms_plugin.views.base.ip_addresses_view.get_interface_name_field",
-                return_value="ifName",
-            ) as mock_gif,
+                return_value="ifDescr",
+            ) as get_name_field,
+            patch.object(view, "enrich_ip_data", return_value=[]) as enrich,
+            patch.object(view, "get_table", return_value=MagicMock()),
         ):
-            mock_cache.get.return_value = None  # no cached data → returns None early
-            result = view._prepare_context(request, obj, None, fetch_fresh=False)
+            mock_cache.get.return_value = cached
+            mock_cache.ttl.return_value = None
+            result = view._prepare_context(request, obj, None, fetch_fresh=False, server_key="default")
 
-        mock_gif.assert_called_once_with(request)
-        assert result is None  # returns None because cache miss
-
-    def test_non_dict_cached_entry_drops_to_none_not_500(self):
-        """A stale/corrupt non-dict cached entry (e.g. a list from a legacy snapshot shape) must drop to None and render empty, not 500 on a .get() against a list — mirrors the interfaces/modules cached-path isinstance guard."""
-        view = self._make_view()
-
-        obj = _mock_obj()
-        request = _mock_request()
-
-        with (
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
-            patch.object(view, "get_cache_key", return_value="test-key"),
-        ):
-            mock_cache.get.return_value = ["not", "a", "dict"]  # corrupt non-dict cache entry
-            result = view._prepare_context(request, obj, "ifName", fetch_fresh=False)
-
-        assert result is None
+        assert result is not None
+        get_name_field.assert_called_once_with(request, obj)
+        assert enrich.call_args.args[2] == "ifDescr"
 
     def test_fetch_fresh_malformed_ip_payload_returns_none(self):
         """A success flag with a non-list get_ip_addresses() payload (or a list with non-dict entries) must be treated as a fetch failure — return None before enrichment so post() neither renders an empty table under a success banner nor caches the empty snapshot."""
@@ -1860,13 +1877,10 @@ class TestSingleIPAddressVerifyViewParseIp:
         assert prefix == 64
 
     def test_invalid_prefix_raises_value_error(self):
-        """'192.168.1.1/abc' → ValueError with 'Invalid prefix length'."""
+        """An invalid prefix is rejected by the shared IP parser."""
         view = self._make_view()
-        try:
+        with pytest.raises(ValueError):
             view._parse_ip_address("192.168.1.1/abc")
-            assert False, "Expected ValueError"
-        except ValueError as exc:
-            assert "Invalid prefix length" in str(exc)
 
     def test_missing_prefix_raises_value_error(self):
         """'192.168.1.1' (no slash) → ValueError with 'Prefix length is missing'."""
@@ -1906,7 +1920,13 @@ class TestSingleIPAddressVerifyViewFindInCache:
     def test_match_returns_entry_vrf_id_port_id(self):
         """Matching entry → (entry, vrf_id, port_id)."""
         view = self._make_view()
-        entry = {"ip_address": "192.168.1.1", "prefix_length": 24, "vrf_id": 5, "port_id": 10}
+        entry = {
+            "ip_address": "192.168.1.1",
+            "ip_with_mask": "192.168.1.1/24",
+            "prefix_length": 24,
+            "vrf_id": 5,
+            "port_id": 10,
+        }
         cached = {"ip_addresses": [entry]}
         ip_entry, vrf_id, port_id = view._find_in_cache(cached, "192.168.1.1", 24)
         assert ip_entry is entry
@@ -1916,7 +1936,13 @@ class TestSingleIPAddressVerifyViewFindInCache:
     def test_no_match_returns_triple_none(self):
         """Entries present but no match → (None, None, None)."""
         view = self._make_view()
-        entry = {"ip_address": "10.0.0.1", "prefix_length": 16, "vrf_id": None, "port_id": 1}
+        entry = {
+            "ip_address": "10.0.0.1",
+            "ip_with_mask": "10.0.0.1/16",
+            "prefix_length": 16,
+            "vrf_id": None,
+            "port_id": 1,
+        }
         cached = {"ip_addresses": [entry]}
         result = view._find_in_cache(cached, "192.168.1.1", 24)
         assert result == (None, None, None)

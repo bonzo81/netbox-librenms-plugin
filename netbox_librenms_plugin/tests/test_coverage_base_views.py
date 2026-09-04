@@ -2694,6 +2694,51 @@ class TestBaseInterfaceTableViewAddVlanGroupSelection:
         assert port["vlan_group_map"][100]["group_name"] == "Override-Group"
 
     @pytest.mark.django_db
+    def test_malformed_vlan_group_override_keeps_the_automatic_selection(self):
+        """A malformed cached override must not abort interface table enrichment."""
+        from ipam.models import VLANGroup
+
+        view = self._make_view()
+        available_group = VLANGroup.objects.create(name="Available Group", slug="available-group")
+        port = {"untagged_vlan": 100, "tagged_vlans": []}
+        lookup_maps = {"vid_to_groups": {100: [available_group]}}
+        device = make_device("malformed-vlan-override")
+
+        view._add_vlan_group_selection(
+            port,
+            lookup_maps,
+            device,
+            vlan_group_overrides={"100": "not-a-group-id"},
+        )
+
+        assert port["vlan_group_map"][100]["group_id"] == str(available_group.pk)
+        assert port["vlan_group_map"][100]["group_name"] == "Available Group"
+
+    @pytest.mark.django_db
+    def test_boolean_vlan_group_override_keeps_the_automatic_selection(self):
+        """A boolean cached override must not select the Global VLAN scope."""
+        from ipam.models import VLANGroup
+
+        view = self._make_view()
+        available_group = VLANGroup.objects.create(name="Boolean Override Group", slug="boolean-override-group")
+        port = {"untagged_vlan": 100, "tagged_vlans": []}
+        lookup_maps = {
+            "vid_to_groups": {100: [available_group]},
+            "vid_group_to_vlan": {(100, None): object()},
+        }
+        device = make_device("boolean-vlan-override")
+
+        view._add_vlan_group_selection(
+            port,
+            lookup_maps,
+            device,
+            vlan_group_overrides={"100": False},
+        )
+
+        assert port["vlan_group_map"][100]["group_id"] == str(available_group.pk)
+        assert port["vlan_group_map"][100]["group_name"] == "Boolean Override Group"
+
+    @pytest.mark.django_db
     def test_override_with_empty_string_forces_global(self):
         """Override with empty string means 'No Group (Global)' (real in_bulk returns nothing)."""
         view = self._make_view()
@@ -2813,13 +2858,13 @@ class TestBaseIPAddressTableViewCreateBaseIpEntry:
         assert result["ip_address"] == "2001:db8::1"
         assert result["ip_with_mask"] == "2001:db8::1/64"
 
-    def test_no_valid_format_raises_key_error(self):
-        """When no valid IP format is found, KeyError is raised."""
+    def test_no_valid_format_raises_value_error(self):
+        """When no supported IP fields exist, the boundary rejects the row."""
         view = self._make_view()
         ip_entry = {"port_id": 1}  # No IP address fields
         obj = MagicMock()
 
-        with pytest.raises(KeyError):
+        with pytest.raises(ValueError, match="no supported address fields"):
             view._create_base_ip_entry(ip_entry, obj, vrfs=[])
 
 
@@ -2916,7 +2961,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
         ip_data = [{"ip_address": "192.168.1.1", "prefix_length": 24, "port_id": 20}]
         prefetched = {
             "vrfs": [],
-            "ip_addresses_map": {"192.168.1.1/24": existing_ip},
+            "ip_addresses_map": {"192.168.1.1/24": [existing_ip]},
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {},
             "all_interfaces": [],
@@ -3395,9 +3440,12 @@ class TestBaseIPAddressTableViewPrefetchNetboxData:
         iface.custom_field_data["librenms_id"] = {"default": 10}
         iface.save()
         ip = make_ip("198.51.100.5/24", assigned_object=iface)
+        unreported = make_ip("198.51.100.99/24")
 
-        result = view._prefetch_netbox_data(obj)
+        result = view._prefetch_netbox_data(obj, {"198.51.100.5/24"})
 
+        # Only the reported address is scanned; an unrelated IPAM row stays out of the map.
+        assert str(unreported.address) not in result["ip_addresses_map"]
         assert result["interfaces_by_name"]["Gi0/0"] == iface
         # Per-server id scoping: the librenms_id CF resolves under server_key "default".
         assert result["interfaces_by_librenms_id"]["10"] == iface
@@ -3415,7 +3463,7 @@ class TestBaseIPAddressTableViewPrefetchNetboxData:
         b.custom_field_data["librenms_id"] = {"default": 20}  # same id → ambiguous
         b.save()
 
-        result = view._prefetch_netbox_data(obj)
+        result = view._prefetch_netbox_data(obj, set())
 
         assert "20" not in result["interfaces_by_librenms_id"]
         # Names are still unambiguous and remain usable for the fallback match.

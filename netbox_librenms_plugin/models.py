@@ -95,6 +95,11 @@ class LibreNMSSettings(models.Model):
         help_text="Remove domain suffix from device names during import",
     )
 
+    remember_interface_name_per_platform = models.BooleanField(
+        default=False,
+        help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
+    )
+
     def save(self, *args, **kwargs):
         self.pk = 1
         super().save(*args, **kwargs)
@@ -940,11 +945,15 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
     Example: Cisco IOS port-channels have ifType='propVirtual' and need name-based
     identification via pattern '^Po\\d+$'.
 
+    Also maps that OS to the regex identifying service-access-point names, whose port_stack
+    rows describe a service rather than an interface relationship and must be skipped.
+    Example: Nokia SR OS SAPs are written 'lag-1:10'. That is per-OS because other vendors
+    spell real interfaces with a colon (a Junos breakout channel is 'xe-1/1/3:1').
+
     Universal rules (hardcoded, vendor-agnostic):
       - LAG aggregate is normally the 'low' entry in a port_stack pair, but the
         aggregate side is determined authoritatively by ifType or this pattern, so a
         pair whose aggregate is on the 'high' side is still mapped member->aggregate.
-      - Pairs where either name contains ':' are skipped (Nokia SAP entries).
       - .N suffix is stripped for name resolution (handles Junos sub-unit pairing).
     """
 
@@ -960,6 +969,16 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             r"Example: ^Po\d+$"
         ),
     )
+    sap_name_pattern = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text=(
+            "Regular expression matching service-access-point names, whose port_stack rows are "
+            "skipped. Leave blank when the OS has no SAP notation. "
+            "Example: ':' for Nokia SR OS (lag-1:10)"
+        ),
+    )
     description = models.TextField(blank=True)
 
     @functools.cached_property
@@ -969,6 +988,41 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             return re.compile(self.lag_name_pattern)
         except re.error:
             return None
+
+    @functools.cached_property
+    def _compiled_sap_pattern(self):
+        """Compiled sap_name_pattern regex, or None when it is blank or doesn't compile."""
+        if not self.sap_name_pattern:
+            return None
+        try:
+            return re.compile(self.sap_name_pattern)
+        except re.error:
+            return None
+
+    @classmethod
+    def _patterns_for_os_queryset(cls, device_os):
+        """
+        Return the stored rows that apply to *device_os*, or None when none can.
+
+        One home for the OS scoping both pattern readers use, so they cannot disagree on which
+        rows apply. ``device_os=None`` loads every stored row (legacy unscoped behaviour); a
+        present-but-blank or non-string OS returns None, because an unknown OS must not
+        re-globalize every vendor's regex.
+
+        Args:
+            device_os (str | None): The LibreNMS OS to scope to, or None for every stored row.
+
+        Returns:
+            QuerySet | None: The rows to read, or None when the OS admits none.
+        """
+        if device_os is None:
+            return cls.objects.all()
+        os_filter = device_os.strip() if isinstance(device_os, str) else ""
+        if not os_filter:
+            return None
+        return cls.objects.annotate(normalized_librenms_os=Lower(_trim_python_whitespace("librenms_os"))).filter(
+            normalized_librenms_os=os_filter.lower()
+        )
 
     @classmethod
     def compiled_patterns_for_os(cls, device_os):
@@ -983,15 +1037,9 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         matches after the same trim/lower normalization as the database constraint. Patterns
         that fail to compile are skipped and logged.
         """
-        if device_os is None:
-            queryset = cls.objects.all()
-        else:
-            os_filter = device_os.strip() if isinstance(device_os, str) else ""
-            if not os_filter:
-                return []
-            queryset = cls.objects.annotate(
-                normalized_librenms_os=Lower(_trim_python_whitespace("librenms_os"))
-            ).filter(normalized_librenms_os=os_filter.lower())
+        queryset = cls._patterns_for_os_queryset(device_os)
+        if queryset is None:
+            return []
         compiled = []
         for pattern in queryset:
             regex = pattern._compiled_pattern
@@ -1005,8 +1053,53 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             compiled.append(regex)
         return compiled
 
+    @classmethod
+    def compiled_sap_patterns_for_os(cls, device_os):
+        """
+        Return the compiled sap_name_pattern regexes scoped to *device_os*.
+
+        Same compile-with-skip as :meth:`compiled_patterns_for_os`, over the other pattern this
+        model stores. Rows with a blank sap_name_pattern contribute nothing, so an OS with no SAP
+        notation simply has no rule. The scoping differs on one point: an OS this model cannot
+        resolve falls back to every stored rule rather than none (see the body).
+
+        Args:
+            device_os (str | None): The LibreNMS OS to scope to. None, blank or unusable applies
+                every stored rule.
+
+        Returns:
+            list: The compiled regexes that apply to this OS.
+        """
+        queryset = cls._patterns_for_os_queryset(device_os)
+        # "No row for this OS" is not the same answer as "this OS has a row saying it has no SAP
+        # notation". Junos is seeded with a blank pattern, so its breakout names keep their
+        # relationships; an OS nobody registered is simply unknown, and a Nokia device reporting
+        # an unseeded OS string would otherwise write its service access points into NetBox as
+        # LAG members.
+        if queryset is None or not queryset.exists():
+            # An unknown OS applies EVERY stored SAP rule rather than none, deliberately the
+            # opposite of compiled_patterns_for_os. The two pattern kinds fail in opposite
+            # directions: an unmatched LAG regex INVENTS a relationship, an unmatched SAP regex
+            # SUPPRESSES one. Over-skipping loses relationships the user can see are missing;
+            # under-skipping writes a service access point into NetBox as a LAG member. This also
+            # keeps the unconditional colon skip this replaced, for a device whose OS is unknown.
+            queryset = cls.objects.all()
+        compiled = []
+        for pattern in queryset:
+            regex = pattern._compiled_sap_pattern
+            if regex is None:
+                if pattern.sap_name_pattern:
+                    logger.warning(
+                        "Skipping invalid SAP name pattern for OS %r: %r",
+                        pattern.librenms_os,
+                        pattern.sap_name_pattern,
+                    )
+                continue
+            compiled.append(regex)
+        return compiled
+
     def clean(self):
-        """Validate OS name is non-blank and lag_name_pattern is a valid regex."""
+        """Validate OS name is non-blank and both stored patterns are valid regexes."""
         super().clean()
         # Invalidate the cached compiled pattern so it recompiles from the edited value.
         self.__dict__.pop("_compiled_pattern", None)
@@ -1021,6 +1114,11 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         # ReDoS note (low severity, accepted): see validate_regex_field, which documents
         # the admin-supplied-pattern risk and centralizes the compile/validation path.
         validate_regex_field(self.lag_name_pattern, "lag_name_pattern")
+        self.__dict__.pop("_compiled_sap_pattern", None)
+        # Blank is a valid answer here: most operating systems have no SAP notation.
+        self.sap_name_pattern = (self.sap_name_pattern or "").strip()
+        if self.sap_name_pattern:
+            validate_regex_field(self.sap_name_pattern, "sap_name_pattern")
 
     def get_absolute_url(self):
         """Return URL for this pattern's detail page."""
@@ -1030,6 +1128,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         data = {
             "librenms_os": self.librenms_os,
             "lag_name_pattern": self.lag_name_pattern,
+            "sap_name_pattern": self.sap_name_pattern,
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)

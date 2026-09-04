@@ -22,6 +22,7 @@ from netbox_librenms_plugin.utils import (
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
     interface_name_fallback_matches_port,
+    normalize_librenms_port_id,
     oob_badge_html,
     render_vc_member_options,
     resolve_interface_row_device,
@@ -106,6 +107,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 ),
                 "data-port-id": lambda record: str(record.get("port_id", "")),
                 "data-member-of-lag": lambda record: str(record.get("librenms_lag_port_id") or ""),
+                "data-lag-name": lambda record: str(record.get("librenms_lag_name") or ""),
                 "data-parent-port-id": lambda record: str(record.get("librenms_parent_port_id") or ""),
                 "data-parent-name": lambda record: str(record.get("librenms_parent_name") or ""),
             },
@@ -209,7 +211,10 @@ class LibreNMSInterfaceTable(tables.Table):
             return mark_safe("—")
 
         interface_name = record.get(self.interface_name_field, "")
-        row_key = str(record.get("port_id", ""))
+        # _sync_interface_vlans() reads vlan_group_<canonical port id>_<vid>, so a raw value such
+        # as "010" would render a key the view never looks up and the override would be dropped.
+        canonical_port_id = normalize_librenms_port_id(record.get("port_id"))
+        row_key = str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id", ""))
 
         # Build compact colored summary (show up to 3 VLANs, summarize rest)
         vlan_group_map = record.get("vlan_group_map", {})

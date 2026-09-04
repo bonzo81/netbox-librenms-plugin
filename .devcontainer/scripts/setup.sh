@@ -122,7 +122,7 @@ source /opt/netbox/venv/bin/activate
 
 # Choose installer (uv if available, else pip)
 if command -v uv >/dev/null 2>&1; then
-  PIP_CMD="uv pip"
+  PIP_CMD="uv --native-tls pip"
 else
   PIP_CMD="pip"
 fi
@@ -131,7 +131,7 @@ fi
 echo "🔧 Installing development dependencies..."
 apt-get update -qq
 apt-get install -y -qq net-tools git
-$PIP_CMD install pytest pytest-django ruff pre-commit
+$PIP_CMD install pytest pytest-cov pytest-django pytest-xdist ruff pre-commit
 
 # Install GitHub CLI (gh)
 # NOTE: The chained && commands below mean a partial failure (e.g. wget succeeds

@@ -198,6 +198,19 @@ def test_relationship_handler_reuses_shared_csrf_helper():
     )
 
 
+def test_interface_preference_save_checks_csrf_and_http_status():
+    """Preference persistence must report missing CSRF and rejected HTTP responses."""
+    handler = _js_block(
+        _js_source(),
+        "function updateInterfaceNameField()",
+        "function setInterfaceNameFieldFromURL()",
+    )
+
+    assert "const csrfToken = getCsrfToken();" in handler
+    assert "missing CSRF token" in handler
+    assert "if (!response.ok)" in handler
+
+
 def test_interface_member_verify_rebinds_replaced_vlan_controls():
     """Replacing the VLAN cell must bind the new edit button before the user can click it."""
     handler = _js_block(
@@ -1516,9 +1529,10 @@ class TestInterfaceContextOOBRows:
             assert str(hidden_member.pk) not in str(table.render_device_selection(None, source_row))
             assert "parent-sync-btn" not in str(table.render_parent(None, source_row))
             vlan_html = str(table.render_vlans(None, source_row))
-            assert str(hidden_member.pk) not in vlan_html
-            assert str(hidden_group.pk) not in vlan_html
             assert hidden_group.name not in vlan_html
+            assert "vlan-group-hidden" not in vlan_html
+            assert "vlan-edit-btn" not in vlan_html
+            assert "data-vlan-groups" not in vlan_html
 
             request = _make_request(
                 {"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"},
@@ -3819,13 +3833,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
 class TestSyncInterfacesViewUpdateInterfaceAttributes:
     def _make_view(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        view.request = _make_request()
-        view._post_server_key = "default"
-        view.handle_mac_address = MagicMock()  # MAC parsing has its own dedicated test class
-        return view
+        return _sync_view()
 
     def test_basic_attributes_set(self):
         """Real Interface: the LibreNMS→NetBox field mapping is applied and persisted; the real convert_speed_to_kbps runs (bps→kbps)."""
@@ -3882,8 +3890,6 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifName",
         )
 
-        # MAC handler must not be invoked when "mac_address" is excluded.
-        view.handle_mac_address.assert_not_called()
         # Excluded attributes keep their pre-update values.
         reloaded = Interface.objects.get(pk=interface.pk)
         assert reloaded.name == "orig-name"
@@ -3917,56 +3923,49 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
     def test_port_id_calls_set_librenms_device_id(self):
         from dcim.models import Interface
+        from netbox_librenms_plugin.utils import get_librenms_device_id
 
         view = self._make_view()
-        interface = MagicMock()
-        interface.__class__ = Interface
+        interface = make_interface(make_device("port-id-write"), "Gi0/0")
         librenms_port = {
             "ifName": "Gi0/1",
-            "ifType": None,
+            "ifType": "ethernetCsmacd",
             "ifSpeed": None,
-            "ifAlias": None,
+            "ifAlias": "",
             "ifMtu": None,
             "port_id": 42,
             "ifAdminStatus": "up",
         }
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set,
-        ):
-            view.update_interface_attributes(interface, librenms_port, None, [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName")
 
-        mock_set.assert_called_once_with(interface, 42, "default")
+        interface = Interface.objects.get(pk=interface.pk)
+        assert get_librenms_device_id(interface, "default", auto_save=False) == 42
 
     def test_port_id_conflict_does_not_overwrite(self):
         from dcim.models import Interface
+        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 
         view = self._make_view()
-        interface = MagicMock()
-        interface.__class__ = Interface
-        interface.pk = 1
-        conflicting_owner = MagicMock()
-        conflicting_owner.pk = 2
+        conflicting_owner = make_interface(make_device("port-id-owner"), "Gi0/0")
+        set_librenms_device_id(conflicting_owner, 42, "default")
+        conflicting_owner.save(update_fields=["custom_field_data"])
+        interface = make_interface(make_device("port-id-target"), "Gi0/0")
         librenms_port = {
             "ifName": "Gi0/1",
-            "ifType": None,
+            "ifType": "ethernetCsmacd",
             "ifSpeed": None,
-            "ifAlias": None,
+            "ifAlias": "",
             "ifMtu": None,
             "port_id": 42,
             "ifAdminStatus": "up",
         }
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=conflicting_owner),
-            patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set,
-        ):
-            view.update_interface_attributes(interface, librenms_port, None, [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName")
 
-        mock_set.assert_not_called()
+        interface = Interface.objects.get(pk=interface.pk)
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert get_librenms_device_id(conflicting_owner, "default", auto_save=False) == 42
 
     def test_ifalias_not_set_when_same_as_name(self):
         """ifAlias should not overwrite when equal to interface name."""
@@ -4279,20 +4278,45 @@ class TestSyncLagAndParentRelationships:
     _CORE_VC_BUG = AttributeError("'Interface' object has no attribute 'virtual_chassis'", name="virtual_chassis")
 
     def test_cross_member_parent_survives_a_netbox_that_cannot_validate_it(self, db):
-        """The edge NetBox 4.4.x cannot validate is the one it exists to allow: same chassis."""
+        """The edge NetBox 4.4.0 cannot validate is the one it exists to allow: same chassis."""
         from dcim.models import Interface
 
+        from netbox_librenms_plugin import utils
         from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
 
         _vc, (member1, member2) = make_virtual_chassis_members("relationship-vc-clean-bug")
         child = make_interface(member2, "Ethernet4.100", iface_type="virtual")
         parent = make_interface(member1, "Ethernet4")
 
-        with patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG):
+        with (
+            patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)),
+            patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG),
+        ):
             _apply_interface_relationship(child, "parent", parent)
 
         child.refresh_from_db()
         assert child.parent_id == parent.pk
+
+    def test_cross_member_parent_error_propagates_once_netbox_fixed_it(self, db):
+        """The tolerance is scoped to 4.4.0: a later release must not hide the same failure."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin import utils
+        from netbox_librenms_plugin.views.sync.interfaces import _apply_interface_relationship
+
+        _vc, (member1, member2) = make_virtual_chassis_members("relationship-vc-clean-fixed")
+        child = make_interface(member2, "Ethernet7.100", iface_type="virtual")
+        parent = make_interface(member1, "Ethernet7")
+
+        with (
+            patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 1)),
+            patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG),
+            pytest.raises(AttributeError),
+        ):
+            _apply_interface_relationship(child, "parent", parent)
+
+        child.refresh_from_db()
+        assert child.parent_id is None
 
     def test_same_device_parent_does_not_swallow_the_attribute_error(self, db):
         """Only the cross-chassis edge is tolerated: NetBox never reaches that branch otherwise."""

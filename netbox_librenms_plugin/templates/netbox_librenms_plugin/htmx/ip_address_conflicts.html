@@ -1,0 +1,72 @@
+{% load helpers %}
+<div class="modal-header">
+  <h5 class="modal-title">
+    <i class="mdi mdi-alert-outline text-warning me-1"></i>
+    Confirm IP address changes
+  </h5>
+  {% if full_page %}
+    <a href="{{ cancel_url }}" class="btn-close" aria-label="Close"></a>
+  {% else %}
+    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+  {% endif %}
+</div>
+<form method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=object_type pk=object.pk %}"
+      {% if not full_page %}
+      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=object_type pk=object.pk %}"
+      hx-target="#htmx-modal-content"
+      hx-swap="innerHTML"
+      {% endif %}>
+  <div class="modal-body">
+    {% csrf_token %}
+    <input type="hidden" name="server_key" value="{{ server_key }}">
+    <input type="hidden" name="set-primary-ip-toggle" value="{% if set_primary_ip %}on{% else %}off{% endif %}">
+    <input type="hidden" name="create-missing-interfaces-toggle" value="{% if create_missing_interfaces %}on{% else %}off{% endif %}">
+
+    {% include 'inc/messages.html' %}
+
+    <p>
+      Safe selected rows were synchronized. The following rows would change an existing IP address.
+      Select the changes to confirm.
+    </p>
+
+    {% for conflict in conflicts %}
+      <div class="border rounded-3 p-3 mb-3{% if not conflict.forceable %} bg-danger-subtle{% endif %}">
+        <div class="d-flex align-items-start gap-2">
+          {% if conflict.forceable %}
+            <input class="form-check-input mt-1"
+                   type="checkbox"
+                   name="force_conflict"
+                   value="{{ conflict.row_id }}"
+                   id="ip-conflict-{{ forloop.counter }}">
+            <input type="hidden" name="conflict_intent" value="{{ conflict.intent }}">
+          {% else %}
+            <i class="mdi mdi-block-helper text-danger mt-1" aria-hidden="true"></i>
+          {% endif %}
+          <label class="flex-grow-1{% if conflict.forceable %} cursor-pointer{% endif %}"
+                 {% if conflict.forceable %}for="ip-conflict-{{ forloop.counter }}"{% endif %}>
+            <strong>{{ conflict.address }}</strong>
+            <span class="badge bg-secondary-lt ms-1">{{ conflict.target_vrf }}</span>
+            <div class="small mt-1">{{ conflict.reason }}</div>
+            <div class="text-muted small">Target interface: {{ conflict.target_interface }}</div>
+          </label>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+  <div class="modal-footer">
+    {% if full_page %}
+      <a href="{{ cancel_url }}" class="btn btn-secondary">Cancel</a>
+    {% else %}
+      <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+    {% endif %}
+    {% if has_forceable_conflicts %}
+      <button type="submit" class="btn btn-warning">
+        Force selected
+      </button>
+      <button type="submit" class="btn btn-danger" name="force_all" value="1">
+        Force all
+      </button>
+    {% endif %}
+  </div>
+</form>
