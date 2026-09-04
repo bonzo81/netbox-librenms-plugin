@@ -129,6 +129,47 @@ class TestLibreNMSAPIPortsFetch:
         assert data["ports"] == []
 
 
+class TestLibreNMSAPIPortStack:
+    """LibreNMS port-stack responses resolve through the HTTP client."""
+
+    def test_documented_port_stack_shape_resolves_lag_membership(self, mock_server):
+        mock_server.register(
+            "/api/v0/devices/42/ports",
+            {
+                "status": "ok",
+                "ports": [
+                    {"port_id": "101", "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
+                    {"port_id": "102", "ifName": "Port-Channel1", "ifType": "ieee8023adLag"},
+                ],
+            },
+        )
+        mock_server.register(
+            "/api/v0/devices/42/port_stack",
+            {
+                "status": "ok",
+                "message": "",
+                "count": 1,
+                "mappings": [
+                    {
+                        "device_id": "42",
+                        "high_port_id": "101",
+                        "low_port_id": "102",
+                        "ifStackStatus": "active",
+                    }
+                ],
+            },
+        )
+        api = _make_api(mock_server.url)
+
+        ports_ok, ports_data = api.get_ports(42)
+        stack_ok, port_stack = api.get_port_stack(42)
+        relationships = api.resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
+
+        assert ports_ok is True
+        assert stack_ok is True
+        assert relationships["lag_members"] == {101: 102}
+
+
 class TestLibreNMSAPIDeviceInfo:
     """LibreNMSAPI.get_device_info() correctly parses device details."""
 

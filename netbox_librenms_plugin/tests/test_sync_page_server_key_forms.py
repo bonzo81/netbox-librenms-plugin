@@ -318,3 +318,68 @@ class TestUpdateDeviceLocationRebindsServer:
         assert response.status_code == 302
         # No client was ever bound — nothing could have been written.
         assert getattr(view, "_librenms_api", None) is None
+
+
+@pytest.mark.django_db
+class TestInterfaceSyncRefreshButtonDeduped:
+    """The Refresh Interfaces button is rendered ONCE with the object-type-correct hx-post URL.
+
+    The device and VM buttons previously duplicated the whole button + hx-vals verbatim; the
+    template now resolves the URL per type and renders a single button, so the shared hx-vals
+    (pagination + server_key forwarding) lives in one place.
+    """
+
+    def _render(self, obj):
+        from unittest.mock import MagicMock
+
+        from django.template.loader import render_to_string
+
+        # A real request (with a user) so {% csrf_token %} and the context processors the
+        # template relies on resolve instead of rendering empty with a warning.
+        request = RequestFactory().get("/")
+        request.user = MagicMock(is_authenticated=True)
+        return render_to_string(
+            "netbox_librenms_plugin/_interface_sync.html",
+            {
+                "object": obj,
+                "has_librenms_id": True,
+                "librenms_server_info": {"server_key": "default"},
+            },
+            request=request,
+        )
+
+    def _refresh_button_tag(self, html, path):
+        hx_post = html.index(f'hx-post="{path}"')
+        return html[html.rfind("<button", 0, hx_post) : html.index(">", hx_post) + 1]
+
+    def test_device_refresh_button_single_with_device_url(self):
+        from django.urls import reverse
+
+        device = make_device("refresh-btn-dev")
+        html = self._render(device)
+        device_path = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
+        vm_path = reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": device.pk})
+
+        # Exactly one refresh action button (hx-post), pointing at the device URL, with the
+        # shared hx-vals — and never the VM branch's URL.
+        assert html.count("hx-post=") == 1
+        assert f'hx-post="{device_path}"' in html
+        button = self._refresh_button_tag(html, device_path)
+        assert "hx-vals=" in button and "interfaces_per_page" in button and "server_key" in button
+        assert vm_path not in html
+
+    def test_vm_refresh_button_single_with_vm_url(self):
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        vm = make_vm("refresh-btn-vm")
+        html = self._render(vm)
+        vm_path = reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": vm.pk})
+        device_path = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": vm.pk})
+
+        assert html.count("hx-post=") == 1
+        assert f'hx-post="{vm_path}"' in html
+        button = self._refresh_button_tag(html, vm_path)
+        assert "hx-vals=" in button and "interfaces_per_page" in button and "server_key" in button
+        assert device_path not in html

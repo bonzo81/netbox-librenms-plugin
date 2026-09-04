@@ -266,6 +266,7 @@ def _select_module_interface_by_coordinates(device, module_interfaces, item):
 
 def _module_component_specs():
     """Return the template, device relation, and model used by NetBox module replication."""
+    from dcim import models as dcim_models
     from dcim.models import (
         ConsolePort,
         ConsoleServerPort,
@@ -277,16 +278,27 @@ def _module_component_specs():
         RearPort,
     )
 
-    return (
+    specs = [
         ("consoleporttemplates", "consoleports", ConsolePort),
         ("consoleserverporttemplates", "consoleserverports", ConsoleServerPort),
         ("interfacetemplates", "interfaces", Interface),
         ("powerporttemplates", "powerports", PowerPort),
         ("poweroutlettemplates", "poweroutlets", PowerOutlet),
-        ("rearporttemplates", "rearports", RearPort),
-        ("frontporttemplates", "frontports", FrontPort),
-        ("modulebaytemplates", "modulebays", ModuleBay),
+    ]
+    # NetBox 4.7 replicates cooling components too.
+    cooling_intake = getattr(dcim_models, "CoolingIntake", None)
+    cooling_outflow = getattr(dcim_models, "CoolingOutflow", None)
+    if cooling_intake is not None and cooling_outflow is not None:
+        specs.append(("coolingintaketemplates", "coolingintakes", cooling_intake))
+        specs.append(("coolingoutflowtemplates", "coolingoutflows", cooling_outflow))
+    specs.extend(
+        [
+            ("rearporttemplates", "rearports", RearPort),
+            ("frontporttemplates", "frontports", FrontPort),
+            ("modulebaytemplates", "modulebays", ModuleBay),
+        ]
     )
+    return tuple(specs)
 
 
 def _restricted_module_component_querysets(view):

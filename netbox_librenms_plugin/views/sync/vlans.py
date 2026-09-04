@@ -11,6 +11,7 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
+from utilities.exceptions import PermissionsViolation
 
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -48,11 +49,24 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             # The owner device is resolved through a restricted queryset (see get_object), so
             # state that read here: a missing grant is an explicit 403, not a 404 at the lookup.
             ("view", Device),
-            ("view", VLANGroup),
             ("add", VLAN),
             ("change", VLAN),
         ],
     }
+
+    def _required_post_permissions(self, request):
+        """Require VLANGroup access only when a selected row names a group."""
+        permissions = list(type(self).required_object_permissions["POST"])
+        selected_vids = request.POST.getlist("select")
+        for vid_str in selected_vids:
+            try:
+                vid = int(vid_str)
+            except ValueError:
+                continue
+            if request.POST.get(f"vlan_group_{vid}"):
+                permissions.append(("view", VLANGroup))
+                break
+        return permissions
 
     def post(self, request, object_type: str, object_id: int):
         """
@@ -63,6 +77,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         - select: List of VLAN IDs to create
         - vlan_group_{vid}: Per-row VLAN group selection
         """
+        self.required_object_permissions = {"POST": self._required_post_permissions(request)}
+
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -128,6 +144,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         concurrent_change_count = 0
         invalid_vid_count = 0
         invalid_name_count = 0
+        add_permission_skipped_count = 0
+        addable_vlans = self.restricted_queryset(VLAN, "add")
         changeable_vlans = self.restricted_queryset(VLAN, "change")
 
         with transaction.atomic():
@@ -213,7 +231,16 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                                 name=librenms_name,
                                 status="active",
                             )
+                            if not addable_vlans.filter(pk=vlan.pk).exists():
+                                raise PermissionsViolation()
                         created = True
+                    except PermissionsViolation:
+                        messages.error(
+                            request,
+                            f"VLAN {vid}: the new VLAN is outside your add permission constraints; skipped.",
+                        )
+                        add_permission_skipped_count += 1
+                        continue
                     except IntegrityError:
                         try:
                             vlan = VLAN.objects.get(**lookup)
@@ -282,6 +309,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             skip_reasons.append(f"{group_missing_count} skipped (VLAN group missing)")
         if permission_skipped_count > 0:
             skip_reasons.append(f"{permission_skipped_count} skipped (change permission missing)")
+        if add_permission_skipped_count > 0:
+            skip_reasons.append(f"{add_permission_skipped_count} skipped (add permission constraints)")
         if ambiguous_count > 0:
             skip_reasons.append(f"{ambiguous_count} skipped (VLAN match ambiguous)")
         if concurrent_change_count > 0:

@@ -75,6 +75,29 @@ class TestGetVirtualChassisMemberException:
         assert result is device
 
 
+@pytest.mark.django_db
+class TestGetVirtualChassisMemberEmptyPrefetchMap:
+    """An empty prefetched members_by_position map must not silently disable member resolution."""
+
+    def test_empty_map_falls_back_to_the_db_lookup(self):
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import get_virtual_chassis_member
+
+        master = make_device("vc-empty-map-1")
+        member2 = make_device("vc-empty-map-2")
+        vc = VirtualChassis.objects.create(name="vc-empty-map", master=master)
+        for dev, pos in ((master, 1), (member2, 2)):
+            dev.virtual_chassis = vc
+            dev.vc_position = pos
+            dev.save()
+
+        # A caller forwarding a raw-but-empty map must still resolve via the per-call query,
+        # not short-circuit every row to the fallback device.
+        assert get_virtual_chassis_member(master, "Ethernet2", members_by_position={}) == member2
+
+
 class TestGetLibreNMSSyncDeviceServerKey:
     """Tests for get_librenms_sync_device with server_key (lines 113-125)."""
 
@@ -265,7 +288,7 @@ class TestGetLibreNMSSyncDeviceFallbacks:
 
 
 class TestGetTablePaginateCountValueError:
-    """Tests for get_table_paginate_count ValueError path (lines 169-170)."""
+    """Tests for get_table_paginate_count fallback paths: a non-integer per_page hits the ValueError handler, and a zero/negative per_page hits the `< 1` guard — both fall back to the NetBox default rather than propagating to the paginator."""
 
     def test_invalid_per_page_falls_back_to_default(self):
         from netbox_librenms_plugin.utils import get_table_paginate_count
@@ -278,6 +301,19 @@ class TestGetTablePaginateCountValueError:
                 mock_paginate.return_value = 50
                 result = get_table_paginate_count(request, "table_")
         assert result == 50
+
+    def test_non_positive_per_page_falls_back_to_default(self):
+        """0 or negative input must not propagate to the paginator."""
+        from netbox_librenms_plugin.utils import get_table_paginate_count
+
+        for raw in ("0", "-5"):
+            request = MagicMock()
+            request.GET = {"table_per_page": raw}
+            with patch("netbox_librenms_plugin.utils.get_config"):
+                with patch("netbox_librenms_plugin.utils.netbox_get_paginate_count") as mock_paginate:
+                    mock_paginate.return_value = 50
+                    result = get_table_paginate_count(request, "table_")
+            assert result == 50, f"per_page={raw!r} should fall back to default"
 
 
 class TestGetUserPrefNoConfig:

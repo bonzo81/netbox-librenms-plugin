@@ -10,6 +10,10 @@ Conventions:
 - object.__new__(TableClass) for render method tests where __init__ is complex
 - MagicMock for all external dependencies
 - assert x == y style assertions
+
+Exception: TestRenderLibreNMSId runs against real Interface rows (@pytest.mark.django_db) — the
+LibreNMS-id cell's colour depends on the real get_librenms_device_id custom-field read, which a
+MagicMock interface would let drift silently.
 """
 
 from unittest.mock import MagicMock, patch
@@ -1796,6 +1800,265 @@ class TestBuildVcAttributes:
 # ===========================================================================
 
 
+class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
+    """Regression guards for two UI fixes on the interface sync table."""
+
+    # The relationship column's status keys; an unknown key exercises the .get() fallback badge.
+    _STATUSES = ["match", "mismatch", "missing_nb", "missing_lnms", "definitely-unknown-status"]
+
+    def _table(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        mock_device = MagicMock()
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            return LibreNMSInterfaceTable(data=[], device=mock_device, server_key="default")
+
+    def _status_badge_classes(self, table, status):
+        """Render a status's badge in isolation and return its CSS class tokens."""
+        import re
+
+        html = str(
+            table._render_relationship_column(
+                lnms_name="",
+                lnms_port_id=None,
+                sync_status=status,
+                record={},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        m = re.search(r'class="badge ([^"]*)"', html)
+        assert m, f"no status badge rendered for {status!r}: {html!r}"
+        return m.group(1).split()
+
+    def test_librenms_id_column_present(self):
+        table = self._table()
+        column_names = [c.name for c in table.columns]
+        assert "librenms_id" in column_names, "LibreNMS ID column was dropped from the interface table"
+        assert table.columns["librenms_id"].verbose_name == "LibreNMS ID"
+
+    def test_every_status_badge_pairs_background_with_text_colour(self):
+        """A solid ``bg-*`` colour fill with no companion text colour is the grey-on-grey / grey-on-green readability bug."""
+        table = self._table()
+        for status in self._STATUSES:
+            tokens = self._status_badge_classes(table, status)
+            # A *-lt token is a known-readable pairing; it isn't a bare solid fill.
+            solid_bg = [t for t in tokens if t.startswith("bg-") and not t.endswith("-lt")]
+            has_text_colour = any(t.startswith("text-") for t in tokens)
+            assert has_text_colour or not solid_bg, (
+                f"status {status!r} badge {tokens} sets a solid background with no contrasting "
+                "text colour (use text-bg-*, bg-*-lt, or an explicit text-* class)"
+            )
+
+    def test_missing_lnms_badge_label_renders(self):
+        table = self._table()
+        tokens = self._status_badge_classes(table, "missing_lnms")
+        # The relationship pill uses Tabler's light variant (ships its own readable text colour in
+        # both themes; exempt from the bare-bg badge guard) and a status icon.
+        assert "bg-secondary-lt" in tokens
+
+
+class TestRelationshipBadgeCompactLayout:
+    """The Parent/LAG column must render ONE compact pill per relationship line: the relationship type + LibreNMS name in a single light badge, with the status conveyed by colour + an mdi icon + a title tooltip."""
+
+    def _table(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(
+                data=[], device=MagicMock(pk=3, virtual_chassis=None), interface_name_field="ifName"
+            )
+        table.migrated_to_marker = False
+        return table
+
+    def test_named_relationship_renders_single_pill_with_type_name_and_title(self):
+        table = self._table()
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="ae36",
+                lnms_port_id=None,
+                sync_status="missing_nb",
+                record={},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        # Exactly one badge — the old design rendered two (status badge + name badge).
+        assert html.count('class="badge') == 1
+        # Type + name inline in that single pill.
+        assert "LAG" in html
+        assert "ae36" in html
+        # Status conveyed by an icon + the full text in the title (not a long inline word).
+        assert "mdi-plus-circle" in html
+        assert 'title="LAG: Not in NetBox"' in html
+
+    def test_match_pill_uses_light_variant_and_check_icon(self):
+        table = self._table()
+        html = str(
+            table._render_relationship_column(
+                type_label="Parent",
+                lnms_name="lo0",
+                lnms_port_id=None,
+                sync_status="match",
+                record={},
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
+            )
+        )
+        assert "bg-success-lt" in html
+        assert "mdi-check-circle" in html
+        assert 'title="Parent: Match"' in html
+
+    def test_render_parent_stacks_lag_and_parent_as_compact_pills(self):
+        table = self._table()
+        record = {
+            "port_id": 5,
+            "ifName": "eth0",
+            "netbox_interface": None,
+            "lag_sync_status": "missing_nb",
+            "librenms_lag_name": "ae0",
+            "librenms_lag_port_id": 111,
+            "parent_sync_status": "match",
+            "librenms_parent_name": "et-0/0/1",
+            "librenms_parent_port_id": 222,
+        }
+        html = str(table.render_parent(None, record))
+        # One pill per line — two relationships → two badges total (not four).
+        assert html.count('class="badge') == 2
+        assert "LAG" in html
+        assert "Parent" in html
+        # Type label lives inside the pill now, not in a separate muted prefix span.
+        assert "text-muted small" not in html
+
+    @pytest.mark.django_db
+    def test_mismatch_renders_reconcile_sync_button(self):
+        """A 'mismatch' (LibreNMS aggregate/parent differs from NetBox) must expose the inline sync button so the row can be reconciled to LibreNMS — not just an amber pill the user can't act on. The LibreNMS port_id is set for a mismatch, so the control has a target."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        table = self._table()
+        source = make_interface(make_device("relationship-mismatch"), "eth0")
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="ae9",
+                lnms_port_id=42,
+                sync_status="mismatch",
+                record={"port_id": 7, "netbox_interface": source},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        # The reconcile button is present and wired to the LibreNMS aggregate port_id.
+        assert "lag-sync-btn" in html
+        assert "mdi-sync" in html
+        assert 'data-lag-port-id="42"' in html
+        # The tooltip spells out that the click overwrites NetBox with the LibreNMS value.
+        assert 'title="Update LAG to match LibreNMS"' in html
+        # Icon-only button also carries an accessible name (title alone is not a reliable one).
+        assert 'aria-label="Update LAG to match LibreNMS"' in html
+
+    @pytest.mark.django_db
+    def test_name_field_does_not_leak_into_a_later_table(self):
+        """A non-default name field must not retarget the columns of the next table built.
+
+        ``base_columns`` and ``_meta`` are class attributes, and Table.__init__ deep-copies
+        base_columns only after ``__init__`` runs, so assigning to either before ``super()``
+        rewrote the accessor for every later table in the worker process, across requests.
+        """
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            LibreNMSInterfaceTable(data=[], device=None, interface_name_field="ifDescr", server_key="default")
+            later = LibreNMSInterfaceTable(data=[], device=None, server_key="default")
+
+        assert later.interface_name_field == "ifName"
+        assert later.columns["name"].column.accessor == "ifName"
+        # The class itself must be untouched, so a fresh worker sees the declared default.
+        assert LibreNMSInterfaceTable.base_columns["name"].accessor is None
+
+    def test_row_attrs_are_per_instance_not_shared_on_the_class(self):
+        """The row-attribute map must be bound to the instance, not written onto Meta."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(data=[], device=None, interface_name_field="ifDescr", server_key="default")
+
+        assert "data-interface" in table.row_attrs
+        assert not LibreNMSInterfaceTable._meta.row_attrs
+
+    @pytest.mark.django_db
+    def test_unresolvable_owner_renders_badge_only_instead_of_failing_the_render(self):
+        """An unresolved owner must degrade this cell, not raise NoReverseMatch for the table.
+
+        ``_resolve_row_member_id`` returns "" when the table has no device context and the row's
+        interface carries no device id. ``reverse()`` with an empty object_id raises, which would
+        take down the whole table render instead of dropping one button.
+        """
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(data=[], device=None, server_key="default")
+        source = make_interface(make_device("relationship-no-owner"), "eth0")
+        source.device_id = None  # in-memory only: models the row whose owner cannot be resolved
+
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="ae9",
+                lnms_port_id=42,
+                sync_status="mismatch",
+                record={"port_id": 7, "netbox_interface": source},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+
+        assert "lag-sync-btn" not in html
+        assert "mdi-sync" not in html
+        assert 'class="badge' in html
+
+    def test_missing_lnms_renders_badge_only_no_button(self):
+        """missing_lnms (NetBox has the relationship, LibreNMS doesn't) has no LibreNMS port_id to sync TO, so the lnms_port_id guard keeps the button off — only the status pill renders."""
+        table = self._table()
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="",
+                lnms_port_id=None,
+                sync_status="missing_lnms",
+                record={"port_id": 7},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        assert "mdi-sync" not in html
+        assert "lag-sync-btn" not in html
+
+    @pytest.mark.django_db
+    def test_mismatch_button_suppressed_on_migrated_donor(self):
+        """Even a mismatch must NOT render the inline control on a migrated donor page (the bulk form is hidden; a direct POST would mutate donor state)."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        table = self._table()
+        table.migrated_to_marker = True
+        source = make_interface(make_device("migrated-relationship-mismatch"), "eth0")
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="ae9",
+                lnms_port_id=42,
+                sync_status="mismatch",
+                record={"port_id": 7, "netbox_interface": source},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        assert "mdi-sync" not in html
+        assert "lag-sync-btn" not in html
+
+
 class TestLibreNMSInterfaceTableInit:
     """Tests for LibreNMSInterfaceTable.__init__()."""
 
@@ -1865,6 +2128,213 @@ class TestLibreNMSInterfaceTableInit:
             table = LibreNMSInterfaceTable(data=[], device=mock_device, server_key=None)
 
         assert table.server_key == "default"
+
+
+class TestRelationshipSyncObjectType:
+    """The missing_nb relationship-sync button must carry the right object type, driven by the table subclass — not a runtime self.device.cluster probe that misclassifies a cluster-less VM as a device."""
+
+    def _render(self, table_cls, device, netbox_interface):
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = table_cls(data=[], device=device, interface_name_field="ifName")
+        record = {"port_id": 5, "ifName": "eth0", "netbox_interface": netbox_interface}
+        return str(
+            table._render_relationship_column(
+                lnms_name="eth0",
+                lnms_port_id=10,
+                sync_status="missing_nb",
+                record=record,
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
+            )
+        )
+
+    @pytest.mark.django_db
+    def test_device_table_emits_device_object_type(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("relationship-object-type")
+        html = self._render(LibreNMSInterfaceTable, device, make_interface(device, "eth0"))
+        assert 'data-object-type="device"' in html
+
+    @pytest.mark.django_db
+    def test_vm_table_emits_virtualmachine_even_without_cluster(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        vm = make_vm("relationship-object-type-vm")
+        html = self._render(LibreNMSVMInterfaceTable, vm, VMInterface.objects.create(virtual_machine=vm, name="eth0"))
+        assert 'data-object-type="virtualmachine"' in html
+
+
+class TestParentColumnContainsLagButton:
+    """Regression guard for the 'refresh the LAG cell after VC-member verification' review note."""
+
+    def _table(self, device):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        table = LibreNMSInterfaceTable(data=[], device=device, interface_name_field="ifName")
+        table.migrated_to_marker = False  # inline sync buttons active
+        return table
+
+    @pytest.mark.django_db
+    def test_render_parent_emits_lag_button_with_port_id_in_same_cell(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("relationship-buttons")
+        interface = make_interface(device, "eth0")
+        table = self._table(device)
+        record = {
+            "port_id": 5,
+            "ifName": "eth0",
+            "netbox_interface": interface,
+            "selected_object_id": 3,
+            "selected_object_type": "device",
+            # Both relationship halves present and unsynced → both buttons render.
+            "lag_sync_status": "missing_nb",
+            "librenms_lag_name": "ae0",
+            "librenms_lag_port_id": 111,
+            "parent_sync_status": "missing_nb",
+            "librenms_parent_name": "eth-parent",
+            "librenms_parent_port_id": 222,
+        }
+        html = str(table.render_parent(None, record))
+        # Both buttons live in the single combined column render_parent produces.
+        assert "lag-sync-btn" in html
+        assert 'data-lag-port-id="111"' in html
+        assert "parent-sync-btn" in html
+        assert 'data-parent-port-id="222"' in html
+
+    @pytest.mark.django_db
+    def test_relationship_button_uses_reversed_prefixed_url(self):
+        from django.urls import get_script_prefix, set_script_prefix
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("prefixed-relationship-button")
+        interface = make_interface(device, "eth0")
+        table = self._table(device)
+        record = {
+            "port_id": 5,
+            "ifName": "eth0",
+            "netbox_interface": interface,
+            "selected_object_id": device.pk,
+            "selected_object_type": "device",
+            "parent_sync_status": "missing_nb",
+            "librenms_parent_name": "eth-parent",
+            "librenms_parent_port_id": 222,
+        }
+        previous_prefix = get_script_prefix()
+        set_script_prefix("/netbox/")
+        try:
+            html = str(table.render_parent(None, record))
+        finally:
+            set_script_prefix(previous_prefix)
+
+        assert f'data-sync-url="/netbox/plugins/librenms_plugin/device/{device.pk}/sync-interface-parent/"' in html
+
+    @pytest.mark.django_db
+    def test_unsynced_source_does_not_offer_relationship_action(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        table = self._table(make_device("unsynced-relationship-source"))
+        record = {
+            "port_id": 5,
+            "ifName": "eth0",
+            "netbox_interface": None,
+            "lag_sync_status": "missing_nb",
+            "librenms_lag_name": "ae0",
+            "librenms_lag_port_id": 111,
+            "parent_sync_status": "missing_nb",
+            "librenms_parent_name": "eth-parent",
+            "librenms_parent_port_id": 222,
+        }
+
+        html = str(table.render_parent(None, record))
+
+        assert "Not in NetBox" in html
+        assert "lag-sync-btn" not in html
+        assert "parent-sync-btn" not in html
+
+    @pytest.mark.django_db
+    def test_no_standalone_lag_column_exists(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        table = self._table(make_device("relationship-columns"))
+        col_names = [c.name for c in table.columns]
+        assert "parent" in col_names  # the combined Parent/LAG column
+        assert "lag" not in col_names  # there is no separate LAG cell for JS to target
+
+
+class TestMigratedModeSuppressesRelationshipButton:
+    """On a migrated donor page the per-row LAG/parent sync button must be suppressed: it POSTs directly via librenms_sync.js, so a live button would let a migrated donor mutate relationship state even though the bulk sync form is hidden."""
+
+    def _render(self, migrated, device, netbox_interface):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(data=[], device=device, interface_name_field="ifName")
+        table.migrated_to_marker = migrated
+        record = {"port_id": 5, "ifName": "eth0", "netbox_interface": netbox_interface}
+        return str(
+            table._render_relationship_column(
+                lnms_name="eth0",
+                lnms_port_id=10,
+                sync_status="missing_nb",
+                record=record,
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
+            )
+        )
+
+    @pytest.mark.django_db
+    def test_button_present_in_normal_mode(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("normal-relationship-button")
+        html = self._render(False, device, make_interface(device, "eth0"))
+        assert "parent-sync-btn" in html
+
+    @pytest.mark.django_db
+    def test_button_suppressed_in_migrated_mode(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("migrated-relationship-button")
+        html = self._render(True, device, make_interface(device, "eth0"))
+        assert "parent-sync-btn" not in html
+        # The status badge must still render so the relationship state stays visible.
+        assert "Not in NetBox" in html
+
+
+class TestRelationshipColumnNameEscaping:
+    """Contract: the related interface name in the Parent/LAG badge is escaped exactly once for a name containing & < >."""
+
+    def _render(self, lnms_name):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(
+                data=[], device=MagicMock(pk=3, virtual_chassis=None), interface_name_field="ifName"
+            )
+        record = {"port_id": 5, "ifName": "eth0", "netbox_interface": None}
+        return str(
+            table._render_relationship_column(
+                lnms_name=lnms_name,
+                lnms_port_id=10,
+                sync_status="match",  # renders the name badge, no sync button
+                record=record,
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
+            )
+        )
+
+    def test_special_chars_escaped_once(self):
+        html = self._render("a&b<c>")
+        assert "a&amp;b&lt;c&gt;" in html  # escaped exactly once
+        assert "&amp;amp;" not in html  # not double-encoded
+        assert "&amp;lt;" not in html
 
 
 # ===========================================================================
@@ -2252,76 +2722,6 @@ class TestRenderEnabled:
         result = str(table.render_enabled(value="down", record=record))
         assert "Disabled" in result
         assert "text-success" in result
-
-
-# ===========================================================================
-# LibreNMSInterfaceTable render_librenms_id tests
-# ===========================================================================
-
-
-class TestRenderLibreNMSId:
-    """Tests for LibreNMSInterfaceTable.render_librenms_id()."""
-
-    def _table(self, server_key="default"):
-        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
-
-        t = object.__new__(LibreNMSInterfaceTable)
-        t.server_key = server_key
-        return t
-
-    def test_not_in_netbox_returns_danger(self):
-        table = self._table()
-        record = {"exists_in_netbox": False, "netbox_interface": None}
-        result = str(table.render_librenms_id(value=123, record=record))
-        assert "text-danger" in result
-        assert "123" in result
-
-    def test_no_netbox_interface_returns_danger(self):
-        table = self._table()
-        record = {"exists_in_netbox": True, "netbox_interface": None}
-        result = str(table.render_librenms_id(value=123, record=record))
-        assert "text-danger" in result
-
-    def test_netbox_librenms_id_is_none_returns_danger(self):
-        table = self._table()
-        nb_iface = MagicMock()
-        record = {"exists_in_netbox": True, "netbox_interface": nb_iface}
-
-        with patch(
-            "netbox_librenms_plugin.tables.interfaces.get_librenms_device_id",
-            return_value=None,
-        ):
-            result = str(table.render_librenms_id(value=456, record=record))
-
-        assert "text-danger" in result
-        assert "No librenms_id" in result
-
-    def test_ids_match_returns_success(self):
-        table = self._table()
-        nb_iface = MagicMock()
-        record = {"exists_in_netbox": True, "netbox_interface": nb_iface}
-
-        with patch(
-            "netbox_librenms_plugin.tables.interfaces.get_librenms_device_id",
-            return_value=42,
-        ):
-            result = str(table.render_librenms_id(value=42, record=record))
-
-        assert "text-success" in result
-
-    def test_ids_mismatch_returns_warning(self):
-        table = self._table()
-        nb_iface = MagicMock()
-        record = {"exists_in_netbox": True, "netbox_interface": nb_iface}
-
-        with patch(
-            "netbox_librenms_plugin.tables.interfaces.get_librenms_device_id",
-            return_value=99,
-        ):
-            result = str(table.render_librenms_id(value=42, record=record))
-
-        assert "text-warning" in result
-        assert "Existing LibreNMS ID: 99" in result
 
 
 # ===========================================================================
@@ -2737,15 +3137,18 @@ class TestFormatInterfaceData:
             # render_description is called with "" (cleared alias)
             mock_desc.assert_called_once_with("", port_data)
 
-    def test_oob_row_never_binds_to_host_interface_by_name(self):
+    def test_oob_row_never_binds_to_host_interface_by_name(self, db):
         """An OOB-controller row (shared-LOM 'eth0') must stay unmatched on row re-render, mirroring the interfaces-tab guard — otherwise the VC-dropdown re-render flips it to green 'matched' against an unrelated host interface."""
-        table = self._table()
-        device = MagicMock()
-        host_iface = MagicMock()  # a host interface named eth0 exists
-        device.interfaces.filter.return_value.first.return_value = host_iface
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        device = make_device("format-interface-oob")
+        make_interface(device, "eth0")
+        table = LibreNMSInterfaceTable(data=[], device=device, interface_name_field="ifName")
 
         port_data = {
             "_source": "oob",
+            "port_id": 10,
             "ifName": "eth0",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 0,
@@ -2754,31 +3157,27 @@ class TestFormatInterfaceData:
             "ifAdminStatus": "up",
             "ifAlias": "",
             "ifDescr": "eth0",
+            "untagged_vlan": None,
+            "tagged_vlans": [],
         }
 
-        with (
-            patch.object(table, "render_name", return_value=""),
-            patch.object(table, "render_type", return_value=""),
-            patch.object(table, "render_speed", return_value=""),
-            patch.object(table, "render_mac_address", return_value=""),
-            patch.object(table, "render_mtu", return_value=""),
-            patch.object(table, "render_enabled", return_value=""),
-            patch.object(table, "render_description", return_value=""),
-        ):
-            table.format_interface_data(port_data, device)
+        table.format_interface_data(port_data, device)
 
         assert port_data["netbox_interface"] is None
         assert port_data["exists_in_netbox"] is False
 
-    def test_main_row_still_binds_by_name(self):
+    def test_main_row_still_binds_by_name(self, db):
         """The guard is OOB-specific: a main-source row keeps the name binding."""
-        table = self._table()
-        device = MagicMock()
-        host_iface = MagicMock()
-        device.interfaces.filter.return_value.first.return_value = host_iface
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        device = make_device("format-interface-main")
+        host_iface = make_interface(device, "eth0")
+        table = LibreNMSInterfaceTable(data=[], device=device, interface_name_field="ifName")
 
         port_data = {
             "_source": "main",
+            "port_id": 10,
             "ifName": "eth0",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 0,
@@ -2787,20 +3186,14 @@ class TestFormatInterfaceData:
             "ifAdminStatus": "up",
             "ifAlias": "",
             "ifDescr": "eth0",
+            "untagged_vlan": None,
+            "tagged_vlans": [],
+            "name_fallback_allowed": True,
         }
 
-        with (
-            patch.object(table, "render_name", return_value=""),
-            patch.object(table, "render_type", return_value=""),
-            patch.object(table, "render_speed", return_value=""),
-            patch.object(table, "render_mac_address", return_value=""),
-            patch.object(table, "render_mtu", return_value=""),
-            patch.object(table, "render_enabled", return_value=""),
-            patch.object(table, "render_description", return_value=""),
-        ):
-            table.format_interface_data(port_data, device)
+        table.format_interface_data(port_data, device)
 
-        assert port_data["netbox_interface"] is host_iface
+        assert port_data["netbox_interface"].pk == host_iface.pk
         assert port_data["exists_in_netbox"] is True
 
 
@@ -2865,98 +3258,131 @@ class TestVCInterfaceTable:
         # device_selection column should be shown for VC devices
         assert "device_selection" in table.columns
 
+    @pytest.mark.django_db
+    def test_duplicate_display_names_have_distinct_stable_form_keys(self):
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+
+        member1 = make_device("stable-form-member-1")
+        member2 = make_device("stable-form-member-2")
+        make_virtual_chassis("stable-form-vc", member1, member2)
+        records = [
+            {"port_id": 10, "ifName": "Ethernet1", "ifDescr": "Ethernet", "ifType": "ethernetCsmacd"},
+            {"port_id": 11, "ifName": "Ethernet2", "ifDescr": "Ethernet", "ifType": "ethernetCsmacd"},
+        ]
+        table = VCInterfaceTable(data=records, device=member1, interface_name_field="ifDescr")
+
+        selection_cells = [str(row.get_cell("selection")) for row in table.rows]
+        member_selects = [str(table.render_device_selection(None, record)) for record in records]
+
+        assert 'name="select" value="10"' in selection_cells[0]
+        assert 'name="select" value="11"' in selection_cells[1]
+        assert 'name="device_selection_10"' in member_selects[0]
+        assert 'name="device_selection_11"' in member_selects[1]
+
+    @pytest.mark.django_db
+    def test_render_device_selection_reuses_single_member_query(self, django_assert_num_queries):
+        """The member dropdown loads the real chassis member queryset once per table."""
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+
+        member1 = make_device("vc-query-member-1")
+        member2 = make_device("vc-query-member-2")
+        make_virtual_chassis("vc-query-members", member1, member2)
+        table = VCInterfaceTable(data=[], device=member1, interface_name_field="ifName")
+
+        with django_assert_num_queries(1):
+            table.render_device_selection(None, {"ifName": "Gi1/0", "ifType": "ethernetCsmacd"})
+            table.render_device_selection(None, {"ifName": "Gi2/0", "ifType": "ethernetCsmacd"})
+            _ = table._vc_members_by_position
+
+    @pytest.mark.django_db
     def test_render_device_selection_ethernet_uses_vc_member(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
-        mock_member1 = MagicMock()
-        mock_member1.id = 1
-        mock_member1.name = "switch-1"
+        member1 = make_device("vc-physical-member-1")
+        member2 = make_device("vc-physical-member-2")
+        make_virtual_chassis("vc-physical-members", member1, member2)
+        table = VCInterfaceTable(data=[], device=member1, interface_name_field="ifName")
 
-        mock_member2 = MagicMock()
-        mock_member2.id = 2
-        mock_member2.name = "switch-2"
+        result = str(
+            table.render_device_selection(
+                value=None,
+                record={"ifName": "Gi2/0/1", "ifType": "ethernetCsmacd"},
+            )
+        )
 
-        mock_device = MagicMock()
-        mock_device.id = 1
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [mock_member1, mock_member2]
-
-        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
-            table = VCInterfaceTable(data=[], device=mock_device, interface_name_field="ifName")
-
-        table.device = mock_device
-
-        record = {
-            "ifName": "Gi1/0/1",
-            "ifType": "ethernetCsmacd",
-        }
-
-        with patch(
-            "netbox_librenms_plugin.tables.interfaces.get_virtual_chassis_member",
-            return_value=mock_member1,
-        ):
-            result = str(table.render_device_selection(value=None, record=record))
-
-        assert "switch-1" in result
-        assert "switch-2" in result
+        assert member1.name in result
+        assert member2.name in result
+        assert f'value="{member2.pk}" selected' in result
         assert "vc-member-select" in result
 
-    def test_render_device_selection_non_ethernet_uses_device_id(self):
+    @pytest.mark.django_db
+    def test_render_device_selection_logical_iface_defaults_to_viewed_member(self):
+        """
+        A not-yet-synced LOGICAL interface (Vlan2) on a real VC must default to the VIEWED member,
+        NOT the member whose vc_position happens to equal the name's trailing digit.
+
+        Real-DB: the digit in ``Vlan2`` is a VLAN id, not a member index — the name-position
+        heuristic must not run for logical types. Against the unfixed code (no ethernet/dotted
+        guard) this resolves to the position-2 member (wrong); the guard defaults it to the viewed
+        member. Uses real Devices in a real VirtualChassis so the vc_position map is genuinely
+        queried — a MagicMock member with a MagicMock vc_position hid this by never matching.
+        """
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
-        mock_member1 = MagicMock()
-        mock_member1.id = 1
-        mock_member1.name = "switch-1"
+        sw1 = make_device("sw-①-1")
+        sw2 = make_device("sw-①-2")
+        make_virtual_chassis("vc-①-logical", sw1, sw2)  # sw1 -> vc_position 1, sw2 -> 2
 
-        mock_device = MagicMock()
-        mock_device.id = 1
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [mock_member1]
+        table = VCInterfaceTable(data=[], device=sw1, interface_name_field="ifName")
 
-        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
-            table = VCInterfaceTable(data=[], device=mock_device, interface_name_field="ifName")
+        record = {"ifName": "Vlan2", "ifType": "l3ipvlan"}  # digit 2 == sw2's vc_position
 
-        table.device = mock_device
-        record = {
-            "ifName": "Vlan100",
-            "ifType": "l3ipvlan",  # non-ethernet
-        }
+        assert table._resolve_row_member_id(record) == sw1.pk  # viewed member, not sw2
+        dropdown = str(table.render_device_selection(value=None, record=record))
+        assert f'value="{sw1.pk}" selected' in dropdown
+        assert f'value="{sw2.pk}" selected' not in dropdown
 
-        result = str(table.render_device_selection(value=None, record=record))
+    @pytest.mark.django_db
+    def test_render_device_selection_uses_name_heuristic_only_for_physical_rows(self):
+        """
+        The name-position heuristic applies to physical Ethernet rows. A dot does not prove that
+        a logical child belongs to the member encoded in its name.
+        """
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
-        assert "switch-1" in result
-        assert 'value="1"' in result
+        sw1 = make_device("sw-①b-1")
+        sw2 = make_device("sw-①b-2")
+        make_virtual_chassis("vc-①-physical", sw1, sw2)  # sw1 -> 1, sw2 -> 2
 
+        table = VCInterfaceTable(data=[], device=sw1, interface_name_field="ifName")
+
+        # Physical ethernet port on member 2 (ethernetCsmacd) -> heuristic resolves sw2.
+        assert table._resolve_row_member_id({"ifName": "Ethernet2", "ifType": "ethernetCsmacd"}) == sw2.pk
+        # The logical child has no stable owner binding, so it stays on the viewed member.
+        assert table._resolve_row_member_id({"ifName": "Ethernet2.100", "ifType": "l3ipvlan"}) == sw1.pk
+
+    @pytest.mark.django_db
     def test_render_device_selection_no_member_uses_device_id(self):
-        """When get_virtual_chassis_member returns None, fall back to device.id."""
+        """A physical name with no matching position falls back to the viewed member."""
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
-        mock_member1 = MagicMock()
-        mock_member1.id = 1
-        mock_member1.name = "switch-1"
+        member = make_device("vc-fallback-member")
+        make_virtual_chassis("vc-fallback", member)
+        table = VCInterfaceTable(data=[], device=member, interface_name_field="ifName")
+        result = str(
+            table.render_device_selection(
+                value=None,
+                record={"ifName": "Gi2/0/1", "ifType": "ethernetCsmacd"},
+            )
+        )
 
-        mock_device = MagicMock()
-        mock_device.id = 1
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [mock_member1]
-
-        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
-            table = VCInterfaceTable(data=[], device=mock_device, interface_name_field="ifName")
-
-        table.device = mock_device
-        record = {
-            "ifName": "Gi2/0/1",
-            "ifType": "ethernetcsmacd",
-        }
-
-        with patch(
-            "netbox_librenms_plugin.tables.interfaces.get_virtual_chassis_member",
-            return_value=None,
-        ):
-            result = str(table.render_device_selection(value=None, record=record))
-
-        # When chassis_member is None, selected_member_id = self.device.id
-        assert "switch-1" in result
+        assert f'value="{member.pk}" selected' in result
 
     def test_format_interface_data_includes_device_selection(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
@@ -3029,6 +3455,12 @@ class TestLibreNMSVMInterfaceTable:
             table = LibreNMSVMInterfaceTable(data=[], device=mock_device)
 
         assert table.tab == "interfaces"
+
+    def test_parent_column_is_in_sequence(self):
+        """The Parent/LAG column must be exposed on VM pages — VMInterface supports sub-interface parents and the relationship sync path resolves VMInterface targets, so omitting it from the sequence would make the feature unreachable for VMs."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
+
+        assert "parent" in LibreNMSVMInterfaceTable.Meta.sequence
 
 
 # ===========================================================================
@@ -3316,3 +3748,166 @@ class TestOobBadgeWiring:
         table = object.__new__(LibreNMSCableTable)
         html = str(table.render_local_port("Gi0/1", {"_source": "main"}))
         assert "From OOB controller" not in html
+
+
+# ---------------------------------------------------------------------------
+# Relationship owner resolution (findings S2/S3) + VM LAG button (finding #1)
+# Real-DB: real Device/VC/Interface objects so button + dropdown resolution is
+# exercised end-to-end rather than re-asserting mock call wiring.
+# ---------------------------------------------------------------------------
+class TestRelationshipOwnerResolutionConsistency:
+    """The relationship sync button (data-object-id) and the VC member dropdown must resolve the same owner; otherwise the JS posts the dropdown value and the sync 404s."""
+
+    @staticmethod
+    def _vc():
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+
+        m1 = make_device("vc-owner-a")
+        m2 = make_device("vc-owner-b")
+        make_virtual_chassis("VC-OWNER", m1, m2)
+        return m1, m2
+
+    @staticmethod
+    def _vc_table(device):
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+
+        return VCInterfaceTable(data=[], device=device, interface_name_field="ifName")
+
+    def test_non_ethernet_subiface_button_and_dropdown_agree_on_owner(self, db):
+        """A non-ethernet sub-interface owned by another VC member: both the sync button and the member dropdown point at that member, not the viewed one."""
+        from netbox_librenms_plugin.tests.conftest import make_interface
+
+        m1, m2 = self._vc()
+        sub = make_interface(m2, "Vlan100", iface_type="virtual")
+        table = self._vc_table(m1)  # viewing member1
+        record = {
+            "ifName": "Vlan100",
+            "ifType": "l3ipvlan",
+            "port_id": 5,
+            "netbox_interface": sub,
+            "lag_sync_status": None,
+            "parent_sync_status": "mismatch",
+            "librenms_parent_name": "Bdi1",
+            "librenms_parent_port_id": 6,
+        }
+        dropdown = str(table.render_device_selection(None, record))
+        button = str(table.render_parent(None, record))
+        assert f'value="{m2.id}" selected' in dropdown  # dropdown defaults to the true owner
+        assert f'value="{m1.id}" selected' not in dropdown
+        assert f'data-object-id="{m2.id}"' in button  # button agrees
+        assert f'data-object-id="{m1.id}"' not in button  # not the viewed member
+
+    def test_vc_member_resolution_is_prefetched_not_per_row(self, db):
+        """The name-based VC owner resolution must prefetch members once, not query per row."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        m1, m2 = self._vc()  # positions 1 and 2
+        table = self._vc_table(m1)  # viewing member1
+        # Rows that fall through to the name-based VC heuristic (no netbox_interface /
+        # selected_object_id), alternating between the two members' positions.
+        records = [{"ifName": f"Ethernet{pos}", "ifType": "ethernetCsmacd"} for pos in (1, 2, 1, 2, 1, 2)]
+
+        with CaptureQueriesContext(connection) as ctx:
+            owners = [table._resolve_row_member_id(r) for r in records]
+
+        # Behaviour preserved: each row resolves to the member at its name's vc_position.
+        assert owners == [m1.pk, m2.pk, m1.pk, m2.pk, m1.pk, m2.pk]
+        # The member set is prefetched once through the cached property.
+        assert len(ctx.captured_queries) == 1
+
+
+class TestVMTableHidesLagSyncButton:
+    """LAG sync is device-only (VMInterface has no lag field); a VM table must not render a LAG sync button that would 404. Parent sync stays available for VMs."""
+
+    @staticmethod
+    def _vm_table():
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        vm = make_vm("vm-lag")
+        return LibreNMSVMInterfaceTable(data=[], device=vm, interface_name_field="ifName"), vm
+
+    def test_vm_table_omits_lag_button(self, db):
+        from virtualization.models import VMInterface
+
+        table, vm = self._vm_table()
+        record = {
+            "ifName": "eth0",
+            "ifType": "ethernetCsmacd",
+            "port_id": 3,
+            "netbox_interface": VMInterface.objects.create(virtual_machine=vm, name="eth0"),
+            "lag_sync_status": "missing_nb",
+            "librenms_lag_name": "Po1",
+            "librenms_lag_port_id": 9,
+            "parent_sync_status": None,
+        }
+        html = str(table.render_parent(None, record))
+        assert "lag-sync-btn" not in html  # no LAG control on a VM (it could only 404)
+
+    def test_vm_table_keeps_parent_button(self, db):
+        from virtualization.models import VMInterface
+
+        table, vm = self._vm_table()
+        record = {
+            "ifName": "eth0.100",
+            "ifType": "l3ipvlan",
+            "port_id": 4,
+            "netbox_interface": VMInterface.objects.create(virtual_machine=vm, name="eth0.100"),
+            "lag_sync_status": None,
+            "parent_sync_status": "missing_nb",
+            "librenms_parent_name": "eth0",
+            "librenms_parent_port_id": 10,
+        }
+        html = str(table.render_parent(None, record))
+        assert "parent-sync-btn" in html  # parent sync IS supported for VMs
+        assert f'data-object-id="{vm.id}"' in html
+
+
+@pytest.mark.django_db
+class TestRenderLibreNMSId:
+    """render_librenms_id colours the LibreNMS-id cell by how the stored port_id compares to NetBox.
+
+    Restores real coverage (deleted on the parent/LAG UI work) using real Interface custom-field
+    reads — a mock netbox_interface would let the get_librenms_device_id contract drift silently.
+    """
+
+    def test_no_exists_in_netbox_renders_red(self):
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": False})
+        assert "text-danger" in html and ">42<" in html
+
+    def test_exists_but_no_netbox_interface_renders_red(self):
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": True, "netbox_interface": None})
+        assert "text-danger" in html
+
+    def test_interface_without_librenms_cf_renders_red_with_title(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        iface = make_interface(make_device("rid-nocf"), "Gi0/1")  # no librenms_id CF
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": True, "netbox_interface": iface})
+        assert "text-danger" in html and "No librenms_id" in html
+
+    def test_mismatch_renders_orange_with_existing_id(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = make_interface(make_device("rid-mismatch"), "Gi0/1")
+        set_librenms_device_id(iface, 99, "default")
+        iface.save()
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": True, "netbox_interface": iface})
+        assert "text-warning" in html and "Existing LibreNMS ID: 99" in html and ">42<" in html
+
+    def test_match_renders_green(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = make_interface(make_device("rid-match"), "Gi0/1")
+        set_librenms_device_id(iface, 42, "default")
+        iface.save()
+        table = _make_interface_table(server_key="default")
+        html = table.render_librenms_id("42", {"exists_in_netbox": True, "netbox_interface": iface})
+        assert "text-success" in html and ">42<" in html

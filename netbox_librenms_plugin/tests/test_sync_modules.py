@@ -855,7 +855,8 @@ class TestInstallSingleStatus:
 
         from netbox_librenms_plugin.views.sync.modules import _module_component_specs
 
-        tree = ast.parse(textwrap.dedent(inspect.getsource(Module.save)))
+        # NetBox 4.7 moved the replication loop into Module._save_new().
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(Module, "_save_new", Module.save))))
         component_loop = next(
             node
             for node in ast.walk(tree)
@@ -872,7 +873,7 @@ class TestInstallSingleStatus:
             for template_attribute, component_attribute, component_model in _module_component_specs()
         ]
 
-        assert scoped_specs == netbox_specs
+        assert scoped_specs == netbox_specs, f"NetBox replicates {netbox_specs}, the plugin scopes {scoped_specs}"
 
     @pytest.mark.django_db
     def test_returns_installed_on_success(self):
@@ -4468,7 +4469,7 @@ class TestInstallModuleViewBehavior:
             patch.object(ModuleBay, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
-            # The module is read through restrict(user, "change"), so hand back the same manager.
+            # Both reads go through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             view.request = request
@@ -4645,7 +4646,7 @@ class TestUpdateModuleSerialViewBehavior:
             patch.object(Module, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
-            # The module is read through restrict(user, "change"), so hand back the same manager.
+            # Both reads go through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
             view.request = request

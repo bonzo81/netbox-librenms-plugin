@@ -848,10 +848,11 @@ class TestAttachMessagesOob:
         from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
 
         response = HttpResponse(b"<tr>row html</tr>")
+        storage = self._storage(["a message"])
         with (
             patch(
                 "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
-                return_value=self._storage(["a message"]),
+                return_value=storage,
             ),
             patch(
                 "netbox_librenms_plugin.views.imports.actions.render_to_string",
@@ -866,6 +867,8 @@ class TestAttachMessagesOob:
         # The CodeQL-safe format_html() composition produces exactly the concatenation of the
         # original response bytes and the rendered (trusted) fragment — no escaping of either.
         assert result.content == b"<tr>row html</tr>" + b'<div id="django-messages" hx-swap-oob="true"></div>'
+        # The peek must not leave the storage consumed for the page renderer.
+        assert storage.used is False
 
     def test_skips_oob_swap_when_no_messages_queued(self):
         """No pending messages → don't append an empty OOB container that would wipe toasts already visible from an earlier action."""
@@ -875,10 +878,11 @@ class TestAttachMessagesOob:
 
         response = HttpResponse(b"<tr>row html</tr>")
         original = response.content
+        storage = self._storage([])
         with (
             patch(
                 "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
-                return_value=self._storage([]),
+                return_value=storage,
             ),
             patch("netbox_librenms_plugin.views.imports.actions.render_to_string") as mock_render,
         ):
@@ -886,6 +890,8 @@ class TestAttachMessagesOob:
 
         mock_render.assert_not_called()
         assert result.content == original
+        # Even on the empty path, the peek must restore used so nothing is consumed.
+        assert storage.used is False
 
     def test_swallows_render_errors(self):
         from django.http import HttpResponse
@@ -5572,15 +5578,13 @@ class TestBulkImportConfirmCollisions:
         view._librenms_api = _make_api()
         return view
 
-    def _run_with_two_devices(self, validation_a, validation_b, *, real_render):
+    def _run_with_two_devices(self, validation_a, validation_b):
         """Drive the real BulkImportConfirmView.post over two LibreNMS rows.
 
         ``validation_a/b`` carry real NetBox Device objects so the real
         detect_bulk_collisions + _model_name_of run; only validate_device_for_import (an
-        expensive VC-detection call covered by its own tests) is stubbed. When
-        ``real_render`` is True the real template engine renders (returning an HttpResponse);
-        otherwise render() is captured so the chosen template can be asserted without
-        building the full confirm-table context.
+        expensive VC-detection call covered by its own tests) is stubbed. render() is captured
+        so the chosen template can be asserted without building the full confirm-table context.
         """
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]})
@@ -5617,8 +5621,6 @@ class TestBulkImportConfirmCollisions:
                 return_value=(True, False),
             ),
         ):
-            if real_render:
-                return view.post(request)
             with patch("netbox_librenms_plugin.views.imports.actions.render") as mock_render:
                 mock_render.side_effect = lambda req, tpl, ctx, status=200: MagicMock(
                     status_code=status, template_name=tpl, context=ctx
@@ -5641,10 +5643,56 @@ class TestBulkImportConfirmCollisions:
         }
         # render captured (not the heavy confirm table) — assert no collision block fired and the
         # confirm template was chosen.
-        response = self._run_with_two_devices(validation_a, validation_b, real_render=False)
+        response = self._run_with_two_devices(validation_a, validation_b)
         assert response is not None
         assert "bulk_import_confirm.html" in response.template_name
         assert response.status_code == 200
+
+    def test_collision_batch_renders_collision_template(self):
+        """A real authorized request can reach and render the collision interstitial."""
+        from dcim.models import Device
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, post
+        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
+
+        target = make_device("nb-collision-target")
+        device_ids = (97001, 97002)
+        rows = {
+            device_id: {
+                "device_id": device_id,
+                "hostname": target.name,
+                "sysName": target.name,
+                "serial": "",
+                "hardware": "Collision hardware",
+                "location": "Collision location",
+                "os": "collision-os",
+            }
+            for device_id in device_ids
+        }
+        for device_id, row in rows.items():
+            cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+
+        user = make_user_with_perms("bulk-confirm-collision", [("view", Device)])
+        request = make_request(
+            data={"select": [str(device_id) for device_id in device_ids]},
+            user=user,
+            path="/device-import/bulk/confirm/",
+            HTTP_HX_REQUEST="true",
+        )
+        api = _make_api()
+        api.get_device_info.side_effect = lambda device_id, **_kwargs: (True, rows[device_id])
+        api.get_inventory_filtered.return_value = (True, [])
+        view = BulkImportConfirmView()
+        view._librenms_api = api
+
+        response = post(view, request)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert "Bulk import blocked: NetBox object collisions" in html
+        assert target.name in html
 
 
 @pytest.mark.django_db
@@ -7384,6 +7432,54 @@ class TestResolveOOBInterface:
         assert device.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 4444
         assert device.oob_ip_id is None
 
+    def test_out_of_scope_pk_tells_the_operator_what_actually_blocked_it(self):
+        from dcim.models import Interface
+        from django.http import HttpResponse
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, messages_on
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        device = make_device("oob-msg-pk-scope")
+        hidden = make_interface(device, "idrac0")
+        visible = make_interface(device, "eth0")
+        user = _scoped_device_writer(device, "oob-msg-pk-scope-writer")
+        user = grant(user, "view", Interface, constraints={"pk": visible.pk})
+        user = grant(user, "add", IPAddress)
+        request = make_request(
+            "post",
+            {
+                "existing_device_id": str(device.pk),
+                "server_key": "default",
+                "oob_interface_id": str(hidden.pk),
+            },
+            user=user,
+            path="/add-as-oob/",
+        )
+        view = AddAsOOBView()
+        view.kwargs = {}
+        view._librenms_api = _make_api()
+        view.request = request
+        libre_device = {"device_id": 4445, "hostname": f"{device.name}-oob", "sysName": f"{device.name}-oob"}
+        validation = {"oob_candidate": {"device": device, "type": "idrac", "ip": "198.18.0.7"}}
+
+        with (
+            patch.object(
+                AddAsOOBView, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
+            ),
+            patch.object(AddAsOOBView, "render_device_row", return_value=HttpResponse(b"row-ok")),
+            patch.object(AddAsOOBView, "rebind_api_for_server", return_value=view._librenms_api),
+        ):
+            view.post(request, device_id=4445)
+
+        queued_messages = messages_on(request)
+        warnings = [text for level, text in queued_messages if level == "warning"]
+        assert any("outside your view scope" in text for text in warnings), warnings
+        assert not any("Choose an interface" in text for _level, text in queued_messages)
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 4445
+        assert device.oob_ip_id is None
+
     def test_create_without_add_perm_returns_permission_add(self):
         """No existing row + user lacks Interface 'add' → the write-time re-check refuses the create rather than silently creating it."""
         from django.db import transaction
@@ -7604,9 +7700,12 @@ class TestAttachOOBIp:
         assert reason is None and ip.pk == existing.pk
         locking = [q["sql"] for q in captured.captured_queries if "FOR UPDATE" in q["sql"].upper()]
         assert locking, "the candidate row was never locked"
-        # The lock must carry the permission join, i.e. it ran through restrict(), and must lock
-        # only the address row rather than the joined permission tables.
-        assert any("OF " in sql.upper() for sql in locking), "the lock did not restrict itself to the row"
+        # Name the locked table: a bare "OF " matches any substring, and the clause is what keeps
+        # a permission join added by restrict() out of the lock set. The scoping itself is pinned
+        # by test_rehome_denied_outside_the_constrained_change_grant.
+        assert any('FOR UPDATE OF "IPAM_IPADDRESS"' in sql.upper() for sql in locking), (
+            f"the lock did not name the address row: {locking}"
+        )
 
 
 @pytest.mark.django_db
@@ -8248,6 +8347,91 @@ class TestMappingChangeScope:
         assert b"Existing mapping is no longer available." in response.content
         hidden.refresh_from_db()
         assert hidden.netbox_platform_id == old_platform.pk
+
+    def test_device_type_mapping_inside_change_grant_is_updated(self):
+        """Control for the refusal above: an in-grant row still updates through the same path.
+
+        Without this, a regression that skips the mapping write entirely leaves the hidden row
+        unchanged too, so the refusal test alone cannot tell scoping from a dead update path.
+        """
+        from dcim.models import DeviceType
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView
+
+        old_type = make_device("mapping-control-old").device_type
+        new_type = DeviceType.objects.create(
+            manufacturer=old_type.manufacturer,
+            model="Mapping Control New Type",
+            slug="mapping-control-new-type",
+        )
+        raw_hardware = "Allowed Hardware Control"
+        mapping_hardware = apply_normalization_rules(value=raw_hardware, scope="device_type")
+        allowed = DeviceTypeMapping.objects.create(librenms_hardware=mapping_hardware, netbox_device_type=old_type)
+        user = make_user_with_perms("mapping-change-control", [("view", type(old_type))])
+        user = grant(user, "change", DeviceTypeMapping, constraints={"pk": allowed.pk})
+        request = self._request(user, device_type_id=str(new_type.pk), server_key="default")
+        view = AddDeviceTypeMappingView()
+        view.setup(request)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+
+        with (
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"hardware": raw_hardware},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView.get",
+                return_value=HttpResponse(b"<div></div>"),
+            ),
+            patch.object(view, "validate_and_apply_selections", return_value=(None, None)),
+        ):
+            response = view.post(request, device_id=1)
+
+        assert b"Existing mapping is no longer available." not in response.content
+        allowed.refresh_from_db()
+        assert allowed.netbox_device_type_id == new_type.pk
+
+    def test_platform_mapping_inside_change_grant_is_updated(self):
+        """Control for the platform refusal above (see the device-type control)."""
+        from dcim.models import Platform
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.models import PlatformMapping
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+        from netbox_librenms_plugin.views.imports.actions import AddPlatformMappingView
+
+        old_platform = Platform.objects.create(name="Mapping Control Old", slug="mapping-control-old")
+        new_platform = Platform.objects.create(name="Mapping Control New", slug="mapping-control-new")
+        allowed = PlatformMapping.objects.create(librenms_os="allowed-control-os", netbox_platform=old_platform)
+        user = make_user_with_perms("platform-mapping-change-control", [("view", Platform)])
+        user = grant(user, "change", PlatformMapping, constraints={"pk": allowed.pk})
+        request = self._request(user, platform_id=str(new_platform.pk), server_key="default")
+        view = AddPlatformMappingView()
+        view.setup(request)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+
+        with (
+            patch.object(view, "rebind_api_for_server", return_value="default"),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"os": "allowed-control-os"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView.get",
+                return_value=HttpResponse(b"<div></div>"),
+            ),
+            patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)),
+        ):
+            response = view.post(request, device_id=1)
+
+        assert b"Existing mapping is no longer available." not in response.content
+        allowed.refresh_from_db()
+        assert allowed.netbox_platform_id == new_platform.pk
 
 
 # ---------------------------------------------------------------------------

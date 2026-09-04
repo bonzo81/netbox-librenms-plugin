@@ -12,6 +12,7 @@ from netbox_librenms_plugin.filters import (
     ModuleTypeMappingFilterSet,
     NormalizationRuleFilterSet,
     PlatformMappingFilterSet,
+    PortStackLagPatternFilterSet,
 )
 from netbox_librenms_plugin.forms import (
     CarrierAutoInstallRuleFilterForm,
@@ -38,6 +39,9 @@ from netbox_librenms_plugin.forms import (
     PlatformMappingFilterForm,
     PlatformMappingForm,
     PlatformMappingImportForm,
+    PortStackLagPatternFilterForm,
+    PortStackLagPatternForm,
+    PortStackLagPatternImportForm,
 )
 from netbox_librenms_plugin.models import (
     CarrierAutoInstallRule,
@@ -48,6 +52,7 @@ from netbox_librenms_plugin.models import (
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 from netbox_librenms_plugin.tables.mappings import (
     CarrierAutoInstallRuleTable,
@@ -58,6 +63,7 @@ from netbox_librenms_plugin.tables.mappings import (
     ModuleTypeMappingTable,
     NormalizationRuleTable,
     PlatformMappingTable,
+    PortStackLagPatternTable,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
@@ -622,3 +628,67 @@ class CarrierAutoInstallRuleChangeLogView(LibreNMSPermissionMixin, generic.Objec
 
 class CarrierAutoInstallRuleBulkExportYAMLView(BulkExportYAMLView):
     queryset = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")
+
+
+# --- PortStackLagPattern views ---
+
+
+class PortStackLagPatternListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all PortStackLagPattern objects."""
+
+    queryset = PortStackLagPattern.objects.all()
+    table = PortStackLagPatternTable
+    filterset = PortStackLagPatternFilterSet
+    filterset_form = PortStackLagPatternFilterForm
+    template_name = "netbox_librenms_plugin/portstacklagpattern_list.html"
+
+
+class PortStackLagPatternCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new PortStackLagPattern object."""
+
+    queryset = PortStackLagPattern.objects.all()
+    form = PortStackLagPatternForm
+
+
+@register_model_view(PortStackLagPattern, "bulk_import", path="import", detail=False)
+class PortStackLagPatternBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing PortStackLagPattern objects from CSV/JSON/YAML."""
+
+    queryset = PortStackLagPattern.objects.all()
+    model_form = PortStackLagPatternImportForm
+
+
+class PortStackLagPatternView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying a PortStackLagPattern object."""
+
+    queryset = PortStackLagPattern.objects.all()
+
+
+class PortStackLagPatternEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a PortStackLagPattern object."""
+
+    queryset = PortStackLagPattern.objects.all()
+    form = PortStackLagPatternForm
+
+
+class PortStackLagPatternDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a PortStackLagPattern object."""
+
+    queryset = PortStackLagPattern.objects.all()
+
+
+class PortStackLagPatternBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
+    """Provides a view for bulk deleting PortStackLagPattern objects."""
+
+    queryset = PortStackLagPattern.objects.all()
+    table = PortStackLagPatternTable
+
+
+class PortStackLagPatternChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the changelog of a PortStackLagPattern object."""
+
+    queryset = PortStackLagPattern.objects.all()
+
+
+class PortStackLagPatternBulkExportYAMLView(BulkExportYAMLView):
+    queryset = PortStackLagPattern.objects.all()

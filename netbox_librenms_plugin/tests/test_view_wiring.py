@@ -1982,6 +1982,13 @@ class TestRoutedSyncPagesScopeTheirObject:
         ("object_sync.devices", "DeviceModuleTableView"),
     )
 
+    # The VM pages inherit the same base table views, so they inherit the scoped get_object and
+    # regress the same way. They resolve a VirtualMachine, so they need their own grant.
+    ROUTED_VM_PAGES = (
+        ("object_sync.vms", "VMInterfaceTableView"),
+        ("object_sync.vms", "VMIPAddressTableView"),
+    )
+
     @pytest.mark.django_db
     @pytest.mark.parametrize("module_path,class_name", ROUTED_DEVICE_PAGES)
     def test_a_constrained_grant_cannot_reach_a_hidden_device(self, module_path, class_name):
@@ -2010,6 +2017,38 @@ class TestRoutedSyncPagesScopeTheirObject:
         view = make_view(view_class, request)
 
         # Sanity: the grant really is constrained — the allowed device stays reachable.
+        assert view.get_object(allowed.pk).pk == allowed.pk
+
+        with pytest.raises(Http404):
+            view.get_object(hidden.pk)
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("module_path,class_name", ROUTED_VM_PAGES)
+    def test_a_constrained_grant_cannot_reach_a_hidden_vm(self, module_path, class_name):
+        """A user granted view_virtualmachine only for VM A must not resolve VM B."""
+        import importlib
+
+        from django.http import Http404
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.tests.conftest import make_vm
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            make_view,
+        )
+
+        allowed = make_vm(f"scoped-allowed-{class_name.lower()}")
+        hidden = make_vm(f"scoped-hidden-{class_name.lower()}")
+        user = make_user_with_perms(
+            f"scoped-viewer-{class_name.lower()}",
+            [("view", VirtualMachine)],
+            constraints={"name": allowed.name},
+        )
+        request = make_request("get", user=user, path=f"/plugins/librenms/vms/{hidden.pk}/sync/")
+        view_class = getattr(importlib.import_module(f"netbox_librenms_plugin.views.{module_path}"), class_name)
+        view = make_view(view_class, request)
+
         assert view.get_object(allowed.pk).pk == allowed.pk
 
         with pytest.raises(Http404):
