@@ -131,12 +131,15 @@ class LocationMappingSerializer(NetBoxModelSerializer):
         model = LocationMapping
         fields = [
             "id",
+            "url",
+            "display",
             "field_type",
             "librenms_value",
             "content_type",
             "object_id",
             "description",
         ]
+        brief_fields = ("id", "url", "display", "field_type", "librenms_value", "description")
 
 
 class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
