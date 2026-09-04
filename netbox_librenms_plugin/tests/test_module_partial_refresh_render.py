@@ -11,18 +11,11 @@ from unittest.mock import patch
 
 import pytest
 
+from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
-
-def _configured_server_key():
-    """Return the first configured server key because deployment key names differ."""
-    from django.conf import settings
-
-    servers = (settings.PLUGINS_CONFIG.get("netbox_librenms_plugin") or {}).get("servers") or {}
-    return next(iter(servers), "default")
-
-
+SERVER_KEY = "default"
 INVENTORY = [
     {
         "entPhysicalIndex": 1,
@@ -60,8 +53,7 @@ def _refresh(device, **failure):
         captured["context"] = context
         return original(self, request, obj, server_key, context, **kwargs)
 
-    server_key = _configured_server_key()
-    request = make_request("post", {"server_key": server_key}, HTTP_HX_REQUEST="true")
+    request = make_request("post", {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
     # The concrete subclass, so a complete refresh can actually build its table.
     view = DeviceModuleTableView()
 
@@ -82,11 +74,16 @@ def _refresh(device, **failure):
 class TestPartialModuleRefreshRendersEmpty:
     """Each partial-failure flag must reach the response as an empty tab."""
 
+    @pytest.fixture(autouse=True)
+    def _configure_server(self, settings):
+        """Configure a usable default LibreNMS server for each test."""
+        configure_default_librenms_server(settings)
+
     @staticmethod
     def _device(name):
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
 
-        device = make_device(name, librenms_cf={_configured_server_key(): 42})
+        device = make_device(name, librenms_cf={SERVER_KEY: 42})
         make_module_bay(device, "Bay 1")
         return device
 
@@ -115,7 +112,7 @@ class TestPartialModuleRefreshRendersEmpty:
         device = self._device(f"partial-refresh-{'-'.join(failure)}")
         # Built by the production helper, so a change to the key scheme cannot silently make
         # the assertion below vacuous.
-        cache_key = sync_snapshot_key(device, "inventory", _configured_server_key())
+        cache_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
         cache.set(cache_key, {"inventory": INVENTORY, "librenms_id": 42, "oob_librenms_id": None}, timeout=300)
         assert cache.get(cache_key) is not None, "the seed never landed, so the drop assertion proves nothing"
 
