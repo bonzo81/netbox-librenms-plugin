@@ -249,13 +249,8 @@ class BaseInterfaceTableView(
             messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
             return self._failure_redirect(request, obj, _server_key)
 
-        # A success=True response can still carry a malformed-but-truthy body (string/list/
-        # dict-with-non-list "ports"); dereferencing it would 500 the refresh. Fail closed like
-        # the not-success path instead. An empty ports list stays valid.
-        ports = librenms_data.get("ports", []) if isinstance(librenms_data, dict) else None
-        if not is_list_of_dicts(ports):
-            messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
-            return self._failure_redirect(request, obj, _server_key)
+        # The guard above already proved a dict whose "ports" is a list of dicts, so index directly.
+        ports = librenms_data["ports"]
 
         # Enrich ports with VLAN data for trunk ports
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
