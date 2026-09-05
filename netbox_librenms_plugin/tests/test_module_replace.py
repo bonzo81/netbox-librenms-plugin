@@ -143,6 +143,64 @@ class TestModuleMismatchPreviewView:
         assert resp.status_code == 400
 
     @pytest.mark.django_db
+    def test_the_preview_refuses_an_oob_sourced_row(self):
+        """The preview is the entry point to Replace, so it must refuse an OOB row too.
+
+        Offering the dialog for inventory the install path will not act on invites the user into
+        a flow that cannot succeed.
+        """
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("preview-oob-device")
+        module_type = make_module_type("PREVIEW-OOB-TYPE")
+        bay = make_module_bay(device, "Preview OOB Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=module_type,
+            serial="PREVIEW-OOB-SERIAL",
+        )
+        request = make_request(
+            "get",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+        )
+        view = make_view(
+            ModuleMismatchPreviewView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": module_type.model,
+                        "entPhysicalSerialNum": "OOB-SERIAL",
+                        "_source": "oob",
+                    }
+                ],
+            ),
+            timeout=300,
+        )
+        try:
+            response = view.get(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 400
+        assert b"read-only" in response.content
+
+    @pytest.mark.django_db
     def test_the_preview_shows_the_serial_without_the_vendor_marker(self):
         """The preview sits next to the stored module serial, which carries no "S/N ".
 
@@ -457,6 +515,68 @@ class TestReplaceModuleView:
 
         mock_msg.error.assert_called_once()
         mock_redirect.assert_called_once()
+
+    @pytest.mark.django_db
+    def test_an_oob_sourced_row_cannot_replace_a_host_module(self):
+        """OOB-controller inventory is merged for display only and is read-only.
+
+        The shared install helper rejects it, but this view builds its own Module, so a crafted
+        POST naming an OOB row's entPhysicalIndex would otherwise install it onto the host.
+        """
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("replace-oob-device")
+        old_type = make_module_type("REPLACE-OOB-OLD")
+        new_type = make_module_type("REPLACE-OOB-NEW")
+        bay = make_module_bay(device, "Replace OOB Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=old_type,
+            serial="REPLACE-OOB-KEEP-ME",
+        )
+        request = make_request(
+            "post",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+        )
+        view = make_view(
+            ReplaceModuleView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": "OOB-SERIAL",
+                        "_source": "oob",
+                    }
+                ],
+            ),
+            timeout=300,
+        )
+        try:
+            _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        installed.refresh_from_db()
+        assert installed.module_type == old_type
+        assert installed.serial == "REPLACE-OOB-KEEP-ME"
+        assert Module.objects.filter(device=device, module_bay=bay).count() == 1
+        assert any("read-only" in text for text in message_texts(request))
 
     @pytest.mark.django_db
     def test_the_replacement_stores_the_serial_without_the_vendor_marker(self):

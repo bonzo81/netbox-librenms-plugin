@@ -51,6 +51,11 @@ NO_LIBRENMS_SERVER_MESSAGE = (
     "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
 )
 
+# OOB-controller rows are merged into the cached snapshot for display only. Every entry point that
+# can act on an inventory row rejects them here, so the marker and the reason are declared once.
+OOB_INVENTORY_SOURCE = "oob"
+OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
+
 
 def _modules_redirect_response(request, sync_url, server_key=None):
     """
@@ -1278,8 +1283,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # renders those rows read-only). Never install it onto the host: a crafted POST could
         # otherwise target an OOB row by its (offset) entPhysicalIndex. Reject at this shared
         # chokepoint so both the branch and selected install paths are covered.
-        if item.get("_source") == "oob":
-            return {"status": "skipped", "name": name, "reason": "OOB controller inventory is read-only"}
+        if item.get("_source") == OOB_INVENTORY_SOURCE:
+            return {"status": "skipped", "name": name, "reason": OOB_INVENTORY_READ_ONLY_REASON}
 
         # Match module type (direct, then normalization fallback)
         manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
@@ -2018,6 +2023,8 @@ class ModuleMismatchPreviewView(
         )
         if not librenms_item:
             return HttpResponse("Inventory item not found in cache.", status=400)
+        if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
+            return HttpResponse(OOB_INVENTORY_READ_ONLY_REASON, status=400)
 
         from netbox_librenms_plugin.utils import resolve_module_type
 
@@ -2214,6 +2221,9 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         )
         if not librenms_item:
             messages.error(request, "Inventory item not found in cache.")
+            return _modules_action_response(request, page_device, server_key)
+        if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
+            messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
             return _modules_action_response(request, page_device, server_key)
 
         from netbox_librenms_plugin.utils import resolve_module_type
