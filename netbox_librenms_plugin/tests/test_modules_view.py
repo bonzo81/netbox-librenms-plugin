@@ -39,6 +39,114 @@ def _captured_table_view(view):
     return rows_store
 
 
+@pytest.mark.django_db
+class TestFpcSlotMatchesOnSlashedPositions:
+    """A Juniper module bay position is "fpc/pic", so the guard must read the FPC from it.
+
+    Reported from live NetBox: an MX304 MIC sits in bay LCMIC0 at position "0/0", which the
+    device-type library needs so the module type's "Transceiver {module}/N" template expands to
+    "Transceiver 0/0/0". int("0/0") raises, and the guard turned that into "no match", so every
+    transceiver bay under the MIC was silently discarded.
+    """
+
+    def _child_bay(self, parent_position):
+        """Build a real transceiver bay nested under a module installed at *parent_position*."""
+        from dcim.models import Module, ModuleBay
+
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+
+        device = make_device_with_module_bays(f"mx304-{parent_position.replace('/', '-')}", [])
+        parent_bay = ModuleBay.objects.create(device=device, name="LCMIC0", position=parent_position)
+        module = Module.objects.create(
+            device=device, module_bay=parent_bay, module_type=make_module_type("JNP-MIC1"), status="active"
+        )
+        return ModuleBay.objects.create(device=device, module=module, name="Transceiver 0/0/0", position="0")
+
+    def test_a_slashed_parent_position_still_matches_its_own_fpc(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("0/0")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP56-DD @ 0/0/0", bay) is True
+
+    def test_the_second_pic_of_the_same_fpc_still_matches(self):
+        """Only the FPC is compared, so pic 1 under fpc 0 is the same slot for this guard."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("0/1")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP56-DD @ 0/1/3", bay) is True
+
+    def test_a_different_fpc_is_still_rejected(self):
+        """The guard exists to drop an orphan belonging to another FPC. That must survive."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("0/0")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP56-DD @ 1/0/2", bay) is False
+
+    def test_a_bare_integer_position_keeps_working(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("2")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 2/0/1", bay) is True
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 3/0/1", bay) is False
+
+    @pytest.mark.parametrize(
+        "position",
+        ["0/FT0", "0/PM0", "0/RP0", "0/RP1", "0/IMD", "0/PS0/M0", "2/x1", "1/1/c1"],
+    )
+    def test_a_compound_position_whose_tail_is_not_numeric_fails_closed(self, position):
+        """Real shipping positions: fan trays, power modules, route processors, Nokia XIOM.
+
+        The leading digit is a chassis index, not an FPC, so reading it alone would accept a
+        transceiver descriptor against a fan tray bay. Only a wholly numeric fpc/pic counts.
+
+        "2/x1" is the case that separates a leading-segment parse from a whole-position one:
+        it is a live parent bay carrying 34 nested bays, so it really reaches this guard.
+        """
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay(position)
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 0/0/1", bay) is False
+
+    def test_the_regex_mapping_resolves_through_to_the_bay(self):
+        """The whole sequence: the mapping resolves the bay name, then the guard keeps it.
+
+        This is the shape the bug actually broke. The mapping matched and produced the right
+        bay name, and the guard then discarded it, so the lookup returned None.
+        """
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("0/0")
+        manufacturer = Manufacturer.objects.get(pk=bay.device.device_type.manufacturer_id)
+        mapping = ModuleBayMapping.objects.create(
+            librenms_name=r"^.+ @ (\d+/\d+/\d+)$",
+            netbox_bay_name=r"Transceiver \1",
+            librenms_class="port",
+            is_regex=True,
+            manufacturer=manufacturer,
+        )
+
+        resolved = BaseModuleTableView._lookup_regex_bay_mapping(
+            "QSFP56-DD @ 0/0/0", "port", {bay.name: bay}, [mapping], manufacturer_id=manufacturer.pk
+        )
+
+        assert resolved == bay
+
+    def test_an_unparseable_position_still_fails_closed(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("slot-a")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 0/0/1", bay) is False
+
+
 class TestMergeTransceiverDataPortIdentity:
     """Transceiver merge should preserve stable port identity metadata."""
 

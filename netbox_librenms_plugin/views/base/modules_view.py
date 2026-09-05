@@ -2087,10 +2087,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         parent_bay = getattr(module, "module_bay", None)
         if not parent_bay:
             return True
-        try:
-            return int(parent_bay.position) == expected_fpc
-        except (TypeError, ValueError):
-            return False
+        # A Juniper bay position is "fpc/pic" and the descriptor names the FPC only, so read
+        # the first component. Every component must be numeric: a leading digit alone also
+        # starts "0/RP0", "0/FT0" and "2/x1", where it is a chassis index and not an FPC.
+        parts = str(parent_bay.position).split("/")
+        return all(part.isdigit() for part in parts) and int(parts[0]) == expected_fpc
 
     @staticmethod
     def _filter_mappings_by_manufacturer(mappings, manufacturer_id):
