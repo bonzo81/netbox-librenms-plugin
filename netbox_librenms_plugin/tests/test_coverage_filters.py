@@ -269,27 +269,33 @@ class TestGetLibreNMSDevicesForImport:
         assert fresh == [{"device_id": 2}]
         assert fresh_from_cache is False
 
-    def test_http_failure_returns_and_caches_an_empty_result(self, live_librenms):
+    def test_http_failure_raises_and_is_not_cached(self, live_librenms):
+        """Caching the fault as [] hid a live outage behind "no devices match your filter"."""
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
+        from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
 
         _register_devices(live_librenms, [], status=500)
 
-        first, first_from_cache = get_librenms_devices_for_import(live_librenms.api, return_cache_status=True)
-        live_librenms.server.requests.clear()
-        second, second_from_cache = get_librenms_devices_for_import(live_librenms.api, return_cache_status=True)
+        with pytest.raises(LibreNMSUnreachable):
+            get_librenms_devices_for_import(live_librenms.api, return_cache_status=True)
 
-        assert first == second == []
-        assert first_from_cache is False
-        assert second_from_cache is True
-        assert live_librenms.server.requests == []
+        # The failure left nothing behind, so the next attempt asks LibreNMS again.
+        live_librenms.server.requests.clear()
+        _register_devices(live_librenms, [{"device_id": 11}])
+
+        assert get_librenms_devices_for_import(live_librenms.api) == [{"device_id": 11}]
+        assert live_librenms.server.requests != []
 
     def test_disconnected_server_fails_closed(self, live_librenms):
+        """Failing closed means saying why, not returning a list that reads as no matches."""
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
+        from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
 
         live_librenms.api.cache_timeout = 300
         live_librenms.server.register_disconnect("/api/v0/devices", method="GET")
 
-        assert get_librenms_devices_for_import(live_librenms.api) == []
+        with pytest.raises(LibreNMSUnreachable):
+            get_librenms_devices_for_import(live_librenms.api)
 
     def test_omitted_api_is_built_from_real_plugin_settings(self, live_librenms):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
