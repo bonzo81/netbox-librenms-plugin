@@ -45,7 +45,9 @@ class Migration(migrations.Migration):
         # Generated against the supported NetBox 4.2 floor. SerialSensorTypePattern only
         # references extras.Tag and extras.TaggedItem, which are available on that floor.
         ("extras", "0122_charfield_null_choices"),
-        ("netbox_librenms_plugin", "0016_portstacklagpattern_sap_name_pattern"),
+        # Chain after the include-rule migration, which also depends on 0016. Without this
+        # the app graph has two leaves and Django refuses to migrate.
+        ("netbox_librenms_plugin", "0017_inventory_class_include_rule"),
     ]
 
     operations = [
