@@ -165,9 +165,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
     """
     try:
         # Get the master device info to use for naming
-        success, device_info = api.get_device_info(device_id)
+        device_found, device_info = api.get_device_info(device_id)
         master_name = None
-        if success and device_info:
+        if device_found and device_info:
             master_name = device_info.get("sysName") or device_info.get("hostname")
 
         # Step 1: Get root level items
@@ -235,7 +235,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         # against the ENTITY-MIB serials.  The device-level serial reported by
         # LibreNMS corresponds to the active/master switch in the stack.
         device_serial = ""
-        if device_info:
+        if device_found and device_info:
             device_serial = _norm_serial(device_info.get("serial"))
 
         # Load naming pattern once to avoid a DB query per member.
