@@ -27,12 +27,6 @@ from django.test import RequestFactory, override_settings
 from netbox_librenms_plugin.tests.conftest import make_device
 
 
-@pytest.fixture(autouse=True)
-def mock_librenms_config():
-    """Neutralize the suite-wide autouse config mock so ``override_settings`` drives real config."""
-    yield
-
-
 DEFAULT_ONLY = {"default": {"librenms_url": "https://default.example.com", "api_token": "default-token"}}
 
 

@@ -9,25 +9,10 @@ from configuration through to server selection.
 
 import copy
 
-import pytest
 from django.conf import settings
 from django.test import override_settings
 
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-
-@pytest.fixture(autouse=True)
-def mock_librenms_config():
-    """Neutralize the suite-wide autouse mock from ``test_librenms_api_helpers``.
-
-    That helper (registered globally via ``pytest_plugins``) patches
-    ``netbox_librenms_plugin.librenms_api.get_plugin_config``, which would shadow the
-    real ``settings.PLUGINS_CONFIG`` lookups these tests drive through
-    ``override_settings``. Overriding the fixture here (same name, module scope) takes
-    precedence over the plugin's autouse one, so this module's tests run against the
-    real ``get_plugin_config``.
-    """
-    yield
 
 
 def _plugins_config_with_servers(servers):

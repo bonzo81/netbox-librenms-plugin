@@ -12,8 +12,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Import the autouse fixture from helpers
-pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
+from netbox_librenms_plugin.tests import test_librenms_api_helpers
+
+# Bind the helper's autouse fixture into this module so it patches the config here only.
+# `pytest_plugins` would register it session-wide and shadow PLUGINS_CONFIG for later tests.
+mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
 
 
 # ============================================

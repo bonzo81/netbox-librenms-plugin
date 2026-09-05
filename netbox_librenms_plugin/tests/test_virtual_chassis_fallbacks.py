@@ -115,9 +115,11 @@ class TestStackDetectionCarriesItsMembers:
         from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
 
         _seed_stack(librenms_server, 900, serials=("SN-ONLY",))
-        api = _api(settings, librenms_server, "default")
+        api = _api(settings, librenms_server, "vc_single_child")
 
         assert detect_virtual_chassis_from_inventory(api, 900) is None
+        # The negative must come from the one child chassis, not from an unreachable server.
+        assert _inventory_paths(librenms_server, 900)
 
     def test_a_detected_stack_carries_one_member_per_child_chassis(self, settings, librenms_server):
         """is_stack is only ever returned with the full member list behind it."""

@@ -18,6 +18,31 @@ from netbox_librenms_plugin.tests.parallel import (
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def test_no_test_module_registers_a_session_wide_plugin():
+    """``pytest_plugins`` in a test module registers that plugin for the whole session.
+
+    Any autouse fixture it carries then applies to every test file collected after it. A
+    helper's config mock reached the virtual-chassis tests that way and pinned
+    PLUGINS_CONFIG to a default-only server map, which only failed in a full-suite run.
+    """
+    import ast
+
+    tests_directory = Path(__file__).parent
+    offenders = []
+    for path in sorted(tests_directory.rglob("test_*.py")):
+        for node in ast.parse(path.read_text()).body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if any(isinstance(target, ast.Name) and target.id == "pytest_plugins" for target in node.targets):
+                offenders.append(f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}")
+
+    assert offenders == [], (
+        "pytest_plugins registers a plugin session-wide. Bind the fixture into the module "
+        "instead, e.g. `mock_librenms_config = test_librenms_api_helpers.mock_librenms_config`. "
+        f"Found: {', '.join(offenders)}"
+    )
+
+
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
     """Assign one PostgreSQL database and two Redis databases to a worker."""
     assert isolated_test_database_name("test_netbox_librenms", "gw3") == "test_netbox_librenms_gw3"

@@ -13,9 +13,7 @@ class TestLoadVcMemberNamePattern:
 
     @staticmethod
     def _real_settings_model():
-        # apps.get_model returns the REAL registered model even when the session-wide
-        # mock_librenms_config autouse has patched netbox_librenms_plugin.models.LibreNMSSettings to a
-        # MagicMock — so real rows can be persisted and read back.
+        """Return the registered LibreNMSSettings model, so real rows persist and read back."""
         from django.apps import apps
 
         return apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
@@ -24,13 +22,6 @@ class TestLoadVcMemberNamePattern:
         from netbox_librenms_plugin.import_utils.virtual_chassis import _load_vc_member_name_pattern
 
         return _load_vc_member_name_pattern()
-
-    def _call_real(self):
-        # The loader does a deferred `from ...models import LibreNMSSettings`, which reads the autouse
-        # mock in the full suite. Restore the real model for the duration of the call so it queries the
-        # row _store_pattern persisted (the whole point of the real-DB de-mock).
-        with patch("netbox_librenms_plugin.models.LibreNMSSettings", self._real_settings_model()):
-            return self._call()
 
     def _store_pattern(self, pattern):
         """Persist a single real LibreNMSSettings row carrying the given pattern."""
@@ -48,22 +39,22 @@ class TestLoadVcMemberNamePattern:
     def test_returns_valid_pattern(self):
         """A configured non-empty pattern is read back verbatim from the real settings row."""
         self._store_pattern("-SW{position}")
-        assert self._call_real() == "-SW{position}"
+        assert self._call() == "-SW{position}"
 
     def test_returns_default_for_empty_string(self):
         """An empty-string pattern in the real settings row falls back to the default."""
         self._store_pattern("")
-        assert self._call_real() == self.DEFAULT
+        assert self._call() == self.DEFAULT
 
     def test_returns_default_for_whitespace_only(self):
         """A whitespace-only pattern in the real settings row falls back to the default."""
         self._store_pattern("   ")
-        assert self._call_real() == self.DEFAULT
+        assert self._call() == self.DEFAULT
 
     def test_returns_default_when_no_settings(self):
         """With no settings row persisted, the loader falls back to the default."""
         self._real_settings_model().objects.all().delete()
-        assert self._call_real() == self.DEFAULT
+        assert self._call() == self.DEFAULT
 
     def test_returns_default_for_none_pattern(self):
         """A NULL pattern (unreachable via the NOT NULL CharField) falls back to the default."""

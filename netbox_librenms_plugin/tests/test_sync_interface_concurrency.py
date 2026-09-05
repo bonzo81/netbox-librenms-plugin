@@ -27,17 +27,6 @@ pytestmark = pytest.mark.django_db(
 
 
 @pytest.fixture(autouse=True)
-def mock_librenms_config():
-    """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
-
-    That mock pins ``get_plugin_config`` to a ``default``-only server map, so the ``stub`` key
-    these tests post becomes an unknown explicit key and the view fails closed before it reaches
-    the behaviour under test. Same-name module fixture wins over the plugin's autouse one.
-    """
-    yield
-
-
-@pytest.fixture(autouse=True)
 def restore_librenms_id_custom_field():
     """Recreate migration-seeded custom-field state after each TransactionTestCase flush."""
     from netbox_librenms_plugin import _ensure_librenms_id_custom_field
