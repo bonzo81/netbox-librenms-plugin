@@ -382,8 +382,22 @@ class TestSaveVLANGroupOverridesEndpoint:
         assert response.json()["message"] == "No cached port data; refresh interfaces first"
         assert cache.get(overrides_key) is None
 
-    def test_plugin_read_only_user_cannot_persist_overrides(self, client, live_librenms):
+    def test_a_user_without_plugin_view_is_denied_before_the_view_runs(self, client, live_librenms):
+        """LibreNMSPermissionMixin denies in dispatch(), so the view body never runs.
+
+        make_user_with_perms(plugin_write=False) grants neither plugin view nor plugin
+        change, and the mixin requires plugin view. The view's own
+        require_write_permission_json() gate is therefore NOT what answers here: that gate
+        is covered by test_vlan_verify_endpoints.TestSaveVlanGroupOverridesBranches, whose
+        user holds plugin view but not plugin change.
+        """
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
+
         device = make_device("save-vlan-overrides-denied", librenms_cf={SERVER_KEY: {"id": 153}})
+        overrides_key = SaveVlanGroupOverridesView().get_vlan_overrides_key(device, SERVER_KEY)
+        cache.delete(overrides_key)
         client.force_login(
             make_user_with_perms(
                 "save-vlan-overrides-denied-user",
@@ -399,6 +413,7 @@ class TestSaveVLANGroupOverridesEndpoint:
         )
 
         assert response.status_code == 403
+        assert cache.get(overrides_key) is None
 
 
 @pytest.mark.django_db
