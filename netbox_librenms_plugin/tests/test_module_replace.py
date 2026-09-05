@@ -80,6 +80,41 @@ class TestModuleMismatchPreviewView:
         ]
         return device, installed, request, view, inventory
 
+    def test_the_preview_shows_the_serial_without_the_vendor_marker(self):
+        """Juniper reports "S/N NS123"; the install path stores "NS123" through the serial rules.
+
+        Rendering the raw value beside the stored one reads as a mismatch against a module that
+        already agrees with its own inventory row.
+        """
+        device, _installed, request, view, inventory = self._setup(
+            "marker", installed_serial="NS123", serial="S/N NS123"
+        )
+        cache_key = _cache_inventory(view, device, inventory)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert "S/N NS123" not in html
+        assert "NS123" in html
+        # The reported symptom: the row read as a serial mismatch against itself.
+        assert "Only the serial differs" not in html
+
+    def test_the_preview_refuses_an_oob_sourced_row(self):
+        """OOB-controller inventory is read-only, so the dialog that leads to Replace must refuse it."""
+        device, _installed, request, view, inventory = self._setup("oob")
+        inventory[0]["_source"] = "oob"
+        cache_key = _cache_inventory(view, device, inventory)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 400
+        assert b"read-only" in response.content
+
     @pytest.mark.parametrize(
         "query",
         [
@@ -224,6 +259,57 @@ class TestReplaceModuleView:
         )
         view = _view(ReplaceModuleView, request)
         return Module, device, old_type, new_type, bay, installed, request, view, inventory
+
+    def test_the_replacement_stores_the_serial_without_the_vendor_marker(self):
+        """The stored serial must match what the install path writes for the same inventory row."""
+        Module, device, _old_type, _new_type, bay, _installed, request, view, inventory = self._setup(
+            "marker", new_serial="S/N NS123"
+        )
+        cache_key = _cache_inventory(view, device, inventory)
+        try:
+            response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+
+    def test_a_rule_that_leaves_padding_still_stores_a_clean_serial(self):
+        """A serial rule is operator-written, so it can drop a prefix and leave the space behind."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_SERIAL,
+            match_pattern=r"^S/N(.+)$",
+            replacement=r"\1",
+            priority=100,
+        )
+        Module, device, _old_type, _new_type, bay, _installed, request, view, inventory = self._setup(
+            "padded", new_serial="S/N NS123"
+        )
+        cache_key = _cache_inventory(view, device, inventory)
+        try:
+            view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+
+    def test_an_oob_sourced_row_cannot_replace_a_host_module(self):
+        """A crafted POST naming an OOB row's index deleted the real module and installed the OOB row."""
+        Module, device, old_type, _new_type, bay, installed, request, view, inventory = self._setup("oob")
+        inventory[0]["_source"] = "oob"
+        cache_key = _cache_inventory(view, device, inventory)
+        try:
+            view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        installed.refresh_from_db()
+        assert installed.module_type == old_type
+        assert Module.objects.filter(device=device, module_bay=bay).count() == 1
+        assert any("read-only" in text for text in message_texts(request))
 
     def test_invalid_parameters_and_missing_cache_redirect_with_errors(self):
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
