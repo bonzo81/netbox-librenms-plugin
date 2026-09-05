@@ -3274,7 +3274,7 @@ class TestParentRowIdxVsEntityIndex:
                                         with patch.object(view, "_build_row", side_effect=fake_build_row):
                                             with patch.object(view, "get_table", side_effect=fake_get_table):
                                                 with patch.object(
-                                                    view, "_sort_with_hierarchy", side_effect=lambda x: x
+                                                    view, "_group_children_under_parents", side_effect=lambda x: x
                                                 ):
                                                     with patch(
                                                         "netbox_librenms_plugin.views.base.modules_view.cache"
