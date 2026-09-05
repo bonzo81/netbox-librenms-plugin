@@ -456,18 +456,21 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     SCOPE_MODULE_TYPE = "module_type"
     SCOPE_DEVICE_TYPE = "device_type"
     SCOPE_MODULE_BAY = "module_bay"
+    SCOPE_SERIAL = "serial"
 
     SCOPE_CHOICES = [
         (SCOPE_MODULE_TYPE, "Module Type"),
         (SCOPE_DEVICE_TYPE, "Device Type"),
         (SCOPE_MODULE_BAY, "Module Bay"),
+        (SCOPE_SERIAL, "Serial"),
     ]
 
     scope = models.CharField(
         max_length=50,
         choices=SCOPE_CHOICES,
         db_index=True,
-        help_text="Which matching lookup this rule applies to",
+        help_text="Which lookup this rule applies to. Serial rules rewrite the stored "
+        "serial rather than a matching key.",
     )
     manufacturer = models.ForeignKey(
         Manufacturer,
@@ -568,9 +571,11 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     # --- action ---
     ACTION_SKIP = "skip"
     ACTION_TRANSPARENT = "transparent"
+    ACTION_INCLUDE = "include"
     ACTION_CHOICES = [
         (ACTION_SKIP, "Skip (remove from table)"),
         (ACTION_TRANSPARENT, "Transparent (hide row, promote children to device level)"),
+        (ACTION_INCLUDE, "Include (admit an entPhysicalClass the built-in list omits)"),
     ]
 
     # --- match_type ---
@@ -579,6 +584,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     MATCH_CONTAINS = "contains"
     MATCH_REGEX = "regex"
     MATCH_SERIAL_DEVICE = "serial_matches_device"
+    MATCH_CLASS_IS = "class_is"
 
     MATCH_TYPE_CHOICES = [
         (MATCH_ENDS_WITH, "Ends with (entPhysicalName)"),
@@ -586,6 +592,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         (MATCH_CONTAINS, "Contains (entPhysicalName)"),
         (MATCH_REGEX, "Regex (entPhysicalName)"),
         (MATCH_SERIAL_DEVICE, "Serial matches device (entPhysicalSerialNum = Device.serial)"),
+        (MATCH_CLASS_IS, "Class is (entPhysicalClass)"),
     ]
 
     name = models.CharField(
@@ -639,6 +646,13 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             validate_regex_field(pattern_stripped, "pattern")
         if self.match_type != self.MATCH_SERIAL_DEVICE and not pattern_stripped:
             raise ValidationError({"pattern": "Pattern is required for name-based match types."})
+        if (self.action == self.ACTION_INCLUDE) != (self.match_type == self.MATCH_CLASS_IS):
+            raise ValidationError(
+                {
+                    "action": "The include action admits an entPhysicalClass, so it pairs only "
+                    "with the class_is match type, and class_is has no other use."
+                }
+            )
         # Normalize stored pattern to the stripped form so matches_name() and
         # clean() always operate on the same string.
         self.pattern = pattern_stripped
@@ -652,6 +666,12 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             return re.compile(self.pattern)
         except re.error:
             return None
+
+    def matches_class(self, phys_class: str) -> bool:
+        """Return True when this rule admits *phys_class* (class_is rules only)."""
+        if self.match_type != self.MATCH_CLASS_IS or not self.pattern:
+            return False
+        return self.pattern.strip().casefold() == (phys_class or "").strip().casefold()
 
     def matches_name(self, name: str) -> bool:
         """Return True if *name* matches this rule's pattern/match_type (name-based rules only)."""

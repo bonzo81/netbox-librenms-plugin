@@ -1554,10 +1554,31 @@ def normalize_serial(value) -> str:
     real-but-falsey serial ``0``. Call sites keep their own ``"-"`` placeholder
     guards.
 
+    A vendor marker such as Juniper's leading "S/N " is removed by a NormalizationRule
+    in the ``serial`` scope, so the operator can see and edit the transformation.
+
     Args:
         value: The raw serial as returned by LibreNMS (str, number, or None).
     """
     return "" if value is None else str(value).strip()
+
+
+def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -> str:
+    """Trim a LibreNMS serial, then apply the serial-scope NormalizationRule chain.
+
+    Vendors decorate the ENTITY-MIB serial: Juniper reports "S/N BCFB9793". Keeping that
+    transformation in a rule shows the operator why a stored serial differs from the raw
+    inventory, and lets them add the next vendor without a release. Callers keep their own
+    placeholder guards, as ``normalize_serial`` does.
+    """
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    serial = normalize_serial(value)
+    if not serial:
+        return serial
+    return apply_normalization_rules(
+        serial, NormalizationRule.SCOPE_SERIAL, manufacturer=manufacturer, preloaded_rules=preloaded_rules
+    )
 
 
 def coerce_librenms_id(value) -> int | None:

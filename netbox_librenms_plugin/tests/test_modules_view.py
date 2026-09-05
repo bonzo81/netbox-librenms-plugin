@@ -39,6 +39,131 @@ def _captured_table_view(view):
     return rows_store
 
 
+@pytest.mark.django_db
+class TestInventoryClassIncludeRule:
+    """Admit an entPhysicalClass the built-in allowlist does not carry.
+
+    A Juniper MX304 reports both Routing Engines with entPhysicalClass "other".
+    INVENTORY_CLASSES has no "other", so the modules tab showed neither of them.
+    """
+
+    def _inventory(self):
+        """A chassis with the two Routing Engines under it, as LibreNMS reports them."""
+        return [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalClass": "chassis",
+                "entPhysicalName": "Chassis",
+                "entPhysicalDescr": "MX304",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 38,
+                "entPhysicalClass": "other",
+                "entPhysicalName": "JNP304-RE-S",
+                "entPhysicalModelName": "JNP304-RE-S",
+                "entPhysicalDescr": "Routing Engine 0",
+                "entPhysicalSerialNum": "S/N BCFB9793",
+                "entPhysicalContainedIn": 1,
+            },
+            {
+                "entPhysicalIndex": 39,
+                "entPhysicalClass": "other",
+                "entPhysicalName": "JNP304-RE-S",
+                "entPhysicalModelName": "JNP304-RE-S",
+                "entPhysicalDescr": "Routing Engine 1",
+                "entPhysicalSerialNum": "S/N BCFB9751",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+
+    def _collect(self, items, rules):
+        """Collect top-level rows the way _build_context does, cache included."""
+        from netbox_librenms_plugin.views.base.modules_view import (
+            BaseModuleTableView,
+            _check_ignore_rules,
+        )
+
+        index_map = {item["entPhysicalIndex"]: item for item in items}
+        # _collect_top_items reads this cache for any item carrying an index, so a test that
+        # passed {} would report that no rule ever matched.
+        ignore_cache = {
+            item["entPhysicalIndex"]: _check_ignore_rules(
+                item, index_map.get(item.get("entPhysicalContainedIn")), rules, index_map, ""
+            )
+            for item in items
+        }
+        transparent = BaseModuleTableView._find_transparent_indices(items, ignore_cache)
+        return BaseModuleTableView._collect_top_items(items, index_map, rules, "", transparent, ignore_cache)
+
+    def _include_rule(self, pattern="other"):
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        return InventoryIgnoreRule.objects.create(
+            name="Routing engines reported as other",
+            match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
+            pattern=pattern,
+            action=InventoryIgnoreRule.ACTION_INCLUDE,
+            require_serial_match_parent=False,
+        )
+
+    def test_without_a_rule_the_class_is_dropped(self):
+        """The built-in allowlist still governs when no rule says otherwise."""
+        assert self._collect(self._inventory(), []) == []
+
+    def test_an_include_rule_admits_every_item_of_that_class(self):
+        collected = self._collect(self._inventory(), [self._include_rule()])
+
+        assert [item["entPhysicalIndex"] for item in collected] == [38, 39]
+
+    def test_a_rule_for_another_class_admits_nothing(self):
+        assert self._collect(self._inventory(), [self._include_rule(pattern="sensor")]) == []
+
+    def test_the_class_match_is_case_insensitive(self):
+        collected = self._collect(self._inventory(), [self._include_rule(pattern="Other")])
+
+        assert [item["entPhysicalIndex"] for item in collected] == [38, 39]
+
+    def test_the_migration_seeds_the_rule_that_admits_routing_engines(self):
+        """The fix ships working: a fresh install admits the class without operator setup."""
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        seeded = InventoryIgnoreRule.objects.filter(
+            match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
+            action=InventoryIgnoreRule.ACTION_INCLUDE,
+            pattern="other",
+        )
+
+        assert seeded.exists()
+        assert seeded.get().enabled is True
+
+    def test_the_row_name_falls_back_to_the_description(self):
+        """Both Routing Engines report entPhysicalName "JNP304-RE-S", so the name cannot
+        tell them apart. The description carries "Routing Engine 0" and "1"."""
+        collected = self._collect(self._inventory(), [self._include_rule()])
+        view = _make_view()
+        names = [
+            view._build_row(item, {item["entPhysicalIndex"]: item for item in collected}, {}, {})["name"]
+            for item in collected
+        ]
+
+        assert names == ["Routing Engine 0", "Routing Engine 1"]
+
+    def test_a_skip_rule_still_wins_over_the_allowlist_admission(self):
+        """An operator must still be able to drop an item the include rule let through."""
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        skip = InventoryIgnoreRule.objects.create(
+            name="Drop RE 1",
+            match_type=InventoryIgnoreRule.MATCH_CONTAINS,
+            pattern="JNP304-RE-S",
+            action=InventoryIgnoreRule.ACTION_SKIP,
+            require_serial_match_parent=False,
+        )
+
+        assert self._collect(self._inventory(), [self._include_rule(), skip]) == []
+
+
 class TestRowOrderIsStableAcrossAnInstall:
     """Installing a module must not move its row.
 
