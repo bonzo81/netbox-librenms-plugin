@@ -3513,9 +3513,8 @@ function xhrErrorMessage(xhr) {
 }
 
 // HTMX never swaps a 4xx/5xx answer, so a failed modal fetch would leave the modal closed and silent.
-document.body.addEventListener('htmx:responseError', function (event) {
+function showHtmxModalError(message) {
     const modalContent = document.getElementById('htmx-modal-content');
-    if (!modalContent || event.detail.target !== modalContent) return;
 
     const header = document.createElement('div');
     header.className = 'modal-header';
@@ -3537,13 +3536,36 @@ document.body.addEventListener('htmx:responseError', function (event) {
     const icon = document.createElement('i');
     icon.className = 'mdi mdi-alert me-1';
     alert.appendChild(icon);
-    alert.appendChild(document.createTextNode(xhrErrorMessage(event.detail.xhr)));
+    alert.appendChild(document.createTextNode(message));
     body.appendChild(alert);
 
     modalContent.textContent = '';
     modalContent.appendChild(header);
     modalContent.appendChild(body);
     showModal(document.getElementById('htmx-modal'));
+}
+
+function htmxModalErrorTarget(event) {
+    const modalContent = document.getElementById('htmx-modal-content');
+    return modalContent && event.detail.target === modalContent ? modalContent : null;
+}
+
+document.body.addEventListener('htmx:responseError', function (event) {
+    if (!htmxModalErrorTarget(event)) return;
+    showHtmxModalError(xhrErrorMessage(event.detail.xhr));
+});
+
+// A request that never reaches the server (DNS, TLS, a redirect loop, a dropped connection) raises
+// sendError or timeout instead of responseError. Without these the click leaves no modal and no
+// message, so the button reads as dead.
+document.body.addEventListener('htmx:sendError', function (event) {
+    if (!htmxModalErrorTarget(event)) return;
+    showHtmxModalError('Could not reach the server. The request failed before any response arrived.');
+});
+
+document.body.addEventListener('htmx:timeout', function (event) {
+    if (!htmxModalErrorTarget(event)) return;
+    showHtmxModalError('The request timed out before the server answered.');
 });
 
 // Event delegation for LAG and parent interface sync buttons.

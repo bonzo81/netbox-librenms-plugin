@@ -134,6 +134,24 @@ def test_a_failed_preview_is_reported_inside_the_modal(page):
     assert "No cached inventory data" in page.locator("#htmx-modal-content .alert-danger").inner_text()
 
 
+def test_a_preview_that_never_reaches_the_server_is_reported_too(page):
+    """A transport-level failure fires htmx:sendError, not htmx:responseError.
+
+    Without a listener for it the click produces no request, no modal and no message, which reads
+    to the user as a dead button.
+    """
+    page.set_content(_module_page_html(REPLACE_BUTTON))
+    page.route(f"{PREVIEW_URL}?*", lambda route: route.abort())
+    _add_page_scripts(page)
+
+    page.click("#replace-btn")
+    page.wait_for_selector("#htmx-modal-content .alert-danger")
+
+    assert page.locator("#htmx-modal").is_visible()
+    # The button must not stay stuck in its in-flight disabled state either.
+    assert page.locator("#replace-btn").is_enabled()
+
+
 def test_a_second_row_action_is_dropped_while_the_first_is_in_flight(page):
     """A second action's response could not retarget from its detached form, so its write never showed."""
     page.set_content(_module_page_html(_row_form(INSTALL_URL, "action-a") + _row_form(SERIAL_URL, "action-b")))
