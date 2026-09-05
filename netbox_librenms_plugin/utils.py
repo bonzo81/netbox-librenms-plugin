@@ -122,17 +122,19 @@ def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
     return speed_bps // 1000
 
 
-def format_mac_address(mac_address: str) -> str:
+def format_mac_address(mac_address: object) -> str:
     """
     Validate and format MAC address string for table display.
 
     Args:
-        mac_address (str): The MAC address string to format.
+        mac_address (object): The raw LibreNMS ifPhysAddress value to format.
 
     Returns:
         str: The MAC address formatted as XX:XX:XX:XX:XX:XX.
     """
-    if not mac_address:
+    # A device can report ifPhysAddress as an int or a list, so a truthy value is not
+    # necessarily a string. Treat any non-string as absent, like the interface view does.
+    if not isinstance(mac_address, str) or not mac_address:
         return ""
 
     mac_address = mac_address.strip().replace(":", "").replace("-", "")
