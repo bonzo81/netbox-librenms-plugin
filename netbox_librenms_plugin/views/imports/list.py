@@ -13,6 +13,7 @@ from netbox_librenms_plugin.import_utils import (
     get_active_cached_searches,
     process_device_filters,
 )
+from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import get_user_pref
@@ -430,18 +431,22 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         show_disabled = bool(data_source.get("show_disabled"))
         exclude_existing = bool(data_source.get("exclude_existing"))
 
-        validated_devices, from_cache = process_device_filters(
-            api=self.librenms_api,
-            filters=libre_filters,
-            vc_detection_enabled=vc_detection_enabled,
-            clear_cache=clear_cache,
-            show_disabled=show_disabled,
-            exclude_existing=exclude_existing,
-            request=self._request,
-            return_cache_status=True,
-            use_sysname=self._use_sysname,
-            strip_domain=self._strip_domain,
-        )
+        try:
+            validated_devices, from_cache = process_device_filters(
+                api=self.librenms_api,
+                filters=libre_filters,
+                vc_detection_enabled=vc_detection_enabled,
+                clear_cache=clear_cache,
+                show_disabled=show_disabled,
+                exclude_existing=exclude_existing,
+                return_cache_status=True,
+                use_sysname=self._use_sysname,
+                strip_domain=self._strip_domain,
+            )
+        except LibreNMSUnreachable as exc:
+            # Show the reason instead of an empty table, which reads as "nothing matched".
+            messages.error(self._request, f"Could not reach LibreNMS: {exc}")
+            return []
 
         self._from_cache = from_cache
 

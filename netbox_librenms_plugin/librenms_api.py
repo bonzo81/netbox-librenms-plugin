@@ -41,6 +41,14 @@ def build_librenms_api(server_key):
         return None
 
 
+class LibreNMSUnreachable(Exception):
+    """The LibreNMS server did not answer, so a run that needs it cannot continue.
+
+    Raised by the bulk-import pre-flight. The message carries the reason
+    test_connection() reported, so a caller can show it verbatim.
+    """
+
+
 class LibreNMSAPI:
     """
     Client to interact with the LibreNMS API and retrieve interface data for devices.
