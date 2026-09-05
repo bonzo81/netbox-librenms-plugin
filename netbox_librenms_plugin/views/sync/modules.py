@@ -2023,9 +2023,11 @@ class ModuleMismatchPreviewView(
 
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         librenms_model = normalize_serial(librenms_item.get("entPhysicalModelName")) or "-"
-        # Coerced, not rule-normalized: applying the serial rules here needs the develop-owned
-        # test_module_replace mock narrowed first, and that file is outside this PR's diff.
-        librenms_serial = normalize_serial(librenms_item.get("entPhysicalSerialNum"))
+        # The preview sits beside the stored module serial, which the install path writes through
+        # this same normalization, so the raw inventory value would read as a mismatch.
+        librenms_serial = normalize_inventory_serial(
+            librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer
+        )
         if librenms_serial.lower() in _PLACEHOLDER_VALUES:
             librenms_serial = ""
 
@@ -2218,7 +2220,9 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
-        serial = normalize_serial(librenms_item.get("entPhysicalSerialNum"))
+        # The replacement is stored and matched against serials the install path already
+        # normalized, so a raw vendor marker here would never match either.
+        serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
 

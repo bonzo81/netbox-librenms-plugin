@@ -90,18 +90,27 @@ def _seeded_sap_rows():
     yield PortStackLagPattern, "librenms_os", "sap_name_pattern", sap.INITIAL_SAP_PATTERNS
 
 
-def _seeded_inventory_rules():
-    """Read the inventory and serial seeds from their migration's definitions."""
+def _seeded_rule_rows():
+    """Yield ``(model, lookup, defaults)`` for every rule row the data migrations seed.
+
+    Kept apart from :func:`_seeded_model_rows` because these rows are identified by a
+    composite lookup rather than one field. The values are read from the migrations so the
+    restore cannot drift from what they seed.
+    """
     import importlib
 
     from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
 
-    migration = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
-    yield InventoryIgnoreRule, {"name": migration.DEFAULT_RULE["name"]}, migration.DEFAULT_RULE
+    inventory = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    for rule in inventory.INITIAL_INVENTORY_IGNORE_RULES:
+        yield InventoryIgnoreRule, {"name": rule["name"]}, rule
+
+    rules = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+    yield InventoryIgnoreRule, {"name": rules.DEFAULT_RULE["name"]}, rules.DEFAULT_RULE
     yield (
         NormalizationRule,
-        {key: migration.SERIAL_RULE[key] for key in ("scope", "match_pattern")},
-        migration.SERIAL_RULE,
+        {"scope": rules.SERIAL_RULE["scope"], "match_pattern": rules.SERIAL_RULE["match_pattern"]},
+        rules.SERIAL_RULE,
     )
 
 
@@ -118,8 +127,8 @@ def seed_migration_rows():
         for lookup, value in rows:
             model.objects.filter(**{lookup_field: lookup}).update(**{value_field: value})
 
-    for model, lookup, defaults in _seeded_inventory_rules():
-        model.objects.get_or_create(**lookup, defaults=defaults)
+    for model, lookup, defaults in _seeded_rule_rows():
+        model.objects.update_or_create(**lookup, defaults=defaults)
 
 
 _transactional_seed_restore_required = False
@@ -147,6 +156,10 @@ def _seeds_are_intact():
     for model, lookup_field, value_field, rows in chain(_seeded_model_rows(), _seeded_sap_rows()):
         stored = set(model.objects.values_list(lookup_field, value_field))
         if not stored.issuperset(rows):
+            return False
+
+    for model, _lookup, defaults in _seeded_rule_rows():
+        if not model.objects.filter(**defaults).exists():
             return False
 
     custom_field = CustomField.objects.filter(name="librenms_id", type="json").first()

@@ -14,6 +14,7 @@ from django.test import override_settings
 
 from netbox_librenms_plugin.tests.conftest import (
     _seeded_model_rows,
+    _seeded_rule_rows,
     _seeded_sap_rows,
     restore_seeded_state,
 )
@@ -432,6 +433,24 @@ def test_a_changed_seed_value_is_restored_even_though_its_lookup_key_survived():
     for model, lookup_field, value_field, rows in _seeded_model_rows():
         stored = set(model.objects.values_list(lookup_field, value_field))
         assert stored.issuperset(rows)
+
+
+@pytest.mark.django_db
+def test_a_flushed_rule_row_is_restored_and_not_reported_as_intact():
+    """Migration 0017's rules are seeded state too.
+
+    Without them a transactional flush disarms the "S/N " serial strip and the routing-engine
+    include rule for every test that follows, which only shows up in a full-suite run.
+    """
+    # Several rules share a model, so flush each model once rather than once per rule.
+    for model in {model for model, _lookup, _defaults in _seeded_rule_rows()}:
+        removed, _details = model.objects.all().delete()
+        assert removed, f"{model.__name__} had no seeded row to remove"
+
+    assert restore_seeded_state(force=False) is True
+
+    for model, _lookup, defaults in _seeded_rule_rows():
+        assert model.objects.filter(**defaults).exists()
 
 
 @pytest.mark.django_db

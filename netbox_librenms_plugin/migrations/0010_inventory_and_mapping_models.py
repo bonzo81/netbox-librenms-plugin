@@ -27,18 +27,17 @@ import utilities.json
 from django.db import migrations, models
 
 
-def _insert_default_inventory_ignore_rules(apps, schema_editor):
-    """Seed the two InventoryIgnoreRules the modules sync expects out of the box."""
-    db_alias = schema_editor.connection.alias
-    InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
-    InventoryIgnoreRule.objects.using(db_alias).create(
-        name="Cisco IOS-XR IDPROM entries",
-        match_type="ends_with",
-        pattern="IDPROM",
-        action="skip",
-        require_serial_match_parent=True,
-        enabled=True,
-        description=(
+# Named at module level so the test-suite seed restore reads the same declared values this
+# migration inserts, rather than a second copy that can drift from them.
+INITIAL_INVENTORY_IGNORE_RULES = (
+    {
+        "name": "Cisco IOS-XR IDPROM entries",
+        "match_type": "ends_with",
+        "pattern": "IDPROM",
+        "action": "skip",
+        "require_serial_match_parent": True,
+        "enabled": True,
+        "description": (
             "Cisco IOS-XR reports every hardware component's EEPROM as a child entity "
             'whose entPhysicalName ends in "IDPROM". These entries duplicate the parent '
             "module's serial number and are not real installable modules. "
@@ -46,22 +45,31 @@ def _insert_default_inventory_ignore_rules(apps, schema_editor):
             'a module whose name happens to end in "IDPROM" but has a different serial '
             "will not be filtered."
         ),
-    )
-    InventoryIgnoreRule.objects.using(db_alias).create(
-        name="Embedded RP / fixed-chassis system board",
-        match_type="serial_matches_device",
-        pattern="",
-        action="transparent",
-        require_serial_match_parent=False,
-        enabled=True,
-        description=(
+    },
+    {
+        "name": "Embedded RP / fixed-chassis system board",
+        "match_type": "serial_matches_device",
+        "pattern": "",
+        "action": "transparent",
+        "require_serial_match_parent": False,
+        "enabled": True,
+        "description": (
             "Fixed-form routers report the built-in RP as an ENTITY-MIB module whose "
             "serial number equals the device's own serial. Marking it transparent hides "
             "the RP row in the sync table while promoting its children (transceivers, "
             "fans, PSUs) to device-level bay matching. No pattern is needed \u2014 detection "
             "is purely serial-based."
         ),
-    )
+    },
+)
+
+
+def _insert_default_inventory_ignore_rules(apps, schema_editor):
+    """Seed the two InventoryIgnoreRules the modules sync expects out of the box."""
+    db_alias = schema_editor.connection.alias
+    InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
+    for rule in INITIAL_INVENTORY_IGNORE_RULES:
+        InventoryIgnoreRule.objects.using(db_alias).create(**rule)
 
 
 def _delete_default_inventory_ignore_rules(apps, schema_editor):
@@ -74,23 +82,10 @@ def _delete_default_inventory_ignore_rules(apps, schema_editor):
     """
     db_alias = schema_editor.connection.alias
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
-    seeded = (
-        {
-            "name": "Cisco IOS-XR IDPROM entries",
-            "match_type": "ends_with",
-            "pattern": "IDPROM",
-            "action": "skip",
-            "require_serial_match_parent": True,
-        },
-        {
-            "name": "Embedded RP / fixed-chassis system board",
-            "match_type": "serial_matches_device",
-            "pattern": "",
-            "action": "transparent",
-            "require_serial_match_parent": False,
-        },
-    )
-    for signature in seeded:
+    # Everything but the free-text fields, which an operator may have edited in place.
+    signature_fields = ("name", "match_type", "pattern", "action", "require_serial_match_parent")
+    for rule in INITIAL_INVENTORY_IGNORE_RULES:
+        signature = {field: rule[field] for field in signature_fields}
         InventoryIgnoreRule.objects.using(db_alias).filter(**signature).delete()
 
 

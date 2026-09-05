@@ -1926,9 +1926,11 @@ def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -
     serial = normalize_serial(value)
     if not serial:
         return serial
+    # Strip again: a rule that drops a prefix without its trailing space leaves the stored
+    # serial padded, which reads as a mismatch against the same serial normalized elsewhere.
     return apply_normalization_rules(
         serial, NormalizationRule.SCOPE_SERIAL, manufacturer=manufacturer, preloaded_rules=preloaded_rules
-    )
+    ).strip()
 
 
 def coerce_librenms_id(value) -> int | None:
