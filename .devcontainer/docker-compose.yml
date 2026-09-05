@@ -82,6 +82,9 @@ services:
 
   postgres:
     image: postgres:15
+    # Parallel pytest workers exhaust Docker's 64MB default /dev/shm, which makes
+    # PostgreSQL drop shared memory segments mid-run and errors whole test files.
+    shm_size: 1gb
     environment:
       POSTGRES_DB: ${DB_NAME:-netbox}
       POSTGRES_USER: ${DB_USER:-netbox}
