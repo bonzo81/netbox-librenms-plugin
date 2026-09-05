@@ -683,7 +683,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         )
 
         # Sort top-level groups by status, keeping children after their parent
-        table_data = self._sort_with_hierarchy(table_data)
+        table_data = self._group_children_under_parents(table_data)
 
         # Bulk-detect serial conflicts for rows that can be replaced/installed
         self._detect_serial_conflicts(table_data)
@@ -1782,18 +1782,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     device_serial=device_serial,
                 )
 
-    def _sort_with_hierarchy(self, table_data):
-        """Sort table keeping children grouped under their parent."""
-        status_order = {
-            "Installed": 0,
-            "Serial Mismatch": 1,
-            "Type Mismatch": 2,
-            "Matched": 3,
-            "No Type": 4,
-            "No Bay": 5,
-            "Unmatched": 6,
-        }
+    def _group_children_under_parents(self, table_data):
+        """Keep every child row directly under its own top-level row, in inventory order.
 
+        The order is the LibreNMS inventory order the rows arrive in. Rows were once ordered
+        by status, which moved a row up the table the moment an install changed its status.
+        """
         # Group into top-level items with their children
         groups = []
         current_group = None
@@ -1803,9 +1797,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 groups.append(current_group)
             elif current_group is not None:
                 current_group["children"].append(row)
-
-        # Sort groups by parent status
-        groups.sort(key=lambda g: status_order.get(g["parent"]["status"], 99))
 
         # Flatten back
         result = []

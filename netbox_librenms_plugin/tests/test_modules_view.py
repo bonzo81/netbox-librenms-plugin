@@ -39,6 +39,54 @@ def _captured_table_view(view):
     return rows_store
 
 
+class TestRowOrderIsStableAcrossAnInstall:
+    """Installing a module must not move its row.
+
+    The rows used to be grouped by status, and installing a module flips its status to
+    "Installed", which pulled the row to the top of the table under the user.
+    """
+
+    def _rows(self, *statuses):
+        """One top-level row per status, each carrying a child, in inventory order."""
+        rows = []
+        for index, status in enumerate(statuses):
+            rows.append({"name": f"bay{index}", "status": status, "depth": 0})
+            rows.append({"name": f"bay{index}-child", "status": "Unmatched", "depth": 1})
+        return rows
+
+    def test_rows_keep_their_inventory_order(self):
+        view = _make_view()
+        rows = self._rows("Unmatched", "Matched", "Installed", "Serial Mismatch")
+
+        assert [row["name"] for row in view._group_children_under_parents(rows)] == [row["name"] for row in rows]
+
+    def test_installing_a_module_does_not_move_its_row(self):
+        """The same table before and after one bay's status becomes Installed."""
+        view = _make_view()
+        # Statuses chosen so the old status sort genuinely reordered them: installing bay1
+        # moved it from last to second.
+        before = self._rows("Installed", "Unmatched", "Matched")
+        after = self._rows("Installed", "Installed", "Matched")
+
+        order_before = [row["name"] for row in view._group_children_under_parents(before)]
+        order_after = [row["name"] for row in view._group_children_under_parents(after)]
+
+        assert order_before == order_after
+
+    def test_children_stay_under_their_own_parent(self):
+        view = _make_view()
+        rows = self._rows("Installed", "Unmatched")
+
+        result = view._group_children_under_parents(rows)
+
+        assert [(row["name"], row["depth"]) for row in result] == [
+            ("bay0", 0),
+            ("bay0-child", 1),
+            ("bay1", 0),
+            ("bay1-child", 1),
+        ]
+
+
 @pytest.mark.django_db
 class TestFpcSlotMatchesOnSlashedPositions:
     """A Juniper module bay position is "fpc/pic", so the guard must read the FPC from it.
@@ -92,6 +140,20 @@ class TestFpcSlotMatchesOnSlashedPositions:
 
         assert BaseModuleTableView._fpc_slot_matches("QSFP @ 2/0/1", bay) is True
         assert BaseModuleTableView._fpc_slot_matches("QSFP @ 3/0/1", bay) is False
+
+    @pytest.mark.parametrize("position", ["01A", "02A", "03D", "PCIe1", "swp3", "FPC1", "PSU0"])
+    def test_a_digit_bearing_but_non_numeric_position_fails_closed(self, position):
+        """These are real bay positions, and none of them names an FPC.
+
+        A fix that pulled the leading digits out of "01A" would read FPC 1 and match a
+        descriptor for a different slot. Only a wholly numeric component counts.
+        """
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay(position)
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 0/0/1", bay) is False
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 1/0/1", bay) is False
 
     @pytest.mark.parametrize(
         "position",
