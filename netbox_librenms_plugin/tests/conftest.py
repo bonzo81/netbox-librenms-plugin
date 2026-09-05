@@ -297,6 +297,44 @@ def make_ip(address, *, assigned_object=None, status="active"):
     return IPAddress.objects.create(address=address, assigned_object=assigned_object, status=status)
 
 
+def configure_librenms_servers(settings, servers):
+    """Replace the plugin's configured LibreNMS servers with *servers*."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = deepcopy(servers)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+def configure_default_librenms_server(settings):
+    """Configure one LibreNMS server under the key ``default`` and return that key."""
+    configure_librenms_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    return "default"
+
+
+def configure_no_librenms_servers(settings):
+    """Leave the plugin without any server ``LibreNMSAPI()`` can bind."""
+    from copy import deepcopy
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["servers"] = {}
+    plugin_settings.pop("librenms_url", None)
+    plugin_settings.pop("api_token", None)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+@pytest.fixture
+def librenms_server(monkeypatch):
+    """A real loopback HTTP LibreNMS whose responses the test registers."""
+    from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        yield server
+
+
 def make_module_type(model, *, manufacturer=None):
     """Create a real ModuleType (on the shared TestMfr unless one is supplied)."""
     from dcim.models import ModuleType
