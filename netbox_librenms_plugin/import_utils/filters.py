@@ -7,7 +7,7 @@ from django.core.cache import cache
 
 from .cache import get_import_search_cache_key
 
-from ..librenms_api import LibreNMSAPI
+from ..librenms_api import LibreNMSAPI, LibreNMSUnreachable
 
 logger = logging.getLogger(__name__)
 
@@ -207,10 +207,19 @@ def get_librenms_devices_for_import(
         cache_key = get_import_search_cache_key(api.server_key, api_filters, client_filters)
         from_cache = False
 
+        # The cache is an optimization here. A backend outage must degrade to a miss, never
+        # to an empty device list that reads as "no devices match your filter".
         if force_refresh:
-            cache.delete(cache_key)
+            try:
+                cache.delete(cache_key)
+            except Exception:
+                logger.warning("Import device cache delete failed; fetching fresh", exc_info=True)
         else:
-            cached_result = cache.get(cache_key)
+            try:
+                cached_result = cache.get(cache_key)
+            except Exception:
+                logger.warning("Import device cache read failed; fetching fresh", exc_info=True)
+                cached_result = None
             if cached_result is not None:
                 # No need to deepcopy - cached data isn't mutated
                 devices = cached_result
@@ -222,12 +231,9 @@ def get_librenms_devices_for_import(
         success, devices = api.list_devices(api_filters if api_filters else None)
 
         if not success:
-            logger.error(f"Failed to retrieve devices from LibreNMS: {devices}")
-            # Cache a brief negative result to prevent hammering the API on repeated failures.
-            cache.set(cache_key, [], timeout=min(60, api.cache_timeout))
-            if return_cache_status:
-                return [], False
-            return []
+            # LibreNMS answers a search that matches nothing with 200 and an empty list, so a
+            # failure here is never "no devices matched". Caching it as [] hid a live outage.
+            raise LibreNMSUnreachable(str(devices) or "LibreNMS did not answer")
 
         # Apply client-side filters if any
         if client_filters:
@@ -235,17 +241,20 @@ def get_librenms_devices_for_import(
 
         # Cache using configured timeout (default 300s)
         # No need to deepcopy - Django's cache backend handles serialization
-        cache.set(cache_key, devices, timeout=api.cache_timeout)
+        try:
+            cache.set(cache_key, devices, timeout=api.cache_timeout)
+        except Exception:
+            logger.warning("Import device cache write failed; returning uncached devices", exc_info=True)
 
         if return_cache_status:
             return devices, from_cache
         return devices
 
+    except LibreNMSUnreachable:
+        raise
     except Exception:
         logger.exception("Error retrieving LibreNMS devices for import")
-        if return_cache_status:
-            return [], False
-        return []
+        raise
 
 
 def _apply_client_filters(devices: List[dict], filters: dict) -> List[dict]:

@@ -104,8 +104,8 @@ class MockLibreNMSServer:
 
     def __init__(self):
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _LibreNMSHandler)
-        # A real LibreNMS always serves /system; callers that check reachability before doing
-        # work rely on it. Seed a default so a test only registers it to assert something
+        # A real LibreNMS always serves /system, and the settings page reads it to report the
+        # server version. Seed a default so a test only registers it to assert something
         # specific, and can still override it to simulate an unhealthy server.
         self._server.routes = {
             "/api/v0/system": (200, {"status": "ok", "system": [{"local_ver": "24.1.0"}]}),
