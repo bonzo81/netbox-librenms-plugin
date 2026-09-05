@@ -22,6 +22,7 @@ from netbox_librenms_plugin.utils import (
     get_module_template_interface_names,
     get_module_types_indexed,
     get_vc_member_positions,
+    normalize_inventory_serial,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
 )
@@ -1096,7 +1097,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import resolve_module_type
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
-        serial = (item.get("entPhysicalSerialNum") or "").strip()
+        # The serial-scope rules strip vendor markers such as Juniper's "S/N ", and the
+        # coercion handles the all-digit serials LibreNMS sends as JSON numbers.
+        serial = normalize_inventory_serial(
+            item.get("entPhysicalSerialNum"), manufacturer=device.device_type.manufacturer
+        )
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
         name = item.get("entPhysicalName", "") or model_name

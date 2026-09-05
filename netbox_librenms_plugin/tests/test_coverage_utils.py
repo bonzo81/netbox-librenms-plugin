@@ -5,6 +5,56 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.mark.django_db
+class TestSerialScopeNormalization:
+    """Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
+
+    The rewrite is a NormalizationRule rather than compiled-in, so an operator can see why a
+    stored serial differs from the raw inventory and add the next vendor without a release.
+    """
+
+    def test_the_migration_seeds_the_juniper_rule(self):
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        assert NormalizationRule.objects.filter(
+            scope=NormalizationRule.SCOPE_SERIAL, match_pattern=r"^S/N\s+(.+)$"
+        ).exists()
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("S/N BCFB9793", "BCFB9793"),
+            ("  S/N BCFB9751  ", "BCFB9751"),
+            ("BCFB9793", "BCFB9793"),
+            ("SN12345", "SN12345"),
+            ("S/NABC", "S/NABC"),
+            (12345, "12345"),
+            (0, "0"),
+            ("", ""),
+            (None, ""),
+        ],
+    )
+    def test_the_seeded_rule_strips_only_the_marker(self, raw, expected):
+        from netbox_librenms_plugin.utils import normalize_inventory_serial
+
+        assert normalize_inventory_serial(raw) == expected
+
+    def test_normalize_serial_itself_no_longer_strips(self):
+        """The transformation lives in the rule, so there is one place to look."""
+        from netbox_librenms_plugin.utils import normalize_serial
+
+        assert normalize_serial("S/N BCFB9793") == "S/N BCFB9793"
+
+    def test_disabling_the_rule_stops_the_rewrite(self):
+        """Proves the stored serial follows the rule rather than compiled-in behaviour."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.utils import normalize_inventory_serial
+
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+
+        assert normalize_inventory_serial("S/N BCFB9793") == "S/N BCFB9793"
+
+
 class TestConvertSpeedToKbps:
     """Boundary and type tests for convert_speed_to_kbps."""
 
