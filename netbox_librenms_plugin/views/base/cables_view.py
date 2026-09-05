@@ -455,15 +455,18 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     f"Multiple devices found with the same LibreNMS ID: {remote_device_id}.",
                 )
 
-        # Fall back to name matching if no device found by ID
+        # Fall back to name matching if no device found by ID. LibreNMS reports the neighbour
+        # hostname as the device advertises it, which is commonly all lower case, while NetBox
+        # holds the operator's capitalisation. Match case insensitively or the remote end only
+        # ever resolves through librenms_id.
         try:
-            device = Device.objects.get(name=hostname)
+            device = Device.objects.get(name__iexact=hostname)
             return device, True, None
         except Device.DoesNotExist:
             # Try without domain name
             simple_hostname = hostname.split(".")[0]
             try:
-                device = Device.objects.get(name=simple_hostname)
+                device = Device.objects.get(name__iexact=simple_hostname)
                 return device, True, None
             except Device.DoesNotExist:
                 return None, False, None
