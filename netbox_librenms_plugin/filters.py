@@ -108,7 +108,7 @@ class InventoryIgnoreRuleFilterSet(django_filters.FilterSet):
         """Meta options for InventoryIgnoreRuleFilterSet."""
 
         model = InventoryIgnoreRule
-        fields = ["match_type", "action", "enabled"]
+        fields = ["match_type", "action", "enabled", "manufacturer"]
 
 
 class PlatformMappingFilterSet(django_filters.FilterSet):

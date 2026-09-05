@@ -4906,11 +4906,24 @@ def slashless_route_aliases(patterns):
     return aliases
 
 
-def get_enabled_ignore_rules() -> list:
-    """Return all enabled InventoryIgnoreRule instances as a list."""
+def get_enabled_ignore_rules(manufacturer=None) -> list:
+    """Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
+
+    Scoping follows :func:`apply_normalization_rules`: a manufacturer takes its own rules plus
+    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits an
+    entPhysicalClass the built-in list omits is vendor-specific in practice, so leaving every
+    such rule global made one vendor's quirk change what every other vendor's sync admits.
+    """
+    from django.db.models import Q
+
     from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-    return list(InventoryIgnoreRule.objects.filter(enabled=True).order_by("pk"))
+    rules = InventoryIgnoreRule.objects.filter(enabled=True)
+    if manufacturer is not None and getattr(manufacturer, "pk", None) is not None:
+        rules = rules.filter(Q(manufacturer__isnull=True) | Q(manufacturer=manufacturer))
+    else:
+        rules = rules.filter(manufacturer__isnull=True)
+    return list(rules.order_by("pk"))
 
 
 def load_bay_mappings() -> tuple:

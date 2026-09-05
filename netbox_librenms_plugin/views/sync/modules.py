@@ -1121,7 +1121,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
-        ignore_rules = get_enabled_ignore_rules()
+        ignore_rules = get_enabled_ignore_rules(
+            getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        )
         device_serial = (getattr(target_device, "serial", None) or "").strip()
 
         # Build index map and collect the branch to install
@@ -1787,7 +1789,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
         from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
-        ignore_rules = get_enabled_ignore_rules()
+        ignore_rules = get_enabled_ignore_rules(
+            getattr(getattr(page_device, "device_type", None), "manufacturer", None)
+        )
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
         # Manufacturer-scoping happens per-iteration since target_device may

@@ -672,6 +672,15 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         "number matches an ancestor entity's serial number.  Recommended to "
         "prevent false positives.  Ignored for serial_matches_device rules.",
     )
+    manufacturer = models.ForeignKey(
+        Manufacturer,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="inventory_ignore_rules",
+        help_text="Optional: only apply this rule to devices from this manufacturer. "
+        "Leave blank for vendor-agnostic rules.",
+    )
     enabled = models.BooleanField(
         default=True,
         db_index=True,

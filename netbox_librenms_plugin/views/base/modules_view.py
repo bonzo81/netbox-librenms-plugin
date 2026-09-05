@@ -723,14 +723,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self._exact_bay_mappings, self._regex_bay_mappings = load_bay_mappings()
 
         # Load enabled ignore rules once; passed to _check_ignore_rules throughout.
-        ignore_rules = get_enabled_ignore_rules()
+        manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
+        ignore_rules = get_enabled_ignore_rules(manufacturer)
 
         # Device serial for serial_matches_device rules (strip whitespace defensively).
         device_serial = (getattr(obj, "serial", None) or "").strip()
-
-        # Manufacturer for module-type normalization rules — passed explicitly to
-        # _build_table_rows/_build_row instead of stored as an instance attribute.
-        manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
 
         # Preload NormalizationRule rows once to avoid N+1 queries inside the
         # _match_module_bay and resolve_module_type loops.

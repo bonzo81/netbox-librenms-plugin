@@ -155,6 +155,17 @@ def _seeded_rule_rows():
     )
 
 
+def restore_inventory_rule_scoping():
+    """Re-apply migration 0019's manufacturer scoping by running the migration's own function."""
+    import importlib
+    from types import SimpleNamespace
+
+    from django.apps import apps as global_apps
+
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0019_inventoryignorerule_manufacturer")
+    migration.scope_include_rule_to_juniper(global_apps, SimpleNamespace(connection=SimpleNamespace(alias="default")))
+
+
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed, with its declared value."""
     for model, lookup_field, value_field, rows in _seeded_model_rows():
@@ -170,6 +181,10 @@ def seed_migration_rows():
 
     for model, lookup, defaults in _seeded_rule_rows():
         model.objects.update_or_create(**lookup, defaults=defaults)
+
+    # The declared rows carry no manufacturer, so a restored include rule would come back
+    # vendor-agnostic while a fresh migrate scopes it. Re-run the migration's own scoping.
+    restore_inventory_rule_scoping()
 
 
 _transactional_seed_restore_required = False
