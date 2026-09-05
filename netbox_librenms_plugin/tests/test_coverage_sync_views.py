@@ -1404,6 +1404,9 @@ class TestSyncIPAddressesViewGetIpTabUrl:
         ):
             url = view.get_ip_tab_url(mock_obj)
         assert "ipaddresses" in url
+        # Without a POSTed key the redirect still carries the bound client's server, which the
+        # librenms_api property returns without rebuilding it.
+        assert "server_key=default" in url
 
     def test_vm_url_includes_tab(self):
         from virtualization.models import VirtualMachine
