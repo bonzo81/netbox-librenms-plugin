@@ -707,6 +707,8 @@ class TestInterfaceVlans:
         group = VLANGroup.objects.create(name="Interface VLAN group", slug="interface-vlan-group")
         untagged = VLAN.objects.create(vid=100, name="Untagged 100", group=group, status="active")
         tagged = VLAN.objects.create(vid=200, name="Tagged 200", group=group, status="active")
+        # NetBox clears untagged_vlan on save unless the interface carries a mode.
+        interface.mode = "tagged"
         interface.untagged_vlan = untagged
         interface.save()
         interface.tagged_vlans.add(tagged)
@@ -728,7 +730,8 @@ class TestInterfaceVlans:
 
         assert "100(U)" in html
         assert "200(T)" in html
-        assert html.count("text-success") >= 2
+        assert '<span class="text-success">100(U)' in html
+        assert '<span class="text-success">200(T)' in html
         assert 'name="vlan_group_10_100"' in html
         assert 'name="vlan_group_10_200"' in html
         assert group.name in html
