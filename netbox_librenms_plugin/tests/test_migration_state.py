@@ -326,28 +326,38 @@ def test_conftest_restores_exactly_the_rules_migration_0010_seeds():
     assert produced == declared
 
 
+def _seeded_ignore_rule_count():
+    """Count the ignore rules the restore declares, across every migration that seeds one."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import _seeded_ignore_rule_signatures, _seeded_rule_rows
+
+    declarative = sum(1 for model, _lookup, _defaults in _seeded_rule_rows() if model is InventoryIgnoreRule)
+    return len(list(_seeded_ignore_rule_signatures())) + declarative
+
+
 @pytest.mark.django_db
 def test_the_seeded_ignore_rules_survive_a_seed_restore():
-    """restore_seeded_state() must put migration 0010's rules back after a flush removes them."""
+    """restore_seeded_state() must put every migration's seeded ignore rules back after a flush."""
     from netbox_librenms_plugin.models import InventoryIgnoreRule
     from netbox_librenms_plugin.tests.conftest import restore_seeded_state
 
+    expected = _seeded_ignore_rule_count()
     InventoryIgnoreRule.objects.all().delete()
 
     assert restore_seeded_state(force=False) is True
-    assert InventoryIgnoreRule.objects.count() == 2
+    assert InventoryIgnoreRule.objects.count() == expected
     # A second pass must not duplicate them.
     restore_seeded_state(force=True)
-    assert InventoryIgnoreRule.objects.count() == 2
+    assert InventoryIgnoreRule.objects.count() == expected
 
 
 @pytest.mark.django_db
 def test_the_seeded_ignore_rules_are_present_before_a_test_body_runs():
-    """Every test starts with migration 0010's rules, including one that follows a flush.
+    """Every test starts with the seeded rules, including one that follows a flush.
 
     A ``transaction=True`` test truncates the tables, so without the restore this passes or fails
     purely on xdist scheduling: the modules sync reads these rules on every render.
     """
     from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-    assert InventoryIgnoreRule.objects.count() == 2
+    assert InventoryIgnoreRule.objects.count() == _seeded_ignore_rule_count()
