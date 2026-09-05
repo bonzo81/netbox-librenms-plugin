@@ -156,11 +156,17 @@ New tests should follow this structure:
 ```python
 from unittest.mock import MagicMock, patch
 
+from netbox_librenms_plugin.tests import test_librenms_api_helpers
+
+# Bind the helper's autouse fixture into this module when the tests need the
+# LibreNMS configuration mocked. Never use `pytest_plugins`: pytest registers a
+# plugin session-wide, so the fixture would then override PLUGINS_CONFIG for
+# every later test file in the run.
+mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
+
 
 class TestFeatureName:
     """Tests for [feature description]."""
-
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.module_name.external_dependency")
     def test_specific_behavior(self, mock_dependency, mock_librenms_config):

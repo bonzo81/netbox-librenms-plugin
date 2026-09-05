@@ -147,15 +147,6 @@ def _refresh_ip_snapshot(client, device, address, prefix_length):
 class TestManagementIpLiveLookup:
     """get_management_ip over a real HTTP LibreNMS, both outcomes its producer can return."""
 
-    @pytest.fixture(autouse=True)
-    def mock_librenms_config(self):
-        """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
-
-        That mock pins ``get_plugin_config`` to a fixed server map, so the loopback server
-        configured below would be ignored and the client would call an unreachable host.
-        """
-        yield
-
     @pytest.mark.django_db
     def test_management_ip_reads_the_live_device_endpoint_and_degrades_on_a_fault(self, settings, librenms_server):
         """A 200 yields the management IP; a faulting endpoint yields None so the sync is never blocked."""

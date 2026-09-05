@@ -15,17 +15,6 @@ from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
 
-@pytest.fixture(autouse=True)
-def mock_librenms_config():
-    """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
-
-    That mock pins ``get_plugin_config`` to a ``default``-only server map, so the ``stub`` key
-    these tests post becomes an unknown explicit key and the view fails closed before it reaches
-    the behaviour under test. Same-name module fixture wins over the plugin's autouse one.
-    """
-    yield
-
-
 def _make_request(body: dict) -> MagicMock:
     """Create a mock POST request with JSON body."""
     request = MagicMock()
@@ -2006,9 +1995,6 @@ class TestSaveVlanGroupOverridesObjectScope:
         from django.contrib.auth import get_user_model
         from users.models import ObjectPermission
 
-        # Resolve via the app registry, not `from ...models import LibreNMSSettings`: the autouse
-        # mock_librenms_config fixture patches the module attribute to a MagicMock during the full
-        # suite, so a plain import would hand get_for_model() a mock class.
         LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
 
         user = get_user_model().objects.create_user(username="scoped-writer", password="x")
