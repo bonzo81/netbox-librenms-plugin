@@ -3817,6 +3817,34 @@ def resolve_module_type(
     return matched
 
 
+def slashless_route_aliases(patterns):
+    """Return an alias for each ``path()`` route in *patterns*, without its trailing slash.
+
+    NetBox runs with ``APPEND_SLASH``, so a request that reaches Django with its trailing slash
+    already removed is answered with a 301 back to the slashed form. Anything in front of NetBox
+    that normalises the slash away strips it again on the retry, and the browser stops at
+    ERR_TOO_MANY_REDIRECTS. An XHR shows that as a control that does nothing, with no error to
+    read, and a redirected POST loses its body.
+
+    Serving both forms answers such a request instead of bouncing it. Aliases carry no name, so
+    ``reverse()`` keeps returning the canonical slashed URL that templates and tables render.
+    Regex routes are skipped: a DRF router builds those, and its clients follow redirects.
+    """
+    from django.urls import URLPattern, path
+    from django.urls.resolvers import RoutePattern
+
+    routes = {str(entry.pattern) for entry in patterns if isinstance(entry, URLPattern)}
+    aliases = []
+    for entry in patterns:
+        if not isinstance(entry, URLPattern) or not isinstance(entry.pattern, RoutePattern):
+            continue
+        route = str(entry.pattern)
+        if not route.endswith("/") or route[:-1] in routes:
+            continue
+        aliases.append(path(route[:-1], entry.callback, entry.default_args))
+    return aliases
+
+
 def get_enabled_ignore_rules() -> list:
     """Return all enabled InventoryIgnoreRule instances as a list."""
     from netbox_librenms_plugin.models import InventoryIgnoreRule

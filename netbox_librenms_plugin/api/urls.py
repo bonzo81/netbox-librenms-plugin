@@ -2,6 +2,7 @@ from django.urls import path
 from netbox.api.routers import NetBoxRouter
 
 from . import views
+from ..utils import slashless_route_aliases
 
 app_name = "netbox_librenms_plugin"
 
@@ -19,4 +20,8 @@ router.register("port-stack-lag-patterns", views.PortStackLagPatternViewSet)
 
 urlpatterns = [
     path("jobs/<int:job_pk>/sync-status/", views.sync_job_status, name="sync_job_status"),
-] + router.urls
+]
+# The import page posts here, so a proxy that drops the trailing slash would redirect the POST
+# and lose its body. The router's own routes are left alone; API clients follow redirects.
+urlpatterns += slashless_route_aliases(urlpatterns)
+urlpatterns += router.urls

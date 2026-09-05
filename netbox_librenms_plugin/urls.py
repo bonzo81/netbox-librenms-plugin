@@ -1,5 +1,6 @@
 from django.urls import include, path
 
+from .utils import slashless_route_aliases
 from .models import (
     CarrierAutoInstallRule,
     DeviceTypeMapping,
@@ -1023,3 +1024,5 @@ urlpatterns = [
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]
+
+urlpatterns += slashless_route_aliases(urlpatterns)

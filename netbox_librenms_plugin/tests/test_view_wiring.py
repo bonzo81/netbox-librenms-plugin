@@ -74,6 +74,75 @@ class TestLibreNMSAPIMixinWiring:
         self._assert_has_api_mixin(ConvertLegacyLibreNMSIdView)
 
 
+class TestTrailingSlashResilience:
+    """Every route stays reachable when something in front of NetBox drops the trailing slash.
+
+    NetBox runs with APPEND_SLASH, so a stripped slash is answered with a 301 back to the slashed
+    form. A proxy that strips it again turns that into ERR_TOO_MANY_REDIRECTS, which an XHR shows
+    as a control that does nothing at all.
+    """
+
+    def _concrete_routes(self, patterns):
+        from django.urls import URLPattern
+        from django.urls.resolvers import RoutePattern
+
+        return {
+            str(entry.pattern)
+            for entry in patterns
+            if isinstance(entry, URLPattern) and isinstance(entry.pattern, RoutePattern)
+        }
+
+    def test_every_page_route_is_served_without_its_trailing_slash(self):
+        from netbox_librenms_plugin import urls as plugin_urls
+
+        routes = self._concrete_routes(plugin_urls.urlpatterns)
+        missing = sorted(route for route in routes if route.endswith("/") and route[:-1] not in routes)
+
+        assert missing == []
+
+    def test_the_posted_job_status_api_route_is_served_without_its_trailing_slash(self):
+        """The import page posts here, and a redirected POST arrives without its body."""
+        from netbox_librenms_plugin.api import urls as api_urls
+
+        routes = self._concrete_routes(api_urls.urlpatterns)
+
+        assert "jobs/<int:job_pk>/sync-status" in routes
+
+    def test_the_canonical_reverse_keeps_the_trailing_slash(self):
+        """The aliases must not become the form templates and tables render."""
+        from django.urls import reverse
+
+        url = reverse("plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": 7})
+
+        assert url.endswith("/")
+
+    def test_a_stripped_url_resolves_to_the_same_view(self):
+        """The endpoint whose button died behind a slash-stripping proxy."""
+        from django.urls import resolve
+
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        match = resolve("/plugins/librenms_plugin/devices/7/module-mismatch-preview")
+
+        assert match.func.view_class is ModuleMismatchPreviewView
+        assert match.kwargs == {"pk": 7}
+
+    @pytest.mark.django_db
+    def test_a_stripped_url_is_answered_rather_than_redirected(self):
+        """End to end through the real URL conf: the request is served, not bounced back."""
+        from django.test import Client
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+
+        client = Client()
+        client.force_login(make_superuser())
+        query = "module_id=1&ent_index=2&server_key=default&selected_device_id=7"
+
+        response = client.get(f"/plugins/librenms_plugin/devices/7/module-mismatch-preview?{query}")
+
+        assert response.status_code != 301
+
+
 class TestCacheMixinWiring:
     """Views that cache LibreNMS data must have CacheMixin and expose get_cache_key."""
 
