@@ -107,6 +107,46 @@ def _name_pattern(pattern="-M{position}"):
 
 
 @pytest.mark.django_db
+class TestStackDetectionCarriesItsMembers:
+    """A detected stack always carries one member per child chassis, so members is never empty."""
+
+    def test_a_single_child_chassis_is_not_reported_as_a_stack(self, settings, librenms_server):
+        """One chassis under the root is a standalone switch, so detection returns nothing."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        _seed_stack(librenms_server, 900, serials=("SN-ONLY",))
+        api = _api(settings, librenms_server, "default")
+
+        assert detect_virtual_chassis_from_inventory(api, 900) is None
+
+    def test_a_detected_stack_carries_one_member_per_child_chassis(self, settings, librenms_server):
+        """is_stack is only ever returned with the full member list behind it."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        _seed_stack(librenms_server, 901, serials=("SN-A", "SN-B", "SN-C"))
+        api = _api(settings, librenms_server, "default")
+
+        detected = detect_virtual_chassis_from_inventory(api, 901)
+
+        assert detected["is_stack"] is True
+        assert detected["member_count"] == 3
+        assert len(detected["members"]) == 3
+
+    def test_members_survive_even_when_no_chassis_reports_a_serial(self, settings, librenms_server):
+        """The serial-less path still carries members, which is what keeps the domain key stable."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        _seed_stack(librenms_server, 902, serials=("", ""))
+        api = _api(settings, librenms_server, "default")
+
+        detected = detect_virtual_chassis_from_inventory(api, 902)
+
+        assert detected["is_stack"] is True
+        assert [m["serial"] for m in detected["members"]] == ["", ""]
+        assert len(detected["members"]) == 2
+
+
+@pytest.mark.django_db
 class TestPrefetchVcData:
     def test_an_empty_device_list_skips_librenms_but_a_populated_one_does_not(self, settings, librenms_server):
         from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
