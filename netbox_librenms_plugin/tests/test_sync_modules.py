@@ -2410,77 +2410,40 @@ class TestVCMemberInterfaceNormalization:
 
 
 @pytest.mark.django_db
-class TestResolveTargetDevice:
-    """Target device selection must remain constrained to visible VC members."""
+class TestResolveTargetDeviceWithValidation:
+    """Target device selection must stay constrained to visible VC members."""
 
-    def test_non_vc_device_ignores_selected_member(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device
-
-        page_device = make_device("target-non-vc")
-
-        result = _resolve_target_device(page_device, "123", Device.objects.all())
-
-        assert result == page_device
-
-    def test_vc_member_selection_accepts_valid_member(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device
-
-        _vc, (page_device, member) = make_virtual_chassis_members("target-valid-vc")
-
-        result = _resolve_target_device(page_device, str(member.pk), Device.objects.all())
-
-        assert result == member
-
-    def test_vc_member_selection_falls_back_for_a_nonmember(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device
-
-        _vc, (page_device, _member) = make_virtual_chassis_members("target-wrong-vc")
-        nonmember = make_device("target-nonmember")
-
-        result = _resolve_target_device(page_device, str(nonmember.pk), Device.objects.all())
-
-        assert result == page_device
-
-    def test_invalid_selected_device_id_falls_back(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device
-
-        page_device = make_device("target-invalid-id")
-
-        result = _resolve_target_device(page_device, "not-an-int", Device.objects.all())
-
-        assert result == page_device
-
-    def test_validation_marks_non_vc_selection_invalid(self):
+    def test_no_selection_keeps_the_page_device_and_flags_nothing(self):
+        """An empty selection is the normal case, not invalid input."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
 
-        page_device = make_device("target-validation-non-vc")
-        other = make_device("target-validation-other")
+        page_device = make_device("target-no-selection")
 
-        resolved, invalid = _resolve_target_device_with_validation(
-            page_device,
-            str(other.pk),
-            Device.objects.all(),
-        )
+        resolved, invalid = _resolve_target_device_with_validation(page_device, "", Device.objects.all())
+
+        assert resolved == page_device
+        assert invalid is False
+
+    def test_a_selection_on_a_non_vc_device_is_invalid(self):
+        """Only a VC member may override the page device, so any selection here is rejected."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
+
+        page_device = make_device("target-non-vc")
+        other = make_device("target-non-vc-other")
+
+        resolved, invalid = _resolve_target_device_with_validation(page_device, str(other.pk), Device.objects.all())
 
         assert resolved == page_device
         assert invalid is True
 
-    def test_validation_accepts_page_device_id(self):
+    def test_the_page_device_id_resolves_without_flagging(self):
+        """Selecting the page device itself is valid even when it has no virtual chassis."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -2489,13 +2452,54 @@ class TestResolveTargetDevice:
         page_device = make_device("target-page-id")
 
         resolved, invalid = _resolve_target_device_with_validation(
-            page_device,
-            str(page_device.pk),
-            Device.objects.all(),
+            page_device, str(page_device.pk), Device.objects.all()
         )
 
         assert resolved == page_device
         assert invalid is False
+
+    def test_a_vc_member_selection_resolves_to_that_member(self):
+        """A sibling in the same virtual chassis replaces the page device."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
+
+        _vc, (page_device, member) = make_virtual_chassis_members("target-valid-vc")
+
+        resolved, invalid = _resolve_target_device_with_validation(page_device, str(member.pk), Device.objects.all())
+
+        assert resolved == member
+        assert invalid is False
+
+    def test_a_device_outside_the_virtual_chassis_falls_back(self):
+        """A device that is not a member of this chassis must not become the target."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
+        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
+
+        _vc, (page_device, _member) = make_virtual_chassis_members("target-wrong-vc")
+        nonmember = make_device("target-nonmember")
+
+        resolved, invalid = _resolve_target_device_with_validation(page_device, str(nonmember.pk), Device.objects.all())
+
+        assert resolved == page_device
+        assert invalid is True
+
+    def test_an_unparseable_selected_device_id_falls_back(self):
+        """A non-integer selection is invalid input, not a silent no-op."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
+
+        page_device = make_device("target-invalid-id")
+
+        resolved, invalid = _resolve_target_device_with_validation(page_device, "not-an-int", Device.objects.all())
+
+        assert resolved == page_device
+        assert invalid is True
 
 
 @pytest.mark.django_db

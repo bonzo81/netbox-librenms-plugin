@@ -231,12 +231,6 @@ def _resolve_target_device_with_validation(page_device, selected_device_id, devi
     return member, False
 
 
-def _resolve_target_device(page_device, selected_device_id, devices):
-    """Resolve and validate a target device from row-level VC selection."""
-    target_device, _ = _resolve_target_device_with_validation(page_device, selected_device_id, devices)
-    return target_device
-
-
 def _warn_invalid_selected_device(request):
     """Warn the user that selected device input was invalid and fallback was applied."""
     messages.warning(
