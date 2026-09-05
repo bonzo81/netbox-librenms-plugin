@@ -1,4 +1,5 @@
 import logging
+import re
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface
@@ -81,6 +82,36 @@ def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
     # shapes resolve.
     host_q, oob_q = build_librenms_id_qs(server_key, value)
     return host_q | oob_q if include_oob else host_q
+
+
+_SUB_UNIT_RE = re.compile(r"^(?P<physical>.+)\.\d+$")
+
+
+def _drop_masked_sub_units(rows):
+    """Drop a neighbour row for a sub-unit whose own physical port is reported beside it.
+
+    A router advertises LLDP from the physical port and from each sub-unit configured on
+    it, so one local port can report the same neighbour several times. A cable terminates
+    on the physical port only, so every sub-unit row renders as a mismatch.
+
+    Masking is deliberately narrow: a sub-unit is dropped only when the SAME local port
+    reports its exact parent name on the SAME remote device. A sub-unit reported on its
+    own is kept, because it is then the only evidence of that neighbour.
+    """
+    physical_by_group = {}
+    for row in rows:
+        if not _SUB_UNIT_RE.match(row["remote_port"] or ""):
+            physical_by_group.setdefault((row["local_port_id"], row["remote_device_id"]), set()).add(row["remote_port"])
+
+    kept = []
+    for row in rows:
+        match = _SUB_UNIT_RE.match(row["remote_port"] or "")
+        if match and match.group("physical") in physical_by_group.get(
+            (row["local_port_id"], row["remote_device_id"]), ()
+        ):
+            continue
+        kept.append(row)
+    return kept
 
 
 def _extract_cached_links(cached, cache_key=None):
@@ -264,7 +295,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     "_source": source,
                 }
             )
-        return rows
+        return _drop_masked_sub_units(rows)
 
     @staticmethod
     def _classify_links_fetch_error(success, data):
