@@ -548,11 +548,8 @@ def bulk_import_devices_shared(
                             f"{m.get('name', '')}/{m.get('model', '')}:{m.get('position', 0)}"
                             for m in vc_data.get("members", [])
                         )
-                        if member_parts:
-                            fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
-                            vc_domain = f"librenms-stack-{fingerprint}"
-                        else:
-                            vc_domain = f"librenms-{device_id}"
+                        fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
+                        vc_domain = f"librenms-stack-{fingerprint}"
 
                     # Only create VC if we haven't processed this stack yet.
                     # Permission was already validated before device import.
@@ -873,9 +870,6 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 else:
                     if hasattr(refreshed, "role") and refreshed.role:
                         apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
-                    elif not validation.get("import_as_vm"):
-                        _reset_device_role(validation)
-                        remove_validation_issue(validation, "role")
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                     # Re-assert non-importable state: recalculate bases can_import on
                     # issues alone, but an existing matched device must never be import-ready.
