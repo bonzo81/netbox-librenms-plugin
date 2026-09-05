@@ -95,6 +95,11 @@ remove the guard, rather than fabricating the state with a mock.
 
 ## Test Coverage by Module
 
+The mapping below names each module's **primary** test file, not its only one. Split a focused suite
+into its own `test_*.py` when the module's primary file already exists on a lower branch of the PR
+stack: appending to that file's tail conflicts on every restack, so a new file is preferred over a
+large tail addition. Give the new file a docstring pointing at the primary home.
+
 - `librenms_api.py` → `test_librenms_api.py`, `test_librenms_api_helpers.py`
 - `import_utils/` package (`filters.py`, `device_operations.py`, `vm_operations.py`, `cache.py`, `permissions.py`, `virtual_chassis.py`), `import_validation_helpers.py`, `utils.py` → `test_import_utils.py`, `test_import_validation_helpers.py`, `test_utils.py`
 - `jobs.py`, `views/imports/list.py` → `test_background_jobs.py`
