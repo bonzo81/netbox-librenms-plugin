@@ -325,7 +325,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             # get_live_device_info reads live (uncached): this feeds the Primary-IP write decision,
             # so it must read the current management IP, not a stale sync-tab snapshot.
             success, info = self.get_live_device_info(librenms_id)
-            if not success or not isinstance(info, dict):
+            # get_device_info returns (True, ...) only after its own dict check, so a truthy
+            # success already guarantees a dict payload here.
+            if not success:
                 return None
             ip = info.get("ip")
             # Guard the type explicitly (like _resolve_management_ip in ip_addresses_view) rather

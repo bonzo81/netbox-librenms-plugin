@@ -144,6 +144,50 @@ def _refresh_ip_snapshot(client, device, address, prefix_length):
         )
 
 
+class TestManagementIpLiveLookup:
+    """get_management_ip over a real HTTP LibreNMS, both outcomes its producer can return."""
+
+    @pytest.fixture(autouse=True)
+    def mock_librenms_config(self):
+        """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
+
+        That mock pins ``get_plugin_config`` to a fixed server map, so the loopback server
+        configured below would be ignored and the client would call an unreachable host.
+        """
+        yield
+
+    @pytest.mark.django_db
+    def test_management_ip_reads_the_live_device_endpoint_and_degrades_on_a_fault(self, settings, librenms_server):
+        """A 200 yields the management IP; a faulting endpoint yields None so the sync is never blocked."""
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        configure_librenms_servers(
+            settings,
+            {"default": {"librenms_url": librenms_server.url, "api_token": "token", "verify_ssl": False}},
+        )
+        device = make_device("mgmt-ip-live-lookup")
+        set_librenms_device_id(device, 9903, "default")
+        device.save()
+        # A real instance: __init__ binds _librenms_api, and the lazy property builds the
+        # configured client from it.
+        view = SyncIPAddressesView()
+
+        librenms_server.register(
+            "/api/v0/devices/9903",
+            {"status": "ok", "devices": [{"device_id": 9903, "ip": "  198.18.7.9  "}]},
+        )
+        try:
+            assert view.get_management_ip(device) == "198.18.7.9"
+
+            # A faulting endpoint is a real (False, None) lookup: no management IP, no raise.
+            librenms_server.register("/api/v0/devices/9903", {"status": "error"}, status=500)
+            assert view.get_management_ip(device) is None
+        finally:
+            cache.delete("librenms_device_info_default_9903")
+
+
 class _IPHostLookupBarrier:
     """Pause concurrent requests after their first destination-host lookup."""
 
