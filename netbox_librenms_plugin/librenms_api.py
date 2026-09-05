@@ -44,8 +44,9 @@ def build_librenms_api(server_key):
 class LibreNMSUnreachable(Exception):
     """The LibreNMS server did not answer, so a run that needs it cannot continue.
 
-    Raised by the bulk-import pre-flight. The message carries the reason
-    test_connection() reported, so a caller can show it verbatim.
+    Raised by the device fetch itself. LibreNMS answers a search that matches nothing
+    with 200 and an empty list, so a failed fetch never means "no devices matched". The
+    message carries the reason the API reported, so a caller can show it verbatim.
     """
 
 

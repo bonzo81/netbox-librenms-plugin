@@ -1183,6 +1183,8 @@ class TestGetViewFilterFields:
 
         mock_api = MagicMock()
         mock_api.server_key = "default"
+        # Answer the way LibreNMS does: a search that matches nothing is 200 and an empty list.
+        mock_api.list_devices.return_value = (True, [])
 
         with patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)):
             with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:

@@ -2,6 +2,120 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
+
+
+class _CacheFailingOn:
+    """The real Django cache, except that the named operations raise.
+
+    Redis is a true external boundary: a local test cannot take it down for one caller
+    only, so the outage is injected here and every other key still round-trips.
+    """
+
+    def __init__(self, failing_operations, error):
+        from django.core.cache import cache
+
+        self._cache = cache
+        self._failing_operations = frozenset(failing_operations)
+        self._error = error
+
+    def _run(self, operation, *args, **kwargs):
+        if operation in self._failing_operations:
+            raise self._error
+        return getattr(self._cache, operation)(*args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        return self._run("get", *args, **kwargs)
+
+    def set(self, *args, **kwargs):
+        return self._run("set", *args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return self._run("delete", *args, **kwargs)
+
+
+class TestCacheOutageIsNotAnEmptyResult:
+    """A Redis outage must not read as "no devices match your filter"."""
+
+    SEARCH = {"hostname": "edge"}
+    DEVICE = {"device_id": 4242, "hostname": "edge-01"}
+
+    def _api(self, settings, server):
+        """Bind a real LibreNMSAPI to the loopback server, which serves one device."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+        server.register("/api/v0/devices", {"status": "ok", "devices": [self.DEVICE]})
+        configure_librenms_servers(
+            settings,
+            {"default": {"librenms_url": server.url, "api_token": "token", "cache_timeout": 300}},
+        )
+        return LibreNMSAPI(server_key="default")
+
+    def _break_cache(self, monkeypatch, *operations):
+        """Take the cache down for the named operations only."""
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        from netbox_librenms_plugin.import_utils import filters as filters_module
+
+        monkeypatch.setattr(
+            filters_module,
+            "cache",
+            _CacheFailingOn(operations, RedisConnectionError("redis is down")),
+        )
+
+    def _fetch(self, api, **kwargs):
+        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
+
+        devices = get_librenms_devices_for_import(api, filters=self.SEARCH, **kwargs)
+        return [device["device_id"] for device in devices]
+
+    def test_a_cache_read_outage_still_returns_the_fetched_devices(self, settings, librenms_server, monkeypatch):
+        """A dead cache is a miss, so the fetch still runs and reports what LibreNMS holds."""
+        api = self._api(settings, librenms_server)
+        self._break_cache(monkeypatch, "get")
+
+        assert self._fetch(api) == [4242]
+
+    def test_a_cache_write_outage_still_returns_the_fetched_devices(self, settings, librenms_server, monkeypatch):
+        """Failing to store the result must not discard the result."""
+        api = self._api(settings, librenms_server)
+        self._break_cache(monkeypatch, "set")
+
+        assert self._fetch(api) == [4242]
+
+    def test_a_cache_delete_outage_still_returns_the_fetched_devices(self, settings, librenms_server, monkeypatch):
+        """force_refresh drops the key first, and that drop failing changes nothing."""
+        api = self._api(settings, librenms_server)
+        self._break_cache(monkeypatch, "delete")
+
+        assert self._fetch(api, force_refresh=True) == [4242]
+
+    def test_a_full_cache_outage_still_returns_the_fetched_devices(self, settings, librenms_server, monkeypatch):
+        """Redis being down entirely is the real case: every operation fails, the import still works."""
+        api = self._api(settings, librenms_server)
+        self._break_cache(monkeypatch, "get", "set", "delete")
+
+        assert self._fetch(api) == [4242]
+        assert self._fetch(api, force_refresh=True) == [4242]
+
+    def test_an_unexpected_error_propagates_instead_of_reporting_no_devices(
+        self, settings, librenms_server, monkeypatch
+    ):
+        """Only the cache degrades quietly: anything else must surface, not return []."""
+        from netbox_librenms_plugin.import_utils import filters as filters_module
+
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        api = self._api(settings, librenms_server)
+        monkeypatch.setattr(filters_module, "get_import_search_cache_key", explode)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            self._fetch(api)
+
 
 class TestGetDeviceCountForFilters:
     """Tests for get_device_count_for_filters (line 101)."""
@@ -230,7 +344,7 @@ class TestGetLibreNMSDevicesForImport:
         api.list_devices.assert_not_called()
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_api_failure_returns_empty_list(self, mock_cache):
+    def test_api_failure_raises_and_caches_nothing(self, mock_cache):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
         mock_cache.get.return_value = None
@@ -239,11 +353,13 @@ class TestGetLibreNMSDevicesForImport:
         api.cache_timeout = 300
         api.list_devices.return_value = (False, "Connection error")
 
-        result = get_librenms_devices_for_import(api, filters={})
-        assert result == []
+        with pytest.raises(LibreNMSUnreachable, match="Connection error"):
+            get_librenms_devices_for_import(api, filters={})
+
+        mock_cache.set.assert_not_called()
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_api_failure_with_return_cache_status(self, mock_cache):
+    def test_api_failure_raises_with_return_cache_status(self, mock_cache):
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
         mock_cache.get.return_value = None
@@ -252,12 +368,12 @@ class TestGetLibreNMSDevicesForImport:
         api.cache_timeout = 300
         api.list_devices.return_value = (False, "Connection error")
 
-        result, from_cache = get_librenms_devices_for_import(api, filters={}, return_cache_status=True)
-        assert result == []
-        assert from_cache is False
+        with pytest.raises(LibreNMSUnreachable, match="Connection error"):
+            get_librenms_devices_for_import(api, filters={}, return_cache_status=True)
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_exception_returns_empty_list(self, mock_cache):
+    def test_an_unexpected_error_propagates(self, mock_cache):
+        """Returning [] here made a broken client look like an empty LibreNMS."""
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
         mock_cache.get.return_value = None
@@ -265,11 +381,12 @@ class TestGetLibreNMSDevicesForImport:
         api.server_key = "default"
         api.list_devices.side_effect = RuntimeError("Unexpected error")
 
-        result = get_librenms_devices_for_import(api, filters={})
-        assert result == []
+        with pytest.raises(RuntimeError, match="Unexpected error"):
+            get_librenms_devices_for_import(api, filters={})
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_exception_with_return_cache_status(self, mock_cache):
+    def test_an_unexpected_error_propagates_with_return_cache_status(self, mock_cache):
+        """The tuple contract never softens an error into ([], False)."""
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
         mock_cache.get.return_value = None
@@ -277,9 +394,8 @@ class TestGetLibreNMSDevicesForImport:
         api.server_key = "default"
         api.list_devices.side_effect = RuntimeError("Unexpected error")
 
-        result, from_cache = get_librenms_devices_for_import(api, filters={}, return_cache_status=True)
-        assert result == []
-        assert from_cache is False
+        with pytest.raises(RuntimeError, match="Unexpected error"):
+            get_librenms_devices_for_import(api, filters={}, return_cache_status=True)
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_success_caches_result(self, mock_cache):
@@ -723,8 +839,8 @@ class TestGetLibreNMSReturnCacheStatus:
         assert from_cache is True
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
-    def test_api_failure_with_return_cache_status(self, mock_cache):
-        """Line 225: return [], False when API fails and return_cache_status=True."""
+    def test_api_failure_raises_from_the_return_cache_status_path(self, mock_cache):
+        """A failed fetch raises, so return_cache_status never yields a misleading ([], False)."""
         from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
 
         mock_cache.get.return_value = None
@@ -733,11 +849,8 @@ class TestGetLibreNMSReturnCacheStatus:
         api.cache_timeout = 300
         api.list_devices.return_value = (False, "Error")
 
-        result = get_librenms_devices_for_import(api, return_cache_status=True)
-        assert isinstance(result, tuple)
-        devices, from_cache = result
-        assert devices == []
-        assert from_cache is False
+        with pytest.raises(LibreNMSUnreachable, match="Error"):
+            get_librenms_devices_for_import(api, return_cache_status=True)
 
 
 class TestCacheKeyServerKeyIsolation:
