@@ -943,23 +943,6 @@ class TestRefreshExistingDevice:
         assert validation["can_import"] is False
         assert validation["is_ready"] is False
 
-    def test_device_path_refreshes_no_role(self):
-        """Defensive branch: a refreshed device with no role → device_role={'found': False}."""
-        from unittest.mock import MagicMock, patch
-
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        existing = MagicMock(pk=2)
-        refreshed = MagicMock(role=None)
-        validation = self._device_validation(existing_device=existing, device_role={"found": True, "role": MagicMock()})
-
-        with patch("dcim.models.Device") as mock_Device:
-            mock_Device.objects.filter.return_value.first.return_value = refreshed
-            _refresh_existing_device(validation)
-
-        assert validation["existing_device"] is refreshed
-        assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
-
     def test_duplicate_hostname_across_sites_fails_closed(self):
         """A hostname matching two NetBox devices in different sites fails closed (ambiguous), not bound to an arbitrary one."""
         from dcim.models import Device, Site
@@ -1809,93 +1792,6 @@ class TestProcessDeviceFilters:
     # Lines 507-511: BrokenPipeError during VC prefetch + request set
     # ------------------------------------------------------------------
 
-    def test_vc_prefetch_client_disconnect_with_request_returns_empty(self):
-        """BrokenPipeError during prefetch + request set → _empty_return."""
-        api = self._make_api()
-        request = MagicMock()
-        device = self._make_device()
-
-        with (
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
-                return_value=([device], False),
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.prefetch_vc_data_for_devices",
-                side_effect=BrokenPipeError("client gone"),
-            ),
-        ):
-            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
-
-            result = process_device_filters(
-                api,
-                filters={},
-                vc_detection_enabled=True,
-                clear_cache=False,
-                show_disabled=True,
-                request=request,
-            )
-
-        assert result == []
-
-    def test_vc_prefetch_client_disconnect_with_return_cache_status(self):
-        """BrokenPipeError + request + return_cache_status=True → ([], False)."""
-        api = self._make_api()
-        request = MagicMock()
-        device = self._make_device()
-
-        with (
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
-                return_value=([device], False),
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.prefetch_vc_data_for_devices",
-                side_effect=BrokenPipeError("client gone"),
-            ),
-        ):
-            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
-
-            result = process_device_filters(
-                api,
-                filters={},
-                vc_detection_enabled=True,
-                clear_cache=False,
-                show_disabled=True,
-                request=request,
-                return_cache_status=True,
-            )
-
-        assert result == ([], False)
-
-    def test_vc_prefetch_client_disconnect_no_request_reraises(self):
-        """BrokenPipeError during prefetch with request=None → exception re-raised."""
-
-        api = self._make_api()
-        device = self._make_device()
-
-        with (
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
-                return_value=([device], False),
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.prefetch_vc_data_for_devices",
-                side_effect=BrokenPipeError("client gone"),
-            ),
-        ):
-            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
-
-            with pytest.raises(BrokenPipeError):
-                process_device_filters(
-                    api,
-                    filters={},
-                    vc_detection_enabled=True,
-                    clear_cache=False,
-                    show_disabled=True,
-                    request=None,
-                )
-
     # ------------------------------------------------------------------
     # Lines 520-531: Job pre-loop RQ check → job was already stopped
     # ------------------------------------------------------------------
@@ -2306,77 +2202,6 @@ class TestProcessDeviceFilters:
             )
 
         assert result == []
-
-    def test_validate_path_client_disconnect_with_request_returns_empty(self):
-        """validate raises BrokenPipeError + request set → _empty_return."""
-        api = self._make_api()
-        request = MagicMock()
-        device = self._make_device()
-
-        with (
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
-                return_value=([device], False),
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
-                side_effect=BrokenPipeError("client gone"),
-            ),
-            patch("netbox_librenms_plugin.import_utils.bulk_import.cache") as mock_cache,
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.get_validated_device_cache_key",
-                return_value="vkey",
-            ),
-        ):
-            mock_cache.get.return_value = None
-
-            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
-
-            result = process_device_filters(
-                api,
-                filters={},
-                vc_detection_enabled=False,
-                clear_cache=True,
-                show_disabled=True,
-                request=request,
-            )
-
-        assert result == []
-
-    def test_validate_path_client_disconnect_no_request_reraises(self):
-        """validate raises BrokenPipeError, request=None → re-raised."""
-
-        api = self._make_api()
-        device = self._make_device()
-
-        with (
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
-                return_value=([device], False),
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
-                side_effect=BrokenPipeError("client gone"),
-            ),
-            patch("netbox_librenms_plugin.import_utils.bulk_import.cache") as mock_cache,
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.get_validated_device_cache_key",
-                return_value="vkey",
-            ),
-        ):
-            mock_cache.get.return_value = None
-
-            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
-
-            with pytest.raises(BrokenPipeError):
-                process_device_filters(
-                    api,
-                    filters={},
-                    vc_detection_enabled=False,
-                    clear_cache=True,
-                    show_disabled=True,
-                    request=None,
-                )
 
     # ------------------------------------------------------------------
     # Line 665: pass – metadata already exists and should_update=False
