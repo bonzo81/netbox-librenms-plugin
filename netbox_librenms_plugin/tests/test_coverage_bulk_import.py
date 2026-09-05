@@ -560,7 +560,13 @@ class TestProcessDeviceFilters:
             show_disabled=True,
             return_cache_status=True,
         )
-        request_count = len(live_librenms.server.requests)
+
+        # Count only data requests: the reachability pre-flight asks /system once per call,
+        # which says nothing about whether the device list came from cache.
+        def data_requests():
+            return [r for r in live_librenms.server.requests if r["path"] != "/api/v0/system"]
+
+        request_count = len(data_requests())
         second, second_from_cache = process_device_filters(
             live_librenms.api,
             filters,
@@ -574,7 +580,7 @@ class TestProcessDeviceFilters:
         assert second_from_cache is True
         assert first[0]["_validation"]["existing_device"] == existing
         assert second[0]["_validation"]["existing_device"] == existing
-        assert len(live_librenms.server.requests) == request_count
+        assert len(data_requests()) == request_count
 
     def test_disabled_rows_are_removed_before_validation(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
