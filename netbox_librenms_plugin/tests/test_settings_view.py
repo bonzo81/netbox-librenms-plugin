@@ -272,20 +272,21 @@ class TestCableSyncSettingsTab:
         cache.set(cache_key, {"links": [row]}, timeout=300)
 
         row_id = row["local_port_id"]
-        synced = client.post(
-            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
-            {
-                "select": row_id,
-                "server_key": server_key,
-                # The endpoints the table renders into the row, confirmed on submit.
-                f"expected_local_id_{row_id}": csp.pk,
-                f"expected_local_device_id_{row_id}": local.pk,
-                f"expected_remote_id_{row_id}": cp.pk,
-                f"expected_remote_device_id_{row_id}": remote.pk,
-            },
-        )
-
-        cache.delete(cache_key)
+        try:
+            synced = client.post(
+                reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+                {
+                    "select": row_id,
+                    "server_key": server_key,
+                    # The endpoints the table renders into the row, confirmed on submit.
+                    f"expected_local_id_{row_id}": csp.pk,
+                    f"expected_local_device_id_{row_id}": local.pk,
+                    f"expected_remote_id_{row_id}": cp.pk,
+                    f"expected_remote_device_id_{row_id}": remote.pk,
+                },
+            )
+        finally:
+            cache.delete(cache_key)
 
         assert synced.status_code == 302
         csp.refresh_from_db()
