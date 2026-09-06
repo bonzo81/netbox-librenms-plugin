@@ -12,9 +12,6 @@ Run:
 from copy import deepcopy
 
 import pytest
-from django.conf import settings
-from django.core.cache import cache
-from django.test import override_settings
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +26,9 @@ def vc_member_name_pattern(db):
 
 def _make_api(url, token="test-token", server_key="test"):
     """Create a LibreNMSAPI instance pointed at the mock server."""
+    from django.conf import settings
+    from django.test import override_settings
+
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
@@ -429,6 +429,8 @@ class TestGetVCDataHTTP:
 
     def test_cache_miss_fetches_via_http(self, librenms_server):
         """Cache miss triggers detect_virtual_chassis_from_inventory via HTTP."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
@@ -451,6 +453,8 @@ class TestGetVCDataHTTP:
 
     def test_cache_hit_returns_without_http(self, librenms_server):
         """Cache hit returns immediately without making any HTTP calls."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
@@ -468,6 +472,8 @@ class TestGetVCDataHTTP:
 
     def test_force_refresh_fetches_even_if_cached(self, librenms_server):
         """force_refresh=True bypasses cache and fetches from HTTP."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
@@ -493,6 +499,8 @@ class TestGetVCDataHTTP:
 
     def test_non_vc_device_returns_empty_dict(self, librenms_server):
         """Single device (not VC) → detect returns None → get_virtual_chassis_data returns empty."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
@@ -515,6 +523,8 @@ class TestPrefetchVCHTTP:
 
     def test_prefetch_multiple_vc_devices(self, librenms_server):
         """Three VC devices → cache populated for all three."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, prefetch_vc_data_for_devices
 
         api = _make_api(librenms_server.url)
@@ -534,6 +544,8 @@ class TestPrefetchVCHTTP:
 
     def test_prefetch_mix_vc_and_single(self, librenms_server):
         """Mix of VC and single devices → VC is cached, single is processed without error."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, prefetch_vc_data_for_devices
 
         api = _make_api(librenms_server.url)
@@ -564,6 +576,8 @@ class TestNegativeVCCaching:
 
     def test_non_vc_device_result_is_cached(self, librenms_server):
         """Single device (not a stack) → detect returns None → empty result cached."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
@@ -587,6 +601,8 @@ class TestNegativeVCCaching:
 
     def test_api_error_result_is_cached(self, librenms_server):
         """API 500 on inventory → detect returns None → empty result still cached."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
@@ -603,6 +619,8 @@ class TestNegativeVCCaching:
 
     def test_force_refresh_bypasses_negative_cache(self, librenms_server):
         """force_refresh=True re-fetches even when a negative result is cached."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         api = _make_api(librenms_server.url)
@@ -723,6 +741,8 @@ class TestCrossServerCacheIsolation:
 
     def test_different_server_keys_use_isolated_cache_entries(self, librenms_server):
         """Data cached via server-a must not be returned when querying the same device via server-b."""
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
 
         device_id = 300

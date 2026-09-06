@@ -9,10 +9,6 @@ lower branch of the PR stack, where appending to their tails conflicts on every 
 import json
 
 import pytest
-from django.contrib import messages as django_messages
-from django.contrib.messages import get_messages
-from django.core.cache import cache
-from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
@@ -29,6 +25,9 @@ def _login(client, username):
 
 def _messages(response, level=None):
     """Return the messages the request actually queued, optionally filtered by level."""
+    from django.contrib import messages as django_messages
+    from django.contrib.messages import get_messages
+
     wanted = None if level is None else getattr(django_messages, level.upper())
     return [
         str(message) for message in get_messages(response.wsgi_request) if wanted is None or message.level == wanted
@@ -57,6 +56,8 @@ def _cache_key(obj):
 
 def _refresh_url(device):
     """Return the IP tab refresh endpoint."""
+    from django.urls import reverse
+
     return reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
 
 
@@ -116,6 +117,8 @@ class TestManagementIPResolutionOnRender:
 
     def test_object_without_a_librenms_id_is_never_looked_up(self, live_librenms):
         """A cached snapshot missing mgmt_ip on an unmapped object requests no device record."""
+        from django.core.cache import cache
+
         device = make_device("ip-render-no-id")
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         cache.set(
@@ -145,6 +148,8 @@ class TestManagementIPResolutionOnRender:
 
     def test_failed_device_read_caches_an_empty_management_ip(self, client, live_librenms):
         """A LibreNMS fault while reading the device record caches a blank management IP."""
+        from django.core.cache import cache
+
         device = make_device("ip-render-mgmt-fails", librenms_cf={SERVER_KEY: {"id": 4302}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9303)
@@ -167,6 +172,8 @@ class TestExistingAddressEnrichment:
 
     def test_unassigned_existing_address_stays_an_update_row(self, client, live_librenms):
         """An existing but unassigned address is reported as an update, not a match."""
+        from django.core.cache import cache
+
         device = make_device("ip-render-unassigned", librenms_cf={SERVER_KEY: {"id": 4303}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9304)
@@ -191,6 +198,8 @@ class TestPrepareContextDefaults:
 
     def test_absent_interface_name_field_is_resolved_from_the_request(self, live_librenms):
         """With no field passed in, the request's interface_name_field decides the rendered name."""
+        from django.core.cache import cache
+
         device = make_device("ip-render-name-field", librenms_cf={SERVER_KEY: {"id": 4304}})
         make_interface(device, "Ethernet1", iface_type="1000base-t")
         cache.set(
@@ -224,6 +233,8 @@ class TestFreshFetchValidation:
 
     def test_unhashable_port_id_fails_the_refresh_closed(self, client, live_librenms):
         """A row whose port_id is not a plain int or string purges the snapshot and reports failure."""
+        from django.core.cache import cache
+
         device = make_device("ip-render-bad-port", librenms_cf={SERVER_KEY: {"id": 4305}})
         cache.set(_cache_key(device), {"ip_addresses": [], "mgmt_ip": "", "ports_by_id": {}}, timeout=300)
         _serve_ip_rows(live_librenms, 4305, [{"ip_address": "198.18.51.50", "prefix_length": 24, "port_id": {}}])
@@ -266,6 +277,8 @@ class TestSingleIPAddressVerify:
 
     def _post(self, client, payload):
         """POST one verify payload as JSON."""
+        from django.urls import reverse
+
         return client.post(
             reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
             data=json.dumps(payload),

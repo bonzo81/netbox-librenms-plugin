@@ -10,12 +10,12 @@ These exercise the real functions against the real Django cache / real plugin co
 from copy import deepcopy
 
 import pytest
-from django.conf import settings
-from django.core.cache import cache as real_cache
-from django.test import RequestFactory, override_settings
 
 
 def _configured_servers(*keys):
+    from django.conf import settings
+    from django.test import override_settings
+
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     plugin_config["netbox_librenms_plugin"]["servers"] = {
         key: {"librenms_url": f"https://{key}.example.test", "api_token": "token"} for key in keys
@@ -47,6 +47,8 @@ class TestExtractCachedPortsShapeCheck:
         assert self._fn()({"ports": "not-a-list"}) is None
 
     def test_non_dict_port_row_is_miss_and_purges_cache(self):
+        from django.core.cache import cache as real_cache
+
         key = "test-b7-extract-cached-ports"
         bad = {"ports": [{"port_id": 1}, "not-a-dict"]}
         real_cache.set(key, bad, timeout=60)
@@ -68,6 +70,8 @@ class TestResolveRequestedServerKey:
     """
 
     def _view(self):
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         view = DeviceInterfaceTableView()

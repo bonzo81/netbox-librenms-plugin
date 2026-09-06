@@ -1,9 +1,6 @@
 """Malformed LibreNMS payloads must fail closed instead of breaking tab renders."""
 
 import pytest
-from django.contrib.auth.models import AnonymousUser
-from django.core.cache import cache
-from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -45,6 +42,10 @@ class TestVlanCachedPayloadShape:
 
     @pytest.mark.parametrize("bad", ["garbage-string", [42], [{"vlan_vlan": 1}, "scalar"]])
     def test_malformed_cached_vlans_are_purged_and_render_empty(self, bad):
+        from django.contrib.auth.models import AnonymousUser
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
         device = make_device(f"vlan-readguard-{type(bad).__name__}")
         view = self._view()
         request = RequestFactory().get("/")
@@ -59,6 +60,10 @@ class TestVlanCachedPayloadShape:
         assert cache.get(vlans_key) is None
 
     def test_empty_cached_vlans_render_an_empty_table(self):
+        from django.contrib.auth.models import AnonymousUser
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
         device = make_device("vlan-empty-render")
         view = self._view()
         request = RequestFactory().get("/")
@@ -77,6 +82,10 @@ class TestVlanCachedPayloadShape:
 class TestInterfaceCachedPayloadShape:
     @pytest.mark.parametrize("bad_ports", [None, [{"port_id": 1}, "scalar"], "garbage-string"])
     def test_malformed_cached_ports_render_empty_without_error(self, bad_ports):
+        from django.contrib.auth.models import AnonymousUser
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device(f"iface-cache-readguard-{type(bad_ports).__name__}")
