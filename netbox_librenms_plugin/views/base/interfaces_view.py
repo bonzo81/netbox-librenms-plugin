@@ -646,6 +646,7 @@ class BaseInterfaceTableView(
         vlan_scope_user = self.vlan_scope_user(request)
         vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices, user=vlan_scope_user)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
+        hidden_ipam_permissions = self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user)
         vlan_groups_by_device = {
             device.pk: self.filter_vlan_groups_for_device(vlan_groups, device) for device in vlan_scope_devices
         }
@@ -903,6 +904,7 @@ class BaseInterfaceTableView(
             "server_key": server_key,
             "oob_incomplete": oob_incomplete,
             "relationship_data_incomplete": relationship_data_incomplete,
+            "hidden_ipam_permissions": hidden_ipam_permissions,
         }
 
     @staticmethod

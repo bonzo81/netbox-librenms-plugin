@@ -4,6 +4,8 @@
 {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=vlan_sync.cache_expiry cache_container_id="vlan-cache-countdown" cache_countdown_id="vlan-countdown-timer" cache_oob=True %}
 {% endif %}
 
+{% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=vlan_sync.hidden_ipam_permissions %}
+
 {% if vlan_sync.error_message %}
 <!-- Error Message -->
 <div class="alert alert-danger">

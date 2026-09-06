@@ -1094,6 +1094,45 @@ class VlanAssignmentMixin:
             request = getattr(self, "request", None)
         return getattr(request, "user", None)
 
+    def hidden_vlan_permissions(self, devices, user):
+        """
+        Return the IPAM view permissions whose absence hides VLAN data for *devices*.
+
+        The VLAN reads are scoped with ``restrict(user, "view")``, which returns nothing for a
+        user without the grant. That is silent on its own, so the tabs and the sync path render
+        this list to name what the user is missing. A permission is only reported when the
+        unscoped query holds rows, so a user is never warned about data that does not exist.
+
+        Args:
+            devices: The devices whose VLAN scope the caller reads.
+            user: The requesting user, or None when no request is bound.
+
+        Returns:
+            list[str]: The missing permission names, group before VLAN, or an empty list.
+        """
+        from django.db.models import Q
+        from ipam.models import VLAN, VLANGroup
+
+        if user is None:
+            return []
+        group_permission = get_permission_for_model(VLANGroup, "view")
+        vlan_permission = get_permission_for_model(VLAN, "view")
+        missing = {perm for perm in (group_permission, vlan_permission) if not user.has_perm(perm)}
+        if not missing:
+            return []
+
+        # Unscoped on purpose: the question is what the caller's grant hides, so the comparison
+        # needs the full scope.
+        groups = self.get_vlan_groups_for_devices(devices)
+        hidden = []
+        if group_permission in missing and groups:
+            hidden.append(group_permission)
+        if vlan_permission in missing:
+            in_scope = Q(group__pk__in=[group.pk for group in groups]) | Q(group__isnull=True)
+            if VLAN.objects.filter(in_scope).exists():
+                hidden.append(vlan_permission)
+        return hidden
+
     def get_vlan_groups_for_device(self, device, user=None):
         """Get all VLAN groups relevant to one device."""
         return self.get_vlan_groups_for_devices([device], user=user)

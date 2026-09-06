@@ -946,7 +946,7 @@ class SyncInterfacesView(
     def _prepare_vlan_lookup_maps(self, vlan_scope_devices):
         """Build VLAN scope maps from owner rows locked for this sync transaction."""
         # The gate checks add/change on the interface model, not IPAM, so read VLANs as the
-        # caller: a caller without the view grant matches no VLAN.
+        # caller. A caller without the grant matches no VLAN, which the warning below names.
         vlan_scope_user = self.vlan_scope_user()
         vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices, user=vlan_scope_user)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
@@ -959,6 +959,11 @@ class SyncInterfacesView(
             for owner in vlan_scope_devices
         }
         self._vlan_owners_by_id = {owner.pk: owner for owner in vlan_scope_devices}
+        if hidden := self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user):
+            messages.warning(
+                self.request,
+                f"VLANs were not matched for the selected interfaces: your account is missing {', '.join(hidden)}.",
+            )
 
     def _lock_selected_device_targets(self, obj):
         """Lock the page Device and its current chassis scope in the shared lock order."""

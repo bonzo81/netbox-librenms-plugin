@@ -4,6 +4,8 @@
 {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=interface_sync.cache_expiry cache_container_id="cache-countdown" cache_countdown_id="countdown-timer" cache_oob=True %}
 {% endif %}
 
+{% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions %}
+
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
 
