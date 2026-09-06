@@ -46,12 +46,14 @@ def _wait_until_blocked(pid, future, seconds=5):
 
 @pytest.fixture(autouse=True)
 def restore_librenms_id_custom_field():
-    """Recreate migration-seeded custom-field state after each transaction flush."""
-    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+    """Recreate migration-seeded custom-field state after each transaction flush.
 
-    executed_aliases = getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set())
-    executed_aliases.discard("default")
-    _ensure_librenms_id_custom_field(sender=None, using="default")
+    conftest owns this contract. The local copy mutated the alias set in place through a
+    ``getattr(..., set())`` default, so it did nothing at all until the attribute existed.
+    """
+    from netbox_librenms_plugin.tests.conftest import _restore_librenms_custom_field
+
+    _restore_librenms_custom_field()
 
 
 def test_current_cable_lock_blocks_replacement_after_confirmation():

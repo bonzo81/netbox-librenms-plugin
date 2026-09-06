@@ -3555,7 +3555,10 @@ class TestGetSerialPortSensors:
             success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
-        assert "refused" in msg or "error" in msg.lower()
+        # "or error in msg" also accepted "Invalid JSON ... refused", so a connection error
+        # routed through the JSON branch would have passed. Pin the classification instead.
+        assert "refused" in msg
+        assert "Invalid JSON" not in msg
 
     def test_recognized_type_change_applies_on_the_next_fetch(self, mock_librenms_api, librenms_server):
         """Adding a recognized sensor type applies on the next fresh fetch."""

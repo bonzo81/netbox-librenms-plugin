@@ -285,11 +285,27 @@ class TestCableSyncSettingsTab:
             },
         )
 
+        cache.delete(cache_key)
+
         assert synced.status_code == 302
         csp.refresh_from_db()
         cp.refresh_from_db()
         assert csp.cable_id == cp.cable_id
         assert set(csp.cable.tags.values_list("slug", flat=True)) == {"librenms"}
+
+    def test_a_read_path_reports_no_tag_instead_of_raising_on_a_malformed_setting(self):
+        """LibreNMSSettings.save() does not full_clean(), so a bad tag name can reach the database.
+
+        The Cables tab render asks for the tag with create=False. Deriving the slug before that
+        guard turned a provenance lookup into a ValidationError on a read-only page.
+        """
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "!!!"
+        settings.save(update_fields=["cable_sync_tag"])
+
+        assert get_librenms_cable_tag(sync_settings=settings, create=False) is None
 
     def test_direct_settings_write_cannot_create_an_empty_tag_slug(self):
         """Tag creation must reject a malformed setting written outside the form."""

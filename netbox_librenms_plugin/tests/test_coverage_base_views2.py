@@ -1062,8 +1062,11 @@ class TestPostHandlerVC:
 
         view = DeviceCableTableView()
         sync_owner = get_librenms_sync_device(selected_member, server_key="default") or selected_member
+        # The cache is not rolled back with the test transaction and device pks repeat across
+        # runs, so the key is released in a finally block below.
+        cache_key = view.get_cache_key(sync_owner, "links", "default")
         cache.set(
-            view.get_cache_key(sync_owner, "links", "default"),
+            cache_key,
             {
                 "links": [
                     {
@@ -1080,11 +1083,14 @@ class TestPostHandlerVC:
         )
 
         client.force_login(make_superuser("cbv2-vcmember-user"))
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_cable"),
-            data=json.dumps({"device_id": selected_member.pk, "row_id": "10", "server_key": "default"}),
-            content_type="application/json",
-        )
+        try:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_cable"),
+                data=json.dumps({"device_id": selected_member.pk, "row_id": "10", "server_key": "default"}),
+                content_type="application/json",
+            )
+        finally:
+            cache.delete(cache_key)
 
         assert response.status_code == 200
         row = response.json()["formatted_row"]

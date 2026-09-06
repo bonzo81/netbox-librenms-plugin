@@ -658,12 +658,16 @@ def get_librenms_cable_tag(*, create=True, sync_settings=None):
 
     sync_settings = sync_settings or get_cable_sync_settings()
     name = sync_settings.cable_sync_tag
-    slug = normalize_cable_tag_slug(name)
     if tag := Tag.objects.filter(name=name).first():
         return tag
     if not create:
         return None
 
+    # Derive the slug only once a create is actually required: normalize_cable_tag_slug() raises
+    # for a name that slugifies to nothing, and LibreNMSSettings.save() does not full_clean(), so a
+    # direct ORM or API write can store one. Read paths such as the Cables tab render call this with
+    # create=False and must report "no provenance tag" rather than raise.
+    slug = normalize_cable_tag_slug(name)
     color = sync_settings.cable_sync_tag_color
     try:
         return _create_cable_tag(name, slug, color)
