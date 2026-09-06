@@ -632,6 +632,59 @@ class TestSerialNumberMatchingRealDB:
         assert result["serial_duplicate"] is True
         assert result["can_import"] is False
 
+    def test_a_padded_stored_serial_still_binds(self):
+        """Migration 0012 canonicalized existing rows, but another tool can write padding again."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        padded = self._make_device("padded-101", "  PAD123  ")
+        padded.refresh_from_db()
+        assert padded.serial == "  PAD123  "
+
+        result = validate_device_for_import(
+            {"device_id": 99997, "hostname": "new-host-101c", "serial": "PAD123"},
+            include_vc_detection=False,
+        )
+
+        assert result["existing_device"] == padded
+        assert result["existing_match_type"] == "serial"
+        assert result["can_import"] is False
+
+    def test_the_cached_row_refresh_binds_a_padded_stored_serial_too(self):
+        """The refresh re-check keeps the breadth of validate_device_for_import, padding included.
+
+        _refresh_existing_device lives in import_utils/bulk_import.py, whose primary home is
+        test_coverage_bulk_import.py; it is exercised here so both serial lookups stay in step.
+        """
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        padded = self._make_device("padded-refresh-101", "  PADR123  ")
+        validation = {
+            "device_id": 99996,
+            "hostname": "new-host-101d",
+            "import_as_vm": False,
+            "existing_device": None,
+            "existing_match_type": None,
+            "existing_librenms_link": None,
+            "is_ready": True,
+            "can_import": True,
+            "issues": [],
+            "warnings": [],
+            "device_role": {"found": True, "role": padded.role, "available_roles": []},
+            "cluster": {"found": False, "cluster": None, "available_clusters": []},
+            "site": {"found": True, "site": padded.site},
+            "device_type": {"found": True, "device_type": padded.device_type},
+        }
+
+        _refresh_existing_device(
+            validation,
+            libre_device={"device_id": 99996, "hostname": "new-host-101d", "serial": "PADR123"},
+            server_key="default",
+        )
+
+        assert validation["existing_device"] == padded
+        assert validation["existing_match_type"] == "serial"
+        assert validation["can_import"] is False
+
     def test_unique_serial_still_binds(self):
         """A single device with the serial still binds via the serial path (guards against the unique guard over-rejecting)."""
         from netbox_librenms_plugin.import_utils import validate_device_for_import

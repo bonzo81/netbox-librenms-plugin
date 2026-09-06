@@ -20,6 +20,7 @@ from ..utils import (
     cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
+    find_devices_by_serial,
     normalize_serial,
     preload_normalization_rules,
     row_identity_matches,
@@ -1122,8 +1123,6 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # Serial applies only to Devices. Management IP applies to Devices and VMs.
             # The richer action heuristics stay in the full validation path; here the contract
             # is simply to block the duplicate import and bind the current object type.
-            from dcim.models import Device as _Device
-
             # This fallback fails closed on ambiguity exactly like validate_device_for_import():
             # if the serial OR the management IP resolves to more than one distinct NetBox object,
             # binding to whichever row sorts first would render the wrong object as the existing
@@ -1132,7 +1131,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if not import_as_vm:
                 serial = normalize_serial(libre_device.get("serial"))
                 if serial and serial != "-":
-                    serial_matches = list(_Device.objects.filter(serial=serial)[:2])
+                    serial_matches = find_devices_by_serial(serial)
                     if len(serial_matches) > 1:
                         ambiguous_fallback = True
                     elif serial_matches:

@@ -24,6 +24,7 @@ from ..utils import (
     cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
+    find_devices_by_serial,
     find_matching_location,
     find_matching_platform,
     find_matching_site,
@@ -1035,7 +1036,7 @@ def validate_device_for_import(
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101).
-                    serial_matches = list(Device.objects.filter(serial=serial)[:2])
+                    serial_matches = find_devices_by_serial(serial)
                     if len(serial_matches) > 1:
                         # Device.serial is not unique in NetBox, so several rows already share it.
                         # Binding to an arbitrary one is wrong, and importing anyway would mint YET

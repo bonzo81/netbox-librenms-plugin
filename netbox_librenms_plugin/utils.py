@@ -2048,6 +2048,26 @@ def normalize_serial(value) -> str:
     return "" if value is None else str(value).strip()
 
 
+def find_devices_by_serial(serial: str, limit: int = 2) -> list:
+    """Return up to *limit* Devices whose stored serial matches an already-normalized *serial*.
+
+    The exact lookup uses the serial index that migration 0012 creates. That migration also
+    canonicalizes existing rows, but a row written afterwards by another tool can hold padding
+    again, so a miss re-checks the trimmed column.
+
+    Args:
+        serial: The incoming serial, already passed through ``normalize_serial``.
+        limit: How many rows to read, enough to tell a unique match from a duplicate.
+    """
+    from dcim.models import Device
+    from django.db.models.functions import Trim
+
+    matches = list(Device.objects.filter(serial=serial)[:limit])
+    if matches:
+        return matches
+    return list(Device.objects.annotate(trimmed_serial=Trim("serial")).filter(trimmed_serial=serial)[:limit])
+
+
 def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -> str:
     """Trim a LibreNMS serial, then apply the serial-scope NormalizationRule chain.
 
