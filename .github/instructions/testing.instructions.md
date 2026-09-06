@@ -56,17 +56,32 @@ and cannot fail when the gate is deleted.
 
 ## The LibreNMS boundary
 
-Drive the real `LibreNMSAPI` against the in-repo loopback HTTP server rather than mocking the client:
+Drive the real `LibreNMSAPI` against the in-repo loopback HTTP server rather than mocking the
+client. The `librenms_server` fixture starts one server per test and stops it afterwards:
 
 ```python
-with run_librenms_server() as server:
-    configure_test_servers(settings, {server_key: {"librenms_url": server.url, ...}})
-    server.device_info_response(device_id=42, hostname="r01", serial="SN1")
-    view._librenms_api = LibreNMSAPI(server_key=server_key)
+def test_the_device_info_is_read_over_http(settings, librenms_server):
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+    configure_librenms_servers(
+        settings,
+        {"default": {"librenms_url": librenms_server.url, "api_token": "token", "verify_ssl": False}},
+    )
+    librenms_server.device_info_response(device_id=42, hostname="r01", serial="SN1")
+
+    assert LibreNMSAPI(server_key="default").get_device_info(42)[0] is True
 ```
 
-See `tests/mock_librenms_server.py` for the registrable responses (`device_info_response`,
-`ports_response`, `inventory_response`, `vc_inventory_callable`, `auth_error_response`).
+Use `librenms_mock_server()` from `tests/mock_librenms_server.py` where a fixture does not fit: it is
+the same server as a context manager, and a test can hold two of them to serve two server keys.
+
+`server.register(path, body, status=200, method=None)` registers any route. Pass a callable as
+*body* to answer per request: it receives `method`, `path`, `query`, `headers` and `body`, and
+returns a `(status, body)` pair. The named helpers wrap `register()` for the common LibreNMS
+payloads: `add_device_response`, `device_info_response`, `ports_response`, `inventory_response`,
+`vc_inventory_callable` and `auth_error_response`. `server.requests` holds every request the code
+under test sent, so a test can assert what it asked for.
 
 ## Verifying a test earns its keep
 
