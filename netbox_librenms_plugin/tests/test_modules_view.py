@@ -165,6 +165,16 @@ class TestInventoryClassIncludeRule:
     def test_a_rule_for_another_class_admits_nothing(self):
         assert self._collect(self._inventory(), [self._include_rule(pattern="sensor")]) == []
 
+    def test_a_numeric_class_value_still_matches_the_rule(self):
+        """A numeric entPhysicalClass must reach matches_class as text, not raise."""
+        items = self._inventory()
+        for item in items[1:]:
+            item["entPhysicalClass"] = 7
+
+        collected = self._collect(items, [self._include_rule(pattern="7")])
+
+        assert [item["entPhysicalIndex"] for item in collected] == [38, 39]
+
     def test_the_class_match_is_case_insensitive(self):
         collected = self._collect(self._inventory(), [self._include_rule(pattern="Other")])
 

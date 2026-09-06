@@ -107,7 +107,8 @@ def _class_is_included(item: dict, rules: list) -> bool:
     otherwise be dropped before any matching runs, so an operator can admit the class with
     a rule rather than waiting for the built-in list to grow.
     """
-    phys_class = item.get("entPhysicalClass")
+    # LibreNMS sends JSON, so a numeric class arrives as an int and matches_class() strips.
+    phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
     return any(rule.action == rule.ACTION_INCLUDE and rule.matches_class(phys_class) for rule in rules)
 
 
