@@ -1068,7 +1068,10 @@ def test_an_empty_snapshot_is_not_reported_as_an_expired_cache(client, settings)
         {"server_key": "default"},
     )
 
-    assert "Cache has expired. Please refresh the IP data." not in _message_texts(response)
+    emitted = _message_texts(response)
+    assert response.status_code == 302
+    assert "Cache has expired. Please refresh the IP data." not in emitted
+    assert emitted == ["No IP addresses selected for synchronization."]
 
 
 @pytest.mark.django_db
