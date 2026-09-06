@@ -560,6 +560,26 @@ def configure_no_librenms_servers(settings):
     settings.PLUGINS_CONFIG = plugin_config
 
 
+def bind_librenms_server(settings, server, *, server_key):
+    """Point the plugin at a loopback LibreNMS and return a client bound to *server_key*."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    configure_librenms_servers(settings, {server_key: {"librenms_url": server.url, "api_token": "test-token"}})
+    return LibreNMSAPI(server_key=server_key)
+
+
+def map_device_to_librenms(device, librenms_id=None, *, server_key, oob=None):
+    """Persist the device's LibreNMS mapping, optionally with an OOB controller sub-entry."""
+    entry = {}
+    if librenms_id is not None:
+        entry["id"] = librenms_id
+    if oob is not None:
+        entry["oob"] = oob
+    device.custom_field_data["librenms_id"] = {server_key: entry}
+    device.save(update_fields=["custom_field_data"])
+    return device
+
+
 @pytest.fixture
 def librenms_server(monkeypatch):
     """A real loopback HTTP LibreNMS whose responses the test registers."""

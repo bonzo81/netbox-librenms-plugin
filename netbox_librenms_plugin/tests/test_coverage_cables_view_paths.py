@@ -10,15 +10,17 @@ HTTP calls.
 """
 
 import json
+from functools import partial
 
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
-    configure_librenms_servers,
+    bind_librenms_server,
     make_device,
     make_interface,
     make_ip,
     make_virtual_chassis,
+    map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
@@ -35,24 +37,9 @@ pytestmark = pytest.mark.django_db
 SERVER_KEY = "alpha"
 
 
-def _bind_server(settings, server):
-    """Point the plugin at the loopback LibreNMS and return a client bound to it."""
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-    configure_librenms_servers(settings, {SERVER_KEY: {"librenms_url": server.url, "api_token": "test-token"}})
-    return LibreNMSAPI(server_key=SERVER_KEY)
-
-
-def _map_device(device, librenms_id=None, *, oob=None):
-    """Persist the device's LibreNMS mapping, optionally with an OOB controller sub-entry."""
-    entry = {}
-    if librenms_id is not None:
-        entry["id"] = librenms_id
-    if oob is not None:
-        entry["oob"] = oob
-    device.custom_field_data["librenms_id"] = {SERVER_KEY: entry}
-    device.save(update_fields=["custom_field_data"])
-    return device
+# The shared helpers in conftest take the server key; this module always uses its own.
+_bind_server = partial(bind_librenms_server, server_key=SERVER_KEY)
+_map_device = partial(map_device_to_librenms, server_key=SERVER_KEY)
 
 
 def _map_interface(interface, port_id):
