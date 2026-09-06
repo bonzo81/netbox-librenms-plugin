@@ -945,8 +945,11 @@ class SyncInterfacesView(
 
     def _prepare_vlan_lookup_maps(self, vlan_scope_devices):
         """Build VLAN scope maps from owner rows locked for this sync transaction."""
-        vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices)
-        lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+        # The gate checks add/change on the interface model, not IPAM, so read VLANs as the
+        # caller: a caller without the view grant matches no VLAN.
+        vlan_scope_user = self.vlan_scope_user()
+        vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices, user=vlan_scope_user)
+        lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
         self._lookup_maps = lookup_maps
         self._lookup_maps_by_owner = {
             owner.pk: self.restrict_vlan_lookup_maps(

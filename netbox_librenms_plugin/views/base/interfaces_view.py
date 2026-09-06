@@ -641,8 +641,11 @@ class BaseInterfaceTableView(
 
         # Include every member's scope so rows owned by another member can resolve their VLANs.
         vlan_scope_devices = virtual_chassis_members or [obj]
-        vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices)
-        lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+        # The tab gate checks the object's own view permission only, and the table serialises VLAN
+        # ids plus each group's id and name, so read IPAM as the caller.
+        vlan_scope_user = self.vlan_scope_user(request)
+        vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices, user=vlan_scope_user)
+        lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
         vlan_groups_by_device = {
             device.pk: self.filter_vlan_groups_for_device(vlan_groups, device) for device in vlan_scope_devices
         }

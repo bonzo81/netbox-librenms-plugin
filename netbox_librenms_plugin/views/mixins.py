@@ -1074,6 +1074,26 @@ class VlanAssignmentMixin:
         """Return *model*'s queryset, scoped to what *user* may view when a user is given."""
         return model.objects.all() if user is None else model.objects.restrict(user, "view")
 
+    def vlan_scope_user(self, request=None):
+        """
+        Return the user whose IPAM view rights scope the VLAN reads.
+
+        Production always has a request: ``dispatch()`` binds one, and the render helpers take
+        one as an argument. The mixin is also built bare, without a request, so resolve both the
+        request and its user by attribute instead of assuming them. No user means no scoping,
+        which is the behaviour a request-less caller had before.
+
+        Args:
+            request: The request being served, when the caller holds one. Falls back to the
+                request bound on the view.
+
+        Returns:
+            The requesting user, or None when no request is bound.
+        """
+        if request is None:
+            request = getattr(self, "request", None)
+        return getattr(request, "user", None)
+
     def get_vlan_groups_for_device(self, device, user=None):
         """Get all VLAN groups relevant to one device."""
         return self.get_vlan_groups_for_devices([device], user=user)

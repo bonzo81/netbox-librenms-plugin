@@ -1977,9 +1977,11 @@ class TestInterfaceContextVirtualChassisOwner:
         assert row["port_id"] == 10
         assert 'name="device_selection_10"' in str(context["table"].render_device_selection(None, row))
         assert 'name="vlan_group_10_100"' in str(context["table"].render_vlans(None, row))
+        # The sync path reads VLANs through the caller's restricted queryset, so this user needs
+        # the IPAM view grants for the rack-scoped group selection under test to run at all.
         user = make_user_with_perms(
             "sync-vlan-owner",
-            [("view", Device), ("add", Interface), ("change", Interface)],
+            [("view", Device), ("add", Interface), ("change", Interface), ("view", VLANGroup), ("view", VLAN)],
         )
         request = _make_request(
             post_data={
