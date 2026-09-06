@@ -351,6 +351,20 @@ class TestActionRendering:
 
         assert "Update Serial" not in rendered
 
+    def test_render_actions_update_interface_hidden_without_an_inventory_index(self):
+        """The bind reads its metadata from the cached row, so a row with no index has no action."""
+        device = make_device("table-bind-no-index")
+        record = {
+            "can_update_interface_binding": True,
+            "installed_module_id": 99,
+            "librenms_port_id": 4501,
+            "ent_physical_index": "",
+        }
+
+        rendered = str(_table(device).render_actions(None, record))
+
+        assert "Update Interface" not in rendered
+
     def test_interface_update_requires_interface_change_permission(self):
         device = make_device("table-interface-permission")
         record = {
