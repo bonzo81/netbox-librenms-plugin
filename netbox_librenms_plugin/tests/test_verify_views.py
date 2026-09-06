@@ -216,6 +216,89 @@ class TestSingleInterfaceVerifyView:
         return view
 
     @pytest.mark.django_db
+    def test_verify_response_hides_vlan_metadata_from_a_user_without_ipam_view_rights(self):
+        """The gate only checks view_device, so the IPAM reads must be scoped to the caller."""
+        from dcim.models import Device, Site
+        from django.contrib.contenttypes.models import ContentType
+        from django.core.cache import cache
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+
+        device = make_device("verify-ipam-scope")
+        group = VLANGroup.objects.create(
+            name="Verify Hidden VLAN Group",
+            slug="verify-hidden-vlan-group",
+            scope_type=ContentType.objects.get_for_model(Site),
+            scope_id=device.site.pk,
+        )
+        VLAN.objects.create(vid=100, name="Verify Hidden VLAN", group=group, status="active")
+
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 41,
+                        "ifName": "Ethernet1",
+                        "ifDescr": "Ethernet1",
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                        "untagged_vlan": 100,
+                        "_source": "host",
+                    }
+                ],
+                "port_stack_relationships": {},
+            },
+        )
+
+        def vlans_cell_for(user):
+            request = make_request(
+                "post",
+                json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "interface_name": "Ethernet1",
+                        "interface_name_field": "ifName",
+                        "port_id": 41,
+                    }
+                ),
+                user=user,
+                path="/verify/",
+                content_type="application/json",
+            )
+            response = view.post(request)
+            assert response.status_code == 200
+            return json.loads(response.content)["formatted_row"]["vlans"]
+
+        try:
+            visible = vlans_cell_for(_verify_superuser("ipam-scope-admin"))
+            restricted = vlans_cell_for(
+                make_user_with_perms("verify-ipam-scope-user", [("view", Device)], plugin_write=False)
+            )
+        finally:
+            cache.delete(cache_key)
+
+        # The group name and its pk reach the tooltip and the hidden group input only for a
+        # caller who may view the group.
+        assert group.name in visible
+        assert f'value="{group.pk}"' in visible
+        assert group.name not in restricted
+        assert f'value="{group.pk}"' not in restricted
+        assert "Not in NetBox" in restricted
+
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
     def test_vc_no_resolvable_sync_device_returns_404(self, mock_cache, mock_sync):

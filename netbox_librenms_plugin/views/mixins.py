@@ -1033,11 +1033,16 @@ class VlanAssignmentMixin:
     - Updating interface VLAN assignments
     """
 
-    def get_vlan_groups_for_device(self, device):
-        """Get all VLAN groups relevant to one device."""
-        return self.get_vlan_groups_for_devices([device])
+    @staticmethod
+    def _vlan_visible_queryset(model, user):
+        """Return *model*'s queryset, scoped to what *user* may view when a user is given."""
+        return model.objects.all() if user is None else model.objects.restrict(user, "view")
 
-    def get_vlan_groups_for_devices(self, devices):
+    def get_vlan_groups_for_device(self, device, user=None):
+        """Get all VLAN groups relevant to one device."""
+        return self.get_vlan_groups_for_devices([device], user=user)
+
+    def get_vlan_groups_for_devices(self, devices, user=None):
         """
         Get all VLAN groups relevant to a set of devices.
 
@@ -1048,6 +1053,11 @@ class VlanAssignmentMixin:
         - Site Group: Each device site's group and all parent site groups
         - Rack: Each device's rack
         - Global: VLAN groups with no scope
+
+        Args:
+            devices: The devices whose VLAN scopes are collected.
+            user: Restrict the result to the groups this user may view. A caller that renders
+                IPAM data into a response must pass the requesting user.
 
         Returns:
             List of VLANGroup objects, deduplicated and sorted by name
@@ -1076,14 +1086,14 @@ class VlanAssignmentMixin:
                 racks.add(rack)
 
         groups = set()
-        groups.update(self._get_vlan_groups_for_scope(Site, sites))
-        groups.update(self._get_vlan_groups_for_scope(Location, locations))
-        groups.update(self._get_vlan_groups_for_scope(Region, regions))
-        groups.update(self._get_vlan_groups_for_scope(SiteGroup, site_groups))
-        groups.update(self._get_vlan_groups_for_scope(Rack, racks))
+        groups.update(self._get_vlan_groups_for_scope(Site, sites, user=user))
+        groups.update(self._get_vlan_groups_for_scope(Location, locations, user=user))
+        groups.update(self._get_vlan_groups_for_scope(Region, regions, user=user))
+        groups.update(self._get_vlan_groups_for_scope(SiteGroup, site_groups, user=user))
+        groups.update(self._get_vlan_groups_for_scope(Rack, racks, user=user))
 
         # Global VLAN groups (no scope)
-        global_groups = VLANGroup.objects.filter(scope_type__isnull=True)
+        global_groups = self._vlan_visible_queryset(VLANGroup, user).filter(scope_type__isnull=True)
         groups.update(global_groups)
 
         # Return sorted by name for consistent display
@@ -1114,12 +1124,14 @@ class VlanAssignmentMixin:
             if group.scope_type_id is None or (group.scope_type_id, group.scope_id) in scope_keys
         ]
 
-    def _build_vlan_lookup_maps(self, vlan_groups):
+    def _build_vlan_lookup_maps(self, vlan_groups, user=None):
         """
         Build lookup dictionaries for VLAN matching.
 
         Args:
             vlan_groups (list[VLANGroup]): The VLAN groups to include.
+            user: Restrict the VLANs to the ones this user may view. A caller that renders
+                IPAM data into a response must pass the requesting user.
 
         Returns:
             dict: A dictionary with these lookup maps:
@@ -1133,9 +1145,10 @@ class VlanAssignmentMixin:
 
         # Get all VLANs from relevant groups and global VLANs
         group_pks = [g.pk for g in vlan_groups]
-        vlans = VLAN.objects.filter(group__pk__in=group_pks).select_related("group")
+        visible_vlans = self._vlan_visible_queryset(VLAN, user)
+        vlans = visible_vlans.filter(group__pk__in=group_pks).select_related("group")
         # Also get global VLANs (no group)
-        global_vlans = VLAN.objects.filter(group__isnull=True)
+        global_vlans = visible_vlans.filter(group__isnull=True)
         return self._index_vlans([*vlans, *global_vlans])
 
     @staticmethod
@@ -1422,13 +1435,14 @@ class VlanAssignmentMixin:
             current = getattr(current, "parent", None)
         return ancestors
 
-    def _get_vlan_groups_for_scope(self, model_class, objects):
+    def _get_vlan_groups_for_scope(self, model_class, objects, user=None):
         """
         Get VLAN groups scoped to any of the given objects.
 
         Args:
             model_class: The Django model class (Site, Location, Region, etc.)
             objects: List of model instances to check
+            user: Restrict the result to the groups this user may view.
 
         Returns:
             QuerySet of VLANGroup objects
@@ -1445,7 +1459,7 @@ class VlanAssignmentMixin:
         if not object_ids:
             return VLANGroup.objects.none()
 
-        return VLANGroup.objects.filter(scope_type=content_type, scope_id__in=object_ids)
+        return self._vlan_visible_queryset(VLANGroup, user).filter(scope_type=content_type, scope_id__in=object_ids)
 
     def _find_vlan_in_group(self, vid, vlan_group_id, lookup_maps):
         """

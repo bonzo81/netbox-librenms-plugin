@@ -258,8 +258,10 @@ class SingleInterfaceVerifyView(
             )
 
             if port_data:
-                vlan_groups = self.get_vlan_groups_for_device(selected_device)
-                vlan_lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+                # Scope the IPAM reads to the caller: the gate above only checked view_device, and
+                # the response serializes VLAN ids plus each group's id, name and scope.
+                vlan_groups = self.get_vlan_groups_for_device(selected_device, user=request.user)
+                vlan_lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=request.user)
                 vlan_group_overrides = cache.get(self.get_vlan_overrides_key(primary_device, server_key)) or {}
                 # Set before the selection call: it validates overrides against this row's groups.
                 port_data["vlan_groups"] = vlan_groups
