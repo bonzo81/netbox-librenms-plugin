@@ -140,6 +140,12 @@ LATE_OR_NEGATED_GUARDS = {
     "QueryDict getlist returns a list even though its values are strings": (
         'def f(request):\n    v = request.POST.getlist("select")\n    return v in NAMES\n'
     ),
+    "QueryDict get default built by a call is unhashable too": (
+        'def f(request):\n    v = request.POST.get("select", set())\n    return v in NAMES\n'
+    ),
+    "QueryDict get default is a tuple holding an unhashable element": (
+        'def f(request):\n    v = request.POST.get("select", ([],))\n    return v in NAMES\n'
+    ),
     "QueryDict get returns an unhashable default when the key is absent": (
         'def f(request):\n    v = request.POST.get("select", [])\n    return v in NAMES\n'
     ),

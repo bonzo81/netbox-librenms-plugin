@@ -20,7 +20,9 @@ from pathlib import Path
 HASHABLE_NARROWING_TYPES = frozenset({"str", "int", "bytes", "float", "frozenset"})
 TAINTING_CALLS = frozenset({"get", "getlist", "loads", "pop"})
 # Literals that cannot be a set member or a dict key, so a read that can return one is tainting.
-UNHASHABLE_LITERALS = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)
+# A default is treated as safe only when it can be PROVEN hashable. Listing unhashable shapes
+# instead would keep missing constructed and nested ones: set(), list(), a comprehension, or a
+# tuple holding a list are all unhashable without being an unhashable literal.
 # A Django QueryDict always yields str, so a form field can never be unhashable.
 QUERYDICT_SOURCES = frozenset({"POST", "GET", "query_params"})
 # Helpers that return a hashable value or None, so their result needs no further narrowing.
@@ -40,6 +42,22 @@ COERCING_CALLS = frozenset(
     }
 )
 SUPPRESSION = "unhashable-ok:"
+
+
+def _is_provably_hashable(node):
+    """Return whether *node* is a literal this checker can prove is hashable.
+
+    Anything it cannot prove is treated as unhashable, so a constructed default such as
+    ``set()`` or a nested one such as ``([],)`` is caught rather than needing to be enumerated.
+    A tuple is hashable only when every element is.
+    """
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.Tuple):
+        return all(_is_provably_hashable(element) for element in node.elts)
+    if isinstance(node, ast.UnaryOp):
+        return _is_provably_hashable(node.operand)
+    return False
 
 
 def _fingerprint(node):
@@ -232,7 +250,7 @@ class MembershipChecker(ast.NodeVisitor):
         if attr == "getlist":
             return True
         if attr == "get" and len(call.args) >= 2:
-            return isinstance(call.args[1], UNHASHABLE_LITERALS)
+            return not _is_provably_hashable(call.args[1])
         return False
 
     @staticmethod
