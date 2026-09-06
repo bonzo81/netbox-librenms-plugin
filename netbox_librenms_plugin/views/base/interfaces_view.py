@@ -209,7 +209,7 @@ class BaseInterfaceTableView(
         # lookups AND the cache writes below all target the same server in a multi-server
         # tab refresh — otherwise data fetched from the session/default server is cached
         # under the POSTed key (wrong interface set). Mirrors cables/ip/modules/vlan views.
-        post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        post_server_key = self.rebind_api_for_posted_server(request.POST)
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             # This POST is HTMX (the success path swaps in the partial), so a bare redirect would

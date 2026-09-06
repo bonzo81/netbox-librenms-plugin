@@ -127,7 +127,7 @@ class SyncInterfacesView(
         # stale/unknown key — the old `or self.librenms_api.server_key` fallback rebuilt
         # the lazy client, which can resolve to a different server (wrong-server sync) or
         # raise on a misconfigured default (500).
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return redirect(
@@ -1842,7 +1842,7 @@ class _BaseRelationshipSyncView(
             return error
 
         obj = self._get_object(object_type, object_id)
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             return JsonResponse({"error": "Selected LibreNMS server is no longer configured."}, status=400)
         if error := self._migrated_donor_error(obj, server_key):

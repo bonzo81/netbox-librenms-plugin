@@ -391,7 +391,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Rebind the API to the POSTed server BEFORE resolving the sync device / librenms_id
         # so the inventory fetch + cache scope all target the same server in a multi-server
         # tab refresh. Resolve before _get_sync_device so VC resolution uses the same key.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             # rebind_api_for_server() returned None to avoid building a missing/misconfigured

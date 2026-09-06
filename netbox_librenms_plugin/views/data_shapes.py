@@ -50,7 +50,7 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         device = self.restrict_object_or_404(Device, pk=device_id)
 
         # Scope the LibreNMS client + id lookup to the server the user is viewing (multi-server).
-        server_key = self.rebind_api_for_server(request.GET.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.GET)
         if server_key is None:
             return self._error(request, device, "Selected LibreNMS server is no longer configured.")
 

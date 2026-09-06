@@ -202,7 +202,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # rows came from. The key comes from request POST, so a stale/tampered request could
         # carry an unknown key — surface a user-facing error instead of a 500. (Uses the
         # shared mixin helper, which also resolves/normalizes the key.)
-        post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        post_server_key = self.rebind_api_for_posted_server(request.POST)
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self.redirect_to_ip_tab(request, obj)

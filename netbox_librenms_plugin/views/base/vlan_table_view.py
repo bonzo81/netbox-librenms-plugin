@@ -46,7 +46,7 @@ class BaseVLANTableView(
         # Rebind the API to the POSTed server BEFORE resolving librenms_id, so the id
         # (and the VLAN fetch/cache below) resolve against the right server in a
         # multi-server tab refresh rather than the session/default one.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             # rebind_api_for_server() returned None precisely to avoid constructing a missing/

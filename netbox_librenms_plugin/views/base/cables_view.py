@@ -2926,7 +2926,7 @@ class CableRemotePickerView(BaseCableTableView):
         if denied := self.require_object_permissions("GET"):
             return denied
         obj = self.restrict_object_or_404(Device, pk=pk)
-        server_key = self.rebind_api_for_server(request.GET.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.GET)
         if server_key is None:
             return HttpResponse("Selected LibreNMS server is no longer configured.", status=400)
         row_id = request.GET.get("row_id", "")
@@ -3039,7 +3039,7 @@ class CableRemotePickerView(BaseCableTableView):
         if denied is not None:
             return denied
         obj = self.restrict_object_or_404(Device, pk=pk)
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             return HttpResponse("Selected LibreNMS server is no longer configured.", status=400)
         row_id = request.POST.get("row_id", "")
