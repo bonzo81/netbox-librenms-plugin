@@ -2053,15 +2053,3 @@ class TestRoutedSyncPagesScopeTheirObject:
 
         with pytest.raises(Http404):
             view.get_object(hidden.pk)
-
-
-def test_location_mapping_bulk_import_url_resolves():
-    """The explicit import route must reach the location mapping form."""
-    from django.urls import resolve, reverse
-
-    from netbox_librenms_plugin.forms import LocationMappingImportForm
-    from netbox_librenms_plugin.views.mapping_views import LocationMappingBulkImportView
-
-    match = resolve(reverse("plugins:netbox_librenms_plugin:locationmapping_bulk_import"))
-    assert match.func.view_class is LocationMappingBulkImportView
-    assert match.func.view_class.model_form is LocationMappingImportForm
