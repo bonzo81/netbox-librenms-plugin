@@ -264,7 +264,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return error
 
         initial_device = self.restrict_object_or_404(Device, pk=pk)
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return redirect(

@@ -516,6 +516,39 @@ class TestSyncCablesServerKey:
             "Selected LibreNMS server is no longer configured."
         ]
 
+    def test_repeated_server_keys_fail_closed(self, client, settings):
+        """Two different configured keys in one POST are ambiguous, so no server may be chosen."""
+        from django.contrib.messages import get_messages
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_librenms_servers,
+            make_device,
+            make_superuser,
+        )
+
+        configure_librenms_servers(
+            settings,
+            {
+                "primary": {"librenms_url": "https://primary.example.com", "api_token": "token-a"},
+                "secondary": {"librenms_url": "https://secondary.example.com", "api_token": "token-b"},
+            },
+        )
+        device = make_device("cable-repeated-server")
+        client.force_login(make_superuser("cable-repeated-server-su"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk]),
+            {"server_key": ["primary", "secondary"]},
+        )
+
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+        assert response.status_code == 302
+        assert response.url == f"{sync_url}?tab=cables"
+        assert [str(message) for message in get_messages(response.wsgi_request)] == [
+            "Selected LibreNMS server is no longer configured."
+        ]
+
     def test_valid_server_key_is_preserved_in_redirect(self, client, settings):
         """A valid posted key remains on the cable-tab redirect."""
         from django.urls import reverse

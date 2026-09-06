@@ -681,6 +681,27 @@ class LibreNMSAPIMixin:
         merged = {"has_write_permission": self.has_write_permission(), **context}
         return render(request, self.partial_template_name, {**merged, **build_migrated_context(obj, server_key)})
 
+    def rebind_api_for_posted_server(self, data):
+        """
+        Rebind ``self.librenms_api`` to a strictly parsed posted ``server_key``.
+
+        ``QueryDict.get()`` keeps only the last of repeated values, so a payload carrying two
+        configured keys would silently bind one server and its cache namespace. An ambiguous
+        selection has no correct answer, so this reports it instead of choosing.
+
+        Args:
+            data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an
+                optional ``server_key``.
+
+        Returns:
+            str | None: The resolved server key, or ``None`` when the selection is unusable.
+        """
+        getlist = getattr(data, "getlist", None)
+        values = getlist("server_key") if callable(getlist) else None
+        if isinstance(values, (list, tuple)) and len(values) > 1:
+            return None
+        return self.rebind_api_for_server(data.get("server_key"))
+
     def rebind_api_for_server(self, server_key):
         """
         Rebind ``self.librenms_api`` to the POST-scoped *server_key*.
