@@ -3533,6 +3533,9 @@ function showHtmxModalError(message) {
     body.className = 'modal-body';
     const alert = document.createElement('div');
     alert.className = 'alert alert-danger';
+    // Announce the failure: the modal opens without focus moving into it, so assistive
+    // technology would otherwise report nothing at all.
+    alert.setAttribute('role', 'alert');
     const icon = document.createElement('i');
     icon.className = 'mdi mdi-alert me-1';
     alert.appendChild(icon);
@@ -3542,6 +3545,9 @@ function showHtmxModalError(message) {
     modalContent.textContent = '';
     modalContent.appendChild(header);
     modalContent.appendChild(body);
+    // #htmx-modal is labelled by #htmx-modal-label, which lives outside the replaced content.
+    // Copy this header into it or the dialog loses its accessible name after an error swap.
+    updateHtmxModalLabel();
     showModal(document.getElementById('htmx-modal'));
 }
 

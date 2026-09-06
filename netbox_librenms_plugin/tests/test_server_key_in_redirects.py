@@ -76,6 +76,7 @@ def test_modules_action_fragment_keeps_the_server_key(client, settings):
 
     from netbox_librenms_plugin.tests.conftest import (
         configure_librenms_servers,
+        make_device,
         make_module_bay,
         make_module_type,
         make_superuser,

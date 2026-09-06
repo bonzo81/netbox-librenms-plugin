@@ -152,6 +152,21 @@ def test_a_preview_that_never_reaches_the_server_is_reported_too(page):
     assert page.locator("#replace-btn").is_enabled()
 
 
+def test_the_error_modal_keeps_its_accessible_name_and_announces_the_alert(page):
+    """The dialog is labelled by an element outside the content the error handler replaces."""
+    page.set_content(_module_page_html(REPLACE_BUTTON))
+    page.route(f"{PREVIEW_URL}?*", lambda route: route.fulfill(status=400, body="No cached inventory data."))
+    _add_page_scripts(page)
+
+    with page.expect_request(f"{PREVIEW_URL}?*"):
+        page.click("#replace-btn")
+    page.wait_for_selector("#htmx-modal-content .alert-danger")
+
+    label_id = page.get_attribute("#htmx-modal", "aria-labelledby")
+    assert page.evaluate(f"document.getElementById({label_id!r}).textContent.trim()") == "Request failed"
+    assert page.get_attribute("#htmx-modal-content .alert-danger", "role") == "alert"
+
+
 def test_a_second_row_action_is_dropped_while_the_first_is_in_flight(page):
     """A second action's response could not retarget from its detached form, so its write never showed."""
     page.set_content(_module_page_html(_row_form(INSTALL_URL, "action-a") + _row_form(SERIAL_URL, "action-b")))
