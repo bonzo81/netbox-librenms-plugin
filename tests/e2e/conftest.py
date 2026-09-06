@@ -78,7 +78,6 @@ def netbox_shell(code):
         ],
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": "/usr/bin:/bin", "HOME": "/root"},
     )
     lines = [
         line

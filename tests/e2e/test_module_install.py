@@ -19,7 +19,7 @@ Configuration (environment variables):
     NETBOX_CONTAINER=<name>      Docker container name (auto-detected if omitted)
 
 Run:
-    cd /home/mzieba/workspace/netbox-librenms-plugin
+    cd <repository root>
     HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \
     no_proxy=localhost,127.0.0.1,172.22.0.4 \
     E2E_TESTS_ENABLED=1 python -m pytest tests/e2e/test_module_install.py -v -s
