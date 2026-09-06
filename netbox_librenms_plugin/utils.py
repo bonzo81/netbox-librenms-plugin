@@ -2060,12 +2060,14 @@ def find_devices_by_serial(serial: str, limit: int = 2) -> list:
         limit: How many rows to read, enough to tell a unique match from a duplicate.
     """
     from dcim.models import Device
-    from django.db.models.functions import Trim
+    from django.db.models import CharField, F, Func, Value
 
     matches = list(Device.objects.filter(serial=serial)[:limit])
     if matches:
         return matches
-    return list(Device.objects.annotate(trimmed_serial=Trim("serial")).filter(trimmed_serial=serial)[:limit])
+    # Django's Trim() strips spaces only; normalize_serial() uses str.strip(), so name the same set.
+    trimmed = Func(F("serial"), Value(" \t\n\r\v\f"), function="BTRIM", output_field=CharField())
+    return list(Device.objects.annotate(trimmed_serial=trimmed).filter(trimmed_serial=serial)[:limit])
 
 
 def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -> str:

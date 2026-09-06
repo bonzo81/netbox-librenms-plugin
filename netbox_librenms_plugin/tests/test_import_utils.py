@@ -632,13 +632,14 @@ class TestSerialNumberMatchingRealDB:
         assert result["serial_duplicate"] is True
         assert result["can_import"] is False
 
-    def test_a_padded_stored_serial_still_binds(self):
+    @pytest.mark.parametrize("padding", ["  PAD123  ", "\tPAD123\r\n"], ids=["spaces", "tab_and_newline"])
+    def test_a_padded_stored_serial_still_binds(self, padding):
         """Migration 0012 canonicalized existing rows, but another tool can write padding again."""
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
-        padded = self._make_device("padded-101", "  PAD123  ")
+        padded = self._make_device(f"padded-101-{len(padding)}", padding)
         padded.refresh_from_db()
-        assert padded.serial == "  PAD123  "
+        assert padded.serial == padding
 
         result = validate_device_for_import(
             {"device_id": 99997, "hostname": "new-host-101c", "serial": "PAD123"},
