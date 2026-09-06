@@ -419,6 +419,33 @@ class TestVirtualChassisInventory:
         assert result[0]["model"] == "Member model A"
         assert result[1]["assigned_member"] is None
 
+    def test_a_vendor_marker_does_not_hide_the_assigned_member(self, librenms_server):
+        """Juniper reports the chassis serial as "S/N BCFB9793"; NetBox stores it without.
+
+        Compared raw the two never match, so an already-assigned member is offered for
+        assignment again and the modal shows the decorated serial.
+        """
+        _vc, members = make_virtual_chassis_members("inventory-marker", count=1)
+        members[0].serial = "BCFB9793"
+        members[0].save()
+        inventory = [
+            {
+                "entPhysicalClass": "chassis",
+                "entPhysicalDescr": "Routing Engine chassis",
+                "entPhysicalSerialNum": "S/N BCFB9793",
+                "entPhysicalModelName": "MX304",
+            }
+        ]
+        _register_device(librenms_server, 6644, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6644
+
+        result = view._get_vc_inventory_serials(members[0])
+
+        assert len(result) == 1
+        assert result[0]["serial"] == "BCFB9793"
+        assert result[0]["assigned_member"] == members[0]
+
     def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-failure", count=1)
         librenms_server.register("/api/v0/inventory/6642/all", {"status": "error"}, status=404)

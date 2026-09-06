@@ -310,6 +310,45 @@ class TestCreateVirtualChassisWithMembers:
         assert "name already exists" in caplog.text
         assert Device.objects.filter(name="vc-keep-name-M1").count() == 1
 
+    def test_a_member_serial_keeps_no_vendor_marker(self):
+        """Juniper reports ENTITY-MIB serials as "S/N BCFB9751".
+
+        Stored verbatim the VC member carries a serial the hardware never matches, and every
+        later comparison against a serial normalized elsewhere fails.
+        """
+        from dcim.models import Device
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        _name_pattern()
+        master = make_device("vc-marker", serial="BCFB9793")
+        members = [{"serial": "S/N BCFB9751", "position": 2, "name": "FPC1"}]
+
+        create_virtual_chassis_with_members(master, members, {"device_id": 8101})
+
+        created = Device.objects.get(virtual_chassis__name="vc-marker", vc_position=2)
+        assert created.serial == "BCFB9751"
+
+    def test_the_master_row_is_skipped_when_its_serial_carries_the_marker(self):
+        """The master's own chassis row comes back with the marker, its stored serial without.
+
+        Comparing the two raw makes them differ, so the master is created a second time as a
+        member of its own virtual chassis.
+        """
+        from dcim.models import Device
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        _name_pattern()
+        master = make_device("vc-master-marker", serial="BCFB9793")
+        members = [
+            {"serial": "S/N BCFB9793", "position": 1, "name": "FPC0"},
+            {"serial": "S/N BCFB9751", "position": 2, "name": "FPC1"},
+        ]
+
+        vc = create_virtual_chassis_with_members(master, members, {"device_id": 8102})
+
+        assert Device.objects.filter(virtual_chassis=vc, serial="BCFB9793").count() == 1
+        assert Device.objects.filter(virtual_chassis=vc).count() == 2
+
     def test_a_member_serial_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members

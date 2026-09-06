@@ -8,7 +8,7 @@ from django.core.cache import cache
 from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
-from ..utils import normalize_serial
+from ..utils import normalize_inventory_serial, normalize_serial, preload_normalization_rules
 
 logger = logging.getLogger(__name__)
 
@@ -520,11 +520,23 @@ def create_virtual_chassis_with_members(
             used_positions = {_master_pos}  # Master occupies its actual position
             members_created = 0
 
+            # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper).
+            # The stored device serial does not, so rewrite it here, once, before any comparison
+            # or write reads it. Left raw the master never matches its own row and is created a
+            # second time as a member of its own chassis.
+            member_manufacturer = getattr(getattr(master_device, "device_type", None), "manufacturer", None)
+            # Preload the rule chain once: normalizing per member would query NormalizationRule
+            # once per stack member.
+            serial_rules = preload_normalization_rules("serial", manufacturer=member_manufacturer)
             for member in members_info:
                 # Normalize serial and position up front so all skip-checks and
                 # downstream logic use consistent values (strips whitespace and
                 # treats the sentinel "-" as "no serial").
-                serial = _norm_serial(member.get("serial"))
+                serial = _norm_serial(
+                    normalize_inventory_serial(
+                        member.get("serial"), manufacturer=member_manufacturer, preloaded_rules=serial_rules
+                    )
+                )
                 member_pos = _safe_pos(member.get("position"))
 
                 # Skip the master member — identified by is_master flag, serial match,

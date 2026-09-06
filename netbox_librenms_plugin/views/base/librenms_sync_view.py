@@ -32,6 +32,7 @@ from netbox_librenms_plugin.utils import (
     get_user_pref,
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
+    normalize_inventory_serial,
     resolve_naming_preferences,
     save_user_pref,
 )
@@ -807,9 +808,13 @@ class BaseLibreNMSSyncView(
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
 
+        # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
+        # the stored member serial does not, so compare and display the normalized value.
+        manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
+
         result = []
         for component in chassis_components:
-            serial = component.get("entPhysicalSerialNum", "-")
+            serial = normalize_inventory_serial(component.get("entPhysicalSerialNum"), manufacturer=manufacturer)
             if not serial or serial == "-":
                 continue
 

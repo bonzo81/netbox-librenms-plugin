@@ -15,12 +15,18 @@ def _make_master_device(serial="MASTER001"):
     master.rack = None
     master.location = None
     master.device_type = MagicMock()
+    # A MagicMock fabricates this, and the serial normalization would then filter the rule
+    # queryset by a mock. A real device without a manufacturer carries None.
+    master.device_type.manufacturer = None
     master.role = MagicMock()
     master.site = MagicMock()
     master.platform = MagicMock()
     return master
 
 
+# The serial normalization these tests exercise reads its rule chain from NormalizationRule, so the
+# creation path needs a database even where the models around it are patched.
+@pytest.mark.django_db
 class TestCreateVirtualChassisWithMembersPositionConflict:
     """Tests specifically for lines 431 and 435 - position conflict resolution."""
 
@@ -215,6 +221,7 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         assert create_calls[0].kwargs.get("serial") == "SN999"
 
 
+@pytest.mark.django_db
 class TestCreateVirtualChassisServerKeyDomain:
     """Tests for server_key parameter in create_virtual_chassis_with_members domain."""
 
