@@ -1967,7 +1967,7 @@ def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(client,
             return _json_response(url, {"status": "ok", "port": [{"port_id": 7440, "ifName": "Ethernet40"}]})
         raise AssertionError(f"Unexpected LibreNMS request: {url}")
 
-    drop_write, _skipped = _drop_snapshot_write(device, SyncTab.IP_ADDRESSES)
+    drop_write, skipped = _drop_snapshot_write(device, SyncTab.IP_ADDRESSES)
     url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
     with (
         drop_write,
@@ -1980,6 +1980,8 @@ def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(client,
         )
 
     assert response.status_code == 200
+    # Without this the test still passes when the view stops writing the snapshot at all.
+    assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.IP_ADDRESSES, "primary")]
     assert b"could not be cached" in response.content
     assert b"no snapshot to show" not in response.content
 
