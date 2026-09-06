@@ -257,7 +257,7 @@ class TestVerifyVlanSyncGroupBranches:
 class TestSaveVlanGroupOverridesBranches:
     """Persisting overrides needs plugin write access, a device id, and a resolvable cache scope."""
 
-    def test_a_plugin_reader_cannot_persist_overrides(self, client, live_librenms):
+    def test_a_plugin_reader_cannot_persist_overrides(self, client, configure_librenms):
         """Plugin read access alone is refused with 403 and writes nothing to the cache."""
         from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
 
@@ -274,7 +274,7 @@ class TestSaveVlanGroupOverridesBranches:
         assert response.status_code == 403
         assert cache.get(overrides_key) is None
 
-    def test_missing_device_id_is_rejected(self, client, live_librenms):
+    def test_missing_device_id_is_rejected(self, client, configure_librenms):
         """A payload without device_id returns a structured 400 before the device lookup."""
         client.force_login(make_superuser("vlan-overrides-no-device-user"))
 
@@ -287,7 +287,7 @@ class TestSaveVlanGroupOverridesBranches:
         assert response.status_code == 400
         assert response.json() == {"status": "error", "message": "No device ID provided"}
 
-    def test_an_unresolvable_chassis_falls_back_to_the_posted_device(self, client, live_librenms):
+    def test_an_unresolvable_chassis_falls_back_to_the_posted_device(self, client, configure_librenms):
         """A chassis with no resolvable sync member stores the overrides under the posted device."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
         from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
