@@ -21,6 +21,7 @@ def _registered_serializers():
 def test_router_exposes_every_serializer_under_test():
     """Guard the parameter source itself: an empty registry would make the suite vacuous."""
     assert len(_registered_serializers()) >= 9
+    assert "location-mappings" in {prefix for prefix, _serializer in _registered_serializers()}
 
 
 @pytest.mark.parametrize("prefix,serializer_class", _registered_serializers(), ids=lambda v: getattr(v, "__name__", v))

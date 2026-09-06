@@ -131,6 +131,7 @@ class PlatformMappingSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "librenms_os", "netbox_platform", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSLocationMapping")
 class LocationMappingSerializer(NetBoxModelSerializer):
     """Serialize LocationMapping model for REST API."""
 
