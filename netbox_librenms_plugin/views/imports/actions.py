@@ -3103,10 +3103,8 @@ class AddAsOOBView(
                 # user must not be blocked on change-IPAddress.
                 selected_iface_pk = None
                 if iface_id and iface_id != "__new__":
-                    try:
-                        selected_iface_pk = int(iface_id)
-                    except ValueError:
-                        selected_iface_pk = None
+                    # Read the id exactly as _resolve_oob_interface does, or the two disagree.
+                    selected_iface_pk = coerce_model_pk(iface_id)
                 elif iface_id == "__new__" and new_iface_name and device is not None:
                     selected_iface_pk = (
                         Interface.objects.filter(device=device, name=new_iface_name)
@@ -3214,9 +3212,9 @@ class AddAsOOBView(
                 # same refusal as the pre-create check above.
                 return (existing, None) if existing is not None else (None, "name_out_of_scope")
         if iface_id:
-            try:
-                iface_pk = int(iface_id)
-            except ValueError:
+            # Same pk rule as every other client-supplied id: ASCII digits, positive, in range.
+            iface_pk = coerce_model_pk(iface_id)
+            if iface_pk is None:
                 return None, None
             try:
                 # Lock the reused row too (same orphan-on-concurrent-delete reasoning).

@@ -8093,6 +8093,27 @@ class TestResolveOOBInterface:
             result_iface, reason = view._resolve_oob_interface(req, dev)
         assert result_iface.pk == iface.pk and reason is None
 
+    def test_a_non_ascii_digit_id_is_refused(self):
+        """Only plain ASCII digits name a pk; int() also reads fullwidth digits."""
+        from django.db import transaction
+
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+
+        view = self._view()
+        dev = make_device("oob-res-digit-forms")
+        iface = make_interface(dev, "eth0")
+        user = make_user_with_perms("oob-res-digit-forms", [("view", Interface)])
+        # int() reads fullwidth digits too, so this string spells the real pk.
+        fullwidth = "".join(chr(ord(digit) - ord("0") + 0xFF10) for digit in str(iface.pk))
+        req = make_request("post", {"oob_interface_id": fullwidth}, user=user)
+
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(req, dev)
+
+        assert (result_iface, reason) == (None, None)
+
     def test_create_new_interface(self):
         from django.db import transaction
 
