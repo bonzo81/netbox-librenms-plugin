@@ -72,6 +72,26 @@ def test_devcontainer_stub_command_runs_the_server_as_a_package_module():
     assert service["healthcheck"]["test"][:3] == ["CMD", "python", "-c"]
 
 
+def test_devcontainer_starts_without_waiting_for_the_stub_to_serve():
+    """A stub that cannot serve must not keep the devcontainer from starting."""
+    if not _has_docker_compose():
+        pytest.skip("Docker Compose is required to validate the devcontainer dependencies")
+
+    compose_path = Path(__file__).resolve().parents[2] / ".devcontainer/docker-compose.yml"
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(compose_path), "config", "--format", "json"],
+        cwd=compose_path.parent.parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    depends_on = json.loads(result.stdout)["services"]["devcontainer"]["depends_on"]
+
+    assert depends_on["librenms-stub"]["condition"] == "service_started"
+    assert depends_on["postgres"]["condition"] == "service_healthy"
+    assert depends_on["redis"]["condition"] == "service_healthy"
+
+
 def _stub_source_mount(repository_root, env_file):
     """Return the resolved /app mount of the stub service for one env file."""
     compose_path = repository_root / ".devcontainer/docker-compose.yml"

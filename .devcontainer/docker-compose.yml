@@ -40,7 +40,8 @@ services:
       redis:
         condition: service_healthy
       librenms-stub:
-        condition: service_healthy
+        # The devcontainer runs `sleep infinity`, so a stub that cannot serve must not block it.
+        condition: service_started
     ports:
       - "8000:8000"
 
