@@ -87,11 +87,13 @@ class TestInterfacesTabIpamScoping:
     """BaseInterfaceTableView.get_context_data must read IPAM as the requesting user."""
 
     def _context(self, user, device, server_key):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         request = make_request("get", user=user)
-        view = make_view(DeviceInterfaceTableView, request)
-        view._librenms_api.get_stored_librenms_id.return_value = None
+        # A real client: the device carries no LibreNMS id, so the stored-id read answers None
+        # without issuing a request, and the VLAN parsing runs the real implementation.
+        view = make_view(DeviceInterfaceTableView, request, librenms_api=LibreNMSAPI(server_key=server_key))
         return view.get_context_data(
             request,
             device,
