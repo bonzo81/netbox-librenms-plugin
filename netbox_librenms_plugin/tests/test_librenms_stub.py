@@ -198,6 +198,47 @@ def test_stub_updates_location_whose_name_contains_slash():
         server.stop()
 
 
+def _location_recording(device_id, location):
+    """Build the smallest recording the stub accepts, carrying one device location."""
+    return {
+        "device_id": device_id,
+        "meta": {"name": f"location-{device_id}"},
+        "responses": {
+            f"GET /api/v0/devices/{device_id}": {
+                "status": "ok",
+                "devices": [{"hostname": f"device-{device_id}.example.test", "location": location}],
+            }
+        },
+    }
+
+
+def test_stub_gives_each_device_the_id_of_its_own_location():
+    """A location filter must return the devices that really sit in that location."""
+    server = LibreNMSStubServer(
+        recordings=[_location_recording(1, "Lab A"), _location_recording(2, "Lab B")],
+        api_token=TOKEN,
+    ).start()
+    try:
+        api = make_recording_api(server.url, server_key="stub", token=TOKEN)
+
+        ok, locations = api.get_locations()
+        assert ok is True
+        ids_by_name = {item["location"]: item["id"] for item in locations}
+        assert sorted(ids_by_name.values()) == [1, 2]
+
+        ok, devices = api.list_devices()
+        assert ok is True
+        assert {device["device_id"]: device["location_id"] for device in devices} == {
+            1: ids_by_name["Lab A"],
+            2: ids_by_name["Lab B"],
+        }
+
+        listed = _request(server, "GET", f"/api/v0/devices?type=location_id&query={ids_by_name['Lab B']}").json()
+        assert [device["device_id"] for device in listed["devices"]] == [2]
+    finally:
+        server.stop()
+
+
 def test_stub_supports_librenms_device_filters_and_lookup_aliases():
     server = _start_stub()
     try:
