@@ -79,6 +79,11 @@ class ObjectServerSelection:
         return sum(mapping.is_selectable for mapping in self.mappings) > 1
 
     @property
+    def has_usable_mapping(self) -> bool:
+        """Return whether any mapping can still be selected on this page."""
+        return any(mapping.is_selectable for mapping in self.mappings)
+
+    @property
     def active_display_name(self) -> str:
         """Return a stable label for the selector button."""
         for mapping in self.mappings:

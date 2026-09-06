@@ -53,6 +53,25 @@
 </div>
 {% endif %}
 
+{% if server_selection_blocked and not server_selection_has_usable_mapping %}
+<div class="alert alert-warning" role="alert" id="librenms-server-selection-recovery">
+    <i class="mdi mdi-lifebuoy me-1"></i>
+    <strong>No mapped LibreNMS server is usable.</strong>
+    Every mapping below is disabled, so no sync tab can run against this object.
+    {% if lookup_device_pk != object.pk %}
+    The mappings belong to the virtual chassis sync device. Correct or remove them on
+    <a href="{% if lookup_device_model_name == 'virtualmachine' %}{% url 'plugins:netbox_librenms_plugin:vm_librenms_sync' pk=lookup_device_pk %}{% else %}{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=lookup_device_pk %}{% endif %}"
+       class="alert-link">that device&#39;s LibreNMS tab</a>.
+    {% else %}
+    A mapping for a server that is no longer configured has a Remove button beside it. A mapping
+    for a configured server stays until its URL and API token are repaired in the plugin
+    configuration.
+    {% endif %}
+    <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="alert-link">Open the LibreNMS settings page</a>
+    to check the configured servers.
+</div>
+{% endif %}
+
 {% if migrated_to_marker %}
 <div class="alert alert-warning d-flex align-items-start" role="alert">
     <i class="mdi mdi-alert-octagon me-2 fs-3"></i>
@@ -194,6 +213,12 @@
                         </button>
                     </form>
                     {% endif %}
+                    {% endif %}
+                    {% if mapping.is_configured and not mapping.is_selectable %}
+                    <span class="text-muted small"
+                          title="This server is configured without a usable URL and API token, so its mapping cannot be removed here">
+                        <i class="mdi mdi-information-outline me-1"></i>Repair this server in the plugin configuration
+                    </span>
                     {% endif %}
                     {% if not mapping.is_configured %}
                     {% if lookup_device_model_name == "device" or lookup_device_model_name == "virtualmachine" %}

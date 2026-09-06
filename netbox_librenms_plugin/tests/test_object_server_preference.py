@@ -421,6 +421,64 @@ def test_unconfigured_preferred_mapping_warns_and_falls_back_without_mutation(cl
 
 
 @pytest.mark.django_db
+def test_an_unusable_configured_mapping_shows_where_to_repair_it(client, settings, servers):
+    """RemoveServerMappingView refuses a configured server, so the blocked page must point elsewhere."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"]["incomplete"] = {
+        "display_name": "Incomplete LibreNMS",
+        "librenms_url": servers.primary.url,
+        "api_token": "",
+        "verify_ssl": False,
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    mapping = {"incomplete": {"id": 13540}}
+    owner = make_device("unusable-configured-mapping", librenms_cf=mapping)
+    client.force_login(make_superuser("unusable-configured-viewer"))
+
+    response = client.get(_sync_url(owner))
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "Select a LibreNMS server to continue." in html
+    assert 'id="librenms-server-selection-recovery"' in html
+    assert reverse("plugins:netbox_librenms_plugin:settings") in html
+    assert "Incomplete LibreNMS" in html
+    assert "Repair this server in the plugin configuration" in html
+    # The page must still refuse to run against a server this object is not mapped on.
+    assert 'data-active-server-key=""' in html
+    assert servers.primary.requests == []
+    assert servers.secondary.requests == []
+    owner.refresh_from_db()
+    assert owner.custom_field_data["librenms_id"] == mapping
+
+
+@pytest.mark.django_db
+def test_a_blocked_vc_member_links_to_the_sync_device_that_owns_the_mapping(client, settings, servers):
+    """The mapping actions live on the sync device, so a blocked member page must link there."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"]["incomplete"] = {
+        "display_name": "Incomplete LibreNMS",
+        "librenms_url": servers.primary.url,
+        "api_token": "",
+        "verify_ssl": False,
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    _chassis, (owner, viewed_member) = make_virtual_chassis_members("blocked-vc-owner", count=2)
+    owner.custom_field_data["librenms_id"] = {"incomplete": {"id": 13541}}
+    owner.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser("blocked-vc-viewer"))
+
+    response = client.get(_sync_url(viewed_member))
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    start = html.index('id="librenms-server-selection-recovery"')
+    recovery_html = html[start : html.index("</div>", start)]
+    assert _sync_url(owner) in recovery_html
+    assert servers.primary.requests == []
+
+
+@pytest.mark.django_db
 def test_only_unusable_mapping_requires_selection_without_get_mutation(client, servers):
     mapping = {
         "retired": {"id": 13529},

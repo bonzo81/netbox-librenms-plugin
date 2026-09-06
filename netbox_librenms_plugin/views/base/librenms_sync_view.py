@@ -215,6 +215,7 @@ class BaseLibreNMSSyncView(
                 "server_selection_warning": selection.warning,
                 "server_selection_active_name": selection.active_display_name,
                 "server_selection_preferred_key": selection.preferred_key,
+                "server_selection_has_usable_mapping": selection.has_usable_mapping,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
                 "server_selection_blocked": True,
                 "has_librenms_id": False,
