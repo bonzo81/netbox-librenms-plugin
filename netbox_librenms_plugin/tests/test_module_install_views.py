@@ -40,7 +40,7 @@ def _drive(view_class, device, data, live_librenms):
 
 
 class TestInstallModuleView:
-    """The single-row install reports its identity fallback and the binding it made."""
+    """The single-row install reads its identity from the cached row, never from the post."""
 
     @pytest.mark.parametrize("broken_field", ["module_bay_id", "module_type_id"])
     def test_a_non_numeric_bay_or_type_is_rejected(self, live_librenms, broken_field):
@@ -65,7 +65,10 @@ class TestInstallModuleView:
         assert "Missing or invalid module bay/module type ID." in message_texts(request, "error")
         assert not Module.objects.filter(device=device).exists()
 
-    def test_posted_row_metadata_binds_the_interface_and_is_flagged_as_a_fallback(self, live_librenms):
+    def test_posted_row_metadata_binds_nothing_without_an_ent_index(self, live_librenms):
+        """With no index there is no cached row, so posted identity and serial must not be read."""
+        from dcim.models import Module
+
         from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
@@ -80,7 +83,7 @@ class TestInstallModuleView:
             {
                 "module_bay_id": str(bay.pk),
                 "module_type_id": str(module_type.pk),
-                "serial": "-",
+                "serial": "FORGED-SN",
                 "server_key": "default",
                 "librenms_port_id": "6201",
                 "librenms_ifname": interface.name,
@@ -90,11 +93,12 @@ class TestInstallModuleView:
 
         interface.refresh_from_db()
         assert response.status_code == 302
-        assert interface.module.module_type == module_type
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 6201
+        assert interface.module_id is None
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert message_texts(request, "info") == []
+        # The carrier install itself still runs; only the posted metadata is discarded.
+        assert Module.objects.get(device=device, module_bay=bay).serial == ""
         assert any("serial: N/A" in text for text in message_texts(request, "success"))
-        assert any("fallback used posted row metadata" in text for text in message_texts(request, "warning"))
-        assert any("Bound Te1/1/1 to LibreNMS port_id 6201" in text for text in message_texts(request, "info"))
 
 
 class TestInstallBranchView:
