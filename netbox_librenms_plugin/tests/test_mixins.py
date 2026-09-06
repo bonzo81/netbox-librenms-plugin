@@ -3,8 +3,6 @@
 from copy import deepcopy
 
 import pytest
-from django.conf import settings
-from django.test import RequestFactory, override_settings
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_vm
 
@@ -13,6 +11,9 @@ pytestmark = pytest.mark.django_db
 
 
 def _server_settings(servers, **legacy):
+    from django.conf import settings
+    from django.test import override_settings
+
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     plugin = dict(plugin_config.get("netbox_librenms_plugin", {}))
     plugin["servers"] = servers
@@ -143,6 +144,8 @@ class TestCacheMixinKeyGeneration:
 class TestRedirectWithServerKey:
     @staticmethod
     def _request():
+        from django.test import RequestFactory
+
         return RequestFactory().get("/", HTTP_HOST="testserver")
 
     @pytest.mark.parametrize(

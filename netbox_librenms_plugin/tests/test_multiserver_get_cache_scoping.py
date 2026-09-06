@@ -3,8 +3,6 @@
 from copy import deepcopy
 
 import pytest
-from django.core.cache import cache
-from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
 
@@ -33,6 +31,8 @@ def configured_servers(configure_librenms):
 
 
 def _request(server_key):
+    from django.test import RequestFactory
+
     request = RequestFactory().get("/", {"server_key": server_key})
     request.user = make_superuser()
     return request
@@ -47,6 +47,8 @@ class TestConfiguredServerCacheScoping:
     """A configured requested server reads only that server's snapshot."""
 
     def test_interfaces_render_the_requested_servers_snapshot(self, configured_servers):
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device("multiserver-interface")
@@ -63,6 +65,8 @@ class TestConfiguredServerCacheScoping:
         assert list(context["table"].data)[0]["port_id"] == 11
 
     def test_cables_render_the_requested_servers_snapshot(self, configured_servers):
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         device = make_device("multiserver-cable")
@@ -78,6 +82,8 @@ class TestConfiguredServerCacheScoping:
         assert list(context["table"].data)[0]["local_port_id"] == 12
 
     def test_vlans_render_the_requested_servers_snapshot(self, configured_servers):
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
 
         device = make_device("multiserver-vlan")
@@ -93,6 +99,8 @@ class TestConfiguredServerCacheScoping:
         assert list(context["vlan_table"].data)[0]["vlan_id"] == 120
 
     def test_ip_addresses_render_the_requested_servers_snapshot(self, configured_servers):
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
         device = make_device("multiserver-ip")
@@ -126,6 +134,8 @@ class TestConfiguredServerCacheScoping:
         assert list(context["table"].data)[0]["ip_with_mask"] == "198.18.30.1/24"
 
     def test_modules_use_the_requested_server_mapping_and_snapshot(self, configured_servers):
+        from django.core.cache import cache
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = make_device("multiserver-module", librenms_cf={"production": 14})
@@ -202,6 +212,8 @@ class TestRemovedServerFailsClosed:
         table_key,
         extra_args,
     ):
+        from django.core.cache import cache
+
         from django.utils.module_loading import import_string
 
         view_class = import_string(view_path)
@@ -240,6 +252,8 @@ class TestRemovedServerFailsClosed:
 
 def test_cables_render_with_a_cache_backend_without_ttl(settings, configured_servers):
     """Cable rendering degrades cleanly on Django cache backends without ``ttl``."""
+    from django.core.cache import cache
+
     from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
     cache_config = deepcopy(settings.CACHES)

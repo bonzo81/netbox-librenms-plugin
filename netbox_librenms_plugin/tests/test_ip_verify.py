@@ -11,7 +11,6 @@ Covers:
 import json
 
 import pytest
-from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 
@@ -30,6 +29,8 @@ def _make_view(request=None):
 
 def _make_request(body_dict):
     """Create a JSON POST request with a real permitted user."""
+    from django.test import RequestFactory
+
     request = RequestFactory().post("/", data=json.dumps(body_dict), content_type="application/json")
     request.user = make_superuser()
     return request

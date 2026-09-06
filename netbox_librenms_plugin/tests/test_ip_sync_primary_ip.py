@@ -7,12 +7,6 @@ conflicts on every restack.
 """
 
 import pytest
-from django.contrib import messages as django_messages
-from django.contrib.messages import get_messages
-from django.core.cache import cache
-from django.urls import reverse
-from ipam.models import VRF, IPAddress
-from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.tests.conftest import (
     configure_no_librenms_servers,
@@ -37,6 +31,9 @@ def _login(client, username):
 
 def _messages(response, level=None):
     """Return the messages the request actually queued, optionally filtered by level."""
+    from django.contrib import messages as django_messages
+    from django.contrib.messages import get_messages
+
     wanted = None if level is None else getattr(django_messages, level.upper())
     return [
         str(message) for message in get_messages(response.wsgi_request) if wanted is None or message.level == wanted
@@ -45,6 +42,9 @@ def _messages(response, level=None):
 
 def _ip_url(obj):
     """Return the IP sync endpoint for a Device or a VirtualMachine."""
+    from django.urls import reverse
+    from virtualization.models import VirtualMachine
+
     object_type = "virtualmachine" if isinstance(obj, VirtualMachine) else "device"
     return reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
@@ -67,6 +67,8 @@ def _row(address, port_id, interface_name, *, prefix_length=24, **extra):
 
 def _seed(obj, rows):
     """Write the IP snapshot the sync view reads, keyed the way production keys it."""
+    from django.core.cache import cache
+
     ports = {row["port_id"]: {"port_id": row["port_id"], "ifName": row["interface_name"]} for row in rows}
     cache.set(
         SyncIPAddressesView().get_cache_key(obj, "ip_addresses", SERVER_KEY),
@@ -134,6 +136,8 @@ class TestPrimaryIPFromManagementAddress:
 
     def test_management_row_becomes_the_primary_ip(self, client, live_librenms):
         """A synced row matching the LibreNMS management IP is written to primary_ip4."""
+        from ipam.models import IPAddress
+
         device = make_device("ip-primary-set", librenms_cf={SERVER_KEY: {"id": 4201}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9201)
@@ -153,6 +157,8 @@ class TestPrimaryIPFromManagementAddress:
 
     def test_primary_ip_already_pointing_at_the_row_is_left_alone(self, client, live_librenms):
         """A row whose address is already the primary IP reports no primary change."""
+        from ipam.models import IPAddress
+
         device = make_device("ip-primary-idempotent", librenms_cf={SERVER_KEY: {"id": 4202}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9202)
@@ -174,6 +180,8 @@ class TestPrimaryIPFromManagementAddress:
 
     def test_primary_ip_written_after_the_object_was_read_is_respected(self, client, live_librenms):
         """The locked re-read sees a primary IP written after the sync loaded the object."""
+        from ipam.models import IPAddress
+
         from django.db import connection
 
         device = make_device("ip-primary-stale", librenms_cf={SERVER_KEY: {"id": 4208}})
@@ -197,6 +205,8 @@ class TestPrimaryIPFromManagementAddress:
 
     def test_management_row_without_an_interface_reports_primary_not_set(self, client, live_librenms):
         """An unmatched management row is reported apart from an ordinary unmatched row."""
+        from ipam.models import IPAddress
+
         device = make_device("ip-primary-no-interface", librenms_cf={SERVER_KEY: {"id": 4203}})
         _serve_device_info(live_librenms, 4203, {"ip": "198.18.42.10"})
         management_row = _row("198.18.42.10", 9203, "Ethernet1")
@@ -214,6 +224,8 @@ class TestPrimaryIPFromManagementAddress:
 
     def test_primary_ip_refuses_a_management_only_sibling_interface(self, client, live_librenms):
         """A management-only interface on a chassis sibling cannot carry the primary IP."""
+        from ipam.models import IPAddress
+
         from dcim.models import Interface
 
         _chassis, members = make_virtual_chassis_members("ip-primary-vc")
@@ -245,6 +257,9 @@ class TestIPRowResolution:
 
     def test_unknown_vrf_selection_fails_the_row(self, client, live_librenms):
         """A posted VRF the caller cannot resolve fails its row instead of writing a global address."""
+        from ipam.models import IPAddress
+        from ipam.models import VRF
+
         device = make_device("ip-vrf-missing", librenms_cf={SERVER_KEY: {"id": 4205}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9206)
@@ -270,6 +285,8 @@ class TestIPRowResolution:
 
     def test_duplicate_stored_port_ids_skip_the_row(self, client, live_librenms):
         """An ambiguous port id skips the row and refuses the cached interface URL fallback."""
+        from ipam.models import IPAddress
+
         device = make_device("ip-ambiguous-port", librenms_cf={SERVER_KEY: {"id": 4206}})
         first = make_interface(device, "Ethernet1", iface_type="1000base-t")
         second = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -289,6 +306,9 @@ class TestIPRowResolution:
 
     def test_renamed_interface_is_matched_through_the_cached_url(self, client, live_librenms):
         """A renamed interface with no stored port id is still resolved by the cached interface URL."""
+        from ipam.models import IPAddress
+        from virtualization.models import VMInterface
+
         vm = make_vm("ip-renamed-interface")
         _set_librenms_id(vm, 4207)
         interface = VMInterface.objects.create(virtual_machine=vm, name="eth0")

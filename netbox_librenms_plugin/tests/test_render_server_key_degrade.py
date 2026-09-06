@@ -9,9 +9,6 @@ degrade on the modules and interfaces tabs, which resolved through the raising p
 from copy import deepcopy
 
 import pytest
-from django.conf import settings
-from django.test import RequestFactory
-from django.test import override_settings
 
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
@@ -28,6 +25,9 @@ def _make_device(name):
 
 def _patch_unbuildable_config():
     """No servers dict and no legacy url/token: LibreNMSAPI() raises ValueError."""
+    from django.conf import settings
+    from django.test import override_settings
+
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     plugin_config["netbox_librenms_plugin"] = {"servers": {}, "librenms_url": "", "api_token": ""}
     return override_settings(PLUGINS_CONFIG=plugin_config)
@@ -42,6 +42,9 @@ def librenms_server(monkeypatch):
 
 
 def _api_for(server):
+    from django.conf import settings
+    from django.test import override_settings
+
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
@@ -55,6 +58,8 @@ def _api_for(server):
 @pytest.mark.django_db
 class TestModulesTabDegradesOnUnbuildableClient:
     def test_get_context_data_returns_empty_panel_not_500(self):
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = _make_device("degrade-mod-dev")
@@ -73,6 +78,8 @@ class TestModulesTabDegradesOnUnbuildableClient:
 @pytest.mark.django_db
 class TestInterfacesTabDegradesOnUnbuildableClient:
     def test_get_context_data_renders_with_none_key_not_500(self):
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _make_device("degrade-if-dev")
@@ -92,6 +99,8 @@ class TestCablesPortsCacheShapeGuard:
     """get_ports_data must treat a truthy but malformed ports cache entry as a miss."""
 
     def test_corrupt_ports_cache_falls_through_to_live_fetch(self, librenms_server):
+        from django.test import RequestFactory
+
         from django.core.cache import cache as real_cache
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
@@ -127,6 +136,8 @@ class TestVlanTabDegradesOnUnbuildableClient:
     """
 
     def test_get_vlan_context_returns_none_key_not_500(self):
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
 
         device = _make_device("degrade-vlan-dev")
