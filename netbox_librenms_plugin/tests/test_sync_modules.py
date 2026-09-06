@@ -135,6 +135,16 @@ class TestInstallSerialRulePreloading:
 pytestmark = pytest.mark.django_db
 
 
+def pytest_generate_tests(metafunc):
+    """Parametrize ``spec_index`` over every component the running NetBox replicates."""
+    if "spec_index" not in metafunc.fixturenames:
+        return
+    # Deferred import: the spec list grows with the running NetBox (4.7 adds two cooling components).
+    from netbox_librenms_plugin.views.sync.modules import _module_component_specs
+
+    metafunc.parametrize("spec_index", range(len(_module_component_specs())))
+
+
 def _view(view_class, request, live_librenms):
     """Bind a real view to a real request and real LibreNMS client."""
     view = view_class()
@@ -611,14 +621,76 @@ class TestInstallAndUpdateViews:
         device = make_device("view-update-serial", librenms_cf={"default": 53})
         bay = make_module_bay(device, "Serial Bay")
         module = install_module(device, bay.name, "SERIAL-CARD", serial="OLD")
-        request = _post_request({"module_id": module.pk, "serial": "NEW", "server_key": "default"})
+        item = _inventory_item(530, module.module_type.model, bay.name, serial="NEW")
+        request = _post_request({"module_id": module.pk, "ent_index": 530, "server_key": "default"})
+        view = _view(UpdateModuleSerialView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=53)
 
-        response = view_post(_view(UpdateModuleSerialView, request, live_librenms), request, pk=device.pk)
+        response = view_post(view, request, pk=device.pk)
 
         module.refresh_from_db()
         assert response.status_code == 302
         assert module.serial == "NEW"
         assert any("Updated serial" in text for text in message_texts(request))
+
+    def test_persists_the_cached_serial_not_the_posted_one(self, live_librenms):
+        """A replayed or edited form must not store a serial LibreNMS never reported."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        device = make_device("view-serial-cached", librenms_cf={"default": 56})
+        bay = make_module_bay(device, "Cached Serial Bay")
+        module = install_module(device, bay.name, "CACHED-SERIAL-CARD", serial="OLD-SN")
+        item = _inventory_item(560, module.module_type.model, bay.name, serial="LNMS-SN")
+        request = _post_request(
+            {"module_id": module.pk, "ent_index": 560, "serial": "FORGED-SN", "server_key": "default"}
+        )
+        view = _view(UpdateModuleSerialView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=56)
+
+        response = view_post(view, request, pk=device.pk)
+
+        module.refresh_from_db()
+        assert response.status_code == 302
+        assert module.serial == "LNMS-SN"
+        assert any("LNMS-SN" in text for text in message_texts(request, "success"))
+
+    def test_refuses_an_oob_inventory_row(self, live_librenms):
+        """OOB controller inventory is read-only, so its serial must never reach a host module."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        device = make_device("view-serial-oob", librenms_cf={"default": 57})
+        bay = make_module_bay(device, "OOB Serial Bay")
+        module = install_module(device, bay.name, "OOB-SERIAL-CARD", serial="OLD-SN")
+        item = _inventory_item(570, module.module_type.model, bay.name, serial="OOB-SN", _source="oob")
+        request = _post_request({"module_id": module.pk, "ent_index": 570, "server_key": "default"})
+        view = _view(UpdateModuleSerialView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=57)
+
+        response = view_post(view, request, pk=device.pk)
+
+        module.refresh_from_db()
+        assert response.status_code == 302
+        assert "OOB controller inventory is read-only" in message_texts(request, "error")
+        assert module.serial == "OLD-SN"
+
+    def test_reports_an_inventory_index_that_is_not_cached(self, live_librenms):
+        """A row the snapshot does not carry is refused instead of writing a blank serial."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        device = make_device("view-serial-missing", librenms_cf={"default": 58})
+        bay = make_module_bay(device, "Missing Serial Bay")
+        module = install_module(device, bay.name, "MISSING-SERIAL-CARD", serial="OLD-SN")
+        item = _inventory_item(580, module.module_type.model, bay.name, serial="LNMS-SN")
+        request = _post_request({"module_id": module.pk, "ent_index": 581, "server_key": "default"})
+        view = _view(UpdateModuleSerialView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=58)
+
+        response = view_post(view, request, pk=device.pk)
+
+        module.refresh_from_db()
+        assert response.status_code == 302
+        assert "Inventory item not found in cache." in message_texts(request, "error")
+        assert module.serial == "OLD-SN"
 
     def test_update_interface_binds_cached_inventory_identity(self, live_librenms):
         from netbox_librenms_plugin.utils import get_librenms_device_id
@@ -646,6 +718,48 @@ class TestInstallAndUpdateViews:
         assert interface.module == module
         assert get_librenms_device_id(interface, "default", auto_save=False) == 5540
         assert any("Updated interface" in text for text in message_texts(request))
+
+    def test_update_module_interface_refuses_an_oob_binding_row(self, live_librenms):
+        """OOB rows are read-only, so a crafted ent_index must not bind a host interface."""
+        from dcim.models import Device, Interface, Module
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("view-update-interface-oob", librenms_cf={"default": 59})
+        bay = make_module_bay(device, "OOB Interface Bay")
+        module = install_module(device, bay.name, "OOB-INTERFACE-CARD")
+        interface = make_interface(device, "Ethernet59")
+        user = make_user_with_perms(
+            "view-update-interface-oob",
+            [("view", Device), ("view", Module), ("change", Interface)],
+        )
+        # Everything a successful bind needs, so only _source="oob" can stop it.
+        item = _inventory_item(
+            590,
+            module.module_type.model,
+            interface.name,
+            _librenms_port_id=5590,
+            _librenms_ifname=interface.name,
+            _source="oob",
+        )
+        request = make_request(
+            "post",
+            {"module_id": str(module.pk), "ent_index": "590", "server_key": "default"},
+            user=user,
+            path="/modules/update-interface/",
+        )
+        view = _view(UpdateModuleInterfaceView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=59)
+
+        response = view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert response.status_code == 302
+        assert "OOB controller inventory is read-only" in message_texts(request, "error")
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert interface.module_id is None
 
     def test_ignore_rules_follow_the_resolved_target_manufacturer(self, live_librenms):
         """A row can be installed onto a VC member whose manufacturer differs from the page device.
@@ -715,6 +829,42 @@ class TestInstallAndUpdateViews:
         assert module.module_type == module_type
         assert module.serial == "SELECTED-SERIAL"
         assert any("Installed 1 module" in text for text in message_texts(request))
+
+    def test_batch_install_preloads_the_serial_normalization_rules_once(self, live_librenms):
+        """The serial scope is queried once for the batch, not once per inventory row."""
+        from dcim.models import Module
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        device = make_device("view-serial-rule-preload", librenms_cf={"default": 60})
+        module_type = make_module_type("SERIAL-PRELOAD-CARD")
+        inventory = []
+        for position in range(1, 4):
+            bay = make_module_bay(device, f"Preload Slot {position}")
+            inventory.append(_inventory_item(600 + position, module_type.model, bay.name, serial=f"SN{position}"))
+        request = _post_request(
+            {"select": [str(item["entPhysicalIndex"]) for item in inventory], "server_key": "default"}
+        )
+        view = _view(InstallSelectedView, request, live_librenms)
+        seed_inventory(view, device, inventory, librenms_id=60)
+
+        with CaptureQueriesContext(connection) as captured:
+            response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        assert Module.objects.filter(device=device).count() == len(inventory)
+        serial_rule_queries = [
+            query["sql"]
+            for query in captured.captured_queries
+            if "normalizationrule" in query["sql"].lower() and "'serial'" in query["sql"]
+        ]
+        # One preload for the unscoped rules, one lazy fill for the device manufacturer.
+        assert len(serial_rule_queries) <= 2, (
+            f"the serial normalization rules were queried {len(serial_rule_queries)} times "
+            f"for {len(inventory)} inventory rows"
+        )
 
     def test_branch_install_does_not_use_hidden_bay_or_module_type(self, live_librenms):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
@@ -1090,7 +1240,7 @@ class TestModulesActionResponse:
 
         response = client.post(
             url,
-            {"server_key": self.SERVER_KEY, "module_id": str(module.pk), "serial": "ACTION-1"},
+            {"server_key": self.SERVER_KEY, "module_id": str(module.pk), "ent_index": "8201"},
             HTTP_HX_REQUEST="true",
         )
 
@@ -1336,7 +1486,6 @@ class TestModuleComponentAdoption:
             return {"type": "8p8c"}
         return {}
 
-    @pytest.mark.parametrize("spec_index", range(8))
     def test_matching_standalone_component_is_authorized(self, spec_index):
         from dcim.constants import MODULE_TOKEN
         from dcim.models import Module, RearPort, RearPortTemplate
