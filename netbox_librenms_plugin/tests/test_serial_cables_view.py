@@ -993,7 +993,8 @@ class TestSerialFetchSkippedWithoutHostId:
 
         assert result is None
         requested_paths = [request["path"] for request in live_librenms.server.requests]
-        assert requested_paths
+        # The only call is the hostname discovery lookup: no host id means no links fetch.
+        assert requested_paths == [f"/api/v0/devices/{obj.name}"]
         assert all("/devices/None/links" not in path for path in requested_paths)
         assert view._serial_links_fetch_failed is False
 

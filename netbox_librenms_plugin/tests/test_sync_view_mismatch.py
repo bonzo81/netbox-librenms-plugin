@@ -171,8 +171,13 @@ class TestMismatchDetection:
 
         LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": pattern})
         _register_device_info(live_librenms, {"device_id": 42, "sysName": librenms_name, "ip": "198.18.0.2"})
+        live_librenms.server.inventory_response(42, [])
+        # The pattern names a virtual-chassis member, so the device has to be a member for the
+        # suffix-stripping branch under test to be the one that runs.
+        device = _netbox_device(pattern, name=netbox_name)
+        make_virtual_chassis(f"mismatch-pattern-{pattern}", device)
 
-        result = _device_info(_view(live_librenms), _netbox_device(pattern, name=netbox_name))
+        result = _device_info(_view(live_librenms), device)
 
         assert result["mismatched_device"] is mismatch
 
