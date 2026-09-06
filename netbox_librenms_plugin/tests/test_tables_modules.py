@@ -338,6 +338,20 @@ class TestActionRendering:
         assert 'hx-indicator="closest tr"' in rendered
         assert 'hx-disabled-elt="find button"' in rendered
 
+    def test_render_actions_install_hidden_without_an_inventory_index(self):
+        """The install resolves its row by index, so a row with no index has no standard action."""
+        device = make_device("table-install-no-index")
+        record = {
+            "can_install": True,
+            "module_bay_id": 5,
+            "module_type_id": 10,
+            "ent_physical_index": "",
+        }
+
+        rendered = str(_table(device).render_actions(None, record))
+
+        assert "Install" not in rendered
+
     def test_render_actions_update_serial_hidden_without_an_inventory_index(self):
         """The view resolves the serial through the cached row, so a row with no index has no action."""
         device = make_device("table-update-no-index")
@@ -423,7 +437,7 @@ class TestActionRendering:
 
     # One record per row action that posts through HTMX.
     _HTMX_ROW_ACTIONS = {
-        "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "serial": "S1"},
+        "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "ent_physical_index": 32},
         "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
         "update_serial": {
             "can_update_serial": True,
