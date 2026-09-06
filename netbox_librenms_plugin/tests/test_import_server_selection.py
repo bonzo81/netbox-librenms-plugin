@@ -843,7 +843,10 @@ def test_background_filter_job_uses_and_records_its_transient_server(settings, s
     from core.models import Job
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+    from netbox_librenms_plugin.import_utils import (
+        get_import_device_cache_key,
+        get_validated_device_cache_key,
+    )
     from netbox_librenms_plugin.jobs import FilterDevicesJob
 
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
@@ -869,6 +872,16 @@ def test_background_filter_job_uses_and_records_its_transient_server(settings, s
     job.refresh_from_db()
     assert job.data["server_key"] == "secondary"
     assert job.data["device_ids"] == [46104]
+    # _load_job_results reads the validated key, so only this one proves the results page can load.
+    validated_key = get_validated_device_cache_key(
+        server_key=job.data["server_key"],
+        filters=job.data["filters"],
+        device_id=46104,
+        vc_enabled=job.data["vc_detection_enabled"],
+        use_sysname=job.data["use_sysname"],
+        strip_domain=job.data["strip_domain"],
+    )
+    assert cache.get(validated_key)["hostname"] == "secondary-background-edge"
     assert cache.get(get_import_device_cache_key(46104, "secondary"))["hostname"] == "secondary-background-edge"
     assert cache.get(get_import_device_cache_key(46104, "primary")) is None
     requests = _requests_by_server(servers)
