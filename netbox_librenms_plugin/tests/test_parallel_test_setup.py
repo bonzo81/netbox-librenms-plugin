@@ -69,6 +69,27 @@ def test_location_mapping_bulk_import_url_resolves():
     assert match.func.view_class.model_form is LocationMappingImportForm
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("certificate_count", [0, 1, 2])
+def test_devcontainer_setup_counts_pem_certificates(tmp_path, certificate_count):
+    """A PEM marker must reach grep as a pattern, not as a command option."""
+    bundle = tmp_path / "ca-bundle.crt"
+    bundle.write_text("-----BEGIN CERTIFICATE-----\ntest-certificate\n-----END CERTIFICATE-----\n" * certificate_count)
+    setup = (REPOSITORY_ROOT / ".devcontainer/scripts/setup.sh").read_text()
+    count_command = next(line.strip() for line in setup.splitlines() if line.strip().startswith("cert_count="))
+
+    result = subprocess.run(
+        ["bash", "-c", count_command + '\nprintf "%s" "$cert_count"'],
+        env={**os.environ, "CA_BUNDLE_SRC": str(bundle)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(certificate_count)
+
+
 def test_no_test_module_registers_a_session_wide_plugin():
     """``pytest_plugins`` in a test module registers that plugin for the whole session.
 
