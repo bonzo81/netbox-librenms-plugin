@@ -1148,7 +1148,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(regex_mappings, mfr_id)
 
         # Preload module_bay normalization rules once so _match_bay considers the
-        # same normalized candidate names as the table/UI matcher.
+        # same normalized candidate names as the table/UI matcher. The serial scope is
+        # preloaded the same way because every item normalizes its inventory serial.
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
@@ -1799,7 +1800,8 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         all_exact, all_regex = load_bay_mappings()
 
         # Preload module_bay normalization rules once so _match_bay considers the
-        # same normalized candidate names as the table/UI matcher.
+        # same normalized candidate names as the table/UI matcher. The serial scope is
+        # preloaded the same way because every item normalizes its inventory serial.
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
