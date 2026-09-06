@@ -8,7 +8,8 @@ frozenset or a dict turns a corrupt value into a 500 instead of a rejected input
 
 The check reports only values it can trace to an external read (``.get()``, a subscript or
 ``json.loads``) inside the same function, and treats an ``isinstance`` narrowing of the same
-expression as a guard. Run it with no arguments to scan the plugin package.
+expression as a guard, including one whose failing branch always exits. Run it with no
+arguments to scan the plugin package.
 """
 
 import argparse
@@ -137,6 +138,47 @@ def _negated_isinstance(node, target_fingerprint):
         and isinstance(node.op, ast.Not)
         and _isinstance_narrows(node.operand, target_fingerprint)
     )
+
+
+def _always_terminates(body):
+    """Return whether every path through the statements in *body* leaves the block."""
+    for stmt in body:
+        if isinstance(stmt, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+            return True
+        if isinstance(stmt, ast.If) and stmt.orelse:
+            if _always_terminates(stmt.body) and _always_terminates(stmt.orelse):
+                return True
+        if isinstance(stmt, (ast.With, ast.AsyncWith)) and _always_terminates(stmt.body):
+            return True
+    return False
+
+
+def _guards_when_true(node):
+    """Return the expressions that hold wherever *node* is true."""
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        return [guard for value in node.values for guard in _guards_when_true(value)]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return _guards_when_false(node.operand)
+    return [node]
+
+
+def _guards_when_false(node):
+    """Return the expressions that hold wherever *node* is false."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return _guards_when_true(node.operand)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        return [guard for value in node.values for guard in _guards_when_false(value)]
+    return []
+
+
+def _bound_names(node):
+    """Return the names *node* rebinds, because a guard on such a name stops holding."""
+    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)}
+
+
+def _read_names(node):
+    """Return every name *node* reads."""
+    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
 
 
 def _operand_is_narrowed(node, index):
@@ -304,13 +346,39 @@ class MembershipChecker(ast.NodeVisitor):
             self._scope.tainted.add(node.target.id)
 
     # -- guards --------------------------------------------------------------
+    def generic_visit(self, node):
+        """Visit the children of *node*, statement blocks through ``_visit_block``."""
+        for _field, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and all(isinstance(item, ast.stmt) for item in value):
+                self._visit_block(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ast.AST):
+                        self.visit(item)
+            elif isinstance(value, ast.AST):
+                self.visit(value)
+
+    def _visit_block(self, body):
+        """Visit *body* in order, keeping what a guard that always exits proves for the rest."""
+        live = []
+        for stmt in body:
+            self.visit(stmt)
+            rebound = _bound_names(stmt)
+            for guard in [guard for guard in live if _read_names(guard) & rebound]:
+                live.remove(guard)
+                self._guard_stack.remove(guard)
+            if isinstance(stmt, ast.If) and _always_terminates(stmt.body):
+                for guard in _guards_when_false(stmt.test):
+                    live.append(guard)
+                    self._guard_stack.append(guard)
+        for guard in live:
+            self._guard_stack.remove(guard)
+
     def visit_If(self, node):
         self._guard_stack.append(node.test)
-        for stmt in node.body:
-            self.visit(stmt)
+        self._visit_block(node.body)
         self._guard_stack.pop()
-        for stmt in node.orelse:
-            self.visit(stmt)
+        self._visit_block(node.orelse)
         self.visit(node.test)
 
     def visit_BoolOp(self, node):

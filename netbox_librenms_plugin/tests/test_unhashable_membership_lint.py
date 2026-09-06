@@ -107,6 +107,65 @@ CLEAN = {
     "fail-closed or-chain value": (
         'def f(cached):\n    v = cached.get("x")\n    safe = not isinstance(v, str) or v\n    return safe in NAMES\n'
     ),
+    "early return keeps the narrowing for the rest of the block": (
+        "def f(cached):\n"
+        '    v = cached.get("x")\n'
+        "    if not isinstance(v, str):\n"
+        "        return None\n"
+        "    return v in NAMES\n"
+    ),
+    "early raise keeps the narrowing for the rest of the block": (
+        "def f(cached):\n"
+        '    v = cached.get("x")\n'
+        "    if not isinstance(v, str):\n"
+        '        raise ValueError("bad")\n'
+        "    return v in NAMES\n"
+    ),
+    "continue keeps the narrowing for the rest of the loop body": (
+        "def f(rows):\n"
+        "    for row in rows:\n"
+        '        v = row.get("x")\n'
+        "        if not isinstance(v, str):\n"
+        "            continue\n"
+        "        if v in NAMES:\n"
+        "            return True\n"
+        "    return False\n"
+    ),
+    "break keeps the narrowing for the rest of the loop body": (
+        "def f(rows):\n"
+        "    for row in rows:\n"
+        '        v = row.get("x")\n'
+        "        if not isinstance(v, str):\n"
+        "            break\n"
+        "        if v in NAMES:\n"
+        "            return True\n"
+        "    return False\n"
+    ),
+    "an exiting or-chain guard narrows every operand it rejects": (
+        "def f(cached):\n"
+        '    v = cached.get("x")\n'
+        "    if v is None or not isinstance(v, str):\n"
+        "        return None\n"
+        "    return v in NAMES\n"
+    ),
+    "a guard whose branches all exit narrows what follows": (
+        "def f(cached, flag):\n"
+        '    v = cached.get("x")\n'
+        "    if not isinstance(v, str):\n"
+        "        if flag:\n"
+        "            return None\n"
+        '        raise ValueError("bad")\n'
+        "    return v in NAMES\n"
+    ),
+    "an unrelated later binding leaves the narrowing in place": (
+        "def f(cached, rows):\n"
+        '    v = cached.get("x")\n'
+        "    if not isinstance(v, str):\n"
+        "        return None\n"
+        "    for row in rows:\n"
+        "        pass\n"
+        "    return v in NAMES\n"
+    ),
 }
 
 # Guards that do not actually protect the membership test: the check must still report these.
@@ -151,6 +210,21 @@ LATE_OR_NEGATED_GUARDS = {
     ),
     "negated isinstance guarding the wrong arm of a conditional expression": (
         'def f(cached):\n    v = cached.get("x")\n    w = v if not isinstance(v, str) else ""\n    return w in NAMES\n'
+    ),
+    "a guarded body that falls through narrows nothing after the guard": (
+        "def f(cached, log):\n"
+        '    v = cached.get("x")\n'
+        "    if not isinstance(v, str):\n"
+        '        log.warning("bad")\n'
+        "    return v in NAMES\n"
+    ),
+    "a value read again after the guard loses the narrowing": (
+        "def f(cached):\n"
+        '    v = cached.get("x")\n'
+        "    if not isinstance(v, str):\n"
+        "        return None\n"
+        '    v = cached.get("y")\n'
+        "    return v in NAMES\n"
     ),
 }
 
