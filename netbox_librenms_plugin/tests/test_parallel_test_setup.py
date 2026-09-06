@@ -435,6 +435,22 @@ def test_a_changed_seed_value_is_restored_even_though_its_lookup_key_survived():
         assert stored.issuperset(rows)
 
 
+def test_a_direct_transactional_db_request_still_starts_with_the_seeds(transactional_db):
+    """A test may ask for ``transactional_db`` by name instead of marking ``transaction=True``.
+
+    The autouse restore then has to treat it as transactional. Selecting the plain ``db`` fixture
+    lets pytest-django flush the seeds afterwards, so the test body runs without them.
+    """
+    from extras.models import CustomField
+
+    from netbox_librenms_plugin.tests.conftest import _seeded_model_rows
+
+    for model, lookup_field, _value_field, rows in _seeded_model_rows():
+        stored = set(model.objects.values_list(lookup_field, flat=True))
+        assert stored >= {lookup for lookup, _v in rows}, model.__name__
+    assert CustomField.objects.filter(name="librenms_id").exists()
+
+
 @pytest.mark.django_db
 def test_a_flushed_rule_row_is_restored_and_not_reported_as_intact():
     """Migration 0017's rules are seeded state too.

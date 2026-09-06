@@ -137,6 +137,12 @@ LATE_OR_NEGATED_GUARDS = {
     "and-chain that returns the falsy external value": (
         'def f(cached):\n    v = cached.get("x")\n    w = v and isinstance(v, str)\n    return w in NAMES\n'
     ),
+    "QueryDict getlist returns a list even though its values are strings": (
+        'def f(request):\n    v = request.POST.getlist("select")\n    return v in NAMES\n'
+    ),
+    "QueryDict get returns an unhashable default when the key is absent": (
+        'def f(request):\n    v = request.POST.get("select", [])\n    return v in NAMES\n'
+    ),
     "negated isinstance guarding the wrong arm of a conditional expression": (
         'def f(cached):\n    v = cached.get("x")\n    w = v if not isinstance(v, str) else ""\n    return w in NAMES\n'
     ),

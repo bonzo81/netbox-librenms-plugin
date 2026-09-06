@@ -263,11 +263,13 @@ with run_librenms_server() as server:
 @patch("netbox_librenms_plugin.views.imports.list.process_device_filters")
 ```
 
-### Available Fixtures
+### Available Helpers and Fixtures
 
-These fixtures are defined in [conftest.py](../../netbox_librenms_plugin/tests/conftest.py):
+Defined in [conftest.py](../../netbox_librenms_plugin/tests/conftest.py):
 
-- `make_device`, `make_vm`, `make_interface`, `make_ip`, `make_cluster`, `make_superuser`: real rows
+- `make_device`, `make_vm`, `make_interface`, `make_ip`, `make_cluster`, `make_superuser`: real rows.
+  These are plain functions, not pytest fixtures: import and call them. Naming one in a test's
+  parameter list raises a fixture-not-found error.
 - `mock_response_factory` — Factory for creating mock HTTP responses
 - `mock_netbox_device`, `mock_netbox_vm` — mock NetBox objects, kept for the unconverted legacy
   tests. Do not use them in new tests.

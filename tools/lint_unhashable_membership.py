@@ -18,7 +18,9 @@ from pathlib import Path
 
 
 HASHABLE_NARROWING_TYPES = frozenset({"str", "int", "bytes", "float", "frozenset"})
-TAINTING_CALLS = frozenset({"get", "loads", "pop"})
+TAINTING_CALLS = frozenset({"get", "getlist", "loads", "pop"})
+# Literals that cannot be a set member or a dict key, so a read that can return one is tainting.
+UNHASHABLE_LITERALS = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)
 # A Django QueryDict always yields str, so a form field can never be unhashable.
 QUERYDICT_SOURCES = frozenset({"POST", "GET", "query_params"})
 # Helpers that return a hashable value or None, so their result needs no further narrowing.
@@ -211,9 +213,26 @@ class MembershipChecker(ast.NodeVisitor):
             if isinstance(func, ast.Name) and func.id in COERCING_CALLS:
                 return False
             if isinstance(func, ast.Attribute) and func.attr in TAINTING_CALLS:
-                return not self._reads_querydict(func.value)
+                if not self._reads_querydict(func.value):
+                    return True
+                return self._querydict_read_can_be_unhashable(func.attr, node)
             if isinstance(func, ast.Name) and func.id in TAINTING_CALLS:
                 return True
+        return False
+
+    @staticmethod
+    def _querydict_read_can_be_unhashable(attr, call):
+        """Return whether a QueryDict read can yield something other than a string.
+
+        A present key always yields str, which is why these reads are otherwise suppressed. Two
+        of them escape that: ``getlist()`` always returns a list, and ``get()`` returns the caller's
+        own default unchanged when the key is absent, so ``request.POST.get("select", [])`` reaches
+        a membership test as a list.
+        """
+        if attr == "getlist":
+            return True
+        if attr == "get" and len(call.args) >= 2:
+            return isinstance(call.args[1], UNHASHABLE_LITERALS)
         return False
 
     @staticmethod

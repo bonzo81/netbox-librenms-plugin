@@ -467,6 +467,67 @@ def test_mapped_device_missing_from_librenms_renders_danger_status(client, setti
 
 
 @pytest.mark.django_db
+def test_an_attribute_only_interface_change_schedules_the_cache_transition(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """An existing interface whose name already matches can still change.
+
+    update_interface_from_port() reports the change through its return value rather than by
+    creating a row, so a sync that only rewrites attributes must still mark the tab.
+    """
+    from dcim.models import Interface
+
+    _configure_servers(settings)
+    device = make_device("cache-attr-only", librenms_cf={"primary": {"id": 51}})
+    interface = Interface.objects.create(
+        device=device, name="Ethernet1/9", type="1000base-t", description="stale description"
+    )
+    _seed_snapshot(
+        "ports",
+        device,
+        "primary",
+        {
+            "ports": [
+                {
+                    "port_id": 7009,
+                    "ifName": "Ethernet1/9",
+                    "ifDescr": "Ethernet1/9",
+                    "ifAlias": "fresh description",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                }
+            ],
+            "port_stack_relationships": {},
+        },
+    )
+    client.force_login(make_superuser("cache-attr-only-user"))
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+                kwargs={"object_type": "device", "object_id": device.pk},
+            ),
+            {
+                "server_key": "primary",
+                "interface_name_field": "ifName",
+                "select": "7009",
+                "exclude_columns": "vlans",
+            },
+        )
+
+    assert response.status_code == 302
+    interface.refresh_from_db()
+    assert interface.description == "fresh description"
+    assert Interface.objects.filter(device=device).count() == 1
+    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.INTERFACES, "primary"))
+    assert state is not None, "an attribute-only change must still schedule the tab transition"
+    assert state["state"] == "locally_changed"
+
+
+@pytest.mark.django_db
 def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapshots(
     client,
     settings,
@@ -1869,6 +1930,58 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
     assert state["snapshot_available"] is False
     assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.INTERFACES, "primary")]
+
+
+@pytest.mark.django_db
+def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(client, settings):
+    """The response still renders the freshly fetched rows when only the cache write failed.
+
+    Saying the tab has no snapshot to show contradicts the table beside it, and leaves the user
+    with no idea that those rows cannot be synced until the data is cached.
+    """
+    _configure_servers(settings)
+    device = make_device("cache-ip-rows", librenms_cf={"primary": {"id": 665}})
+    user = make_superuser("cache-ip-rows-user")
+    client.force_login(user)
+
+    def librenms_response(url, **_kwargs):
+        if url.endswith("/api/v0/devices/665/ip"):
+            return _json_response(
+                url,
+                {
+                    "status": "ok",
+                    "addresses": [
+                        {
+                            "ipv4_address": "198.18.44.10",
+                            "ipv4_prefixlen": 24,
+                            "port_id": 7440,
+                        }
+                    ],
+                },
+            )
+        if url.endswith("/api/v0/devices/665"):
+            return _json_response(url, {"status": "ok", "devices": [{"device_id": 665}]})
+        if url.endswith("/api/v0/devices/665/ports"):
+            return _json_response(url, {"status": "ok", "ports": [{"port_id": 7440, "ifName": "Ethernet40"}]})
+        if url.endswith("/api/v0/ports/7440"):
+            return _json_response(url, {"status": "ok", "port": [{"port_id": 7440, "ifName": "Ethernet40"}]})
+        raise AssertionError(f"Unexpected LibreNMS request: {url}")
+
+    drop_write, _skipped = _drop_snapshot_write(device, SyncTab.IP_ADDRESSES)
+    url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
+    with (
+        drop_write,
+        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+    ):
+        response = client.post(
+            url,
+            {"server_key": "primary", "interface_name_field": "ifName"},
+            HTTP_HX_REQUEST="true",
+        )
+
+    assert response.status_code == 200
+    assert b"could not be cached" in response.content
+    assert b"no snapshot to show" not in response.content
 
 
 @pytest.mark.django_db

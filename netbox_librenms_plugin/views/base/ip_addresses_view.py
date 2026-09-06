@@ -705,10 +705,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         ):
             messages.success(request, "IP address data refreshed successfully.")
         else:
+            # The rows below come from this refresh and are rendered, so the message must not
+            # claim there is nothing to show. Only the snapshot write failed, and a sync posts
+            # against that snapshot, so say what the user has to do before syncing.
             messages.error(
                 request,
-                "IP address data could not be cached, so the tab has no snapshot to show. "
-                "Refresh again; see server logs for details.",
+                "IP address data could not be cached. The rows shown come from this refresh only "
+                "and will not survive a reload. Refresh again before syncing; see server logs for details.",
             )
         return self.render_sync_partial(request, obj, server_key, {"ip_sync": context})
 

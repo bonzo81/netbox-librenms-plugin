@@ -200,7 +200,12 @@ def _restore_migration_seeded_rows(request):
         yield
         return
 
-    db_fixture = "transactional_db" if (marker and marker.kwargs.get("transaction")) else "db"
+    # A test may ask for "transactional_db" by name instead of marking transaction=True. Both mean
+    # the database is flushed rather than rolled back, so both must pick the transactional fixture
+    # and arm the next restore; selecting "db" here would leave that to pytest-django's own
+    # delegation and to the intactness probe noticing the flush afterwards.
+    is_transactional = bool(marker and marker.kwargs.get("transaction")) or "transactional_db" in requested
+    db_fixture = "transactional_db" if is_transactional else "db"
     # An autouse fixture is set up BEFORE the fixtures it does not request, so ask for the
     # database one here: querying without it raises "Database access not allowed".
     request.getfixturevalue(db_fixture)
@@ -209,7 +214,7 @@ def _restore_migration_seeded_rows(request):
 
     yield
 
-    if marker and marker.kwargs.get("transaction"):
+    if is_transactional:
         _transactional_seed_restore_required = True
 
 

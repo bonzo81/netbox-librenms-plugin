@@ -835,6 +835,9 @@ class SyncSubjectClaimMixin:
     SYNC_SUBJECT_MODEL_LABEL = None
 
     # Opt in when an unusable server also prevents this view from scheduling its transition.
+    # A view that opts in must also inherit LibreNMSAPIMixin: dispatch() resolves the posted server
+    # through resolve_posted_server_key_or_none(), so opting in without it raises AttributeError on
+    # every POST. Every current opt-in inherits it.
     DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = False
 
     def sync_subject_claim(self, request=None, **kwargs):

@@ -212,7 +212,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             require_create_metadata=self._create_missing_interfaces(request),
         )
 
-        if not cached_snapshot or not cached_snapshot["ip_addresses"]:
+        # A refresh that finds no IPs still writes a valid snapshot, so only a genuine miss (None)
+        # is a cache miss. An empty list is a real result and goes through the selection path,
+        # which reports that nothing was selected.
+        if cached_snapshot is None:
             if response := render_sync_cache_miss(
                 request,
                 "IP Addresses",

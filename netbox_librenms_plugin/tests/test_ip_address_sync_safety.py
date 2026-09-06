@@ -1049,6 +1049,29 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
 
 
 @pytest.mark.django_db
+def test_an_empty_snapshot_is_not_reported_as_an_expired_cache(client, settings):
+    """A refresh that finds no IPs writes a valid snapshot whose ip_addresses list is empty.
+
+    Treating that as a cache miss tells the user to refresh the data they just refreshed, and
+    replaces the tab with the cache-miss prompt.
+    """
+    _configure_test_server(settings)
+    device = make_device("ip-empty-snapshot", librenms_cf={"default": {"id": 43}})
+    cache.set(_ip_snapshot_key(device), {"ip_addresses": []}, timeout=300)
+    client.force_login(make_superuser("ip-empty-snapshot-user"))
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {"server_key": "default"},
+    )
+
+    assert "Cache has expired. Please refresh the IP data." not in _message_texts(response)
+
+
+@pytest.mark.django_db
 def test_create_missing_interfaces_rejects_legacy_snapshot_before_processing_rows(client, settings):
     """Create-missing must reject a legacy snapshot once, before processing its rows."""
     from dcim.models import Interface
