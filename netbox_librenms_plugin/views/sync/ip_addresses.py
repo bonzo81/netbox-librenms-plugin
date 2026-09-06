@@ -13,7 +13,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.constants import is_supported_interface_name_field
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
@@ -542,7 +542,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if not is_supported_interface_name_field(interface_name_field):
             raise ValueError("The cached interface naming field is missing or invalid. Refresh the IP data.")
         port = self._cached_port(cached_ports_by_id, ip_data.get("port_id"))
-        if port is None or port.get("_source") == "oob":
+        if port is None or port.get("_source") == OOB_INVENTORY_SOURCE:
             raise ValueError("The cached LibreNMS port is missing or ambiguous. Refresh the IP data.")
         if normalize_librenms_port_id(port.get("port_id")) != normalize_librenms_port_id(ip_data.get("port_id")):
             raise ValueError("The cached LibreNMS port identity changed. Refresh the IP data.")

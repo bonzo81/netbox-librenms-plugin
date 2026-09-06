@@ -6,6 +6,7 @@ from dcim.models import Device, Interface
 from django.db.models import Q
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
     build_librenms_id_qs,
     get_librenms_device_id,
@@ -247,7 +248,7 @@ def build_relationship_maps(cached_data):
         ports = []
     ports_by_id = {}
     for port in ports:
-        if port.get("_source") == "oob":
+        if port.get("_source") == OOB_INVENTORY_SOURCE:
             continue
         port_id = normalize_librenms_port_id(port.get("port_id"))
         if port_id is not None:
@@ -409,7 +410,7 @@ def resolve_relationship_row(
     port_id = normalize_librenms_port_id(port.get("port_id"))
     if port_id is not None:
         port["port_id"] = port_id
-    if port.get("_source") == "oob":
+    if port.get("_source") == OOB_INVENTORY_SOURCE:
         port["netbox_interface"] = None
         port["exists_in_netbox"] = False
         port["name_fallback_allowed"] = False

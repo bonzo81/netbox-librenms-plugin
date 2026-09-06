@@ -6,6 +6,7 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
+from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
@@ -280,7 +281,7 @@ class BaseInterfaceTableView(
         # Enrich ports with VLAN data for trunk ports
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
         for port in enriched_ports:
-            port["_source"] = "main"
+            port["_source"] = MAIN_INVENTORY_SOURCE
         librenms_data["ports"] = enriched_ports
 
         # If an OOB controller is linked, fetch its ports and merge them in. The
@@ -322,7 +323,7 @@ class BaseInterfaceTableView(
                 oob_ports = oob_raw.get("ports", [])
                 oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
                 for port in oob_enriched:
-                    port["_source"] = "oob"
+                    port["_source"] = OOB_INVENTORY_SOURCE
 
                 # Detect shared-LOM: same MAC seen on BOTH main and OOB sides.
                 # Build separate per-source MAC sets so that within-source
@@ -379,7 +380,7 @@ class BaseInterfaceTableView(
         # only consider host ports. An OOB-only row matching the ifType/name heuristic would
         # otherwise trigger a host port_stack fetch (and the "may be incomplete" warning) even
         # when the main device has no such relationships.
-        host_ports_final = [p for p in librenms_data.get("ports", []) if p.get("_source") != "oob"]
+        host_ports_final = [p for p in librenms_data.get("ports", []) if p.get("_source") != OOB_INVENTORY_SOURCE]
         self._enrich_port_stack_relationships(
             request,
             librenms_data,
@@ -838,7 +839,7 @@ class BaseInterfaceTableView(
             librenms_interface_names = {
                 port.get(interface_name_field)
                 for port in ports_data
-                if port.get(interface_name_field) and port.get("_source") != "oob"
+                if port.get(interface_name_field) and port.get("_source") != OOB_INVENTORY_SOURCE
             }
 
             netbox_only_interfaces = []

@@ -200,6 +200,80 @@ class TestMappingBulkImportViewsAreRegistered:
         assert not missing, f"bulk-import views missing @register_model_view: {missing}"
 
 
+class TestSourceMarkerConvention:
+    """The row-source marker is written and compared through one constant, never a bare string.
+
+    Every reader gates read-only OOB rows on this value, so a typo at one site silently turns a
+    display-only row into an actionable one. constants.OOB_INVENTORY_SOURCE is the single spelling.
+    """
+
+    def _is_source_access(self, node):
+        """Return whether *node* reads or writes the ``_source`` key of a row."""
+        import ast
+
+        if isinstance(node, ast.Call):
+            func = node.func
+            return (
+                isinstance(func, ast.Attribute)
+                and func.attr == "get"
+                and bool(node.args)
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "_source"
+            )
+        return (
+            isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "_source"
+        )
+
+    def _bare_marker_lines(self, tree):
+        import ast
+
+        hits = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Compare) and self._is_source_access(node.left):
+                for comparator in node.comparators:
+                    if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
+                        hits.append(node.lineno)
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                if isinstance(node.value.value, str) and any(self._is_source_access(t) for t in node.targets):
+                    hits.append(node.lineno)
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == "_source"
+                        and isinstance(value, ast.Constant)
+                        and isinstance(value.value, str)
+                    ):
+                        hits.append(value.lineno)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                # get("_source", "main") and setdefault("_source", "main") write the marker too.
+                if (
+                    node.func.attr in ("get", "setdefault")
+                    and len(node.args) == 2
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "_source"
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)
+                ):
+                    hits.append(node.lineno)
+        return hits
+
+    def test_no_production_module_spells_the_source_marker_inline(self):
+        import ast
+        from pathlib import Path
+
+        package = Path(__file__).resolve().parent.parent
+        offenders = {}
+        for source_file in sorted(package.rglob("*.py")):
+            if "tests" in source_file.parts or "migrations" in source_file.parts:
+                continue
+            lines = self._bare_marker_lines(ast.parse(source_file.read_text()))
+            if lines:
+                offenders[str(source_file.relative_to(package))] = lines
+
+        assert offenders == {}, f"use constants.OOB_INVENTORY_SOURCE instead: {offenders}"
+
+
 class TestCacheMixinWiring:
     """Views that cache LibreNMS data must have CacheMixin and expose get_cache_key."""
 

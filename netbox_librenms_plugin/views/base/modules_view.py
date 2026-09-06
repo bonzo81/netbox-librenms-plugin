@@ -6,6 +6,7 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
+from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -458,7 +459,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             )
 
         for item in inventory_data:
-            item["_source"] = "main"
+            item["_source"] = MAIN_INVENTORY_SOURCE
 
         # Fetch ports once and reuse in subsequent enrichment steps.
         ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
@@ -481,7 +482,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # this reordering those high indices could fall inside the OOB namespace.
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
         for item in inventory_data:
-            item.setdefault("_source", "main")
+            item.setdefault("_source", MAIN_INVENTORY_SOURCE)
         # Enrich port rows with stable LibreNMS port_id using ports data so
         # interface matching works even when transceiver metadata is absent.
         self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
@@ -528,7 +529,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # non-negative, so the offset clears every main index.
                 _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
                 for item in oob_inventory:
-                    item["_source"] = "oob"
+                    item["_source"] = OOB_INVENTORY_SOURCE
                     if (idx := item.get("entPhysicalIndex")) is not None:
                         item["entPhysicalIndex"] = idx + _OOB_OFFSET
                     if (parent := item.get("entPhysicalContainedIn")) not in (None, 0):
@@ -1111,7 +1112,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # the main device's interfaces are indexed in target_context. Matching an
         # OOB row by name would bind it to an unrelated main-device interface, so
         # skip interface matching entirely for OOB-sourced rows.
-        if row.get("_source") == "oob":
+        if row.get("_source") == OOB_INVENTORY_SOURCE:
             return
         try:
             port_id = int(row.get("librenms_port_id") or 0)
@@ -2043,7 +2044,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # OOB controller rows are stamped read-only in _build_row; never offer carrier
         # install options on them either (this runs after _build_row, so the central
         # stamp doesn't cover it).
-        if row.get("_source") == "oob":
+        if row.get("_source") == OOB_INVENTORY_SOURCE:
             return
         device_bays = getattr(self, "_current_device_bays", None) or {}
         if not device_bays:
@@ -2626,7 +2627,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # integrated-child duplicates, which would otherwise steal the row into the "Integrated"
         # path and drop its OOB status). Emit a read-only informational row with neutral
         # bay/type/status. (A late post-match scrub can't undo a status the matching computed.)
-        if item.get("_source") == "oob":
+        if item.get("_source") == OOB_INVENTORY_SOURCE:
             return {
                 "name": name,
                 "model": model_name or "-",
@@ -2646,7 +2647,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "librenms_ifname": item.get("_librenms_ifname"),
                 "librenms_ifdescr": item.get("_librenms_ifdescr"),
                 "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
-                "_source": "oob",
+                "_source": OOB_INVENTORY_SOURCE,
             }
 
         # Detect "integrated child" SNMP duplicates (e.g. Nokia XIOM with a
@@ -2674,7 +2675,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "has_installable_children": False,
                 "integrated_in_name": ancestor_name,
                 "integrated_in_index": integrating_ancestor.get("entPhysicalIndex"),
-                "_source": item.get("_source", "main"),
+                "_source": item.get("_source", MAIN_INVENTORY_SOURCE),
             }
 
         # Match to NetBox module bay
@@ -2723,7 +2724,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "librenms_ifname": item.get("_librenms_ifname"),
             "librenms_ifdescr": item.get("_librenms_ifdescr"),
             "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
-            "_source": item.get("_source", "main"),
+            "_source": item.get("_source", MAIN_INVENTORY_SOURCE),
         }
         if name_conflict_reason:
             row["name_conflict_reason"] = name_conflict_reason

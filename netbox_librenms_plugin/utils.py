@@ -23,6 +23,7 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
     OOB_BADGE_HTML,
+    OOB_INVENTORY_SOURCE,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -477,7 +478,7 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
     port_names = {}
     name_counts = {}
     for port in ports:
-        if port.get("_source") == "oob":
+        if port.get("_source") == OOB_INVENTORY_SOURCE:
             continue
         port_id = normalize_librenms_port_id(port.get("port_id"))
         interface_name = port.get(interface_name_field)
@@ -2799,7 +2800,7 @@ def oob_badge_html(record, leading_space=False):
         SafeString: The badge markup, or ``""`` when the row is not OOB-sourced.
 
     """
-    if record.get("_source") != "oob":
+    if record.get("_source") != OOB_INVENTORY_SOURCE:
         return ""
     # Static trusted markup — mark_safe, not format_html (which requires interpolation
     # args and raises TypeError when given a bare string).

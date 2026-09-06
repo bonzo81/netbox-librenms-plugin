@@ -15,6 +15,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -58,9 +59,9 @@ NO_LIBRENMS_SERVER_MESSAGE = (
     "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
 )
 
-# OOB-controller rows are merged into the cached snapshot for display only. Every entry point that
-# can act on an inventory row rejects them here, so the marker and the reason are declared once.
-OOB_INVENTORY_SOURCE = "oob"
+# OOB-controller rows are merged into the cached snapshot for display only, and every entry point
+# that can act on an inventory row rejects them. The marker itself is shared with the readers in
+# constants.py; only the wording of the refusal belongs to this module.
 OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
 
