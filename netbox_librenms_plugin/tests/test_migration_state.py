@@ -68,3 +68,26 @@ def test_plugin_migrations_do_not_redeclare_squashed_core_ancestors():
                     f"{migration_key} repeats squashed core dependency {dependency}; "
                     "the plugin parent already reaches it"
                 )
+
+
+def test_plugin_migrations_have_one_leaf():
+    """Every plugin migration must belong to one ordered migration graph."""
+    from django.db.migrations.graph import MigrationGraph
+    from django.db.migrations.loader import MigrationLoader
+
+    loader = MigrationLoader(None, load=False)
+    loader.load_disk()
+    graph = MigrationGraph()
+    migrations = {key: value for key, value in loader.disk_migrations.items() if key[0] == "netbox_librenms_plugin"}
+    assert migrations, "No plugin migrations were loaded"
+    for key, migration in migrations.items():
+        graph.add_node(key, migration)
+    for key, migration in migrations.items():
+        for dependency in migration.dependencies:
+            if dependency[0] == key[0] and not dependency[1].startswith("__"):
+                graph.add_dependency(migration, key, dependency)
+    graph.validate_consistency()
+    graph.ensure_not_cyclic()
+
+    leaves = graph.leaf_nodes()
+    assert len(leaves) == 1, f"Plugin migrations have multiple leaves: {leaves}"

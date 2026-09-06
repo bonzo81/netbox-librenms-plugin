@@ -589,7 +589,6 @@ class LocationMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEdit
     template_name = "netbox_librenms_plugin/locationmapping_edit.html"
 
 
-@register_model_view(LocationMapping, "bulk_import", path="import", detail=False)
 class LocationMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing LocationMapping objects."""
 

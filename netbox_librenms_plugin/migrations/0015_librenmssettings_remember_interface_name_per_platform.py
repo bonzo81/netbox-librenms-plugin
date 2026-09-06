@@ -3,7 +3,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_librenms_plugin", "0014_portstacklagpattern_ci_unique"),
+        ("netbox_librenms_plugin", "0015_locationmapping"),
     ]
 
     operations = [
