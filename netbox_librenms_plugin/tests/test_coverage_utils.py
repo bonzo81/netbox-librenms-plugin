@@ -353,18 +353,23 @@ class TestMatchLibreNMSHardware:
 
 
 class TestLocationAndPlatformMatching:
-    def test_case_insensitive_duplicate_site_uses_the_first_deterministic_row(self):
+    def test_case_insensitive_duplicate_site_follows_the_site_model_ordering(self):
         from dcim.models import Site
 
         from netbox_librenms_plugin.utils import find_matching_site
 
-        first = Site.objects.create(name="Example Site", slug="example-site-one")
+        Site.objects.create(name="Example Site", slug="example-site-one")
         Site.objects.create(name="EXAMPLE SITE", slug="example-site-two")
+        # The rows differ only in case, so the database collation, not the creation order,
+        # decides which one Site's own ordering puts first.
+        duplicates = Site.objects.filter(name__iexact="example site")
+        expected = duplicates.order_by(*Site._meta.ordering)[0]
 
         result = find_matching_site("example site")
 
         assert result["found"] is True
-        assert result["site"] == first
+        assert result["site"] == expected
+        assert find_matching_site("example site")["site"] == expected
 
     def test_case_insensitive_duplicate_platform_fails_closed(self):
         from dcim.models import Platform

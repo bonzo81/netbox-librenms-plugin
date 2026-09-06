@@ -89,13 +89,14 @@ class TestFindParentModuleId:
     def test_an_exact_mapping_translates_the_ancestor_name_to_the_bay(self):
         device = make_device_with_module_bays("parent-exact-map", ["Slot 3"])
         module = install_module(device, "Slot 3", "PARENT-EXACT-CARD")
-        # A class-scoped row must beat the vendor-agnostic one for the same name.
+        # A class-scoped row must beat the vendor-agnostic one for the same name, so the
+        # vendor-agnostic row is passed first and list order cannot decide the winner.
         wrong = _mapping(librenms_name="Rack 0-Slot 3", librenms_class="", netbox_bay_name="Nowhere")
         right = _mapping(librenms_name="Rack 0-Slot 3", librenms_class="container", netbox_bay_name="Slot 3")
         index_map = {10: _item(10, "", "Rack 0-Slot 3", phys_class="container")}
         child = _item(20, "SFP-X", "Transceiver 1", parent=10)
 
-        assert _find_parent(child, index_map, _bays(device), exact=[right, wrong]) == module.pk
+        assert _find_parent(child, index_map, _bays(device), exact=[wrong, right]) == module.pk
 
     def test_an_exact_mapping_falls_back_to_the_class_agnostic_row(self):
         device = make_device_with_module_bays("parent-exact-fallback", ["Slot 5"])
