@@ -241,17 +241,25 @@ class TestUpdateModuleSerialView:
         assert "Missing or invalid module ID." in message_texts(request, "error")
 
     def test_a_placeholder_serial_is_stored_as_blank(self, live_librenms):
+        """The serial comes from the cached row, so a placeholder there must land as blank."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         device = make_device_with_module_bays("serial-placeholder", ["Slot 1"])
+        device.custom_field_data["librenms_id"] = {"default": 68}
+        device.save(update_fields=["custom_field_data"])
         module = install_module(device, "Slot 1", "SERIAL-PLACEHOLDER-CARD", serial="OLD")
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="N/A")]
 
-        _view, request, response = _drive(
-            UpdateModuleSerialView,
-            device,
-            {"module_id": str(module.pk), "serial": "N/A", "server_key": "default"},
-            live_librenms,
+        request = make_request(
+            "post",
+            {"module_id": str(module.pk), "ent_index": "11", "server_key": "default"},
+            user=make_superuser(),
+            path="/modules/",
         )
+        view = UpdateModuleSerialView()
+        view._librenms_api = live_librenms.api
+        seed_inventory(view, device, rows, librenms_id=68)
+        response = view_post(view, request, pk=device.pk)
 
         module.refresh_from_db()
         assert response.status_code == 302
