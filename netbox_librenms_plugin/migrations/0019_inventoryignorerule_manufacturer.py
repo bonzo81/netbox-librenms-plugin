@@ -47,7 +47,6 @@ def unscope_include_rule(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("dcim", "0001_initial"),
         ("netbox_librenms_plugin", "0018_librenmssettings_cable_sync"),
     ]
 
