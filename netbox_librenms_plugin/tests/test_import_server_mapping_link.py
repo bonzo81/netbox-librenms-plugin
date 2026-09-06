@@ -414,7 +414,10 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
     response_names = iter((device.name, vm.name))
 
     def device_response(**_request):
-        name = next(response_names)
+        # Only the two racing lookups synchronize; the winner re-reads the device to render its row.
+        name = next(response_names, None)
+        if name is None:
+            return 200, {"status": "ok", "devices": [librenms_device(49801, device.name)]}
         first_fetch_completed.set()
         fetch_barrier.wait(timeout=10)
         return 200, {"status": "ok", "devices": [librenms_device(49801, name)]}
@@ -468,6 +471,9 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
     mappings = [device.custom_field_data["librenms_id"], vm.custom_field_data["librenms_id"]]
     owners = [mapping for mapping in mappings if mapping.get("secondary") == 49801]
     assert [status for status, _content in outcomes] == [200, 200]
+    # Two racing lookups plus the winner's post-action re-read; a fourth would be an unnoticed refetch.
+    assert [request["path"] for request in servers.secondary.requests].count("/api/v0/devices/49801") == 3
+    assert not any(b"Device not found after action" in content for _status, content in outcomes)
     assert all(wrapper.target_lock_seen for wrapper in wrappers)
     assert all(wrapper.advisory_lock_seen for wrapper in wrappers)
     assert all(wrapper.claim_lock_preceded_the_target_lock for wrapper in wrappers)
