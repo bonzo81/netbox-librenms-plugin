@@ -24,6 +24,30 @@ def _include_rule(name, manufacturer=None):
 
 
 @pytest.mark.django_db
+class TestYamlExport:
+    """The YAML export must carry the manufacturer scope so a re-import keeps it."""
+
+    def test_a_scoped_rule_exports_its_manufacturer(self):
+        import yaml
+
+        juniper = _manufacturer("Yaml Juniper", "yaml-juniper")
+        rule = _include_rule("yaml-juniper-only", juniper)
+
+        exported = yaml.safe_load(rule.to_yaml())
+
+        assert exported["manufacturer"] == "Yaml Juniper"
+
+    def test_an_unscoped_rule_exports_a_blank_manufacturer(self):
+        import yaml
+
+        rule = _include_rule("yaml-all-vendors")
+
+        exported = yaml.safe_load(rule.to_yaml())
+
+        assert exported["manufacturer"] == ""
+
+
+@pytest.mark.django_db
 class TestGetEnabledIgnoreRules:
     """The loader scopes rules the way apply_normalization_rules scopes its own."""
 

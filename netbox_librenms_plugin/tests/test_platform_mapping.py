@@ -302,6 +302,7 @@ class TestToYamlOnAllMappingModels:
         rule.pattern = "IDPROM"
         rule.action = "skip"
         rule.require_serial_match_parent = False
+        rule.manufacturer_id = None
         rule.enabled = True
         rule.description = ""
 

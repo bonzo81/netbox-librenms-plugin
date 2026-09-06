@@ -786,6 +786,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             "pattern": self.pattern,
             "action": self.action,
             "require_serial_match_parent": self.require_serial_match_parent,
+            "manufacturer": self.manufacturer.name if self.manufacturer_id else "",
             "enabled": self.enabled,
             "description": self.description,
         }
