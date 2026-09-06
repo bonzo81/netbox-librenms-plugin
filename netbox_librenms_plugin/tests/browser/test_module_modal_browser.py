@@ -22,7 +22,7 @@ REPLACE_BUTTON = (
 # What ModuleMismatchPreviewView answers now: a whole modal content, not just a body.
 PREVIEW_FRAGMENT = (
     '<div class="modal-header">'
-    '<h5 id="htmx-modal-label" class="modal-title">Module Mismatch</h5>'
+    '<h5 class="modal-title">Module Mismatch</h5>'
     '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>'
     "</div>"
     '<div class="modal-body">'

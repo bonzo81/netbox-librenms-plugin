@@ -5311,7 +5311,9 @@ class TestModulesActionResponse:
 
         assert response.status_code == 200
         body = response.content.decode()
-        assert 'id="htmx-modal-label"' in body
+        # The shell owns id="htmx-modal-label"; a second copy here would duplicate the id.
+        assert 'id="htmx-modal-label"' not in body
+        assert 'class="modal-title"' in body
         assert "closeHtmxModal()" in body
         assert 'class="modal-body"' in body
         forms = open_tags(body, "form")
