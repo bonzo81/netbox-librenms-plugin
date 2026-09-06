@@ -208,7 +208,9 @@ class TestActionRendering:
 
         assert "Install" in rendered
         assert "Install Branch" in rendered
-        assert "TEST-SERIAL" in rendered
+        # The install reads the serial from the cached row, so the form posts the row index only.
+        assert 'name="ent_index" value="42"' in rendered
+        assert "TEST-SERIAL" not in rendered
         assert "table-csrf-token" in rendered
         assert 'hx-target="#module-sync-content"' in rendered
         assert f"/{device.pk}/" in rendered
@@ -336,6 +338,19 @@ class TestActionRendering:
         assert 'hx-indicator="closest tr"' in rendered
         assert 'hx-disabled-elt="find button"' in rendered
 
+    def test_render_actions_update_serial_hidden_without_an_inventory_index(self):
+        """The view resolves the serial through the cached row, so a row with no index has no action."""
+        device = make_device("table-update-no-index")
+        record = {
+            "can_update_serial": True,
+            "installed_module_id": 99,
+            "ent_physical_index": "",
+        }
+
+        rendered = str(_table(device).render_actions(None, record))
+
+        assert "Update Serial" not in rendered
+
     def test_interface_update_requires_interface_change_permission(self):
         device = make_device("table-interface-permission")
         record = {
@@ -396,7 +411,12 @@ class TestActionRendering:
     _HTMX_ROW_ACTIONS = {
         "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "serial": "S1"},
         "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
-        "update_serial": {"can_update_serial": True, "installed_module_id": 42, "serial": "S2"},
+        "update_serial": {
+            "can_update_serial": True,
+            "installed_module_id": 42,
+            "ent_physical_index": 77,
+            "serial": "S2",
+        },
         "update_interface": {
             "can_update_interface_binding": True,
             "installed_module_id": 42,
@@ -434,6 +454,7 @@ class TestActionRendering:
             "module_type_id": 2,
             "can_update_serial": True,
             "installed_module_id": 99,
+            "ent_physical_index": 88,
             "serial": "SERIAL",
             "ent_physical_index": 99,
             "inventory_digest": "permission-row-digest",
