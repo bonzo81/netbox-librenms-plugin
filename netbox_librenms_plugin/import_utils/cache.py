@@ -76,7 +76,6 @@ def _is_valid_cached_search_metadata(metadata, server_key: str) -> bool:
         and not isinstance(cache_timeout, bool)
         and cache_timeout > 0
         and isinstance(metadata.get("filters"), dict)
-        and bool(metadata["filters"])
         and isinstance(metadata.get("vc_enabled"), bool)
         and isinstance(metadata.get("use_sysname"), bool)
         and isinstance(metadata.get("strip_domain"), bool)

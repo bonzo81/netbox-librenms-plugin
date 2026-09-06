@@ -398,6 +398,33 @@ def test_completed_filter_job_rejects_invalid_server_without_querying_a_fallback
 
 
 @pytest.mark.django_db
+def test_a_search_whose_filters_clean_to_empty_stays_in_the_active_cached_search_list(client, servers):
+    """A whitespace-only filter cleans to {}, and that search still belongs in the cached-search list."""
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
+    client.force_login(make_superuser("blank-filter-cached-searcher"))
+    import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
+    _register_device(servers.primary, librenms_device(46108, "blank-filter-edge"))
+
+    search_response = client.get(
+        import_url,
+        {
+            "server_key": "primary",
+            "librenms_hostname": "   ",
+            "use_background_job": "",
+        },
+    )
+    listing_response = client.get(import_url, {"server_key": "primary"})
+
+    assert search_response.status_code == 200
+    assert b"blank-filter-edge" in search_response.content
+    assert listing_response.status_code == 200
+    html = listing_response.content.decode()
+    cached_start = html.index('id="cached-searches-collapse"')
+    cached_html = html[cached_start : html.index("</div>", cached_start)]
+    assert 'data-cached-server-key="primary"' in cached_html
+
+
+@pytest.mark.django_db
 def test_synchronous_import_search_and_cache_are_scoped_to_the_active_server(client, settings, servers):
     """Identical filters on two servers return and cache only each server's rows."""
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})

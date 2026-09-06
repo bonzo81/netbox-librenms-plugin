@@ -173,7 +173,7 @@ class TestGetActiveCachedSearches:
             "not-a-mapping",
             {},
             {"server_key": "another-server"},
-            {"server_key": "placeholder", "filters": {}},
+            {"server_key": "placeholder", "filters": {"hostname": "edge"}},
         ],
     )
     def test_missing_or_invalid_metadata_is_removed_from_the_index(self, server_key, invalid_metadata):
@@ -188,6 +188,21 @@ class TestGetActiveCachedSearches:
 
         assert get_active_cached_searches(server_key) == []
         assert cache.get(get_cache_index_key(server_key)) == []
+
+    def test_complete_metadata_without_filters_stays_in_the_index(self, server_key):
+        """A search whose filters clean to {} is still a real cached search."""
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
+
+        cache_key = _store_indexed_search(
+            server_key,
+            _metadata(server_key, datetime.now(timezone.utc).isoformat(), {}),
+        )
+
+        result = get_active_cached_searches(server_key)
+
+        assert [search["cache_key"] for search in result] == [cache_key]
+        assert result[0]["display_filters"] == {}
+        assert cache.get(get_cache_index_key(server_key)) == [cache_key]
 
     def test_naive_future_timestamp_is_treated_as_utc(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
