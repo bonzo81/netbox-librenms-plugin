@@ -622,8 +622,8 @@ class LibreNMSAPIMixin:
         fallback, and that property raises KeyError/ValueError when the plugin configuration holds
         no bindable server. Every action view would then answer a 500. This resolve reports the
         missing server instead, and the caller decides what that means: a NetBox-only write (module
-        serial/move, bay template, interface delete) continues and lets its write signal invalidate
-        the source snapshot, while an action that reads or writes server-scoped data fails closed.
+        move, bay template, interface delete) continues and lets its write signal invalidate the
+        source snapshot, while an action that reads or writes server-scoped data fails closed.
 
         Args:
             data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an
