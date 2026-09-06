@@ -1545,7 +1545,6 @@ class TestImportSingleDevice:
         assert result["device"] is None
         assert result["error"] == "Device role is required but not provided"
 
-
     def _import_location_payload(self, location, *, pattern, validation, manual_mappings=None):
         """Import through the real parser and reload the persisted device."""
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device

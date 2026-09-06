@@ -476,9 +476,7 @@ class TestDeviceValidation:
 
         site = Site.objects.create(name="Hierarchy Validation Site", slug="hierarchy-validation-site")
         parent_location = Location.objects.create(name="Parent Hall", slug="parent-hall", site=site)
-        child_location = Location.objects.create(
-            name="Child Row", slug="child-row", site=site, parent=parent_location
-        )
+        child_location = Location.objects.create(name="Child Row", slug="child-row", site=site, parent=parent_location)
         tenant = Tenant.objects.create(name="Example Tenant", slug="example-tenant")
         LibreNMSSettings.objects.update_or_create(
             pk=1,
