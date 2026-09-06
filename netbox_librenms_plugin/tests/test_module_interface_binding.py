@@ -2,6 +2,7 @@
 
 import pytest
 
+from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
     install_module,
     make_device,
@@ -25,6 +26,24 @@ def _module_with_interfaces(device, bay_name, model, names):
     for name in names:
         Interface.objects.create(device=device, module=module, name=name, type="other")
     return module
+
+
+# The device custom field and the seeded snapshot must carry the same id, or the cache reads stale.
+ADOPTION_LIBRENMS_ID = 71
+ADOPTION_ENT_INDEX = 710
+
+
+def _adoption_inventory_row(model, name):
+    """A cached row with no port identity, so only the template adoption can change NetBox."""
+    return {
+        "entPhysicalIndex": ADOPTION_ENT_INDEX,
+        "entPhysicalModelName": model,
+        "entPhysicalName": name,
+        "entPhysicalDescr": name,
+        "entPhysicalClass": "module",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalSerialNum": "",
+    }
 
 
 class TestInterfacePortBinding:
@@ -76,40 +95,6 @@ class TestInterfacePortBinding:
             "status": "skipped",
             "reason": "no matching interface found for port_id 8803",
         }
-
-
-class TestSingleInstallBindingItem:
-    """Row-level binding metadata is read from the POST when the snapshot has no row."""
-
-    def _resolve(self, data):
-        from netbox_librenms_plugin.views.sync.modules import _resolve_single_install_binding_item
-
-        device = make_device(f"binding-item-{data.get('librenms_port_id', 'blank')}")
-        request = make_request("post", data, user=make_superuser(), path="/modules/")
-        return _resolve_single_install_binding_item(request, device, "default", None)
-
-    def test_every_posted_identity_field_reaches_the_fallback_item(self):
-        resolved = self._resolve(
-            {
-                "librenms_port_id": "7701",
-                "librenms_ifname": "Te1/1/1",
-                "librenms_ifdescr": "TenGigabitEthernet1/1/1",
-                "inventory_name": "Optics 1/1/1",
-                "inventory_descr": "10G SFP+",
-            }
-        )
-
-        assert resolved == {
-            "_librenms_port_id": 7701,
-            "_librenms_ifname": "Te1/1/1",
-            "_librenms_ifdescr": "TenGigabitEthernet1/1/1",
-            "entPhysicalName": "Optics 1/1/1",
-            "entPhysicalDescr": "10G SFP+",
-            "_binding_source": "post_fallback",
-        }
-
-    def test_a_post_with_no_identity_resolves_nothing(self):
-        assert self._resolve({"module_id": "1"}) is None
 
 
 class TestRecordBindOutcome:
@@ -207,12 +192,12 @@ class TestVCNameNormalizationScopes:
 
 
 class TestUpdateModuleInterfaceAdoption:
-    """The update action adopts standalone template interfaces even with no LibreNMS row."""
+    """The update action adopts standalone template interfaces when the cached row binds nothing."""
 
     def _module_with_templates(self, tag, template_names):
         from dcim.models import InterfaceTemplate, Module
 
-        device = make_device(f"{tag}-device", librenms_cf={"default": 71})
+        device = make_device(f"{tag}-device", librenms_cf={"default": ADOPTION_LIBRENMS_ID})
         bay = make_module_bay(device, f"{tag} Bay")
         module_type = make_module_type(f"{tag.upper()}-CARD")
         module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, status="active")
@@ -221,10 +206,20 @@ class TestUpdateModuleInterfaceAdoption:
             InterfaceTemplate.objects.create(module_type=module_type, name=name, type="other")
         return device, module
 
-    def _post(self, view_class, device, data, live_librenms):
+    def _seed(self, view, device, module):
+        seed_inventory(
+            view,
+            device,
+            [_adoption_inventory_row(module.module_type.model, module.module_bay.name)],
+            librenms_id=ADOPTION_LIBRENMS_ID,
+        )
+
+    def _post(self, view_class, device, data, live_librenms, module=None):
         request = make_request("post", data, user=make_superuser(), path="/modules/")
         view = view_class()
         view._librenms_api = live_librenms.api
+        if module is not None:
+            self._seed(view, device, module)
         return view, request, view_post(view, request, pk=device.pk)
 
     def test_a_missing_module_id_reports_an_error(self, live_librenms):
@@ -250,8 +245,9 @@ class TestUpdateModuleInterfaceAdoption:
         _view, request, response = self._post(
             UpdateModuleInterfaceView,
             device,
-            {"module_id": str(module.pk), "server_key": "default"},
+            {"module_id": str(module.pk), "ent_index": str(ADOPTION_ENT_INDEX), "server_key": "default"},
             live_librenms,
+            module=module,
         )
 
         first.refresh_from_db()
@@ -271,8 +267,9 @@ class TestUpdateModuleInterfaceAdoption:
         _view, request, response = self._post(
             UpdateModuleInterfaceView,
             device,
-            {"module_id": str(module.pk), "server_key": "default"},
+            {"module_id": str(module.pk), "ent_index": str(ADOPTION_ENT_INDEX), "server_key": "default"},
             live_librenms,
+            module=module,
         )
 
         assert response.status_code == 302
@@ -290,15 +287,17 @@ class TestUpdateModuleInterfaceAdoption:
         user = grant(user, "change", Interface, constraints={"name": "Management1"})
         request = make_request(
             "post",
-            {"module_id": str(module.pk), "server_key": "default"},
+            {"module_id": str(module.pk), "ent_index": str(ADOPTION_ENT_INDEX), "server_key": "default"},
             user=user,
             path="/modules/",
         )
         view = UpdateModuleInterfaceView()
         view._librenms_api = live_librenms.api
+        self._seed(view, device, module)
 
         response = view_post(view, request, pk=device.pk)
 
         blocked.refresh_from_db()
         assert response.status_code == 302
         assert blocked.module_id is None
+        assert any("no matching standalone interfaces found" in text for text in message_texts(request, "warning"))
