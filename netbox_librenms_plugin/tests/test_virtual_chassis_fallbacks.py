@@ -328,6 +328,31 @@ class TestCreateVirtualChassisWithMembers:
         created = Device.objects.get(virtual_chassis__name="vc-marker", vc_position=2)
         assert created.serial == "BCFB9751"
 
+    def test_the_master_position_is_found_from_a_decorated_serial(self, caplog):
+        """Without an is_master flag the master is located by serial, which arrives decorated.
+
+        Compared raw it never matches, so the master keeps position 1 while its real slot is 2,
+        and the member-count check counts the master row as a member it failed to create.
+        """
+        from dcim.models import Device
+        from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        _name_pattern()
+        master = make_device("vc-master-pos", serial="BCFB9793")
+        members = [
+            {"serial": "S/N BCFB9751", "position": 1, "name": "FPC0"},
+            {"serial": "S/N BCFB9793", "position": 2, "name": "FPC1"},
+        ]
+
+        with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
+            vc = create_virtual_chassis_with_members(master, members, {"device_id": 8103})
+
+        master.refresh_from_db()
+        assert master.vc_position == 2
+        assert Device.objects.filter(virtual_chassis=vc).count() == 2
+        assert "expected" not in caplog.text
+
     def test_the_master_row_is_skipped_when_its_serial_carries_the_marker(self):
         """The master's own chassis row comes back with the marker, its stored serial without.
 

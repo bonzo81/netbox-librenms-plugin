@@ -534,6 +534,22 @@ def test_is_redos_prone_flags_nested_quantifiers_but_not_real_lag_patterns():
     assert ports.is_redos_prone("(" * 500) is True
 
 
+def test_is_redos_prone_flags_overlapping_alternation_in_a_quantified_group():
+    """``^(a|aa)+$`` backtracks catastrophically without any nested quantifier.
+
+    The group holds alternatives that can match the same text, so an unbounded quantifier over it
+    explores exponentially many splits. Matching 255 characters plus one non-matching character
+    takes over a second, which a community recording can trigger during --validate.
+    """
+    from netbox_librenms_plugin.data_shapes import ports
+
+    for evil in (r"^(a|aa)+$", r"(a|a)*", r"(ab|a|b)+", r"(x|xy){2,}"):
+        assert ports.is_redos_prone(evil) is True, evil
+    # An alternation that is NOT unbounded-quantified stays usable: this is the real LAG shape.
+    for ok in (r"^(Po|Te)\d+$", r"^(Bundle-Ether|Port-channel)\d+$", r"^(ae|bond)\d+$"):
+        assert ports.is_redos_prone(ok) is False, ok
+
+
 def test_signature_skips_redos_prone_untrusted_lag_pattern():
     """A ReDoS-prone untrusted LAG pattern is skipped, not applied — the port isn't classified a LAG."""
     rec = {

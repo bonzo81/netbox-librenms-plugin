@@ -240,6 +240,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "action",
             "pattern",
             "require_serial_match_parent",
+            "manufacturer",
             "enabled",
             "description",
             "actions",
@@ -252,6 +253,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "action",
             "pattern",
             "require_serial_match_parent",
+            "manufacturer",
             "enabled",
             "actions",
         )

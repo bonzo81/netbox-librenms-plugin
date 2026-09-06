@@ -462,15 +462,28 @@ def create_virtual_chassis_with_members(
 
     # Find master's actual VC position from members_info.
     # Priority: is_master flag (set during detection) → serial match → default 1.
+    # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while the
+    # stored device serial does not. Resolve the rule chain once here, before the first comparison,
+    # so master matching, the member loop and the member-count check all read the same value.
+    member_manufacturer = getattr(getattr(master_device, "device_type", None), "manufacturer", None)
+    serial_rules = preload_normalization_rules("serial", manufacturer=member_manufacturer)
+
+    def _member_serial(value):
+        """Return a member's serial normalized the way the stored device serial was written."""
+        return _norm_serial(
+            normalize_inventory_serial(value, manufacturer=member_manufacturer, preloaded_rules=serial_rules)
+        )
+
+    _master_serial = _norm_serial(master_device.serial)
     _master_pos = 1
     _master_member = next((m for m in members_info if m.get("is_master")), None)
     if _master_member:
         _found_pos = _safe_pos(_master_member.get("position"))
         if _found_pos and _found_pos >= 1:
             _master_pos = _found_pos
-    elif _norm_serial(master_device.serial):
+    elif _master_serial:
         for _m in members_info:
-            if _norm_serial(_m.get("serial")) == _norm_serial(master_device.serial):
+            if _member_serial(_m.get("serial")) == _master_serial:
                 _found_pos = _safe_pos(_m.get("position"))
                 if _found_pos and _found_pos >= 1:
                     _master_pos = _found_pos
@@ -482,7 +495,7 @@ def create_virtual_chassis_with_members(
             vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
             master_device_new_name = _generate_vc_member_name(
-                original_master_name, _master_pos, serial=_norm_serial(master_device.serial), pattern=vc_pattern
+                original_master_name, _master_pos, serial=_master_serial, pattern=vc_pattern
             )
 
             # Check if renamed master conflicts with existing device
@@ -520,23 +533,11 @@ def create_virtual_chassis_with_members(
             used_positions = {_master_pos}  # Master occupies its actual position
             members_created = 0
 
-            # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper).
-            # The stored device serial does not, so rewrite it here, once, before any comparison
-            # or write reads it. Left raw the master never matches its own row and is created a
-            # second time as a member of its own chassis.
-            member_manufacturer = getattr(getattr(master_device, "device_type", None), "manufacturer", None)
-            # Preload the rule chain once: normalizing per member would query NormalizationRule
-            # once per stack member.
-            serial_rules = preload_normalization_rules("serial", manufacturer=member_manufacturer)
             for member in members_info:
                 # Normalize serial and position up front so all skip-checks and
                 # downstream logic use consistent values (strips whitespace and
                 # treats the sentinel "-" as "no serial").
-                serial = _norm_serial(
-                    normalize_inventory_serial(
-                        member.get("serial"), manufacturer=member_manufacturer, preloaded_rules=serial_rules
-                    )
-                )
+                serial = _member_serial(member.get("serial"))
                 member_pos = _safe_pos(member.get("position"))
 
                 # Skip the master member — identified by is_master flag, serial match,
@@ -544,7 +545,7 @@ def create_virtual_chassis_with_members(
                 if member.get("is_master"):
                     continue
                 # Skip if this is the master's serial (only when both serials are non-empty)
-                if serial and serial == _norm_serial(master_device.serial):
+                if serial and serial == _master_serial:
                     continue
                 # Skip blank-serial entries that represent the master slot by position
                 if (
@@ -611,10 +612,7 @@ def create_virtual_chassis_with_members(
                 [
                     m
                     for m in members_info
-                    if not (
-                        _norm_serial(m.get("serial"))
-                        and _norm_serial(m.get("serial")) == _norm_serial(master_device.serial)
-                    )
+                    if not (_member_serial(m.get("serial")) and _member_serial(m.get("serial")) == _master_serial)
                     and not (
                         not _norm_serial(m.get("serial"))
                         and m.get("position") is not None

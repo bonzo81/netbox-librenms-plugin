@@ -4366,6 +4366,74 @@ class TestInstallViewsPreserveInventoryCache:
         finally:
             cache.delete(cache_key)
 
+    def test_ignore_rules_follow_the_resolved_target_manufacturer(self):
+        """A row can be installed onto a VC member whose manufacturer differs from the page device.
+
+        Loading the ignore rules once from the page device omits the target's vendor rules, so a
+        row the target's own rule says to skip is installed anyway.
+        """
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Module, ModuleType, VirtualChassis
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        from dcim.models import Manufacturer
+
+        page_mfr = Manufacturer.objects.create(name="Target Page Vendor", slug="target-page-vendor")
+        member_mfr = Manufacturer.objects.create(name="Target Member Vendor", slug="target-member-vendor")
+        page = make_device_with_module_bays("target-rules-page", ["Slot 0"], manufacturer=page_mfr)
+        member = make_device_with_module_bays("target-rules-member", ["Slot 0"], manufacturer=member_mfr)
+        vc = VirtualChassis.objects.create(name="target-rules-vc")
+        for position, device in ((1, page), (2, member)):
+            device.virtual_chassis = vc
+            device.vc_position = position
+            device.save()
+        module_type = ModuleType.objects.create(manufacturer=member_mfr, model="TargetRulesModule")
+        # Scoped to the MEMBER's manufacturer, so only a target-resolved lookup finds it.
+        InventoryIgnoreRule.objects.create(
+            name="target-rules-skip",
+            match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+            pattern="Slot 0",
+            action=InventoryIgnoreRule.ACTION_SKIP,
+            require_serial_match_parent=False,
+            manufacturer=member_mfr,
+        )
+        inventory = [
+            {
+                "entPhysicalIndex": 100,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalContainedIn": 0,
+                "entPhysicalName": "Slot 0",
+            }
+        ]
+        request = make_request(
+            "post",
+            {
+                "select": ["100"],
+                "server_key": "default",
+                "device_selection_100": str(member.pk),
+            },
+            user=self._user("target-rules"),
+        )
+        view = InstallSelectedView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(page, "inventory", server_key="default")
+        cache.set(cache_key, self._trusted_inventory(page, inventory), timeout=300)
+        try:
+            _post(view, request, pk=page.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert not Module.objects.filter(device__in=[page, member]).exists()
+        assert Device.objects.filter(pk=member.pk).exists()
+
     @pytest.mark.parametrize(
         ("view_name", "request_data"),
         [

@@ -43,7 +43,7 @@ _MAX_LAG_NAME_LEN = 256
 # compile a pattern whose structure is the classic ReDoS shape — a group that itself contains an
 # unbounded quantifier and is again unbounded-quantified (``^(a+)+$``, ``(a*)*``, ``(a+){2,}``) — and
 # cap how many patterns are compiled at all. This is a heuristic, not a guarantee (it won't catch every
-# pathological regex, e.g. overlapping alternation); the real gates remain human review of submissions
+# pathological regex); the real gates remain human review of submissions
 # and the CI job timeout. A skipped pattern is simply not used for LAG-name classification (a lossless
 # nudge), exactly like the non-string/typo'd patterns already skipped below.
 _MAX_LAG_PATTERNS = 100
@@ -56,6 +56,10 @@ _MAX_LAG_PATTERN_LEN = 200
 # backtrack the same way, so one alternative serves both positions.
 _UNBOUNDED_QUANTIFIER = r"(?:[*+]|\{\d*,\})"
 _NESTED_QUANTIFIER_RE = re.compile(rf"\([^()]*{_UNBOUNDED_QUANTIFIER}[^()]*\)\s*{_UNBOUNDED_QUANTIFIER}")
+# An unbounded quantifier over an ALTERNATION backtracks the same way without any nested quantifier:
+# ``^(a|aa)+$`` splits 255 characters exponentially because the branches can match the same text.
+# Only a quantified group is refused, so the real LAG shape ``^(Po|Te)\d+$`` still compiles.
+_QUANTIFIED_ALTERNATION_RE = re.compile(rf"\([^()]*\|[^()]*\)\s*{_UNBOUNDED_QUANTIFIER}")
 
 
 def is_redos_prone(pattern):
@@ -74,7 +78,7 @@ def is_redos_prone(pattern):
     """
     if not isinstance(pattern, str) or len(pattern) > _MAX_LAG_PATTERN_LEN:
         return True
-    return _NESTED_QUANTIFIER_RE.search(pattern) is not None
+    return _NESTED_QUANTIFIER_RE.search(pattern) is not None or _QUANTIFIED_ALTERNATION_RE.search(pattern) is not None
 
 
 def _compile_recording_patterns(recording, key):

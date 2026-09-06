@@ -159,3 +159,51 @@ class TestSeededRuleScoping:
         rule = InventoryIgnoreRule.objects.get(name=include.DEFAULT_RULE["name"])
         assert rule.manufacturer == vendor
         assert rule.enabled is True
+
+
+@pytest.mark.django_db
+class TestManufacturerIsReachableFromTheUI:
+    """The field is only useful if the list view can show and filter on it."""
+
+    def test_the_filterset_applies_the_parameter_the_filter_form_submits(self):
+        """The form field is a DynamicModelChoiceField, which submits manufacturer_id."""
+        from netbox_librenms_plugin.filters import InventoryIgnoreRuleFilterSet
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        wanted = _manufacturer("Filter Wanted", "filter-wanted")
+        other = _manufacturer("Filter Other", "filter-other")
+        mine = _include_rule("filter-wanted-rule", wanted)
+        theirs = _include_rule("filter-other-rule", other)
+
+        filtered = InventoryIgnoreRuleFilterSet(
+            {"manufacturer_id": str(wanted.pk)}, queryset=InventoryIgnoreRule.objects.all()
+        ).qs
+
+        assert mine in filtered
+        assert theirs not in filtered
+
+    def test_the_list_table_carries_the_manufacturer_column(self):
+        """NetBox builds the list from Meta.fields and shows Meta.default_columns."""
+        from netbox_librenms_plugin.tables.mappings import InventoryIgnoreRuleTable
+
+        assert "manufacturer" in InventoryIgnoreRuleTable.Meta.fields
+        assert "manufacturer" in InventoryIgnoreRuleTable.Meta.default_columns
+
+    def test_the_rendered_list_shows_the_scoped_manufacturer(self):
+        """End to end: the column has to reach the rendered table, not just Meta."""
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tables.mappings import InventoryIgnoreRuleTable
+
+        vendor = _manufacturer("Rendered Vendor", "rendered-vendor")
+        _include_rule("rendered-scoped-rule", vendor)
+
+        table = InventoryIgnoreRuleTable(InventoryIgnoreRule.objects.filter(manufacturer=vendor))
+        rendered = table.as_html(_bare_request())
+
+        assert "Rendered Vendor" in rendered
+
+
+def _bare_request():
+    from django.test import RequestFactory
+
+    return RequestFactory().get("/")

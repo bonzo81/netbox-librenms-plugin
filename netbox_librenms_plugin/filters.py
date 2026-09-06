@@ -104,11 +104,19 @@ class NormalizationRuleFilterSet(django_filters.FilterSet):
 class InventoryIgnoreRuleFilterSet(django_filters.FilterSet):
     """Filter set for InventoryIgnoreRule model."""
 
+    # DynamicModelChoiceField submits manufacturer_id; use a ModelChoiceFilter
+    # with field_name="manufacturer" so the filterset resolves it to the FK.
+    manufacturer_id = django_filters.ModelChoiceFilter(
+        field_name="manufacturer",
+        queryset=Manufacturer.objects.all(),
+        label="Manufacturer",
+    )
+
     class Meta:
         """Meta options for InventoryIgnoreRuleFilterSet."""
 
         model = InventoryIgnoreRule
-        fields = ["match_type", "action", "enabled", "manufacturer"]
+        fields = ["match_type", "action", "enabled", "manufacturer", "manufacturer_id"]
 
 
 class PlatformMappingFilterSet(django_filters.FilterSet):
