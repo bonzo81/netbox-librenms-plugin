@@ -20,7 +20,7 @@ Configuration (environment variables): see ``tests/e2e/conftest.py``, plus
 
 Run (from a host that has Playwright, where NetBox itself is not importable, so the
 repo-root conftest and the coverage addopts have to stay out of the way):
-    cd /home/mzieba/workspace/netbox-librenms-plugin
+    cd <repository root>
     E2E_TESTS_ENABLED=1 NETBOX_URL=... python -m pytest \\
         tests/e2e/test_module_actions_in_place.py -v -s \\
         -p no:django -o 'addopts=' --confcutdir=tests/e2e
