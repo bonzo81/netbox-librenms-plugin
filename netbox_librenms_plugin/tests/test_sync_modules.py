@@ -647,6 +647,48 @@ class TestInstallAndUpdateViews:
         assert get_librenms_device_id(interface, "default", auto_save=False) == 5540
         assert any("Updated interface" in text for text in message_texts(request))
 
+    def test_ignore_rules_follow_the_resolved_target_manufacturer(self, live_librenms):
+        """A row can be installed onto a VC member whose manufacturer differs from the page device.
+
+        Loading the ignore rules once from the page device omits the target's vendor rules, so a
+        row the target's own rule says to skip is installed anyway.
+        """
+        from dcim.models import Manufacturer, Module, ModuleType, VirtualChassis
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        page_mfr = Manufacturer.objects.create(name="Target Page Vendor", slug="target-page-vendor")
+        member_mfr = Manufacturer.objects.create(name="Target Member Vendor", slug="target-member-vendor")
+        page = make_device_with_module_bays("target-rules-page", ["Slot 0"], manufacturer=page_mfr)
+        member = make_device_with_module_bays("target-rules-member", ["Slot 0"], manufacturer=member_mfr)
+        vc = VirtualChassis.objects.create(name="target-rules-vc")
+        for position, device in ((1, page), (2, member)):
+            device.virtual_chassis = vc
+            device.vc_position = position
+            device.save()
+        page.custom_field_data["librenms_id"] = {"default": {"id": 77}}
+        page.save(update_fields=["custom_field_data"])
+        module_type = ModuleType.objects.create(manufacturer=member_mfr, model="TargetRulesModule")
+        # Scoped to the MEMBER's manufacturer, so only a target-resolved lookup finds it.
+        InventoryIgnoreRule.objects.create(
+            name="target-rules-skip",
+            match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+            pattern="Slot 0",
+            action=InventoryIgnoreRule.ACTION_SKIP,
+            require_serial_match_parent=False,
+            manufacturer=member_mfr,
+        )
+        item = _inventory_item(100, module_type.model, "Slot 0")
+        request = _post_request({"select": ["100"], "server_key": "default", "device_selection_100": str(member.pk)})
+        view = _view(InstallSelectedView, request, live_librenms)
+        seed_inventory(view, page, [item], librenms_id=77)
+
+        view_post(view, request, pk=page.pk)
+
+        assert not Module.objects.filter(device__in=[page, member]).exists()
+
     def test_install_selected_uses_real_cache_mapping_and_models(self, live_librenms):
         from dcim.models import Module
 

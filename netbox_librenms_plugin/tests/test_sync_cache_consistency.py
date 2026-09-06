@@ -2000,6 +2000,44 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
 
 
 @pytest.mark.django_db
+def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
+    client, settings, primary_librenms, monkeypatch
+):
+    """The response still renders the freshly fetched rows when only the cache write failed.
+
+    Saying the tab has no snapshot to show contradicts the table beside it, and leaves the user
+    with no idea that those rows cannot be synced until the data is cached.
+    """
+    _configure_servers(settings)
+    device = make_device("cache-ip-rows", librenms_cf={"primary": {"id": 665}})
+    client.force_login(make_superuser("cache-ip-rows-user"))
+    primary_librenms.register(
+        "/api/v0/devices/665/ip",
+        {
+            "status": "ok",
+            "addresses": [
+                {"ipv4_address": "198.18.44.10", "ipv4_prefixlen": 24, "port_id": 7440},
+            ],
+        },
+    )
+    primary_librenms.register("/api/v0/devices/665", {"status": "ok", "devices": [{"device_id": 665}]})
+    primary_librenms.register(
+        "/api/v0/devices/665/ports", {"status": "ok", "ports": [{"port_id": 7440, "ifName": "Ethernet40"}]}
+    )
+    primary_librenms.register(
+        "/api/v0/ports/7440", {"status": "ok", "port": [{"port_id": 7440, "ifName": "Ethernet40"}]}
+    )
+    _drop_snapshot_write(monkeypatch, device, SyncTab.IP_ADDRESSES)
+
+    url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
+    response = client.post(url, {"server_key": "primary", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    assert b"could not be cached" in response.content
+    assert b"no snapshot to show" not in response.content
+
+
+@pytest.mark.django_db
 def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_success(
     client, settings, primary_librenms, monkeypatch
 ):
