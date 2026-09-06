@@ -233,6 +233,53 @@ class TestInventoryCacheContract:
 
         assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) is None
 
+    def test_resolve_posted_inventory_row_returns_the_cache_row_for_ent_index(self, live_librenms):
+        """The resolver hands back the cached row itself, so the caller reads its _source marker."""
+        from netbox_librenms_plugin.views.sync.modules import _resolve_posted_inventory_row
+
+        device = make_device("resolve-row-hit", librenms_cf={"default": 771})
+        view = _view(_cache_view_class(), _post_request({}), live_librenms)
+        item = _inventory_item(77, "CARD", "Te1/1/1", _librenms_port_id=42, _librenms_ifname="Te1/1/1")
+        seed_inventory(view, device, [item], librenms_id=771)
+        request = _post_request({"ent_index": "77", "server_key": "default"})
+
+        row, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+
+        assert refusal is None
+        assert row["_librenms_port_id"] == 42
+        assert row["_librenms_ifname"] == "Te1/1/1"
+
+    def test_resolve_posted_inventory_row_refuses_a_missing_ent_index(self, live_librenms):
+        """Without an index there is no row to read, so the resolver refuses instead of guessing."""
+        from netbox_librenms_plugin.views.sync.modules import _resolve_posted_inventory_row
+
+        device = make_device("resolve-row-no-index", librenms_cf={"default": 772})
+        view = _view(_cache_view_class(), _post_request({}), live_librenms)
+        seed_inventory(view, device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=772)
+        # The identity the deleted fallback used to read, with no index to resolve it against.
+        request = _post_request({"librenms_port_id": "56284", "librenms_ifname": "Te1/1/1", "server_key": "default"})
+
+        row, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+
+        assert row is None
+        assert refusal is not None
+        assert "Missing or invalid inventory index." in message_texts(request, "error")
+
+    def test_resolve_posted_inventory_row_refuses_a_stale_cache_snapshot(self, live_librenms):
+        """A snapshot taken under a different LibreNMS device ID must not resolve any row."""
+        from netbox_librenms_plugin.views.sync.modules import _resolve_posted_inventory_row
+
+        device = make_device("resolve-row-stale", librenms_cf={"default": 999})
+        view = _view(_cache_view_class(), _post_request({}), live_librenms)
+        seed_inventory(view, device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
+        request = _post_request({"ent_index": "77", "server_key": "default"})
+
+        row, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+
+        assert row is None
+        assert refusal is not None
+        assert "No cached inventory data. Please refresh modules first." in message_texts(request, "error")
+
 
 def _cache_view_class():
     from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
@@ -573,16 +620,19 @@ class TestInstallAndUpdateViews:
         device = make_device("view-install", librenms_cf={"default": 51})
         bay = make_module_bay(device, "View Install Bay")
         module_type = make_module_type("VIEW-INSTALL-CARD")
+        item = _inventory_item(510, module_type.model, bay.name, serial="VIEW-SERIAL")
         request = _post_request(
             {
                 "module_bay_id": bay.pk,
                 "module_type_id": module_type.pk,
-                "serial": "VIEW-SERIAL",
+                "ent_index": 510,
                 "server_key": "default",
             }
         )
+        view = _view(InstallModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=51)
 
-        response = view_post(_view(InstallModuleView, request, live_librenms), request, pk=device.pk)
+        response = view_post(view, request, pk=device.pk)
 
         module = Module.objects.get(device=device, module_bay=bay)
         assert response.status_code == 302
@@ -614,6 +664,68 @@ class TestInstallAndUpdateViews:
         assert Module.objects.get(device=device, module_bay=bay) == existing
         assert Module.objects.get(pk=existing.pk).serial == "ORIGINAL"
         assert any("already has a module" in text for text in message_texts(request))
+
+    def test_install_module_refuses_an_unresolved_ent_index(self, live_librenms):
+        """An install reads its inventory metadata from the cache, never from the post."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("view-install-unresolved", librenms_cf={"default": 55})
+        bay = make_module_bay(device, "Unresolved Install Bay")
+        module_type = make_module_type("UNRESOLVED-INSTALL-CARD")
+        interface = make_interface(device, "Ethernet55")
+        item = _inventory_item(
+            550,
+            module_type.model,
+            interface.name,
+            serial="LNMS-SN",
+            _librenms_port_id=5550,
+            _librenms_ifname=interface.name,
+        )
+        # A crafted post: an index the snapshot does not carry, plus the identity and serial the
+        # deleted form fallback used to read.
+        request = _post_request(
+            {
+                "module_bay_id": bay.pk,
+                "module_type_id": module_type.pk,
+                "ent_index": 9999,
+                "serial": "FORGED-SN",
+                "librenms_port_id": 5550,
+                "librenms_ifname": interface.name,
+                "server_key": "default",
+            }
+        )
+        view = _view(InstallModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=55)
+
+        response = view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert response.status_code == 302
+        assert not Module.objects.filter(device=device).exists()
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert interface.module_id is None
+        assert "Inventory item not found in cache." in message_texts(request, "error")
+
+    def test_carrier_install_without_an_ent_index_still_installs_with_no_serial(self, live_librenms):
+        """The carrier is not an inventory row, so its button posts no index and gets no serial."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("view-install-carrier", librenms_cf={"default": 60})
+        bay = make_module_bay(device, "Carrier Install Bay")
+        module_type = make_module_type("CARRIER-INSTALL-CARD")
+        request = _post_request({"module_bay_id": bay.pk, "module_type_id": module_type.pk, "server_key": "default"})
+
+        response = view_post(_view(InstallModuleView, request, live_librenms), request, pk=device.pk)
+
+        module = Module.objects.get(device=device, module_bay=bay)
+        assert response.status_code == 302
+        assert module.module_type == module_type
+        assert module.serial == ""
 
     def test_update_serial_changes_the_real_module(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
@@ -718,6 +830,44 @@ class TestInstallAndUpdateViews:
         assert interface.module == module
         assert get_librenms_device_id(interface, "default", auto_save=False) == 5540
         assert any("Updated interface" in text for text in message_texts(request))
+
+    def test_update_module_interface_refuses_an_unresolved_ent_index(self, live_librenms):
+        """Posted metadata carries no _source marker, so an unknown ent_index must not bind at all."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("view-update-interface-unresolved", librenms_cf={"default": 61})
+        bay = make_module_bay(device, "Unresolved Interface Bay")
+        module = install_module(device, bay.name, "UNRESOLVED-INTERFACE-CARD")
+        interface = make_interface(device, "Ethernet61")
+        # The one cached row is OOB, so no index at all makes this identity bindable.
+        item = _inventory_item(
+            610,
+            module.module_type.model,
+            interface.name,
+            _librenms_port_id=5610,
+            _librenms_ifname=interface.name,
+            _source="oob",
+        )
+        request = _post_request(
+            {
+                "module_id": module.pk,
+                "ent_index": 9999,
+                "librenms_port_id": 5610,
+                "librenms_ifname": interface.name,
+                "server_key": "default",
+            }
+        )
+        view = _view(UpdateModuleInterfaceView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=61)
+
+        response = view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert response.status_code == 302
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert interface.module_id is None
+        assert "Inventory item not found in cache." in message_texts(request, "error")
 
     def test_update_module_interface_refuses_an_oob_binding_row(self, live_librenms):
         """OOB rows are read-only, so a crafted ent_index must not bind a host interface."""
