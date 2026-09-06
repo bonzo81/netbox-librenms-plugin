@@ -121,6 +121,17 @@ class TestInstallSerialRulePreloading:
             assert "norm_rules_serial=" in ast.unparse(install_post), "a post() does not forward norm_rules_serial"
 
 
+def pytest_generate_tests(metafunc):
+    """Parametrize ``spec_index`` over every component NetBox replicates on this version."""
+    if "spec_index" not in metafunc.fixturenames:
+        return
+    # Deferred import: the module-level test imports stay inside the test methods, and the
+    # spec list grows with the running NetBox (4.7 adds the two cooling components).
+    from netbox_librenms_plugin.views.sync.modules import _module_component_specs
+
+    metafunc.parametrize("spec_index", range(len(_module_component_specs())))
+
+
 @contextmanager
 def _patch_build_row_deps(view, match_bay_return=None):
     """Patch all utility imports used by _build_row to isolate bay/type matching tests."""
@@ -6746,7 +6757,6 @@ class TestStandaloneAdoptionAcrossEveryComponentType:
         return kwargs
 
     @pytest.mark.django_db
-    @pytest.mark.parametrize("spec_index", range(8))
     def test_a_standalone_component_is_authorized_for_adoption(self, spec_index):
         """A standalone component matching the template name is locked and authorized."""
         from netbox_librenms_plugin.views.sync.modules import (
@@ -6781,7 +6791,6 @@ class TestStandaloneAdoptionAcrossEveryComponentType:
         )
 
     @pytest.mark.django_db
-    @pytest.mark.parametrize("spec_index", range(8))
     def test_an_unauthorized_standalone_component_is_refused_by_name(self, spec_index):
         """A component outside the change scope aborts the write and names the component."""
         from netbox_librenms_plugin.views.sync.modules import (
