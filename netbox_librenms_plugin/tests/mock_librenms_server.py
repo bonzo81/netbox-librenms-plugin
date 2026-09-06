@@ -742,6 +742,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
                 return 409, {"status": "error", "message": "No generated device address is available"}
 
             self._next_device_id = device_id + 1
+            device["location_id"] = self._location_id(device["location"])
             self.devices[device_id] = device
             self.ports_by_device[device_id] = []
             self.inventory_by_device[device_id] = []
@@ -828,8 +829,27 @@ class LibreNMSStubServer(MockLibreNMSServer):
         self.locations = [
             {"id": index, "location": name, "lat": None, "lng": None} for index, name in enumerate(names, start=1)
         ]
+        # _normalise_device defaults every unrecorded location_id to 1, so realign each device
+        # with the list before the location filter is served.
+        for device in self.devices.values():
+            device["location_id"] = self._location_id(device.get("location") or "Lab")
         for location in self.locations:
             self._register_location_patch(location["location"])
+
+    def _location_id(self, name):
+        """Return the listed id of location *name*, listing the location when it is new."""
+        for item in self.locations:
+            if item["location"] == name:
+                return item["id"]
+        location = {
+            "id": max((item["id"] for item in self.locations), default=0) + 1,
+            "location": name,
+            "lat": None,
+            "lng": None,
+        }
+        self.locations.append(location)
+        self._register_location_patch(name)
+        return location["id"]
 
     def _get_locations(self, method, path, query, headers, body):
         with self._lock:
