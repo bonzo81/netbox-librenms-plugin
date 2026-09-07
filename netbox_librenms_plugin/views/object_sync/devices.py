@@ -529,9 +529,8 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         except (ValueError, TypeError):
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
-        try:
-            selected_gid = int(vlan_group_id) if vlan_group_id else None
-        except (ValueError, TypeError):
+        selected_gid = coerce_model_pk(vlan_group_id)
+        if vlan_group_id not in (None, "") and selected_gid is None:
             return JsonResponse({"status": "error", "message": "Invalid VLAN group ID"}, status=400)
 
         # Build lookup for the selected group
@@ -662,9 +661,8 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         except (ValueError, TypeError):
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
-        try:
-            selected_gid = int(vlan_group_id) if vlan_group_id else None
-        except (ValueError, TypeError):
+        selected_gid = coerce_model_pk(vlan_group_id)
+        if vlan_group_id not in (None, "") and selected_gid is None:
             return JsonResponse({"status": "error", "message": "Invalid VLAN group ID"}, status=400)
 
         # Check if VLAN exists in the selected group (or globally)

@@ -23,7 +23,11 @@ from netbox_librenms_plugin.utils import (
     get_virtual_chassis_members,
     ip_family,
     normalize_librenms_port_id,
+    normalize_ip_sync_row_id,
+    index_ip_sync_rows,
+    index_ip_source_interfaces,
     resolve_interface_row_device,
+    resolve_ip_source_interface,
     resolve_create_missing_interfaces,
     resolve_set_primary_ip,
     same_host,
@@ -218,7 +222,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             confirmed = set()
             for value in request.POST.getlist("force_conflict"):
                 try:
-                    confirmed.add(str(parse_address_with_prefix(value)))
+                    confirmed.add(normalize_ip_sync_row_id(value))
                 except ValueError:
                     continue
             selected_ips = [row_id for row_id in force_intents if row_id in confirmed]
@@ -295,7 +299,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         for token in request.POST.getlist("conflict_intent"):
             try:
                 payload = signing.loads(token, salt=IP_CONFLICT_SIGNING_SALT, max_age=3600)
-                row_id = str(parse_address_with_prefix(payload["row_id"]))
+                row_id = normalize_ip_sync_row_id(payload["row_id"])
                 if (
                     payload.get("object_type") != object_type
                     or str(payload.get("object_pk")) != str(obj.pk)
@@ -377,37 +381,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         else:
             interfaces = list(self.restricted_queryset(VMInterface).filter(virtual_machine=obj))
             obj_device_id = None
-        by_librenms_id = {}
-        by_name = {}
-        by_pk = {}
-        for iface in interfaces:
-            # Key by PK for the cached-interface_url fallback (rename-safe identity). Scoped to
-            # this object's (and its VC members') interfaces, so a stale URL can never bind the
-            # address to an unrelated device's interface — stricter than the old direct .get(id=).
-            by_pk[str(iface.pk)] = iface
-            lib_id = get_librenms_device_id(iface, server_key, auto_save=False)
-            if lib_id is not None:
-                key = str(lib_id)
-                if key in by_librenms_id:
-                    # Two current interfaces carry the same stored port id — we can't tell which
-                    # one the IP belongs to. Mark the id ambiguous (None) so _match_interface fails
-                    # the row safe instead of binding the address to an arbitrary interface.
-                    by_librenms_id[key] = None
-                else:
-                    by_librenms_id[key] = iface
-            # Name fallback: the VIEWED object's OWN interface always wins. NetBox enforces a unique
-            # (device, name), so obj has at most one interface of a given name, and binding the IP to
-            # it matches exactly what the rendered table shows (the render indexes only obj.interfaces).
-            # A sibling VC member only fills a name obj doesn't own; a collision among siblings alone
-            # (none on obj) stays ambiguous (None) so the address can't rebind to an arbitrary member.
-            iface_is_obj = obj_device_id is not None and getattr(iface, "device_id", None) == obj_device_id
-            if iface_is_obj:
-                by_name[iface.name] = iface
-            elif iface.name not in by_name:
-                by_name[iface.name] = iface
-            elif by_name[iface.name] is not None and getattr(by_name[iface.name], "device_id", None) != obj_device_id:
-                by_name[iface.name] = None
-        return by_librenms_id, by_name, by_pk
+        return index_ip_source_interfaces(interfaces, server_key, obj_device_id)
 
     @staticmethod
     def _match_interface(ip_data, by_librenms_id, by_name, by_pk=None):
@@ -435,29 +409,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         Returns:
             Interface | VMInterface | None: The matched interface, or None if none resolves.
         """
-        port_id = ip_data.get("port_id")
-        if port_id is not None and str(port_id) in by_librenms_id:
-            iface = by_librenms_id[str(port_id)]
-            if iface is not None:
-                return iface
-            # None marks an ambiguous port id (>1 interface shares it). Fall through to the name
-            # match, but never use the cached URL when a stable match was explicitly ambiguous.
-        name = ip_data.get("interface_name")
-        if name and name in by_name:
-            if by_name[name] is not None:
-                return by_name[name]
-            return None
-        if port_id is not None and str(port_id) in by_librenms_id:
-            return None
-        # Rename-safe fallback: the cached interface_url PK still points at the (renamed)
-        # interface. Scope to by_pk (the object's own interfaces) so a stale URL can't bind the
-        # address to an unrelated device's interface.
-        interface_url = ip_data.get("interface_url")
-        if interface_url and by_pk:
-            pk = interface_url.rstrip("/").rsplit("/", 1)[-1]
-            if pk in by_pk:
-                return by_pk[pk]
-        return None
+        return resolve_ip_source_interface(ip_data, by_librenms_id, by_name, by_pk)
 
     def _lock_interface_owner_scope(self, obj):
         """Lock the current interface-owner scope in the shared chassis-first order."""
@@ -658,21 +610,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     @staticmethod
     def _cached_ip_index(cached_ips):
-        """Index cached rows by canonical CIDR and record duplicate row identities."""
-        index = {}
-        duplicates = set()
-        for row in cached_ips:
-            if not isinstance(row, dict):
-                continue
-            try:
-                row_id = str(parse_address_with_prefix(row.get("ip_with_mask")))
-            except (TypeError, ValueError):
-                continue
-            if row_id in index:
-                duplicates.add(row_id)
-            else:
-                index[row_id] = row
-        return index, duplicates
+        """Index current source evidence through the table's shared identity rules."""
+        return index_ip_sync_rows(cached_ips)
 
     def _prelock_ip_hosts(self, request, selected_ips, cached_index, duplicate_cached_rows, force_intents):
         """Acquire every valid batch host lock in one deterministic order.
@@ -684,10 +623,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         lock_entries = {}
         for selected_ip in selected_ips:
             try:
-                row_id = str(parse_address_with_prefix(selected_ip))
+                row_id = normalize_ip_sync_row_id(selected_ip)
                 if row_id in duplicate_cached_rows or row_id not in cached_index:
                     continue
-                parsed = parse_address_with_prefix(row_id)
+                parsed = parse_address_with_prefix(cached_index[row_id]["ip_with_mask"])
                 force_payload = force_intents.get(row_id)
                 vrf = (
                     self._resolve_vrf_id(force_payload.get("target_vrf_id"))
@@ -759,7 +698,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """Return one user-facing conflict and its signed force intent when safe."""
         conflict = {
             "row_id": row_id,
-            "address": row_id,
+            "address": row_id.partition("@")[0],
             "target_interface": str(interface),
             "target_vrf": self._vrf_label(vrf),
             "reason": reason,
@@ -782,8 +721,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     def _classify_ip_change(self, *, row_id, parsed, ip_data, obj, object_type, server_key, interface, vrf):
         """Classify a current VRF-scoped IP state without mutating it."""
         target_rows = self._host_rows(vrf, parsed)
-        exact_rows = [row for row in target_rows if str(row.address) == row_id]
-        other_prefix_rows = [row for row in target_rows if str(row.address) != row_id]
+        exact_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) == parsed]
+        other_prefix_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) != parsed]
 
         if other_prefix_rows:
             if len(other_prefix_rows) == 1 and not exact_rows:
@@ -813,7 +752,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         interface=interface,
                         vrf=vrf,
                         reason=(
-                            f"Change the existing IP address from {existing_ip.address} to {row_id} "
+                            f"Change the existing IP address from {existing_ip.address} to {parsed} "
                             "because it has a different prefix length, and assign it to the selected interface."
                         ),
                         ip_obj=existing_ip,
@@ -883,7 +822,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         source_pk = ip_data.get("netbox_ip_id")
         if source_pk is not None:
-            exact_rows_across_vrfs = list(IPAddress.objects.filter(address=row_id).order_by("pk"))
+            exact_rows_across_vrfs = list(IPAddress.objects.filter(address=str(parsed)).order_by("pk"))
             source_ip = next((row for row in exact_rows_across_vrfs if str(row.pk) == str(source_pk)), None)
             if source_ip is None:
                 return (
@@ -930,7 +869,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             )
 
         ip_obj = IPAddress.objects.create(
-            address=row_id,
+            address=str(parsed),
             assigned_object=interface,
             status="active",
             vrf=vrf,
@@ -950,12 +889,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if payload.get("ip_state") != self._ip_state(ip_obj):
             raise ValueError("The existing IP address changed after confirmation. Refresh the IP data and try again.")
         kind = payload.get("kind")
-        if kind != "change_prefix" and str(ip_obj.address) != row_id:
+        if kind != "change_prefix" and parse_address_with_prefix(str(ip_obj.address)) != parsed:
             raise ValueError("The existing IP address changed after confirmation. Refresh the IP data and try again.")
 
         target_rows = self._host_rows(vrf, parsed)
-        exact_rows = [row for row in target_rows if str(row.address) == row_id]
-        other_prefix_rows = [row for row in target_rows if str(row.address) != row_id]
+        exact_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) == parsed]
+        other_prefix_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) != parsed]
         if other_prefix_rows and kind != "change_prefix":
             raise ValueError("The destination VRF now contains this host with a different prefix length.")
 
@@ -975,7 +914,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 or ip_obj.vrf_id != target_vrf_id
             ):
                 raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
-            ip_obj.address = row_id
+            ip_obj.address = str(parsed)
         else:
             raise ValueError("IP address confirmation is invalid. Refresh the IP data and try again.")
 
@@ -1039,6 +978,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         set_primary = resolve_set_primary_ip(request)
         mgmt_ip = self.get_management_ip(obj) if set_primary else None
+        if mgmt_ip and sum(self._same_host(str(row_id).partition("@")[0], mgmt_ip) for row_id in selected_ips) > 1:
+            messages.warning(
+                request,
+                "Primary IP not set: multiple selected source rows match the management IP. Select one row to set it.",
+            )
+            mgmt_ip = None
 
         # Re-resolve interfaces from current NetBox state (not the cached
         # interface_url) so an interface synced after these rows were cached is
@@ -1060,6 +1005,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         for selected_ip in selected_ips:
             row_id = str(selected_ip)
+            display_address = row_id.partition("@")[0]
             interface_creation_state_before_row = interface_creation_state
             interface_maps_before_row = (
                 (
@@ -1079,13 +1025,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 # Per-IP savepoint so one bad address rolls back only itself and
                 # surfaces a real error, instead of poisoning the whole batch.
                 with transaction.atomic():
-                    row_id = str(parse_address_with_prefix(selected_ip))
+                    row_id = normalize_ip_sync_row_id(selected_ip)
                     if row_id in duplicate_cached_rows:
                         raise ValueError("The cached snapshot contains duplicate rows for this IP address.")
                     ip_data = cached_index.get(row_id)
                     if ip_data is None:
                         raise ValueError("The selected IP address is no longer present in the cached snapshot.")
-                    parsed = parse_address_with_prefix(row_id)
+                    parsed = parse_address_with_prefix(cached_index[row_id]["ip_with_mask"])
+                    display_address = str(parsed)
 
                     force_payload = force_intents.get(row_id)
                     if force_payload is not None:
@@ -1123,7 +1070,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
                     # This row ends in obj.save() (primary_ip) when it matches the management
                     # address, so it takes BOTH an ipam_ipaddress and a dcim_device row lock.
-                    is_primary_candidate = bool(mgmt_ip) and self._same_host(row_id, mgmt_ip)
+                    is_primary_candidate = bool(mgmt_ip) and self._same_host(str(parsed), mgmt_ip)
 
                     if interface is None:
                         # No matching NetBox interface — the row is stale, the interface isn't
@@ -1132,9 +1079,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # or create an unassigned/global address, both of which violate the
                         # interface-assigned model. Skip the row instead of corrupting state.
                         if is_primary_candidate:
-                            results["primary_no_interface"].append(row_id)
+                            results["primary_no_interface"].append(display_address)
                         else:
-                            results["skipped_no_interface"].append(row_id)
+                            results["skipped_no_interface"].append(display_address)
                         continue
 
                     if is_primary_candidate:
@@ -1155,7 +1102,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             interface=interface,
                             vrf=vrf,
                         )
-                        results["updated"].append(row_id)
+                        results["updated"].append(display_address)
                     else:
                         ip_obj, outcome, conflict = self._classify_ip_change(
                             row_id=row_id,
@@ -1176,7 +1123,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             )
                             results["conflicts"].append(conflict)
                             continue
-                        results[outcome].append(row_id)
+                        results[outcome].append(display_address)
 
                     # Primary-IP auto-match for the management IP. The no-interface case is
                     # handled above (the row was skipped before any write), so here the IP is
@@ -1200,9 +1147,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                                 and not interface.mgmt_only
                             )
                         ):
-                            results["primary_interface_not_eligible"].append(row_id)
+                            results["primary_interface_not_eligible"].append(display_address)
                         elif self._set_primary_ip(obj, ip_obj):
-                            results["primary_set"].append(row_id)
+                            results["primary_set"].append(display_address)
 
             except Exception as exc:
                 if interface_maps_before_row is not None:
@@ -1225,8 +1172,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             {key: list(value) for key, value in interfaces_by_port_id_before.items()}
                         )
                 logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
-                results["failed"].append(row_id)
-                results["errors"][row_id] = str(exc) or exc.__class__.__name__
+                results["failed"].append(display_address)
+                results["errors"][display_address] = str(exc) or exc.__class__.__name__
 
         return results
 

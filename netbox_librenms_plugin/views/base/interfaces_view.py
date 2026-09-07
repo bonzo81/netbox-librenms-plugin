@@ -798,8 +798,10 @@ class BaseInterfaceTableView(
 
             netbox_only_interfaces = []
             for device_id, device_interface_maps in interfaces_by_device.items():
+                if device_id not in actionable_owner_ids:
+                    continue
                 for interface_name, interface in device_interface_maps["by_name"].items():
-                    if interface.id in matched_interface_ids:
+                    if interface.id not in viewable_interface_ids or interface.id in matched_interface_ids:
                         continue
                     if interface_name not in librenms_interface_names:
                         # Get device name for the interface (reuse the pre-indexed members — the

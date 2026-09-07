@@ -39,17 +39,6 @@ def add_default_rule(apps, schema_editor):
     )
 
 
-def remove_default_rule(apps, schema_editor):
-    InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
-    InventoryIgnoreRule.objects.using(schema_editor.connection.alias).filter(
-        name=DEFAULT_RULE["name"], pattern=DEFAULT_RULE["pattern"]
-    ).delete()
-    NormalizationRule = apps.get_model("netbox_librenms_plugin", "NormalizationRule")
-    NormalizationRule.objects.using(schema_editor.connection.alias).filter(
-        scope=SERIAL_RULE["scope"], match_pattern=SERIAL_RULE["match_pattern"]
-    ).delete()
-
-
 class Migration(migrations.Migration):
     dependencies = [
         ("netbox_librenms_plugin", "0016_portstacklagpattern_sap_name_pattern"),
@@ -104,5 +93,6 @@ class Migration(migrations.Migration):
                 max_length=50,
             ),
         ),
-        migrations.RunPython(add_default_rule, remove_default_rule),
+        # Existing and edited operator rules cannot be distinguished from seeded rows.
+        migrations.RunPython(add_default_rule, migrations.RunPython.noop),
     ]

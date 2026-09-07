@@ -1499,7 +1499,6 @@ def validate_device_for_import(
                     cache.set(cache_key, available_racks, cache_timeout)
 
                 result["rack"]["available_racks"] = available_racks
-                parsed_location = parse_location_for_import(libre_device.get("location", ""))
                 result["rack"]["rack"] = _resolve_rack_for_import(site, parsed_location.get("rack"))
                 # Rack is optional, don't add to issues
                 result["rack"]["found"] = True  # Mark as "found" even if None (optional field)

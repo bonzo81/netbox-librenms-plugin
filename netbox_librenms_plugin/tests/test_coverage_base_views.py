@@ -3057,6 +3057,7 @@ class TestBaseIPAddressTableViewEnrichExistingIp:
 
         prefetched = {
             "interfaces_by_librenms_id": {"10": assigned_iface},
+            "interfaces_by_name": {},
         }
 
         enriched = {}
@@ -3078,6 +3079,7 @@ class TestBaseIPAddressTableViewEnrichExistingIp:
 
         prefetched = {
             "interfaces_by_librenms_id": {},
+            "interfaces_by_name": {"Gi0/0": assigned_iface},
         }
 
         enriched = {}
@@ -3098,6 +3100,7 @@ class TestBaseIPAddressTableViewEnrichExistingIp:
 
         prefetched = {
             "interfaces_by_librenms_id": {},  # No librenms_id match
+            "interfaces_by_name": {"Gi0/1": other_iface},
         }
 
         enriched = {}
@@ -3465,8 +3468,8 @@ class TestBaseIPAddressTableViewPrefetchNetboxData:
 
         result = view._prefetch_netbox_data(obj, set())
 
-        assert "20" not in result["interfaces_by_librenms_id"]
-        # Names are still unambiguous and remain usable for the fallback match.
+        assert result["interfaces_by_librenms_id"]["20"] is None
+        # Names stay indexed for source rows without a stored port identity.
         assert result["interfaces_by_name"]["Gi0/1"] == a
         assert result["interfaces_by_name"]["Gi0/2"] == b
 
@@ -3609,15 +3612,14 @@ class TestBaseInterfaceTableViewMissingLines:
 
     @staticmethod
     def _real_view_and_request():
-        from django.contrib.auth import get_user_model
         from django.test import RequestFactory
 
+        from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         view = DeviceInterfaceTableView()
         request = RequestFactory().get("/")  # GET render, no ?server_key -> default server
-        user_model = get_user_model()
-        request.user = user_model.objects.first() or user_model.objects.create_user(username="iface-ctx-tester")
+        request.user = make_superuser("iface-ctx-tester")
         view.request = request
         return view, request
 

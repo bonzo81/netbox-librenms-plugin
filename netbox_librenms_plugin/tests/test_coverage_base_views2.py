@@ -1929,7 +1929,8 @@ class TestSingleIPAddressVerifyViewFindInCache:
         }
         cached = {"ip_addresses": [entry]}
         ip_entry, vrf_id, port_id = view._find_in_cache(cached, "192.168.1.1", 24)
-        assert ip_entry is entry
+        assert ip_entry == {**entry, "row_id": entry["ip_with_mask"]}
+        assert "row_id" not in entry
         assert vrf_id == 5
         assert port_id == 10
 

@@ -1212,6 +1212,7 @@ function handleVRFChange(select, value) {
         body: JSON.stringify({
             device_id: deviceId,
             ip_address: fullIpAddress,  // Use full IP address with prefix
+            row_id: select.dataset.rowId,
             vrf_id: value,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
@@ -1223,7 +1224,7 @@ function handleVRFChange(select, value) {
             return response.json();
         })
         .then(data => {
-            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+            const row = select.closest('tr');
 
             if (data.status === 'success' && row && data.formatted_row) {
                 const statusCell = row.querySelector('td[data-col="status"]');

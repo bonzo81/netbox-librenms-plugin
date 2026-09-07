@@ -98,17 +98,30 @@ def _drop_masked_sub_units(rows):
     reports its exact parent name on the SAME remote device. A sub-unit reported on its
     own is kept, because it is then the only evidence of that neighbour.
     """
+
+    def group_key(row):
+        remote_device = row["remote_device_id"]
+        hostname = row.get("remote_device")
+        if remote_device is not None:
+            remote_identity = ("id", remote_device)
+        elif isinstance(hostname, str) and hostname.strip():
+            remote_identity = ("hostname", hostname)
+        else:
+            return None
+        return row["local_port_id"], remote_identity
+
     physical_by_group = {}
     for row in rows:
-        if not _SUB_UNIT_RE.match(row["remote_port"] or ""):
-            physical_by_group.setdefault((row["local_port_id"], row["remote_device_id"]), set()).add(row["remote_port"])
+        remote_port = row["remote_port"]
+        key = group_key(row)
+        if key is not None and isinstance(remote_port, str) and not _SUB_UNIT_RE.match(remote_port):
+            physical_by_group.setdefault(key, set()).add(remote_port)
 
     kept = []
     for row in rows:
-        match = _SUB_UNIT_RE.match(row["remote_port"] or "")
-        if match and match.group("physical") in physical_by_group.get(
-            (row["local_port_id"], row["remote_device_id"]), ()
-        ):
+        remote_port = row["remote_port"]
+        match = _SUB_UNIT_RE.match(remote_port) if isinstance(remote_port, str) else None
+        if match and match.group("physical") in physical_by_group.get(group_key(row), ()):
             continue
         kept.append(row)
     return kept
@@ -486,6 +499,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     f"Multiple devices found with the same LibreNMS ID: {remote_device_id}.",
                 )
 
+        if not isinstance(hostname, str) or not hostname.strip():
+            return None, False, None
+
         # Fall back to name matching if no device found by ID. LibreNMS reports the neighbour
         # hostname as the device advertises it, which is commonly all lower case, while NetBox
         # holds the operator's capitalisation. Match case insensitively or the remote end only
@@ -552,7 +568,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
     def enrich_remote_port(self, link, device, server_key=None):
         """Add remote port URL if device and interface exist in NetBox"""
-        if remote_port := link.get("remote_port"):
+        remote_port = link.get("remote_port")
+        if isinstance(remote_port, str) and remote_port:
             netbox_remote_interface = None
             librenms_remote_port_id = link.get("remote_port_id")
             if server_key is None:

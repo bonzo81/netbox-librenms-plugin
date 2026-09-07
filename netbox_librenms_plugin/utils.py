@@ -22,7 +22,7 @@ from netbox_librenms_plugin.constants import (
     OOB_BADGE_HTML,
     is_supported_interface_name_field,
 )
-from netbox_librenms_plugin.ip_addressing import parse_host_address
+from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +149,110 @@ def format_mac_address(mac_address: object) -> str:
 def normalize_librenms_port_id(value) -> int | None:
     """Normalize a LibreNMS port_id to a positive integer, or None."""
     return coerce_librenms_id(value)
+
+
+def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):
+    """Index one owner scope with identical ambiguity rules for reads and writes."""
+    by_librenms_id = {}
+    by_name = {}
+    by_pk = {}
+    for iface in interfaces:
+        # Key by PK for the cached-interface_url fallback (rename-safe identity). Scoped to
+        # this object's (and its VC members') interfaces, so a stale URL can never bind the
+        # address to an unrelated device's interface — stricter than the old direct .get(id=).
+        by_pk[str(iface.pk)] = iface
+        lib_id = get_librenms_device_id(iface, server_key, auto_save=False)
+        if lib_id is not None:
+            key = str(lib_id)
+            if key in by_librenms_id:
+                # Two current interfaces carry the same stored port id — we can't tell which
+                # one the IP belongs to. Mark the id ambiguous (None) so _match_interface fails
+                # the row safe instead of binding the address to an arbitrary interface.
+                by_librenms_id[key] = None
+            else:
+                by_librenms_id[key] = iface
+        # Name fallback: the VIEWED object's OWN interface always wins. NetBox enforces a unique
+        # (device, name), so obj has at most one interface of a given name, and binding the IP to
+        # it preserves the viewed device as the primary name scope.
+        # A sibling VC member only fills a name obj doesn't own; a collision among siblings alone
+        # (none on obj) stays ambiguous (None) so the address can't rebind to an arbitrary member.
+        iface_is_obj = obj_device_id is not None and getattr(iface, "device_id", None) == obj_device_id
+        if iface_is_obj:
+            by_name[iface.name] = iface
+        elif iface.name not in by_name:
+            by_name[iface.name] = iface
+        elif by_name[iface.name] is not None and getattr(by_name[iface.name], "device_id", None) != obj_device_id:
+            by_name[iface.name] = None
+    return by_librenms_id, by_name, by_pk
+
+
+def resolve_ip_source_interface(row, by_librenms_id, by_name, by_pk=None):
+    """Resolve a source interface without falling through an ambiguous identity."""
+    port_id = normalize_librenms_port_id(row.get("port_id"))
+    if port_id is not None and str(port_id) in by_librenms_id:
+        return by_librenms_id[str(port_id)]
+    name = row.get("interface_name")
+    if isinstance(name, str) and name in by_name:
+        return by_name[name]
+    interface_url = row.get("interface_url")
+    if isinstance(interface_url, str) and by_pk:
+        return by_pk.get(interface_url.rstrip("/").rsplit("/", 1)[-1])
+    return None
+
+
+def normalize_ip_sync_row_id(value):
+    """Normalize a CIDR selection with an optional source-port discriminator."""
+    if not isinstance(value, str):
+        raise ValueError("IP row identity must be a string.")
+    address, separator, raw_port = value.partition("@")
+    address = str(parse_address_with_prefix(address))
+    if not separator:
+        return address
+    port_id = normalize_librenms_port_id(raw_port)
+    if port_id is None:
+        raise ValueError("IP row identity has an invalid source port.")
+    return f"{address}@{port_id}"
+
+
+def identify_ip_sync_rows(rows):
+    """Give duplicate source addresses separate keys without trusting cached keys."""
+    addresses = []
+    counts = {}
+    for row in rows:
+        address = None
+        if isinstance(row, dict):
+            try:
+                address = str(parse_address_with_prefix(row.get("ip_with_mask")))
+            except ValueError:
+                pass
+        addresses.append(address)
+        if address is not None:
+            counts[address] = counts.get(address, 0) + 1
+    identified = []
+    for row, address in zip(rows, addresses, strict=True):
+        if not isinstance(row, dict):
+            continue
+        row_id = address
+        if address is not None and counts[address] > 1:
+            port_id = normalize_librenms_port_id(row.get("port_id"))
+            row_id = f"{address}@{port_id}" if port_id is not None else None
+        identified.append({**row, "row_id": row_id})
+    return identified
+
+
+def index_ip_sync_rows(rows):
+    """Index current source rows and reject duplicate source identities."""
+    index = {}
+    duplicates = set()
+    for row in identify_ip_sync_rows(rows):
+        row_id = row["row_id"]
+        if row_id is None:
+            continue
+        if row_id in index:
+            duplicates.add(row_id)
+        else:
+            index[row_id] = row
+    return index, duplicates
 
 
 def interface_name_fallback_matches_port(interface, port_id, server_key) -> bool:

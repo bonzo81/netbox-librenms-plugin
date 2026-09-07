@@ -38,7 +38,7 @@ def get_netbox_interface_type(librenms_interface, *, speed_converter=convert_spe
 
 def assign_interface_mac(interface, mac_address):
     """Assign one MAC address to an interface when LibreNMS supplies it."""
-    if not mac_address:
+    if not isinstance(mac_address, str) or not mac_address.strip():
         return
     existing_mac = interface.mac_addresses.filter(mac_address=mac_address).first()
     mac_obj = existing_mac or MACAddress.objects.create(mac_address=mac_address)

@@ -1693,8 +1693,8 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_id == {"7": None}  # ambiguous → no usable target
         assert set(by_name) == {"eth0", "eth1"}
 
-    def test_match_interface_falls_through_to_name_on_ambiguous_port_id(self):
-        """An ambiguous port id (None value) falls through to the (unambiguous) name match instead of skipping the row — mirroring the render path (which drops the ambiguous id and links by name). by_name is itself fail-closed (obj's own wins; sibling-only collision maps to None), so this can't bind to an arbitrary interface."""
+    def test_match_interface_stops_on_ambiguous_port_id(self):
+        """An ambiguous stable identity must not fall through to a cached name."""
         dev = make_device("ipres-ambig-name")
         named = make_interface(dev, "eth0")
         result = self._view()._match_interface(
@@ -1702,7 +1702,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
             {"7": None},
             {"eth0": named},
         )
-        assert result == named
+        assert result is None
 
     def test_match_interface_stays_none_when_id_and_name_both_ambiguous(self):
         """With the port id ambiguous AND the name mapping to None (sibling-only collision) and no interface_url, the row still fails closed to None — no arbitrary bind."""

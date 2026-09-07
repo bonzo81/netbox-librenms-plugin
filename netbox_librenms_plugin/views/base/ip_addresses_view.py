@@ -4,7 +4,7 @@ from collections import defaultdict
 from ipaddress import ip_interface
 from urllib.parse import quote_plus
 
-from dcim.models import Device
+from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
 from django.http import Http404, JsonResponse
@@ -15,13 +15,16 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.constants import is_supported_interface_name_field
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
+from netbox_librenms_plugin.utils import identify_ip_sync_rows, index_ip_sync_rows, normalize_ip_sync_row_id
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
-    get_librenms_device_id,
+    get_virtual_chassis_members,
+    index_ip_source_interfaces,
     resolve_create_missing_interfaces,
+    resolve_ip_source_interface,
     resolve_set_primary_ip,
     same_host,
 )
@@ -82,11 +85,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         # Only an address LibreNMS reported can match a row, so resolve them first and scope
         # the NetBox IP scan to them instead of loading every IPAddress in the deployment.
         candidate_addresses = set()
+        source_address_counts = {}
         for ip_entry in ip_data:
             if not isinstance(ip_entry, dict) or "port_id" not in ip_entry:
                 continue
             try:
-                candidate_addresses.add(str(parse_librenms_ip_entry(ip_entry)))
+                candidate_address = str(parse_librenms_ip_entry(ip_entry))
+                candidate_addresses.add(candidate_address)
+                source_address_counts[candidate_address] = source_address_counts.get(candidate_address, 0) + 1
             except ValueError:
                 continue
 
@@ -126,6 +132,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # IP with mask is already calculated in _create_base_ip_entry
             ip_with_mask = enriched_ip["ip_with_mask"]
             ip_matches = prefetched_data["ip_addresses_map"].get(ip_with_mask, [])
+            if source_address_counts.get(ip_with_mask, 0) > 1:
+                source_interface = resolve_ip_source_interface(
+                    enriched_ip, prefetched_data["interfaces_by_librenms_id"], prefetched_data["interfaces_by_name"]
+                )
+                ip_matches = [
+                    ip for ip in ip_matches if source_interface is not None and ip.assigned_object == source_interface
+                ]
             global_matches = [ip for ip in ip_matches if ip.vrf_id is None]
             ip_address = global_matches[0] if len(global_matches) == 1 else None
             if ip_address is None and len(ip_matches) == 1:
@@ -156,7 +169,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             enriched_data.append(enriched_ip)
 
         self._flag_management_ip(enriched_data, mgmt_ip)
-        return enriched_data
+        return identify_ip_sync_rows(enriched_data)
 
     def _resolve_management_ip(self):
         """
@@ -219,31 +232,16 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         Returns:
             dict: The interface, IP, and VRF lookup maps used during enrichment.
         """
-        # Get all interfaces for the device
-        all_interfaces = list(obj.interfaces.all())
-
-        # Create maps for efficient lookups (POST-resolved server when provided; else the
-        # shared degrading resolver so a missing/misconfigured default can't 500 the GET render).
+        if isinstance(obj, Device):
+            all_interfaces = list(Interface.objects.filter(device__in=get_virtual_chassis_members(obj)))
+            obj_device_id = obj.pk
+        else:
+            all_interfaces = list(obj.interfaces.all())
+            obj_device_id = None
         server_key = server_key or self._render_server_key()
-        # Fail closed on duplicate server-scoped LibreNMS IDs: if two NetBox interfaces share one,
-        # keeping either would bind an IP to whichever was iterated last. Drop the ambiguous id so
-        # _add_interface_info_to_ip() falls back to the (unambiguous) name match instead.
-        interfaces_by_librenms_id = {}
-        ambiguous_librenms_ids = set()
-        for interface in all_interfaces:
-            lib_id = get_librenms_device_id(interface, server_key, auto_save=False)
-            if lib_id is None:
-                continue
-            lib_id_key = str(lib_id)
-            if lib_id_key in ambiguous_librenms_ids:
-                continue
-            if lib_id_key in interfaces_by_librenms_id:
-                ambiguous_librenms_ids.add(lib_id_key)
-                interfaces_by_librenms_id.pop(lib_id_key, None)
-                continue
-            interfaces_by_librenms_id[lib_id_key] = interface
-
-        interfaces_by_name = {interface.name: interface for interface in all_interfaces}
+        interfaces_by_librenms_id, interfaces_by_name, _by_pk = index_ip_source_interfaces(
+            all_interfaces, server_key, obj_device_id
+        )
 
         # Get the NetBox rows for the reported addresses only
         ip_addresses_map = defaultdict(list)
@@ -321,33 +319,25 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
         assigned_interface = ip_address.assigned_object
 
-        # Check if interface matches by LibreNMS ID
-        if str(port_id) in prefetched_data["interfaces_by_librenms_id"]:
-            interface = prefetched_data["interfaces_by_librenms_id"][str(port_id)]
-            if assigned_interface == interface:
-                enriched_ip["status"] = "matched"
-                return
-
-        # Check if interface matches by name
-        if librenms_interface_name and assigned_interface.name == librenms_interface_name:
+        interface = resolve_ip_source_interface(
+            {"port_id": port_id, "interface_name": librenms_interface_name},
+            prefetched_data["interfaces_by_librenms_id"],
+            prefetched_data["interfaces_by_name"],
+        )
+        if interface is not None and assigned_interface == interface:
             enriched_ip["status"] = "matched"
-            # Add interface information
-            enriched_ip["interface_name"] = assigned_interface.name
-            enriched_ip["interface_url"] = assigned_interface.get_absolute_url()
-
-    def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
-        """Add interface information to the IP entry regardless of IP status"""
-        # First try to match by LibreNMS ID (highest priority)
-        if str(port_id) in prefetched_data["interfaces_by_librenms_id"]:
-            interface = prefetched_data["interfaces_by_librenms_id"][str(port_id)]
             enriched_ip["interface_name"] = interface.name
             enriched_ip["interface_url"] = interface.get_absolute_url()
-            return
 
-        # Then try to match by interface name
-        if librenms_interface_name and librenms_interface_name in prefetched_data["interfaces_by_name"]:
-            interface = prefetched_data["interfaces_by_name"][librenms_interface_name]
-            # Don't overwrite the interface name from LibreNMS but do add the URL
+    def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
+        """Add the same scoped interface that the sync writer will resolve."""
+        interface = resolve_ip_source_interface(
+            {"port_id": port_id, "interface_name": librenms_interface_name},
+            prefetched_data["interfaces_by_librenms_id"],
+            prefetched_data["interfaces_by_name"],
+        )
+        if interface is not None:
+            enriched_ip["interface_name"] = interface.name
             enriched_ip["interface_url"] = interface.get_absolute_url()
 
     def get_table(self, data, obj, request, server_key=None):
@@ -460,7 +450,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
             # Pre-upgrade entries lack ports_by_id; remember so we can backfill below.
             cached_had_ports_by_id = bool(cached_ip_data.get("ports_by_id"))
-            cached_had_interface_name_field = cached_interface_name_field is not None
+            cached_matches_interface_name_field = cached_interface_name_field == interface_name_field
 
         cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
 
@@ -485,7 +475,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         elif (
             (not cached_had_ports_by_id and port_data_cache)
             or cached_mgmt_ip_missing
-            or not cached_had_interface_name_field
+            or not cached_matches_interface_name_field
         ):
             # Backfill: a pre-upgrade cache entry had no ports_by_id and/or no mgmt_ip, so they
             # were rebuilt above via live calls. Persist them under the
@@ -761,32 +751,19 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         parsed = parse_address_with_prefix(ip_address)
         return str(parsed.ip), parsed.network.prefixlen
 
-    def _find_in_cache(self, cached_data, address, prefix_len):
-        """Find IP address in cache data using unified fields only."""
-        # Fail closed on a missing OR truthy-but-malformed entry (a legacy/corrupt non-dict such
-        # as a list from an older snapshot shape): a bare ``cached_data.get(...)`` would raise
-        # AttributeError on a list -> the verify POST's broad except returns 500 on every retry
-        # until the entry expires. Treat it as a cache miss instead, mirroring the isinstance
-        # fail-closed guard the GET-render path (_prepare_context) already uses.
-        if not isinstance(cached_data, dict):
+    def _find_in_cache(self, cached_data, address, prefix_len, row_id=None):
+        """Resolve one current source row without guessing among equal addresses."""
+        if not isinstance(cached_data, dict) or not isinstance(cached_data.get("ip_addresses"), list):
             return None, None, None
-
         target = str(parse_address_with_prefix(address, prefix_len))
-        for ip_entry in cached_data.get("ip_addresses", []):
-            # Per-item shape guard: a non-dict row (or one missing the unified fields) in a
-            # corrupt/legacy snapshot would otherwise TypeError/KeyError here and be swallowed by
-            # post()'s broad except as a 500. Skip it, mirroring _extract_cached_links /
-            # extract_cached_ports which validate each row.
-            if not isinstance(ip_entry, dict):
-                continue
-            try:
-                cached_address = str(parse_address_with_prefix(ip_entry.get("ip_with_mask")))
-            except (TypeError, ValueError):
-                continue
-            if cached_address == target:
-                return (ip_entry, ip_entry.get("vrf_id"), ip_entry.get("port_id"))
-
-        return None, None, None
+        key = normalize_ip_sync_row_id(row_id) if row_id is not None else target
+        if key.partition("@")[0] != target:
+            return None, None, None
+        index, duplicates = index_ip_sync_rows(cached_data["ip_addresses"])
+        row = index.get(key) if key not in duplicates else None
+        if row is None:
+            return None, None, None
+        return row, row.get("vrf_id"), row.get("port_id")
 
     def _find_existing_ip(self, address_no_mask, prefix_len, vrf_id=None):
         """
@@ -901,12 +878,14 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             except Http404:
                 return JsonResponse({"status": "error", "message": f"Object with ID {object_id} not found"}, status=404)
 
-            # Parse IP address
+            # Validate both address and source selector before reading the snapshot.
             try:
                 address_no_mask, prefix_len = self._parse_ip_address(ip_address)
+                if data.get("row_id") is not None:
+                    normalize_ip_sync_row_id(data["row_id"])
             except ValueError:
                 return JsonResponse(
-                    {"status": "error", "message": "Invalid IP address: prefix length is missing or invalid"},
+                    {"status": "error", "message": "Invalid IP address or source row identity"},
                     status=400,
                 )
 
@@ -927,8 +906,24 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
 
             # Try to find the IP in cache data
             cache_entry, original_vrf_id, original_port_id = self._find_in_cache(
-                cached_data, address_no_mask, prefix_len
+                cached_data, address_no_mask, prefix_len, data.get("row_id")
             )
+
+            if cache_entry is None and (
+                data.get("row_id") is not None
+                or (
+                    isinstance(cached_data, dict)
+                    and sum(
+                        row.get("ip_with_mask") == updated_record["ip_with_mask"]
+                        for row in cached_data.get("ip_addresses", [])
+                        if isinstance(row, dict)
+                    )
+                    > 1
+                )
+            ):
+                return JsonResponse(
+                    {"status": "error", "message": "Refresh the IP data and select a current source row."}, status=400
+                )
 
             # Update record with cache data if found
             if cache_entry:

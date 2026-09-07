@@ -3157,3 +3157,34 @@ class TestDetectCollisionsForDeviceIds:
         # The mismatched payload must NOT leak into the shared cache the caller passed in.
         assert 8020 not in shared_cache, "mismatched fresh fetch poisoned the shared cache"
         assert shared_cache == {}, "no mis-keyed payload may survive the collision gate"
+
+
+@pytest.mark.django_db
+def test_import_validation_reads_location_parse_settings_once():
+    """Site and rack validation must share the same parsed location."""
+    from django.apps import apps
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+    settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+    settings_model.objects.update_or_create(
+        pk=1, defaults={"location_parse_pattern": "", "location_parse_is_regex": False}
+    )
+    device = make_device("import-location-source")
+    with CaptureQueriesContext(connection) as queries:
+        result = validate_device_for_import(
+            {
+                "device_id": 8100,
+                "hostname": "import-location-target",
+                "sysName": "import-location-target",
+                "location": device.site.name,
+                "hardware": device.device_type.model,
+            },
+            include_vc_detection=False,
+        )
+    assert result["site"]["found"]
+    assert result["site"]["site"] == device.site
+    settings_reads = [query["sql"] for query in queries if f'FROM "{settings_model._meta.db_table}"' in query["sql"]]
+    assert len(settings_reads) == 1, settings_reads

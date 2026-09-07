@@ -90,3 +90,62 @@ class TestSubInterfaceNeighbourRows:
         )
 
         assert len(rows) == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("remote_port", [True, 123, ["eth0"], {"name": "eth0"}])
+def test_malformed_remote_port_survives_collection_and_enrichment(remote_port):
+    """A malformed remote name must not crash or identify an interface."""
+    from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+    from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+    device = make_device("malformed-remote-port")
+    make_interface(device, "eth0")
+    rows = _collect([_link(100, "eth0", remote_port, 201)])
+    assert len(rows) == 1
+    result = BaseCableTableView().enrich_remote_port(rows[0], device, server_key="default")
+    assert "netbox_remote_interface_id" not in result
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("same_hostname", [False, True])
+def test_missing_remote_device_id_groups_by_hostname(same_hostname):
+    """Only the same remote hostname can mask a sub-unit without a device ID."""
+    physical = _link(100, "eth0", "eth1", 201, remote_device_id=None)
+    physical["remote_hostname"] = "peer-a.example"
+    sub_unit = _link(100, "eth0", "eth1.100", 202, remote_device_id=None)
+    sub_unit["remote_hostname"] = "peer-a.example" if same_hostname else "peer-b.example"
+    rows = _collect([physical, sub_unit])
+    assert len(rows) == (1 if same_hostname else 2)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hostname", [None, "", [], {}, 123, True])
+def test_unknown_remote_hostname_preserves_rows_and_skips_name_lookup(hostname):
+    """Unknown neighbor identities cannot mask rows or identify a device by name."""
+    from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+    links = [
+        _link(100, "eth0", "eth1", 201, remote_device_id=None),
+        _link(100, "eth0", "eth1.100", 202, remote_device_id=None),
+    ]
+    for link in links:
+        link["remote_hostname"] = hostname
+    rows = _collect(links)
+    assert [row["remote_port"] for row in rows] == ["eth1", "eth1.100"]
+    device, matched, _error = BaseCableTableView().get_device_by_id_or_name(None, hostname, "default")
+    assert device is None
+    assert not matched
+
+
+@pytest.mark.django_db
+def test_remote_device_id_resolves_with_malformed_hostname():
+    """A valid remote ID remains usable when the advertised hostname is malformed."""
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+    device = make_device("remote-id-without-name", librenms_cf={"default": {"id": 42}})
+    found, matched, error = BaseCableTableView().get_device_by_id_or_name(42, [], "default")
+    assert found == device
+    assert matched
+    assert error is None

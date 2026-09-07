@@ -47,13 +47,15 @@ def _librenms_ip_response(address, prefix_length, *, device_name="ip-prefix-devi
     )
 
 
-def _librenms_ip_rows_response(rows, *, device_name):
+def _librenms_ip_rows_response(rows, *, device_name, management_ip="198.18.0.254"):
     """Return an HTTP dispatcher for a complete LibreNMS device IP snapshot."""
     rows_by_port = {}
     for row in rows:
         rows_by_port.setdefault(str(row["port_id"]), row)
 
     def _get(url, **_kwargs):
+        if url.endswith("/api/v0/poller_group"):
+            return _json_response(url, {"status": "ok", "get_poller_group": []})
         if url.endswith(f"/api/v0/devices/{device_name}"):
             return _json_response(
                 url,
@@ -94,7 +96,7 @@ def _librenms_ip_rows_response(rows, *, device_name):
         if url.endswith("/api/v0/devices/42"):
             return _json_response(
                 url,
-                {"status": "ok", "devices": [{"device_id": 42, "ip": "198.18.0.254"}]},
+                {"status": "ok", "devices": [{"device_id": 42, "ip": management_ip}]},
             )
         raise AssertionError(f"Unexpected LibreNMS request: {url}")
 
@@ -1936,8 +1938,12 @@ def test_sync_creates_an_independent_global_row_when_other_vrfs_are_ambiguous(cl
 
 
 @pytest.mark.django_db
-def test_vrf_change_requires_confirmation_and_moves_the_identified_row(client, settings):
+@pytest.mark.parametrize("address,prefix", [("2001:db8:2::10", 64), ("::198.18.0.1", 128)])
+def test_vrf_change_requires_confirmation_and_moves_the_identified_row(client, settings, address, prefix):
     """Changing the VRF dropdown must confirm and then move the exact cached IP row."""
+    from ipaddress import ip_interface
+
+    row_id = str(ip_interface(f"{address}/{prefix}"))
     _configure_test_server(settings)
     source_vrf = VRF.objects.create(name="Source VRF")
     destination_vrf = VRF.objects.create(name="Destination VRF")
@@ -1947,12 +1953,12 @@ def test_vrf_change_requires_confirmation_and_moves_the_identified_row(client, s
     target.save(update_fields=["custom_field_data"])
     source_interface = make_interface(device, "Ethernet2", iface_type="1000base-t")
     existing = IPAddress.objects.create(
-        address="2001:db8:2::10/64",
+        address=row_id,
         vrf=source_vrf,
         assigned_object=source_interface,
     )
     client.force_login(make_superuser("ip-vrf-move-user"))
-    assert _refresh_ip_snapshot(client, device, "2001:db8:2::10", 64).status_code == 200
+    assert _refresh_ip_snapshot(client, device, address, prefix).status_code == 200
 
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
@@ -1962,8 +1968,8 @@ def test_vrf_change_requires_confirmation_and_moves_the_identified_row(client, s
         sync_url,
         {
             "server_key": "default",
-            "select": "2001:db8:2::10/64",
-            "vrf_2001:db8:2::10/64": str(destination_vrf.pk),
+            "select": row_id,
+            f"vrf_{row_id}": str(destination_vrf.pk),
         },
         HTTP_HX_REQUEST="true",
     )
@@ -2388,3 +2394,287 @@ def test_create_missing_interfaces_toggle_survives_a_table_refresh(client, setti
     # cannot pass just because "checked" appears somewhere in the element.
     assert "checked" not in _refresh(base)
     assert "checked" in _refresh({**base, "create-missing-interfaces-toggle": "on"})
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("cached_port_id", [7, "007", "+7", " 7 "])
+def test_ambiguous_port_identity_cannot_bind_an_unrelated_named_interface(client, settings, cached_port_id):
+    """A stale name must not override an ambiguous stable LibreNMS port identity."""
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    _configure_test_server(settings)
+    device = make_device("ambiguous-ip-port", librenms_cf={"default": {"id": 42}})
+    for name, port_id in [("duplicate-a", 7), ("duplicate-b", 7), ("eth0", 9)]:
+        interface = make_interface(device, name)
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save()
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.21.10",
+                    "ip_with_mask": "198.18.21.10/24",
+                    "prefix_length": 24,
+                    "port_id": cached_port_id,
+                    "interface_name": "eth0",
+                }
+            ],
+            "ports_by_id": {},
+            "mgmt_ip": "",
+            "interface_name_field": "ifName",
+        },
+    )
+    client.force_login(make_superuser("ambiguous-ip-port-user"))
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
+        ),
+        {"server_key": "default", "select": ["198.18.21.10/24"], "vrf_198.18.21.10/24": ""},
+    )
+    assert response.status_code == 302
+    assert not IPAddress.objects.filter(address="198.18.21.10/24").exists()
+
+
+@pytest.mark.django_db
+def test_netbox_only_interfaces_respect_view_scope(client, settings):
+    """The unmatched-interface list must not disclose restricted interfaces."""
+    from dcim.models import Device, Interface
+
+    _configure_test_server(settings)
+    device = make_device("netbox-only-scope", librenms_cf={"default": {"id": 42}})
+    visible = make_interface(device, "visible-interface")
+    hidden = make_interface(device, "hidden-interface")
+    hidden.description = "restricted-description"
+    hidden.save()
+    user = make_user_with_perms("netbox-only-scope-user", [("view", Device)])
+    user = grant(user, "view", Interface, constraints={"pk": visible.pk})
+    client.force_login(user)
+    cache.set(
+        f"librenms_ports_device_{device.pk}_default",
+        {"ports": [{"port_id": 7010, "ifName": "remote-only", "ifDescr": "remote-only"}]},
+    )
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "interfaces", "server_key": "default", "interface_name_field": "ifName"},
+    )
+    assert response.status_code == 200
+    rows = response.context["interface_sync"]["netbox_only_interfaces"]
+    assert [row["id"] for row in rows] == [visible.pk]
+    assert b"restricted-description" not in response.content
+
+
+@pytest.mark.django_db
+def test_unchanged_compatible_ipv6_address_has_no_prefix_conflict(client, settings):
+    """Equivalent IPv6 representations identify the same existing address."""
+    _configure_test_server(settings)
+    device = make_device("compatible-ipv6-device", librenms_cf={"default": {"id": 42}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    interface.custom_field_data["librenms_id"] = {"default": 7001}
+    interface.save(update_fields=["custom_field_data"])
+    existing = IPAddress.objects.create(address="::198.18.0.1/128", assigned_object=interface)
+    client.force_login(make_superuser("compatible-ipv6-user"))
+    assert _refresh_ip_snapshot(client, device, "::198.18.0.1", 128).status_code == 200
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    response = client.post(
+        sync_url,
+        {"server_key": "default", "select": "::c612:1/128"},
+        HTTP_HX_REQUEST="true",
+    )
+    assert response.status_code == 200
+    assert response.headers.get("HX-Redirect")
+    assert IPAddress.objects.filter(address="::198.18.0.1/128").count() == 1
+    existing.refresh_from_db()
+    assert existing.assigned_object == interface
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("existing_first", [False, True])
+@pytest.mark.parametrize("bound_port_ids", [False, True])
+@pytest.mark.parametrize("member_source", [False, True])
+@pytest.mark.parametrize("set_primary", [False, True])
+def test_duplicate_source_addresses_have_independent_vrf_controls_and_writes(
+    client, settings, existing_first, bound_port_ids, member_source, set_primary
+):
+    """Equal addresses on separate source ports must retain independent VRF assignments."""
+    _configure_test_server(settings)
+    device = make_device("duplicate-source-addresses", librenms_cf={"default": {"id": 42}})
+    source_device = device
+    if member_source:
+        from dcim.models import VirtualChassis
+
+        source_device = make_device("duplicate-source-member")
+        chassis = VirtualChassis.objects.create(name="duplicate-source-chassis", master=device)
+        device.virtual_chassis = chassis
+        device.vc_position = 1
+        device.save()
+        source_device.virtual_chassis = chassis
+        source_device.vc_position = 2
+        source_device.save()
+    interfaces = [make_interface(source_device, "Ethernet1"), make_interface(device, "Ethernet2")]
+    vrfs = [VRF.objects.create(name=name) for name in ("Source Blue", "Source Red")]
+    for port_id, interface in zip((7001, 7002), interfaces, strict=True):
+        if bound_port_ids:
+            interface.custom_field_data["librenms_id"] = {"default": port_id}
+            interface.save(update_fields=["custom_field_data"])
+    existing = None
+    if existing_first:
+        existing = IPAddress.objects.create(address="198.18.22.1/24", vrf=vrfs[0], assigned_object=interfaces[0])
+    source_rows = [
+        {"address": "198.18.22.1", "prefix_length": 24, "port_id": port_id, "interface": interface.name}
+        for port_id, interface in zip((7001, 7002), interfaces, strict=True)
+    ]
+    client.force_login(make_superuser("duplicate-source-addresses-user"))
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=_librenms_ip_rows_response(source_rows, device_name=device.name),
+    ):
+        refreshed = client.post(
+            refresh_url, {"server_key": "default", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true"
+        )
+    assert refreshed.status_code == 200
+    rows = list(refreshed.context["ip_sync"]["table"].data)
+    keys = [row.get("row_id", row["ip_with_mask"]) for row in rows]
+    assert len(set(keys)) == 2
+    html = refreshed.content.decode()
+    for key in keys:
+        assert f'name="vrf_{key}"' in html
+        assert f'value="{key}"' in html
+    assert rows[1].get("netbox_ip_id") is None
+    if existing is not None:
+        assert rows[0].get("netbox_ip_id") == existing.pk
+        assert rows[0]["vrf_id"] == vrfs[0].pk
+
+    verified = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
+        data=json.dumps(
+            {
+                "device_id": device.pk,
+                "object_type": "device",
+                "server_key": "default",
+                "ip_address": "198.18.22.1/24",
+                "row_id": keys[1],
+                "vrf_id": vrfs[1].pk,
+            }
+        ),
+        content_type="application/json",
+    )
+    assert verified.status_code == 200
+    assert f'value="{keys[1]}"' in verified.json()["formatted_row"]["status"]
+
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=_librenms_ip_rows_response(
+            source_rows,
+            device_name=device.name,
+            management_ip="198.18.22.1",
+        ),
+    ):
+        response = client.post(
+            sync_url,
+            {
+                "server_key": "default",
+                "select": keys,
+                "set_primary_ip": "on" if set_primary else "off",
+                **{f"vrf_{key}": vrf.pk for key, vrf in zip(keys, vrfs, strict=True)},
+            },
+            HTTP_HX_REQUEST="true",
+        )
+    assert response.status_code == 200
+    assert response.headers.get("HX-Redirect")
+    for interface, vrf in zip(interfaces, vrfs, strict=True):
+        assert IPAddress.objects.get(address="198.18.22.1/24", vrf=vrf).assigned_object == interface
+    if existing is not None:
+        existing.refresh_from_db()
+        assert existing.vrf == vrfs[0]
+        assert existing.assigned_object == interfaces[0]
+
+    device.refresh_from_db()
+    assert device.primary_ip4_id is None
+    if set_primary:
+        assert any("multiple selected source rows" in str(message) for message in get_messages(response.wsgi_request))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("row_id", [True, 7, [], {}, "bad", "198.18.22.1/24@bad"])
+def test_verify_rejects_malformed_source_row_identity(client, settings, row_id):
+    """Invalid source selectors must return a client error, without a server crash."""
+    _configure_test_server(settings)
+    device = make_device("invalid-source-selector")
+    client.force_login(make_superuser("invalid-source-selector-user"))
+    cache.set(
+        f"librenms_ip_addresses_device_{device.pk}_default",
+        {
+            "ip_addresses": [
+                {"ip_with_mask": "198.18.22.1/24", "port_id": 7001},
+            ]
+        },
+    )
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
+        data=json.dumps(
+            {
+                "device_id": device.pk,
+                "object_type": "device",
+                "server_key": "default",
+                "ip_address": "198.18.22.1/24",
+                "row_id": row_id,
+            }
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_cached_naming_field_change_matches_the_interface_created_by_sync(client, settings):
+    """Creating an interface must use the name shown by the cached IP table."""
+    from dcim.models import Interface
+
+    _configure_test_server(settings)
+    device = make_device("ip-naming-field-change", librenms_cf={"default": {"id": 42}})
+    client.force_login(make_superuser("ip-naming-field-user"))
+    rows = [
+        {
+            "address": "198.18.23.1",
+            "prefix_length": 24,
+            "port_id": 7023,
+            "interface": "Eth1",
+            "port_fields": {"ifDescr": "Ethernet1", "ifType": "ethernetCsmacd"},
+        }
+    ]
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
+    ):
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk]),
+            {"server_key": "default", "interface_name_field": "ifName"},
+            HTTP_HX_REQUEST="true",
+        )
+        assert refreshed.status_code == 200
+        page = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+            {"tab": "ipaddresses", "server_key": "default", "interface_name_field": "ifDescr"},
+        )
+        assert page.status_code == 200
+        assert list(page.context["ip_sync"]["table"].data)[0]["interface_name"] == "Ethernet1"
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+                kwargs={"object_type": "device", "pk": device.pk},
+            ),
+            {"server_key": "default", "select": "198.18.23.1/24", "create-missing-interfaces-toggle": "on"},
+        )
+    assert response.status_code == 302
+    interface = Interface.objects.get(device=device, name="Ethernet1")
+    assert IPAddress.objects.get(address="198.18.23.1/24").assigned_object == interface
+    assert not Interface.objects.filter(device=device, name="Eth1").exists()

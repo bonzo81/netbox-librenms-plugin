@@ -245,3 +245,49 @@ def test_location_mapping_bulk_import_url_resolves():
     match = resolve(reverse("plugins:netbox_librenms_plugin:locationmapping_bulk_import"))
     assert match.func.view_class is LocationMappingBulkImportView
     assert match.func.view_class.model_form is LocationMappingImportForm
+
+
+def test_test_alias_preserves_the_calling_shell(tmp_path):
+    """A test invocation must preserve its caller's directory and environment."""
+    script = "\n".join(
+        (
+            f'source "{REPOSITORY_ROOT}/.devcontainer/scripts/load-aliases.sh"',
+            "unset VIRTUAL_ENV",
+            'original_path="$PATH"',
+            'original_directory="$PWD"',
+            'pytest() { test "$PWD" = "$PLUGIN_DIR" && return 23; }',
+            "netbox-test",
+            "result=$?",
+            'test "$result" = 23 || exit 1',
+            'test "$PWD" = "$original_directory" || exit 2',
+            'test "$PATH" = "$original_path" || exit 3',
+            'test -z "${VIRTUAL_ENV:-}" || exit 4',
+        )
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        env={**os.environ, "TEST_DB_NAME": "test_alias_contract", "TEST_REDIS_HOST": "redis-alias-contract"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.django_db
+def test_reused_database_restores_inventory_and_serial_seed_rules():
+    """A transactional flush must not remove the newer migration seeds permanently."""
+    import importlib
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import seed_migration_rows
+
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+    inventory = {"name": migration.DEFAULT_RULE["name"]}
+    serial = {key: migration.SERIAL_RULE[key] for key in ("scope", "match_pattern")}
+    InventoryIgnoreRule.objects.filter(**inventory).delete()
+    NormalizationRule.objects.filter(**serial).delete()
+    seed_migration_rows()
+    assert InventoryIgnoreRule.objects.filter(**inventory).exists()
+    assert NormalizationRule.objects.filter(**serial).exists()

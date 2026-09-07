@@ -91,3 +91,31 @@ def test_plugin_migrations_have_one_leaf():
 
     leaves = graph.leaf_nodes()
     assert len(leaves) == 1, f"Plugin migrations have multiple leaves: {leaves}"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operator_edited", [False, True])
+def test_reverse_inventory_seed_preserves_operator_rules(operator_edited):
+    """Rollback cannot identify whether matching rules belong to the operator."""
+    from django.apps import apps
+    from django.db import connection, migrations
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+    InventoryIgnoreRule.objects.filter(name=module.DEFAULT_RULE["name"]).delete()
+    NormalizationRule.objects.filter(scope="serial", match_pattern=module.SERIAL_RULE["match_pattern"]).delete()
+    inventory_rule = InventoryIgnoreRule.objects.create(**module.DEFAULT_RULE)
+    serial_rule = NormalizationRule.objects.create(**module.SERIAL_RULE)
+    if operator_edited:
+        inventory_rule.description = "Operator-owned inventory rule"
+        inventory_rule.save()
+        serial_rule.replacement = r"serial-\1"
+        serial_rule.save()
+    before_inventory = InventoryIgnoreRule.objects.filter(pk=inventory_rule.pk).values().get()
+    before_serial = NormalizationRule.objects.filter(pk=serial_rule.pk).values().get()
+    operation = next(op for op in module.Migration.operations if isinstance(op, migrations.RunPython))
+    with connection.schema_editor() as editor:
+        operation.code(apps, editor)
+        operation.reverse_code(apps, editor)
+    assert InventoryIgnoreRule.objects.filter(pk=inventory_rule.pk).values().get() == before_inventory
+    assert NormalizationRule.objects.filter(pk=serial_rule.pk).values().get() == before_serial

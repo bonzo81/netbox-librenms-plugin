@@ -107,6 +107,21 @@ def _seeded_sap_rows():
     yield PortStackLagPattern, "librenms_os", "sap_name_pattern", sap.INITIAL_SAP_PATTERNS
 
 
+def _seeded_inventory_rules():
+    """Read the inventory and serial seeds from their migration's definitions."""
+    import importlib
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+    yield InventoryIgnoreRule, {"name": migration.DEFAULT_RULE["name"]}, migration.DEFAULT_RULE
+    yield (
+        NormalizationRule,
+        {key: migration.SERIAL_RULE[key] for key in ("scope", "match_pattern")},
+        migration.SERIAL_RULE,
+    )
+
+
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed."""
     for model, lookup_field, value_field, rows in _seeded_model_rows():
@@ -119,6 +134,9 @@ def seed_migration_rows():
     for model, lookup_field, value_field, rows in _seeded_sap_rows():
         for lookup, value in rows:
             model.objects.filter(**{lookup_field: lookup}).update(**{value_field: value})
+
+    for model, lookup, defaults in _seeded_inventory_rules():
+        model.objects.get_or_create(**lookup, defaults=defaults)
 
 
 @pytest.fixture(autouse=True)
@@ -178,6 +196,17 @@ def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
     finalized. Without this the seeded rows stay missing in the reused database and the next run
     starts with LAG pattern detection silently disabled.
     """
+
+    from django.db import connection
+
+    # Pure test runs do not switch the connection to an isolated test database.
+    if connection.settings_dict["NAME"] != connection.settings_dict["TEST"]["NAME"]:
+        yield
+        return
+
+    with django_db_blocker.unblock():
+        seed_migration_rows()
+
     yield
 
     with django_db_blocker.unblock():

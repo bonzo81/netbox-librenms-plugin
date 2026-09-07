@@ -178,8 +178,10 @@ _netbox-test() {
     echo "TEST_REDIS_HOST must not be empty." >&2
     return 1
   fi
-  cd "$PLUGIN_DIR" && source /opt/netbox/venv/bin/activate && \
-    pytest "$target" -q --disable-warnings --reuse-db "${coverage_args[@]}" "${parallel_args[@]}" "$@"
+  (
+    cd "$PLUGIN_DIR" && source /opt/netbox/venv/bin/activate && \
+      pytest "$target" -q --disable-warnings --reuse-db "${coverage_args[@]}" "${parallel_args[@]}" "$@"
+  )
 }
 
 netbox-test() {

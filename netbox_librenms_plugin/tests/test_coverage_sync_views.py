@@ -1616,13 +1616,8 @@ class TestSyncIPAddressesViewProcessIpSync:
 
         assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == vmiface
 
-    def test_ambiguous_port_id_binds_by_name(self):
-        """Two interfaces share a port id (id ambiguous), but the row names one uniquely → it binds by name.
-
-        This is what the rendered IP table shows (its render drops the ambiguous id and links by name),
-        so the sync must agree and NOT drop the row into skipped_no_interface. by_name is fail-closed
-        (obj's own interface wins), so the fall-through binds only to the uniquely-named interface.
-        """
+    def test_ambiguous_port_id_is_skipped_despite_matching_name(self):
+        """An ambiguous port ID cannot select one owner through a cached name."""
         from ipam.models import IPAddress
 
         view = self._setup_view()
@@ -1635,8 +1630,8 @@ class TestSyncIPAddressesViewProcessIpSync:
 
         results = self._run(view, ["10.0.0.1/24"], cached, obj, "device")
 
-        assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == a
-        assert "10.0.0.1/24" not in results["skipped_no_interface"]
+        assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
+        assert "10.0.0.1/24" in results["skipped_no_interface"]
 
     def test_ambiguous_port_id_and_unresolvable_name_still_skips(self):
         """When the port id is ambiguous AND the row's name matches no interface, it still fails closed (skip, no bind)."""
@@ -2596,16 +2591,14 @@ class TestSyncIPAddressesViewSetPrimaryIp:
 
         selected = ["10.0.0.1/24"]
         obj = make_device("ipsync-setprimary-dev")
-        make_interface(obj, "eth0")  # matched by LibreNMS port id (5, patched) or name ("eth0")
+        interface = make_interface(obj, "eth0")
+        interface.custom_field_data["librenms_id"] = {"default": 5}
+        interface.save(update_fields=["custom_field_data"])
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=set_primary):
             with patch.object(view, "get_management_ip", return_value=mgmt_ip) as mock_mgmt:
                 with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
-                    with patch(
-                        "netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id",
-                        return_value=5,
-                    ):
-                        with patch.object(view, "get_vrf_selection", return_value=None):
-                            results = view.process_ip_sync(view.request, selected, cached, obj, "device")
+                    with patch.object(view, "get_vrf_selection", return_value=None):
+                        results = view.process_ip_sync(view.request, selected, cached, obj, "device")
         obj.refresh_from_db()
         return results, obj, mock_mgmt
 

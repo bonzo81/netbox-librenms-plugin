@@ -241,3 +241,24 @@ def test_interface_delete_counts_only_committed_savepoints(client):
     assert response.json()["deleted_count"] == 0
     assert response.json()["errors"] == ["Error deleting interface Ethernet1. Check server logs."]
     assert type(interface).objects.filter(pk=interface.pk).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mac", [True, 123, ["aa:bb:cc:dd:ee:ff"], {"value": "aa:bb:cc:dd:ee:ff"}])
+def test_interface_update_ignores_non_string_mac(mac):
+    """Malformed MAC data must not prevent the remaining interface update."""
+    from dcim.models import MACAddress
+    from netbox_librenms_plugin.interface_sync import update_interface_from_port
+
+    interface = make_interface(make_device("malformed-mac"), "eth0")
+    update_interface_from_port(
+        interface,
+        {"ifName": "eth0", "ifAlias": "updated description", "ifPhysAddress": mac},
+        server_key="default",
+        interface_name_field="ifName",
+        netbox_type="other",
+    )
+    interface.refresh_from_db()
+    assert interface.description == "updated description"
+    assert interface.primary_mac_address_id is None
+    assert not MACAddress.objects.exists()

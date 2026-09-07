@@ -215,10 +215,14 @@ device.primary_ip.address.ip = "192.168.1.1"
 
 These fixtures are defined in [conftest.py](../../netbox_librenms_plugin/tests/conftest.py):
 
-- `mock_librenms_config` — Automatically mocks plugin configuration for all tests
 - `mock_response_factory` — Factory for creating mock HTTP responses
 - `mock_netbox_device` — Pre-configured mock NetBox Device object
 - `mock_netbox_vm` — Pre-configured mock NetBox VM object
+
+`mock_librenms_config` is defined in
+[test_librenms_api_helpers.py](../../netbox_librenms_plugin/tests/test_librenms_api_helpers.py).
+Bind it at module scope in each test module that needs it. Its `autouse=True` setting
+applies only to modules where the fixture is available.
 
 ### Common Assertion Patterns
 
