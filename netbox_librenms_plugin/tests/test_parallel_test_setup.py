@@ -249,13 +249,30 @@ def test_location_mapping_bulk_import_url_resolves():
 
 def test_test_alias_preserves_the_calling_shell(tmp_path):
     """A test invocation must preserve its caller's directory and environment."""
+    import venv
+
+    virtual_environment = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False).create(virtual_environment)
     script = "\n".join(
         (
+            # Redirect only the container's activation path. Source the real alias script
+            # in place so its repository discovery and shell function remain under test.
+            "source() {",
+            '  if [ "$1" = /opt/netbox/venv/bin/activate ]; then',
+            '    builtin source "$ALIAS_TEST_VENV/bin/activate"',
+            "  else",
+            '    builtin source "$@"',
+            "  fi",
+            "}",
             f'source "{REPOSITORY_ROOT}/.devcontainer/scripts/load-aliases.sh"',
             "unset VIRTUAL_ENV",
             'original_path="$PATH"',
             'original_directory="$PWD"',
-            'pytest() { test "$PWD" = "$PLUGIN_DIR" && return 23; }',
+            "pytest() {",
+            '  test "$PLUGIN_DIR" = "$ALIAS_TEST_REPOSITORY" &&',
+            '    test "$PWD" = "$ALIAS_TEST_REPOSITORY" &&',
+            '    test "$VIRTUAL_ENV" = "$ALIAS_TEST_VENV" && return 23',
+            "}",
             "netbox-test",
             "result=$?",
             'test "$result" = 23 || exit 1',
@@ -267,7 +284,13 @@ def test_test_alias_preserves_the_calling_shell(tmp_path):
     result = subprocess.run(
         ["bash", "-c", script],
         cwd=tmp_path,
-        env={**os.environ, "TEST_DB_NAME": "test_alias_contract", "TEST_REDIS_HOST": "redis-alias-contract"},
+        env={
+            **os.environ,
+            "TEST_DB_NAME": "test_alias_contract",
+            "TEST_REDIS_HOST": "redis-alias-contract",
+            "ALIAS_TEST_VENV": str(virtual_environment),
+            "ALIAS_TEST_REPOSITORY": str(REPOSITORY_ROOT),
+        },
         capture_output=True,
         text=True,
         check=False,
