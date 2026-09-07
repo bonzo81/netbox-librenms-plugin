@@ -2435,6 +2435,10 @@ def test_ambiguous_port_identity_cannot_bind_an_unrelated_named_interface(client
     assert response.status_code == 302
     assert not IPAddress.objects.filter(address="198.18.21.10/24").exists()
 
+    assert any(
+        "Skipped (no matching NetBox interface): 198.18.21.10/24" in message for message in _message_texts(response)
+    )
+
 
 @pytest.mark.django_db
 def test_netbox_only_interfaces_respect_view_scope(client, settings):

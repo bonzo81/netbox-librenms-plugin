@@ -149,3 +149,34 @@ def test_remote_device_id_resolves_with_malformed_hostname():
     assert found == device
     assert matched
     assert error is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("id_field", ["local_port_id", "remote_device_id"])
+@pytest.mark.parametrize("malformed_id", [[], {}, True, 1.5, None, "", 0])
+def test_invalid_cable_identifiers_cannot_mask_unrelated_neighbors(id_field, malformed_id):
+    """Malformed identifiers must not crash collection or merge unrelated neighbors."""
+    links = [
+        _link(100, "eth0", "eth1", 201),
+        _link(100, "eth0", "eth1.100", 202),
+    ]
+    for index, link in enumerate(links):
+        link[id_field] = malformed_id
+        link["remote_hostname"] = f"peer-{index}.example"
+    rows = _collect(links)
+    assert [row["remote_port"] for row in rows] == ["eth1", "eth1.100"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("remote_device_id", [[], {}, True, 1.5, None, "", 0])
+@pytest.mark.parametrize("hostname", [None, "peer.example"])
+def test_invalid_remote_identifier_can_use_a_matching_hostname(remote_device_id, hostname):
+    """A valid shared hostname still identifies the physical neighbor when its ID is invalid."""
+    links = [
+        _link(100, "eth0", "eth1", 201, remote_device_id=remote_device_id),
+        _link(100, "eth0", "eth1.100", 202, remote_device_id=remote_device_id),
+    ]
+    for link in links:
+        link["remote_hostname"] = hostname
+    expected = ["eth1"] if hostname else ["eth1", "eth1.100"]
+    assert [row["remote_port"] for row in _collect(links)] == expected

@@ -100,7 +100,10 @@ def _drop_masked_sub_units(rows):
     """
 
     def group_key(row):
-        remote_device = row["remote_device_id"]
+        local_port_id = coerce_librenms_id(row["local_port_id"])
+        if local_port_id is None:
+            return None
+        remote_device = coerce_librenms_id(row["remote_device_id"])
         hostname = row.get("remote_device")
         if remote_device is not None:
             remote_identity = ("id", remote_device)
@@ -108,7 +111,7 @@ def _drop_masked_sub_units(rows):
             remote_identity = ("hostname", hostname)
         else:
             return None
-        return row["local_port_id"], remote_identity
+        return local_port_id, remote_identity
 
     physical_by_group = {}
     for row in rows:
