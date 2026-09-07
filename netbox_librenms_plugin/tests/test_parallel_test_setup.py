@@ -776,6 +776,68 @@ def test_reused_database_restores_inventory_and_serial_seed_rules():
     assert NormalizationRule.objects.filter(**serial).exists()
 
 
+@pytest.mark.django_db
+def test_reverse_of_the_inventory_seed_keeps_a_disabled_operator_rule():
+    """The 0010 rollback matches seeded rows on a signature of non-free-text fields.
+
+    ``enabled`` is a boolean, not free text, so a disabled operator rule that happens to share
+    every other signature value must not be swept up with the seed.
+    """
+    import importlib
+
+    from django.apps import apps as django_apps
+    from django.db import connection
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    seeded = module.INITIAL_INVENTORY_IGNORE_RULES[0]
+    operator_rule = InventoryIgnoreRule.objects.create(**{**seeded, "enabled": False})
+
+    # Precondition: the enabled seed row is present, so a pass below is not vacuous.
+    assert InventoryIgnoreRule.objects.filter(name=seeded["name"], enabled=True).exists()
+
+    with connection.schema_editor() as editor:
+        module._delete_default_inventory_ignore_rules(django_apps, editor)
+
+    # Effect: the seed is gone, and the operator's disabled rule survived it.
+    assert not InventoryIgnoreRule.objects.filter(name=seeded["name"], enabled=True).exists()
+    assert InventoryIgnoreRule.objects.filter(pk=operator_rule.pk).exists()
+
+
+def test_testing_guide_librenms_stub_example_defines_every_name_it_uses():
+    """A developer copies this block verbatim, so an undefined name is a NameError for them."""
+    testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()
+    block = testing_guide.split("**Drive the LibreNMS API through the loopback stub**", maxsplit=1)[1]
+    example = block.split("```python", maxsplit=1)[1].split("```", maxsplit=1)[0]
+
+    tree = ast.parse(example)
+    assigned = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assigned |= {
+        node.optional_vars.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.withitem) and isinstance(node.optional_vars, ast.Name)
+    }
+    imported = {
+        (alias.asname or alias.name).split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in node.names
+    }
+    used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    # settings, view and device come from the surrounding test in the guide's own narrative.
+    external = {"settings", "view", "device", "LibreNMSAPI"}
+
+    undefined = used - assigned - imported - external
+    assert not undefined, f"the stub example uses names it never defines: {sorted(undefined)}"
+
+
 def test_testing_guide_template_keeps_project_imports_inside_the_test_method():
     """The starter template must not import Django-dependent project modules during collection."""
     testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()

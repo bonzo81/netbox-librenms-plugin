@@ -83,7 +83,9 @@ def _delete_default_inventory_ignore_rules(apps, schema_editor):
     db_alias = schema_editor.connection.alias
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
     # Everything but the free-text fields, which an operator may have edited in place.
-    signature_fields = ("name", "match_type", "pattern", "action", "require_serial_match_parent")
+    # enabled is a boolean, so it belongs here: without it a disabled operator rule that shares
+    # the other values matches this filter and is deleted with the seed.
+    signature_fields = ("name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled")
     for rule in INITIAL_INVENTORY_IGNORE_RULES:
         signature = {field: rule[field] for field in signature_fields}
         InventoryIgnoreRule.objects.using(db_alias).filter(**signature).delete()

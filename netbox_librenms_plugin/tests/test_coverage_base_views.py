@@ -2115,7 +2115,17 @@ class TestBaseInterfaceTableViewPost:
         # would also pass if OOB ports were never fetched or merged (the whole point of the
         # filter being that there *was* an OOB LAG row to exclude).
         assert "/api/v0/devices/99/ports" in requested_paths
-        cache_key = DeviceInterfaceTableView().get_cache_key(device, "ports", "default")
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
+
+        view_for_keys = DeviceInterfaceTableView()
+        cache_key = view_for_keys.get_cache_key(device, "ports", "default")
+        # post() writes three real entries; the device pk is reused after rollback, so a stale
+        # timestamp or tab state would leak into a later test's object.
+        written_keys = [
+            cache_key,
+            view_for_keys.get_last_fetched_key(device, "ports", "default"),
+            SyncCacheConsistency(device).state_key(SyncTab.INTERFACES, "default"),
+        ]
         try:
             cached_snapshot = real_cache.get(cache_key)
             assert cached_snapshot is not None
@@ -2126,7 +2136,8 @@ class TestBaseInterfaceTableViewPost:
             # The OOB LAG row does not trigger the main-device port_stack fetch.
             assert not [path for path in requested_paths if path.endswith("/port_stack")]
         finally:
-            real_cache.delete(cache_key)
+            for written_key in written_keys:
+                real_cache.delete(written_key)
 
 
 @pytest.mark.django_db

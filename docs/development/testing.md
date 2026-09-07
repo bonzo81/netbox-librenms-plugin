@@ -247,6 +247,7 @@ from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_serv
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
 
 
+key = "default"
 with run_librenms_server() as server:
     configure_test_servers(settings, {key: {"librenms_url": server.url, "api_token": "t"}})
     server.device_info_response(device_id=42, hostname="r01", serial="SN1")
