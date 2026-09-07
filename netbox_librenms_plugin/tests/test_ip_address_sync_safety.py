@@ -81,6 +81,25 @@ class TestCachedInterfaceUrlFallback:
         assert enriched[0]["interface_name"] == "Ethernet1-renamed"
         assert enriched[0]["interface_url"] == cached_url
 
+    def test_a_row_without_address_fields_is_skipped_not_raised(self):
+        """enrich_ip_data guards only isinstance/port_id, so an unparseable row aborted the
+        whole call for a direct caller instead of being skipped like the first loop does."""
+        device = make_device("ipurl-malformed")
+        make_interface(device, "Ethernet1")
+
+        enriched = self._view().enrich_ip_data(
+            [
+                {"port_id": 1},
+                {"ipv4_address": "192.0.2.52", "ipv4_prefixlen": 24, "port_id": 2, "interface_name": "Ethernet1"},
+            ],
+            device,
+            "ifName",
+            server_key="default",
+            port_data_cache={1: None, 2: None},
+        )
+
+        assert [row["ip_with_mask"] for row in enriched] == ["192.0.2.52/24"]
+
     def test_an_unknown_cached_url_stays_fail_closed(self):
         """by_pk is scoped to this object, so a URL naming another device resolves to nothing."""
         device = make_device("ipurl-foreign")

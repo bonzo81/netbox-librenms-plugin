@@ -120,8 +120,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # Get or fetch port data (with caching)
             port_info = self._get_port_info(ip_entry["port_id"], port_data_cache, interface_name_field)
 
-            # Create enriched IP structure with base data
-            enriched_ip = self._create_base_ip_entry(ip_entry, obj, prefetched_data["vrfs"])
+            # Create enriched IP structure with base data. The first loop skips a row whose
+            # address will not parse; this one must too, or a direct caller aborts on it.
+            try:
+                enriched_ip = self._create_base_ip_entry(ip_entry, obj, prefetched_data["vrfs"])
+            except ValueError:
+                continue
 
             # Get LibreNMS interface name if available
             librenms_interface_name = None
@@ -309,6 +313,19 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             entry["interface_url"] = cached_url
         return entry
 
+    def _resolve_ip_row_interface(self, port_id, librenms_interface_name, enriched_ip, prefetched_data):
+        """Resolve one row's source interface, so both callers agree on the row shape."""
+        return resolve_ip_source_interface(
+            {
+                "port_id": port_id,
+                "interface_name": librenms_interface_name,
+                "interface_url": enriched_ip.get("interface_url"),
+            },
+            prefetched_data["interfaces_by_librenms_id"],
+            prefetched_data["interfaces_by_name"],
+            prefetched_data["interfaces_by_pk"],
+        )
+
     def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
         """Add information for IP addresses that exist in NetBox"""
         enriched_ip["ip_url"] = ip_address.get_absolute_url()
@@ -330,16 +347,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
         assigned_interface = ip_address.assigned_object
 
-        interface = resolve_ip_source_interface(
-            {
-                "port_id": port_id,
-                "interface_name": librenms_interface_name,
-                "interface_url": enriched_ip.get("interface_url"),
-            },
-            prefetched_data["interfaces_by_librenms_id"],
-            prefetched_data["interfaces_by_name"],
-            prefetched_data["interfaces_by_pk"],
-        )
+        interface = self._resolve_ip_row_interface(port_id, librenms_interface_name, enriched_ip, prefetched_data)
         if interface is not None and assigned_interface == interface:
             enriched_ip["status"] = "matched"
             enriched_ip["interface_name"] = interface.name
@@ -347,16 +355,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
     def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
         """Add the same scoped interface that the sync writer will resolve."""
-        interface = resolve_ip_source_interface(
-            {
-                "port_id": port_id,
-                "interface_name": librenms_interface_name,
-                "interface_url": enriched_ip.get("interface_url"),
-            },
-            prefetched_data["interfaces_by_librenms_id"],
-            prefetched_data["interfaces_by_name"],
-            prefetched_data["interfaces_by_pk"],
-        )
+        interface = self._resolve_ip_row_interface(port_id, librenms_interface_name, enriched_ip, prefetched_data)
         if interface is not None:
             enriched_ip["interface_name"] = interface.name
             enriched_ip["interface_url"] = interface.get_absolute_url()
