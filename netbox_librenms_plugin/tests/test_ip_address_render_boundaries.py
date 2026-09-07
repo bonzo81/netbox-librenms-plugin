@@ -316,7 +316,7 @@ class TestSingleIPAddressVerify:
         response = self._post(client, {"device_id": device.pk, "ip_address": "198.18.52.30"})
 
         assert response.status_code == 400
-        assert response.json()["message"] == "Invalid IP address: prefix length is missing or invalid"
+        assert response.json()["message"] == "Invalid IP address or source row identity"
 
     def test_non_string_address_is_rejected(self, client):
         """A JSON number in the address field is rejected rather than parsed."""
@@ -326,4 +326,4 @@ class TestSingleIPAddressVerify:
         response = self._post(client, {"device_id": device.pk, "ip_address": 19821852})
 
         assert response.status_code == 400
-        assert response.json()["message"] == "Invalid IP address: prefix length is missing or invalid"
+        assert response.json()["message"] == "Invalid IP address or source row identity"
