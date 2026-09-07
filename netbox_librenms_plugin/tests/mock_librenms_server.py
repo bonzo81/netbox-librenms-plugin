@@ -766,6 +766,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
                 return 422, {"status": "error", "message": "device_id cannot be updated"}
             with self._lock:
                 updates = dict(zip(fields, values, strict=True))
+                if "location" in updates and (
+                    not isinstance(updates["location"], str) or not updates["location"].strip()
+                ):
+                    return 422, {"status": "error", "message": "location must be a non-empty string"}
                 candidate = {**self.devices[device_id], **updates}
                 aliases = (candidate.get("hostname"), candidate.get("sysName"), candidate.get("ip"))
                 if any(
@@ -774,6 +778,8 @@ class LibreNMSStubServer(MockLibreNMSServer):
                     if alias not in (None, "")
                 ):
                     return 409, {"status": "error", "message": "Device lookup alias already exists"}
+                if "location" in updates:
+                    updates["location_id"] = self._location_id(updates["location"])
                 self.devices[device_id].update(updates)
                 self._register_device_routes(device_id)
             return 200, {"status": "ok", "message": "Device fields updated"}

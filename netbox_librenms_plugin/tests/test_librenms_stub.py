@@ -462,6 +462,9 @@ def test_stub_device_and_location_writes_are_visible_until_restart():
         assert lookup.status_code == 200
         created = lookup.json()["devices"][0]
 
+        ok, location = api.add_location({"location": "Stub Row B", "lat": None, "lng": None})
+        assert ok is True, location
+
         ok, message = api.update_device_field(
             created["device_id"],
             {"field": ["location", "override_sysLocation"], "data": ["Stub Row B", "1"]},
@@ -483,8 +486,6 @@ def test_stub_device_and_location_writes_are_visible_until_restart():
         assert renamed.status_code == 200
         assert renamed.json()["devices"][0]["device_id"] == created["device_id"]
 
-        ok, location = api.add_location({"location": "Stub Row B", "lat": None, "lng": None})
-        assert ok is True, location
         ok, locations = api.get_locations()
         assert ok is True
         assert any(item["location"] == "Stub Row B" for item in locations)
@@ -826,5 +827,78 @@ def test_stub_refuses_an_oversized_body_before_reading_it():
         )
 
         assert "413" in status_line, status_line
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("destination", ["Lab B", "Lab C"])
+@pytest.mark.parametrize("posted_id", [False, True])
+def test_stub_location_update_moves_the_device_into_the_destination_filter(destination, posted_id):
+    """Location writes must keep the listed name and filter identity consistent."""
+    server = LibreNMSStubServer(
+        recordings=[_location_recording(1, "Lab A"), _location_recording(2, "Lab B")],
+        api_token=TOKEN,
+    ).start()
+    try:
+        api = make_recording_api(server.url, server_key="stub", token=TOKEN)
+        payload = {"field": ["location"], "data": [destination]}
+        if posted_id:
+            payload["field"].append("location_id")
+            payload["data"].append(999)
+        ok, message = api.update_device_field(1, payload)
+        assert ok is True, message
+        ok, locations = api.get_locations()
+        assert ok is True
+        destination_rows = [location for location in locations if location["location"] == destination]
+        assert len(destination_rows) == 1
+        destination_id = destination_rows[0]["id"]
+        device = _request(server, "GET", "/api/v0/devices/1").json()["devices"][0]
+        assert device["location"] == destination
+        assert device["location_id"] == destination_id
+        filtered = _request(server, "GET", f"/api/v0/devices?type=location_id&query={destination_id}").json()
+        assert {row["device_id"] for row in filtered["devices"]} == ({1, 2} if destination == "Lab B" else {1})
+        previous = _request(server, "GET", "/api/v0/devices?type=location_id&query=1").json()
+        assert previous["devices"] == []
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("location", [None, [], {}, 7, "", "   "])
+def test_stub_rejects_invalid_location_updates_without_partial_writes(location):
+    """Invalid location data must not change the device or its lookup aliases."""
+    server = LibreNMSStubServer(recordings=[_location_recording(1, "Lab A")], api_token=TOKEN).start()
+    try:
+        before = _request(server, "GET", "/api/v0/devices/1").json()
+        locations = _request(server, "GET", "/api/v0/resources/locations").json()
+        response = _request(
+            server,
+            "PATCH",
+            "/api/v0/devices/1",
+            json={"field": ["hostname", "location"], "data": ["changed.example.test", location]},
+        )
+        assert response.status_code == 422
+        assert _request(server, "GET", "/api/v0/devices/1").json() == before
+        assert _request(server, "GET", "/api/v0/resources/locations").json() == locations
+        assert _request(server, "GET", "/api/v0/devices/changed.example.test").status_code == 404
+    finally:
+        server.stop()
+
+
+def test_stub_rejected_alias_update_does_not_create_a_location():
+    """A rejected device write must not create its proposed destination."""
+    server = LibreNMSStubServer(
+        recordings=[_location_recording(1, "Lab A"), _location_recording(2, "Lab B")],
+        api_token=TOKEN,
+    ).start()
+    try:
+        before = _request(server, "GET", "/api/v0/resources/locations").json()
+        response = _request(
+            server,
+            "PATCH",
+            "/api/v0/devices/1",
+            json={"field": ["hostname", "location"], "data": ["device-2.example.test", "Lab C"]},
+        )
+        assert response.status_code == 409
+        assert _request(server, "GET", "/api/v0/resources/locations").json() == before
     finally:
         server.stop()
