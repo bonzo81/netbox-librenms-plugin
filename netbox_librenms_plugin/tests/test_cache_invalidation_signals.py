@@ -434,7 +434,6 @@ class TestOneFlushPerObject:
         interface = make_interface(device, "Ethernet1")
         ContentType.objects.get_for_model(interface)
         keys = _seed_every_tab(device)
-        monkeypatch.setitem(cache_signals.OWNER_COLUMNS, "dcim.interface", ("missing_owner_id",))
 
         try:
             with django_capture_on_commit_callbacks(execute=True):
@@ -442,6 +441,8 @@ class TestOneFlushPerObject:
                     interface.description = "Changed in the same transaction"
                     interface.save(update_fields=["description"])
                     IPAddress.objects.create(address="198.18.32.1/24", assigned_object=interface)
+                    # Fail only deferred assignment resolution after the writes are recorded.
+                    monkeypatch.setitem(cache_signals.OWNER_COLUMNS, "dcim.interface", ("missing_owner_id",))
             remaining = _snapshot_state(device)
         finally:
             _clear(keys)
