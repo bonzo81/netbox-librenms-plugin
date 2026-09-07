@@ -348,6 +348,39 @@ class TestImportListRequest:
         assert list(response.context["table"].data) == []
 
     @pytest.mark.django_db
+    def test_an_unreachable_search_reports_the_outage_instead_of_queueing_a_job(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The device-count preflight failing means LibreNMS did not answer.
+
+        should_use_background_job() never looks at that count, so a superuser still queued a job
+        that only repeats the failing call, and the outage disappeared behind a polling response.
+        """
+        from unittest.mock import patch
+
+        from core.models import Job
+
+        def unreachable(**request):
+            return 500, {"status": "error", "message": "LibreNMS is down"}
+
+        librenms_server.register("/api/v0/devices", unreachable, method="GET")
+        user = _create_user(django_user_model, "unreachable-preflight")
+        client.force_login(user)
+
+        # Workers are available and background mode is on, so the preflight is the only thing
+        # that can keep the job from being enqueued.
+        with patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue", return_value=1):
+            response = client.get(_import_url(), _search_params(use_background_job="1"))
+
+        assert response.status_code == 200
+        # A rendered page, not the JSON polling payload the background branch returns.
+        assert response.context is not None and "table" in response.context
+        assert not Job.objects.exists()
+
+    @pytest.mark.django_db
     def test_synchronous_search_renders_the_real_validated_device(
         self,
         client,
