@@ -72,12 +72,17 @@ class AddDeviceToLibreNMSView(
 
         self.object = self.get_object(object_id, object_type=object_type)
 
+        server_key = self.rebind_api_for_posted_server(request.POST)
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return redirect(self.object.get_absolute_url())
+
         form_class = self.get_form_class()
 
         snmp_version = request.POST.get("v1v2-snmp_version") or request.POST.get("v3-snmp_version")
         prefix = "v1v2" if snmp_version in ("v1", "v2c") else "v3"
 
-        form = form_class(request.POST, prefix=prefix)
+        form = form_class(request.POST, prefix=prefix, server_key=server_key)
         if form.is_valid():
             # Inject snmp_version from toggle into cleaned_data for v1/v2c forms
             if snmp_version in ("v1", "v2c"):

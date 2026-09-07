@@ -99,7 +99,7 @@
           hx-target="#module-sync-content"
           hx-swap="innerHTML"
           hx-sync="#module-sync-content:drop"
-          hx-disabled-elt="find button[type=submit]"
+          hx-disabled-elt="#htmx-modal-content button[type=submit]"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
@@ -120,7 +120,7 @@
           hx-target="#module-sync-content"
           hx-swap="innerHTML"
           hx-sync="#module-sync-content:drop"
-          hx-disabled-elt="find button[type=submit]"
+          hx-disabled-elt="#htmx-modal-content button[type=submit]"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk|default:'' }}">
@@ -142,7 +142,7 @@
           hx-target="#module-sync-content"
           hx-swap="innerHTML"
           hx-sync="#module-sync-content:drop"
-          hx-disabled-elt="find button[type=submit]"
+          hx-disabled-elt="#htmx-modal-content button[type=submit]"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">

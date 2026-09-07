@@ -1142,8 +1142,9 @@ class TestRenderIntegrated(TestLibreNMSModuleTable):
         }
         html = str(table.render_status("Integrated", record))
         assert "Integrated in XIOM 2/x1" in html
-        # muted styling
-        assert "text-muted" in html or "bg-light" in html
+        assert "bg-body-secondary" in html
+        assert "text-body" in html
+        assert "bg-light" not in html
         # tooltip explains the dedupe
         assert "Duplicate SNMP entry" in html
 

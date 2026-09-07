@@ -7400,3 +7400,15 @@ def test_replace_action_requires_a_source_inventory_index(index):
         table.render_actions(None, {"can_replace": True, "installed_module_id": 55, "ent_physical_index": index})
     )
     assert ("Replace" in html) is (index == 200)
+
+
+def test_integrated_module_badge_tracks_the_active_theme():
+    """The parent label must use paired theme colors rather than a fixed light surface."""
+    from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+    table = LibreNMSModuleTable([])
+    html = str(table.render_status("Integrated", {"status": "Integrated", "integrated_in_name": "Carrier 1"}))
+    assert "Integrated in Carrier 1" in html
+    assert "bg-body-secondary" in html
+    assert "text-body" in html
+    assert "bg-light" not in html

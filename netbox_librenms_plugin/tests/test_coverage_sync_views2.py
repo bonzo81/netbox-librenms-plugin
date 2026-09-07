@@ -2924,3 +2924,97 @@ class TestSyncSiteLocationViewGetQuerysetFilterset:
 
         assert response.status_code == 200
         assert [row.netbox_site.pk for row in response.context_data["table"].data] == [mine.pk]
+
+
+@pytest.mark.parametrize(
+    "prefix,version,credentials",
+    [
+        ("v1v2", "v2c", {"community": "test-community"}),
+        ("v3", "v3", {"authlevel": "noAuthNoPriv", "authname": "test-user"}),
+    ],
+)
+def test_add_device_posts_to_the_submitted_server(client, settings, prefix, version, credentials):
+    """Poller validation and the add request must use the server shown in the form."""
+    import json
+
+    from django.urls import reverse
+    from requests import Response
+
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+    configure_librenms_servers(
+        settings,
+        {
+            "primary": {"librenms_url": "https://primary.example", "api_token": "test-token"},
+            "secondary": {"librenms_url": "https://secondary.example", "api_token": "test-token"},
+        },
+    )
+    device = make_device("snmp-server-device")
+    client.force_login(make_superuser("snmp-server-user"))
+
+    def pollers(url, **kwargs):
+        response = Response()
+        response.status_code = 200
+        group = 22 if url.startswith("https://secondary.example/") else 11
+        response._content = json.dumps(
+            {
+                "status": "ok",
+                "get_poller_group": [
+                    {"id": group, "group_name": "Test pollers"},
+                ],
+            }
+        ).encode()
+        return response
+
+    added = Response()
+    added.status_code = 200
+    added._content = b'{"status": "ok"}'
+    data = _snmp_post(prefix, snmp_version=version, hostname="router.example", poller_group="22", **credentials)
+    data["server_key"] = "secondary"
+    with (
+        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=pollers),
+        patch(
+            "netbox_librenms_plugin.librenms_api.requests.post",
+            return_value=added,
+        ) as post,
+    ):
+        response = client.post(reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[device.pk]), data)
+    assert response.status_code == 302
+    post.assert_called_once()
+    assert post.call_args.args[0] == "https://secondary.example/api/v0/devices"
+    assert post.call_args.kwargs["json"]["poller_group"] == 22
+
+
+@pytest.mark.parametrize("server_keys", [["primary", "secondary"], ["retired"]])
+def test_add_device_rejects_ambiguous_or_removed_server_before_api_calls(client, settings, server_keys):
+    """A stale or ambiguous server selector must never send device credentials."""
+    from django.urls import reverse
+    from requests import Response
+
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+    configure_librenms_servers(
+        settings,
+        {
+            "primary": {"librenms_url": "https://primary.example", "api_token": "test-token"},
+            "secondary": {"librenms_url": "https://secondary.example", "api_token": "test-token"},
+        },
+    )
+    device = make_device("snmp-invalid-server")
+    client.force_login(make_superuser("snmp-invalid-server-user"))
+    external_response = Response()
+    external_response.status_code = 200
+    external_response._content = b'{"status": "ok", "get_poller_group": []}'
+    data = _snmp_post("v1v2", hostname="router.example", community="test-community")
+    data["server_key"] = server_keys
+    with (
+        patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=external_response) as get,
+        patch(
+            "netbox_librenms_plugin.librenms_api.requests.post",
+            return_value=external_response,
+        ) as post,
+    ):
+        response = client.post(reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[device.pk]), data)
+    assert response.status_code == 302
+    get.assert_not_called()
+    post.assert_not_called()

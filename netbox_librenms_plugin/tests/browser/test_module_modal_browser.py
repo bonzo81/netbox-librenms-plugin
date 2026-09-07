@@ -187,3 +187,54 @@ def test_a_second_row_action_is_dropped_while_the_first_is_in_flight(page):
     page.wait_for_selector("#module-sync-content #swapped")
 
     assert page.locator("#module-sync-content #swapped").inner_text() == "A"
+
+
+def test_mismatch_action_disables_competing_modal_submissions(page):
+    """Every mutation button must show that the shared request scope is busy."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from django.template import Context, Engine, Library
+    from playwright.sync_api import expect
+
+    engine = Engine()
+    engine.template_libraries["helpers"] = Library()
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name, **kwargs):
+        return SERIAL_URL if name.endswith(":update_module_serial") else REPLACE_URL
+
+    engine.template_builtins.append(urls)
+    template = Path(__file__).parents[2] / "templates/netbox_librenms_plugin/htmx/module_mismatch_modal.html"
+    fragment = engine.from_string(template.read_text()).render(
+        Context(
+            {
+                "installed_module": SimpleNamespace(pk=55, module_type=SimpleNamespace(model="Test Card")),
+                "serial_mismatch": True,
+                "type_mismatch": False,
+                "librenms_serial": "TEST-SERIAL",
+                "server_key": "production",
+                "device_pk": 1,
+                "ent_index": 200,
+                "csrf_token": "test-token",
+            },
+            use_l10n=False,
+        )
+    )
+    page.set_content(_module_page_html(REPLACE_BUTTON))
+    page.route(f"{PREVIEW_URL}?*", lambda route: route.fulfill(body=fragment))
+    pending = []
+    page.route(SERIAL_URL, lambda route: pending.append(route))
+    _add_page_scripts(page)
+    page.click("#replace-btn")
+    buttons = page.locator("#htmx-modal-content button[type=submit]")
+    expect(buttons).to_have_count(2)
+    with page.expect_request(SERIAL_URL):
+        buttons.first.click()
+    expect(buttons.first).to_be_disabled()
+    expect(buttons.last).to_be_disabled()
+    pending[0].fulfill(body='<p id="serial-updated">Updated</p>')
+    expect(page.locator("#serial-updated")).to_be_visible()
+    expect(buttons.first).to_be_enabled()
+    expect(buttons.last).to_be_enabled()

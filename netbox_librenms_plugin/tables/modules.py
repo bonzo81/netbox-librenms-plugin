@@ -360,7 +360,7 @@ class LibreNMSModuleTable(tables.Table):
             "Serial Mismatch": "bg-danger text-white",
             "Name Conflict": "bg-warning text-dark",
             "Type Mismatch": "bg-warning text-dark",
-            "Integrated": "bg-light text-muted border",
+            "Integrated": "bg-body-secondary text-body border",
         }
         badge_class = badge_classes.get(value, "bg-secondary text-white")
         warning = record.get("model_warning")

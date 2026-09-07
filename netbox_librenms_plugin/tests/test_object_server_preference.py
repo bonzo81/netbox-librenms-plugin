@@ -522,3 +522,20 @@ def test_removing_mapping_clears_preference_when_removed_or_only_one_mapping_rem
     assert response.status_code == 302
     owner.refresh_from_db()
     assert owner.custom_field_data["librenms_id"] == {"primary": 13519}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stored_preference", ["secondary", "retired", 123])
+def test_preference_without_mappings_does_not_block_default_server(client, servers, stored_preference):
+    """Orphaned preference metadata must leave an unmapped object usable."""
+    from netbox_librenms_plugin.server_selection import ServerSelectionState, resolve_object_server
+
+    device = make_device("preference-only-device", librenms_cf={"_preferred_server": stored_preference})
+    client.force_login(make_superuser("preference-only-user"))
+    response = client.get(_sync_url(device))
+    assert response.status_code == 200
+    selection = resolve_object_server(device)
+    assert selection.state == ServerSelectionState.RESOLVED
+    assert selection.active_key == "primary"
+    device.refresh_from_db()
+    assert device.custom_field_data["librenms_id"] == {"_preferred_server": stored_preference}
