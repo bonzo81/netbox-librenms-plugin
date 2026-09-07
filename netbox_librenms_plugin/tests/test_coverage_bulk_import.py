@@ -17,6 +17,39 @@ from netbox_librenms_plugin.tests.conftest import delete_keeping_pk, make_device
 # ---------------------------------------------------------------------------
 
 
+class TestStackDedupKey:
+    """One key per physical stack, and never one key shared by unrelated stacks."""
+
+    def _members(self, **overrides):
+        member = {"name": "sw1", "model": "C9300", "position": 1, "serial": "FOC1"}
+        member.update(overrides)
+        return [member]
+
+    def test_member_serials_key_the_stack(self):
+        from netbox_librenms_plugin.import_utils.bulk_import import stack_dedup_key
+
+        assert stack_dedup_key({"members": self._members()}, 7) == "librenms-stack-FOC1"
+
+    def test_every_device_of_one_stack_shares_the_key(self):
+        """Each stack member is its own LibreNMS device, so the key must not depend on which."""
+        from netbox_librenms_plugin.import_utils.bulk_import import stack_dedup_key
+
+        vc_data = {"members": self._members(serial=None)}
+
+        assert stack_dedup_key(vc_data, 7) == stack_dedup_key(vc_data, 8)
+
+    def test_stacks_without_member_identity_get_distinct_keys(self):
+        """An empty member list fingerprints to a constant, so a shared key let the first such
+        stack suppress virtual-chassis creation for every other one in the batch."""
+        from netbox_librenms_plugin.import_utils.bulk_import import stack_dedup_key
+
+        first = stack_dedup_key({"members": []}, 7)
+        second = stack_dedup_key({"members": []}, 8)
+
+        assert first != second
+        assert str(7) in first and str(8) in second
+
+
 def _make_job(logger=True):
     """
     Return a minimal JobRunner-like mock.

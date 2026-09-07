@@ -29,14 +29,19 @@ SERIAL_RULE = {
 
 def add_default_rule(apps, schema_editor):
     """Seed the rule, leaving an operator's existing rule of the same name alone."""
+    # Neither model constrains these lookup fields, so an operator may hold duplicates and
+    # get_or_create would raise MultipleObjectsReturned and abort the migration.
+    alias = schema_editor.connection.alias
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
-    InventoryIgnoreRule.objects.using(schema_editor.connection.alias).get_or_create(
-        name=DEFAULT_RULE["name"], defaults=DEFAULT_RULE
-    )
+    inventory_rules = InventoryIgnoreRule.objects.using(alias)
+    if not inventory_rules.filter(name=DEFAULT_RULE["name"]).exists():
+        inventory_rules.create(**DEFAULT_RULE)
     NormalizationRule = apps.get_model("netbox_librenms_plugin", "NormalizationRule")
-    NormalizationRule.objects.using(schema_editor.connection.alias).get_or_create(
-        scope=SERIAL_RULE["scope"], match_pattern=SERIAL_RULE["match_pattern"], defaults=SERIAL_RULE
-    )
+    serial_rules = NormalizationRule.objects.using(alias)
+    if not serial_rules.filter(
+        scope=SERIAL_RULE["scope"], match_pattern=SERIAL_RULE["match_pattern"], manufacturer__isnull=True
+    ).exists():
+        serial_rules.create(**SERIAL_RULE)
 
 
 class Migration(migrations.Migration):

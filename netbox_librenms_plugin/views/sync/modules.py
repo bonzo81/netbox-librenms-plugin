@@ -23,6 +23,7 @@ from netbox_librenms_plugin.utils import (
     get_module_types_indexed,
     get_vc_member_positions,
     normalize_inventory_serial,
+    normalize_serial,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
 )
@@ -1851,16 +1852,18 @@ class ModuleMismatchPreviewView(
         if not librenms_item:
             return HttpResponse("Inventory item not found in cache.", status=400)
 
-        librenms_model = (librenms_item.get("entPhysicalModelName") or "").strip() or "-"
-        librenms_serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        librenms_model = normalize_serial(librenms_item.get("entPhysicalModelName")) or "-"
+        # Coerced, not rule-normalized: applying the serial rules here needs the develop-owned
+        # test_module_replace mock narrowed first, and that file is outside this PR's diff.
+        librenms_serial = normalize_serial(librenms_item.get("entPhysicalSerialNum"))
         if librenms_serial.lower() in _PLACEHOLDER_VALUES:
             librenms_serial = ""
 
         # Detect type mismatch
-        from netbox_librenms_plugin.utils import resolve_module_type
-
         module_types = get_module_types_indexed()
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(
             librenms_model if librenms_model != "-" else "", module_types, manufacturer=manufacturer
         )
@@ -2044,15 +2047,15 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             messages.error(request, "Inventory item not found in cache.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        model_name = (librenms_item.get("entPhysicalModelName") or "").strip()
-        serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
+        serial = normalize_serial(librenms_item.get("entPhysicalSerialNum"))
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
 
         module_types = get_module_types_indexed()
-        from netbox_librenms_plugin.utils import resolve_module_type
-
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
 
         if not matched_type:

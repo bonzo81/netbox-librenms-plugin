@@ -119,3 +119,30 @@ def test_reverse_inventory_seed_preserves_operator_rules(operator_edited):
         operation.reverse_code(apps, editor)
     assert InventoryIgnoreRule.objects.filter(pk=inventory_rule.pk).values().get() == before_inventory
     assert NormalizationRule.objects.filter(pk=serial_rule.pk).values().get() == before_serial
+
+
+@pytest.mark.django_db
+def test_inventory_seed_survives_duplicate_operator_rules():
+    """Neither seeded model enforces uniqueness, so the seed lookups must not assume one row."""
+    from django.apps import apps
+    from django.db import connection, migrations
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+    InventoryIgnoreRule.objects.filter(name=module.DEFAULT_RULE["name"]).delete()
+    NormalizationRule.objects.filter(scope="serial", match_pattern=module.SERIAL_RULE["match_pattern"]).delete()
+    # An operator may keep two rules that share the seed's lookup fields; both are valid rows.
+    for _ in range(2):
+        InventoryIgnoreRule.objects.create(**module.DEFAULT_RULE)
+        NormalizationRule.objects.create(**module.SERIAL_RULE)
+
+    operation = next(op for op in module.Migration.operations if isinstance(op, migrations.RunPython))
+    with connection.schema_editor() as editor:
+        operation.code(apps, editor)
+
+    # The seed found existing rows, so it must not have added a third of either.
+    assert InventoryIgnoreRule.objects.filter(name=module.DEFAULT_RULE["name"]).count() == 2
+    assert (
+        NormalizationRule.objects.filter(scope="serial", match_pattern=module.SERIAL_RULE["match_pattern"]).count() == 2
+    )

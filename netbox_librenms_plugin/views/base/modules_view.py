@@ -640,7 +640,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.utils import (
             get_enabled_ignore_rules,
             load_bay_mappings,
-            normalize_inventory_serial,
             preload_normalization_rules,
         )
 
@@ -661,18 +660,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self._norm_rules_bay = preload_normalization_rules("module_bay")
         self._norm_rules_type = preload_normalization_rules("module_type", manufacturer=manufacturer)
         self._norm_rules_serial = preload_normalization_rules("serial", manufacturer=manufacturer)
-        # Rewrite the serials once for the whole inventory rather than per row: every consumer
-        # below (row display, status comparison, the install path) then reads the same value,
-        # and the rule lookup costs one query instead of one per item. Skip the walk entirely
-        # when no serial rule is configured, so an unused feature costs nothing.
-        if any(rules for (rule_scope, _), rules in (self._norm_rules_serial or {}).items() if rule_scope == "serial"):
-            for entity in inventory_data:
-                raw_serial = entity.get("entPhysicalSerialNum")
-                if raw_serial is not None:
-                    entity["entPhysicalSerialNum"] = normalize_inventory_serial(
-                        raw_serial, manufacturer=manufacturer, preloaded_rules=self._norm_rules_serial
-                    )
-
         # Pre-compute ignore rule results once to avoid calling _check_ignore_rules
         # twice per item (once in _find_transparent_indices, once in _collect_top_items).
         ignore_cache = {
@@ -1100,6 +1087,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # manufacturer. Set per-item-context so VC members resolve correctly.
         sel_dt = getattr(selected_device, "device_type", None)
         sel_mfr = getattr(sel_dt, "manufacturer", None)
+        self._current_manufacturer = sel_mfr
         self._current_manufacturer_id = getattr(sel_mfr, "id", None)
         self._current_manufacturer_name = getattr(sel_mfr, "name", None)
         # Top-level items match against the full bay set: device-level bays plus
@@ -1117,6 +1105,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             depth=0,
             manufacturer=manufacturer,
             sibling_counts=target_context["sibling_counts"],
+            normalized_serial=self._normalized_item_serial(item, manufacturer),
         )
         row["selected_device_id"] = selected_device.id
         row["selected_device_name"] = selected_device.name
@@ -1229,6 +1218,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 scope_uninstalled=scope_uninstalled,
                 scope_preserved=scope_preserved,
                 scope_empty_installed_bays=scope_empty_installed_bays,
+                normalized_serial=self._normalized_item_serial(sub_item, manufacturer),
             )
             sub_row["selected_device_id"] = selected_device.id
             sub_row["selected_device_name"] = selected_device.name
@@ -2335,6 +2325,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return matches[0]
         return None
 
+    def _normalized_item_serial(self, item, manufacturer=None):
+        """Return the item's serial under the rules of the device the row actually targets.
+
+        A virtual-chassis row can resolve to a member whose manufacturer differs from the page
+        device's, and serial rules are manufacturer-scoped, so the target's manufacturer decides.
+        """
+        from netbox_librenms_plugin.utils import normalize_inventory_serial
+
+        target_manufacturer = getattr(self, "_current_manufacturer", None) or manufacturer
+        return normalize_inventory_serial(
+            item.get("entPhysicalSerialNum"),
+            manufacturer=target_manufacturer,
+            preloaded_rules=getattr(self, "_norm_rules_serial", None),
+        )
+
     def _build_row(
         self,
         item,
@@ -2347,6 +2352,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         scope_uninstalled=False,
         scope_preserved=False,
         scope_empty_installed_bays=False,
+        normalized_serial=None,
     ):
         """Build a single table row from a LibreNMS inventory item.
 
@@ -2373,7 +2379,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         )
 
         model_name = _normalize_librenms_text(item.get("entPhysicalModelName"))
-        serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+        raw_serial = item.get("entPhysicalSerialNum") if normalized_serial is None else normalized_serial
+        serial = _clean_librenms_value(raw_serial)
         phys_class = item.get("entPhysicalClass", "")
         name = item.get("entPhysicalName", "") or "-"
         description = _normalize_librenms_text(item.get("entPhysicalDescr"))

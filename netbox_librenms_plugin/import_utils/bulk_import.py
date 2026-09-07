@@ -332,6 +332,29 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
     )
 
 
+def stack_dedup_key(vc_data, device_id):
+    """Return the dedup key shared by every LibreNMS device in one physical stack.
+
+    Member serials identify a stack best. Without them a fingerprint over member
+    name/model/position still groups the members. With no member identity at all
+    there is nothing to group on, so the key falls back to the device: a shared key
+    would let the first such stack suppress virtual-chassis creation for every other
+    one in the same batch.
+    """
+    member_serials = sorted(
+        serial for m in vc_data.get("members", []) if (serial := normalize_serial(m.get("serial"))) and serial != "-"
+    )
+    if member_serials:
+        return f"librenms-stack-{','.join(member_serials)}"
+    member_parts = sorted(
+        f"{m.get('name', '')}/{m.get('model', '')}:{m.get('position', 0)}" for m in vc_data.get("members", [])
+    )
+    if not member_parts:
+        return f"librenms-stack-device-{device_id}"
+    fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
+    return f"librenms-stack-{fingerprint}"
+
+
 def bulk_import_devices_shared(
     device_ids: List[int],
     server_key: str = None,
@@ -529,27 +552,8 @@ def bulk_import_devices_shared(
 
                 # Handle virtual chassis creation for stacks
                 if vc_data.get("is_stack", False):
-                    # Derive a stack-level dedup key from member serials so that all
-                    # LibreNMS devices belonging to the same physical stack (e.g. each
-                    # switch in a stacked chassis that appears as a separate device in
-                    # LibreNMS) share the same key and VC creation is triggered only once.
-                    # Fall back to device_id when no member serials are available.
-                    member_serials = sorted(
-                        serial
-                        for m in vc_data.get("members", [])
-                        if (serial := normalize_serial(m.get("serial"))) and serial != "-"
-                    )
-                    if member_serials:
-                        vc_domain = f"librenms-stack-{','.join(member_serials)}"
-                    else:
-                        # No serials available — build a stable fingerprint from member name/model/position
-                        # so all LibreNMS devices in the same physical stack share the same dedup key.
-                        member_parts = sorted(
-                            f"{m.get('name', '')}/{m.get('model', '')}:{m.get('position', 0)}"
-                            for m in vc_data.get("members", [])
-                        )
-                        fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
-                        vc_domain = f"librenms-stack-{fingerprint}"
+                    # One key per physical stack, so VC creation is triggered only once for it.
+                    vc_domain = stack_dedup_key(vc_data, device_id)
 
                     # Only create VC if we haven't processed this stack yet.
                     # Permission was already validated before device import.

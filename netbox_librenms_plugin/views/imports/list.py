@@ -277,6 +277,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                     logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
 
             # Get device count for background job decision
+            preflight_failed = False
             try:
                 device_count = get_device_count_for_filters(
                     api=self.librenms_api,
@@ -287,10 +288,12 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             except Exception as e:
                 logger.error(f"Error getting device count: {e}")
                 device_count = 0
+                preflight_failed = True
 
-            # Decide whether to use background job
-            # Skip background job if validated data is already cached
-            if not validated_cached and self.should_use_background_job():
+            # Decide whether to use background job. A failed preflight means LibreNMS did not
+            # answer, so the job would only repeat the same call and hide the error behind a
+            # polling response; fall through to the synchronous handler that reports it.
+            if not preflight_failed and not validated_cached and self.should_use_background_job():
                 # Check if RQ workers are available
                 if get_workers_for_queue("default") > 0:
                     from netbox_librenms_plugin.jobs import FilterDevicesJob

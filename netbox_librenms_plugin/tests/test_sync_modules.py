@@ -3346,6 +3346,7 @@ class TestParentRowIdxVsEntityIndex:
             scope_uninstalled=False,
             scope_preserved=False,
             scope_empty_installed_bays=False,
+            **kwargs,
         ):
             if item.get("entPhysicalIndex") == LARGE_IDX:
                 return {"ent_physical_index": LARGE_IDX, "can_install": False, "depth": 0}
@@ -3365,7 +3366,10 @@ class TestParentRowIdxVsEntityIndex:
             with patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore:
                 mock_ignore.objects.restrict.return_value = mock_ignore.objects
                 mock_ignore.objects.filter.return_value.order_by.return_value = []
-                with patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}):
+                with patch(
+                    "netbox_librenms_plugin.utils.preload_normalization_rules",
+                    side_effect=lambda scope, manufacturer=None: {(scope, None): []},
+                ):
                     with patch.object(view, "_get_module_bays", return_value=({}, {})):
                         with patch.object(view, "_get_module_types", return_value={}):
                             with patch.object(view, "_get_generic_module_types", return_value={}):

@@ -108,7 +108,8 @@ def _drop_masked_sub_units(rows):
         if remote_device is not None:
             remote_identity = ("id", remote_device)
         elif isinstance(hostname, str) and hostname.strip():
-            remote_identity = ("hostname", hostname)
+            # The hostname lookup below is name__iexact, so the grouping identity folds case too.
+            remote_identity = ("hostname", hostname.strip().casefold())
         else:
             return None
         return local_port_id, remote_identity

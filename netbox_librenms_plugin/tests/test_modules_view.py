@@ -177,6 +177,69 @@ class TestInventoryClassIncludeRule:
         assert self._collect(self._inventory(), [self._include_rule(), skip]) == []
 
 
+@pytest.mark.django_db
+class TestSerialRulesFollowTheTargetDevice:
+    """Serial rules are manufacturer-scoped, so the device a row targets picks them.
+
+    A virtual-chassis row can resolve to a member whose manufacturer differs from the page
+    device's. Normalizing the whole snapshot up front with the page manufacturer gave those
+    rows a serial normalized under the wrong vendor's rules.
+    """
+
+    def _rule_for(self, manufacturer):
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        return NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_SERIAL,
+            manufacturer=manufacturer,
+            match_pattern=r"^BBB-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+
+    def _item(self):
+        return {
+            "entPhysicalIndex": 5,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 1",
+            "entPhysicalModelName": "WS-X4748",
+            "entPhysicalSerialNum": "BBB-12345",
+            "entPhysicalContainedIn": 0,
+        }
+
+    def _serial_for(self, target_manufacturer, page_manufacturer=None):
+        view = _make_view()
+        view._current_manufacturer = target_manufacturer
+        return view._normalized_item_serial(self._item(), page_manufacturer)
+
+    def test_the_targets_own_rule_normalizes_the_serial(self):
+        from dcim.models import Manufacturer
+
+        owner = Manufacturer.objects.create(name="Serial Rule Owner", slug="serial-rule-owner")
+        self._rule_for(owner)
+
+        assert self._serial_for(owner) == "12345"
+
+    def test_the_page_manufacturers_rule_does_not_reach_another_members_row(self):
+        """The page device owns the rule; a VC row resolving to another vendor keeps the raw value."""
+        from dcim.models import Manufacturer
+
+        page = Manufacturer.objects.create(name="Page Vendor", slug="page-vendor")
+        member = Manufacturer.objects.create(name="Member Vendor", slug="member-vendor")
+        self._rule_for(page)
+
+        assert self._serial_for(member, page_manufacturer=page) == "BBB-12345"
+
+    def test_build_row_reports_the_serial_it_is_given(self):
+        """_build_row must stay free of database access, so the caller resolves the serial."""
+        view = _make_view()
+        item = self._item()
+
+        row = view._build_row(item, {item["entPhysicalIndex"]: item}, {}, {}, normalized_serial="12345")
+
+        assert row["serial"] == "12345"
+
+
 class TestRowOrderIsStableAcrossAnInstall:
     """Installing a module must not move its row.
 
@@ -1963,7 +2026,10 @@ class TestPositionalMatchScaffoldingChain:
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[transparent_rule]),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
-            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
+            patch(
+                "netbox_librenms_plugin.utils.preload_normalization_rules",
+                side_effect=lambda scope, manufacturer=None: {(scope, None): []},
+            ),
             patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
         ):

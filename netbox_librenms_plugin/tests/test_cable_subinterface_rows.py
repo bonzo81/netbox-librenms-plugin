@@ -120,6 +120,20 @@ def test_missing_remote_device_id_groups_by_hostname(same_hostname):
 
 
 @pytest.mark.django_db
+def test_hostname_grouping_folds_case_like_the_device_lookup():
+    """get_device_by_id_or_name resolves a hostname with name__iexact, so two spellings of one
+    neighbour must land in the same group and the physical row must still mask the sub-unit."""
+    physical = _link(100, "eth0", "eth1", 201, remote_device_id=None)
+    physical["remote_hostname"] = "PEER-A.example"
+    sub_unit = _link(100, "eth0", "eth1.100", 202, remote_device_id=None)
+    sub_unit["remote_hostname"] = "  peer-a.example  "
+
+    rows = _collect([physical, sub_unit])
+
+    assert [row["remote_port"] for row in rows] == ["eth1"]
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("hostname", [None, "", [], {}, 123, True])
 def test_unknown_remote_hostname_preserves_rows_and_skips_name_lookup(hostname):
     """Unknown neighbor identities cannot mask rows or identify a device by name."""
@@ -142,9 +156,13 @@ def test_unknown_remote_hostname_preserves_rows_and_skips_name_lookup(hostname):
 def test_remote_device_id_resolves_with_malformed_hostname():
     """A valid remote ID remains usable when the advertised hostname is malformed."""
     from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-    device = make_device("remote-id-without-name", librenms_cf={"default": {"id": 42}})
+    device = make_device("remote-id-without-name")
+    # The canonical writer, so the test pins ID resolution rather than a hand-built field shape.
+    set_librenms_device_id(device, 42)
+    device.save()
     found, matched, error = BaseCableTableView().get_device_by_id_or_name(42, [], "default")
     assert found == device
     assert matched
