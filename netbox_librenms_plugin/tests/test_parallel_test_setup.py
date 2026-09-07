@@ -466,6 +466,24 @@ def test_a_detected_flush_restores_the_custom_field_with_the_seeded_rows():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("field,value", [("enabled", False), ("description", "Changed seed description")])
+def test_changed_ignore_rule_defaults_trigger_seed_restoration(field, value):
+    """The probe must detect changes to every declared ignore-rule default."""
+    import importlib
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
+        assert InventoryIgnoreRule.objects.filter(**defaults).update(**{field: value}) == 1
+
+    assert restore_seeded_state(force=False) is True
+
+    for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
+        assert InventoryIgnoreRule.objects.filter(**defaults).count() == 1
+
+
+@pytest.mark.django_db
 def test_intact_seeds_are_left_alone_when_no_flush_is_detected():
     """A probe that finds the seeds intact must not rewrite them."""
     assert restore_seeded_state(force=False) is False

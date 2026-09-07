@@ -1143,6 +1143,8 @@ class TestPostInventoryRefresh:
 
     def test_post_stale_server_key_resolves_migrated_context_with_session_key(self, server_keys):
         """When the POSTed server_key is stale, resolve migrated context under the active session key. Using the stale key would miss the marker and re-enable a donor's sync controls."""
+        from django.test.signals import template_rendered
+
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
@@ -1158,11 +1160,25 @@ class TestPostInventoryRefresh:
         view._librenms_api = LibreNMSAPI(server_key=active_key)
         request = make_request("post", {"server_key": "retired-inventory-server"})
 
-        response = post(view, request, pk=donor.pk)
+        rendered_contexts = []
+
+        def capture_context(sender, template, context, **kwargs):
+            if template.name == view.partial_template_name:
+                rendered_contexts.append(context.flatten())
+
+        template_rendered.connect(capture_context)
+        try:
+            response = post(view, request, pk=donor.pk)
+        finally:
+            template_rendered.disconnect(capture_context)
 
         assert response.status_code == 200
         assert view.active_server_key == active_key
         assert message_texts(request, "error") == ["Selected LibreNMS server is no longer configured."]
+        assert len(rendered_contexts) == 1
+        assert rendered_contexts[0]["migrated_to_marker"]["server_key"] == active_key
+        assert rendered_contexts[0]["migrated_to_marker"]["device_id"] == winner.pk
+        assert rendered_contexts[0]["migrated_to_winner"] == winner
 
     def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self, librenms_server, server_keys):
         """A list payload that carries non-dict entries, such as None, is a fetch failure."""

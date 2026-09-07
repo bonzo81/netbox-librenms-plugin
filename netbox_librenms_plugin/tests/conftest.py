@@ -276,6 +276,8 @@ def _seeds_are_intact():
     from extras.models import CustomField
     from virtualization.models import VirtualMachine, VMInterface
 
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
     # Both seeds, or a corrupted sap_name_pattern reports the state as intact and
     # restore_seeded_state(force=False) skips the repair it needs.
     for model, lookup_field, value_field, rows in chain(_seeded_model_rows(), _seeded_sap_rows()):
@@ -298,6 +300,10 @@ def _seeds_are_intact():
         return False
     for model, signature in _seeded_ignore_rule_signatures():
         if not model.objects.filter(**signature).exists():
+            return False
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
+        if not InventoryIgnoreRule.objects.filter(**defaults).exists():
             return False
 
     custom_field = CustomField.objects.filter(name="librenms_id", type="json").first()
