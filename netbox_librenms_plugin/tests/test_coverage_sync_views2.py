@@ -3018,3 +3018,34 @@ def test_add_device_rejects_ambiguous_or_removed_server_before_api_calls(client,
     assert response.status_code == 302
     get.assert_not_called()
     post.assert_not_called()
+
+
+@pytest.mark.parametrize("form_id", ["snmpv1v2-form", "snmpv3-form"])
+def test_rendered_snmp_form_carries_one_server_selection(client, settings, librenms_server, form_id):
+    """The browser must submit one server value to the strict device-add endpoint."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+    configure_librenms_servers(
+        settings,
+        {"primary": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
+    )
+    device = make_device("unmapped-snmp-form.example")
+    librenms_server.register(
+        f"/api/v0/devices/{device.name}", {"status": "error", "message": "Device not found"}, status=404
+    )
+    librenms_server.register("/api/v0/poller_group", {"status": "ok", "get_poller_group": []})
+    client.force_login(make_superuser("rendered-snmp-form-user"))
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]))
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    marker = html.index(f'id="{form_id}"')
+    form_start = html.rindex("<form", 0, marker)
+    form_end = html.index("</form>", marker)
+    inputs = open_tags(html[form_start:form_end], "input")
+    server_values = [field.get("value") for field in inputs if field.get("name") == "server_key"]
+    assert server_values == ["primary"]
