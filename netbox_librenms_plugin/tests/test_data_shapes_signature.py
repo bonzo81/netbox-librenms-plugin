@@ -1,5 +1,7 @@
 """Tests for data-shape signatures + novelty classification."""
 
+import pytest
+
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, pseudonymize_os
 from netbox_librenms_plugin.data_shapes.signature import (
     build_manifest,
@@ -550,13 +552,14 @@ def test_is_redos_prone_flags_overlapping_alternation_in_a_quantified_group():
         assert ports.is_redos_prone(ok) is False, ok
 
 
-def test_signature_skips_redos_prone_untrusted_lag_pattern():
+@pytest.mark.parametrize("pattern", [r"^(a+)+$", r"^(a{1,999})+$", r"^(a+){1,999}$", r"^(a|aa){1,999}$"])
+def test_signature_skips_redos_prone_untrusted_lag_pattern(pattern):
     """A ReDoS-prone untrusted LAG pattern is skipped, not applied — the port isn't classified a LAG."""
     rec = {
         "schema_version": 1,
         "name": "x",
         "device_id": 1,
-        "lag_patterns": {"evil": r"^(a+)+$"},
+        "lag_patterns": {"evil": pattern},
         "responses": {
             "GET /api/v0/devices/1/ports": {
                 "status": "ok",
@@ -567,3 +570,21 @@ def test_signature_skips_redos_prone_untrusted_lag_pattern():
         },
     }
     assert compute_shape_signature(rec)["lag"]["present"] is False
+
+
+@pytest.mark.parametrize("pattern", [r"^(a{2})+$", r"^(a{2,2})+$", r"^a{1,999}$"])
+def test_fixed_or_unnested_bounded_patterns_remain_usable(pattern):
+    """Fixed-width groups and plain bounded repetition remain usable."""
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, name_matches_lag_pattern
+
+    compiled = compile_lag_patterns({"lag_patterns": {"example": pattern}})
+    assert len(compiled) == 1
+    assert name_matches_lag_pattern("aaaa", compiled)
+
+
+@pytest.mark.parametrize("pattern", [r"^(a+){20}$", r"^(a+){20,20}$", r"^(a|aa){100}$"])
+def test_compiler_rejects_fixed_outer_repeats_of_ambiguous_groups(pattern):
+    """A fixed outer repeat still permits many partitions of an ambiguous group."""
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
+
+    assert compile_lag_patterns({"lag_patterns": {"example": pattern}}) == []

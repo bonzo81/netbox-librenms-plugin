@@ -54,6 +54,8 @@ _MAX_LAG_PATTERNS = 100
 _MAX_LAG_PATTERN_LEN = 200
 # ``{n,}`` is unbounded too, on either side of the nesting: ``(a{2,})+`` and ``(a+){2,}`` both
 # backtrack the same way, so one alternative serves both positions.
+_BOUNDED_RANGE_RE = re.compile(r"\{(\d*),(\d+)\}")
+_FIXED_GROUP_REPEAT_RE = re.compile(r"\)\{(\d+)(?:,(\d+))?\}")
 _UNBOUNDED_QUANTIFIER = r"(?:[*+]|\{\d*,\})"
 _NESTED_QUANTIFIER_RE = re.compile(rf"\([^()]*{_UNBOUNDED_QUANTIFIER}[^()]*\)\s*{_UNBOUNDED_QUANTIFIER}")
 # An unbounded quantifier over an ALTERNATION backtracks the same way without any nested quantifier:
@@ -78,7 +80,19 @@ def is_redos_prone(pattern):
     """
     if not isinstance(pattern, str) or len(pattern) > _MAX_LAG_PATTERN_LEN:
         return True
-    return _NESTED_QUANTIFIER_RE.search(pattern) is not None or _QUANTIFIED_ALTERNATION_RE.search(pattern) is not None
+    # Variable finite ranges permit the same ambiguous partitions as unbounded repeats.
+    # Reduce them for both structural checks, while preserving fixed-width ranges.
+    structural_pattern = _BOUNDED_RANGE_RE.sub(
+        lambda match: "+" if int(match[1] or "0") != int(match[2]) else match[0], pattern
+    )
+    # Fixed outer repetition can still partition an ambiguous inner group.
+    structural_pattern = _FIXED_GROUP_REPEAT_RE.sub(
+        lambda match: ")+" if int(match[2] or match[1]) > 1 else match[0], structural_pattern
+    )
+    return (
+        _NESTED_QUANTIFIER_RE.search(structural_pattern) is not None
+        or _QUANTIFIED_ALTERNATION_RE.search(structural_pattern) is not None
+    )
 
 
 def _compile_recording_patterns(recording, key):
