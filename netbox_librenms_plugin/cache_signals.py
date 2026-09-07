@@ -286,8 +286,8 @@ def _remember_owner(sender, instance, **kwargs):
     setattr(instance, PREVIOUS_OWNER_ATTRIBUTE, values)
 
 
-def _load_deferred_subject_columns(sender, instance, using=None, **kwargs):
-    """Load omitted subject columns only when the deferred row is written or deleted."""
+def _load_previous_subject_columns(sender, instance, using=None, **kwargs):
+    """Read persisted owner columns when a deferred or previously saved row is written."""
     if getattr(instance, PREVIOUS_OWNER_ATTRIBUTE, None) is not None or instance.pk is None:
         return
     columns = OWNER_COLUMNS.get(sender._meta.label_lower, ())
@@ -308,6 +308,9 @@ def _handle_write(sender, instance, using=None, **kwargs):
     _schedule_columns(label, current, using)
 
     previous = getattr(instance, PREVIOUS_OWNER_ATTRIBUTE, None)
+    # A later write must read its persisted owner again. The next pre-save read also
+    # handles rollback and saves that omit owner columns from update_fields.
+    setattr(instance, PREVIOUS_OWNER_ATTRIBUTE, None)
     if previous is None or previous == current:
         return
     # The row moved: the object it left still holds a snapshot that no longer matches NetBox.
@@ -414,12 +417,12 @@ def connect():
         label = model._meta.label_lower
         post_init.connect(_remember_owner, sender=model, dispatch_uid=f"{DISPATCH_PREFIX}_init_{label}")
         pre_save.connect(
-            _load_deferred_subject_columns,
+            _load_previous_subject_columns,
             sender=model,
             dispatch_uid=f"{DISPATCH_PREFIX}_pre_save_{label}",
         )
         pre_delete.connect(
-            _load_deferred_subject_columns,
+            _load_previous_subject_columns,
             sender=model,
             dispatch_uid=f"{DISPATCH_PREFIX}_pre_delete_{label}",
         )

@@ -754,66 +754,136 @@ class TestEverySchedulingViewTakesTheClaim:
                 yield obj
                 yield from self._nested_classes(obj)
 
+    @staticmethod
+    def _qualified_name(module_name, name):
+        return f"{module_name}.{name}" if module_name else name
+
+    def _imports(self, tree, module_name):
+        """Resolve imported aliases without merging unrelated modules' namespaces."""
+        import ast
+        from importlib.util import resolve_name
+
+        imports = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imports[alias.asname or alias.name.split(".")[0]] = (
+                        alias.name if alias.asname else alias.name.split(".")[0]
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                source = node.module or ""
+                if node.level:
+                    source = resolve_name("." * node.level + source, module_name.rpartition(".")[0])
+                for alias in node.names:
+                    imports[alias.asname or alias.name] = self._qualified_name(source, alias.name)
+        return imports
+
+    def _reference_name(self, node, module_name, class_name, imports):
+        """Resolve callable names, self methods and imported module attributes."""
+        import ast
+
+        if isinstance(node, ast.Name):
+            return imports.get(node.id, self._qualified_name(module_name, node.id))
+        if not isinstance(node, ast.Attribute):
+            return None
+        parts = []
+        receiver = node
+        while isinstance(receiver, ast.Attribute):
+            parts.append(receiver.attr)
+            receiver = receiver.value
+        if not isinstance(receiver, ast.Name):
+            return None
+        if receiver.id in ("self", "cls") and class_name:
+            base = self._qualified_name(module_name, class_name)
+        elif receiver.id in imports:
+            base = imports[receiver.id]
+        else:
+            # An arbitrary receiver such as request.POST or a dictionary does not identify
+            # a package function merely because its method shares that function's name.
+            return None
+        return ".".join([base, *reversed(parts)])
+
+    def _called_names(self, node, module_name="", class_name="", imports=None):
+        """Return resolved calls in this body, excluding nested classes."""
+        import ast
+
+        return {
+            name
+            for call in self._own_nodes(node)
+            if isinstance(call, ast.Call)
+            and (name := self._reference_name(call.func, module_name, class_name, imports or {})) is not None
+        }
+
     def _scheduler_names(self, trees=None):
-        """Derive the scheduler and every package name that reaches it through wrappers, aliases, or assignments."""
+        """Follow wrappers and aliases while retaining each module and class namespace."""
         import ast
 
         if trees is None:
             from netbox_librenms_plugin import sync_cache
 
-            # The scheduler's own module counts: it is the natural home for a shared wrapper.
-            trees = [ast.parse(self._module_source(module)) for module in [*self._view_modules(), sync_cache]]
+            trees = {
+                module.__name__: ast.parse(self._module_source(module))
+                for module in [*self._view_modules(), sync_cache]
+            }
+        elif not isinstance(trees, dict):
+            trees = {"": ast.Module(body=[node for tree in trees for node in tree.body], type_ignores=[])}
         refers = {}
-        for tree in trees:
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Import, ast.ImportFrom)):
-                    for alias in node.names:
-                        if alias.asname:
-                            refers.setdefault(alias.asname, set()).add(alias.name.rsplit(".", 1)[-1])
-                elif isinstance(node, ast.Assign):
-                    # Covers a plain alias and a wrapped one such as functools.partial(...).
-                    mentioned = {name.id for name in ast.walk(node.value) if isinstance(name, ast.Name)}
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            refers.setdefault(target.id, set()).update(mentioned)
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    refers.setdefault(node.name, set()).update(self._called_names(node))
+        for module_name, tree in trees.items():
+            imports = self._imports(tree, module_name)
+            for local_name, target in imports.items():
+                refers.setdefault(self._qualified_name(module_name, local_name), set()).add(target)
 
-        names = {self.SCHEDULER}
+            def visit(body, class_name=""):
+                for node in body:
+                    if isinstance(node, ast.ClassDef):
+                        visit(node.body, self._qualified_name(class_name, node.name))
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        name = self._qualified_name(module_name, self._qualified_name(class_name, node.name))
+                        refers.setdefault(name, set()).update(
+                            self._called_names(node, module_name, class_name, imports)
+                        )
+                    elif isinstance(node, ast.Assign):
+                        mentioned = {
+                            name
+                            for value in ast.walk(node.value)
+                            if (name := self._reference_name(value, module_name, class_name, imports)) is not None
+                        }
+                        for target in node.targets:
+                            if isinstance(target, ast.Name):
+                                name = self._qualified_name(module_name, self._qualified_name(class_name, target.id))
+                                refers.setdefault(name, set()).update(mentioned)
+
+            visit(tree.body)
+
+        names = {self.SCHEDULER, f"netbox_librenms_plugin.sync_cache.{self.SCHEDULER}"}
         while True:
             grown = names | {name for name, refs in refers.items() if refs & names}
             if grown == names:
                 return names
             names = grown
 
-    def _called_names(self, node):
-        """Return the names *node* calls in its own body, ignoring classes nested inside it."""
+    def _class_context(self, cls):
+        """Resolve a real class's calls using its defining module's imports."""
         import ast
+        import inspect
+        import textwrap
 
-        return {
-            call.func.id if isinstance(call.func, ast.Name) else call.func.attr
-            for call in self._own_nodes(node)
-            if isinstance(call, ast.Call) and isinstance(call.func, (ast.Name, ast.Attribute))
-        }
+        definition = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+        module = inspect.getmodule(cls)
+        imports = self._imports(ast.parse(self._module_source(module)), module.__name__)
+        return definition, module.__name__, cls.__qualname__, imports
 
     def _schedules(self, cls, names=None):
-        """Return whether *cls* calls a scheduler, read from its own source."""
-        import ast
-        import inspect
-        import textwrap
-
-        definition = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+        """Return whether this class calls a resolved scheduler or wrapper."""
+        definition, module_name, class_name, imports = self._class_context(cls)
         names = names if names is not None else self._scheduler_names()
-        return bool(self._called_names(definition) & names)
+        return bool(self._called_names(definition, module_name, class_name, imports) & names)
 
     def _server_key_guarded_scheduler_calls(self, cls, names=None):
-        """Return scheduler calls nested in a truthy server-key branch."""
+        """Return resolved scheduler calls nested in a truthy server-key branch."""
         import ast
-        import inspect
-        import textwrap
 
-        definition = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+        definition, module_name, class_name, imports = self._class_context(cls)
         names = names if names is not None else self._scheduler_names()
 
         def requires_server_key(test):
@@ -834,7 +904,7 @@ class TestEverySchedulingViewTakesTheClaim:
                 if isinstance(node, ast.If) and child in node.body:
                     guarded |= requires_server_key(node.test)
                 if isinstance(child, ast.Call) and guarded:
-                    name = child.func.id if isinstance(child.func, ast.Name) else getattr(child.func, "attr", None)
+                    name = self._reference_name(child.func, module_name, class_name, imports)
                     if name in names:
                         found.append(name)
                 found.extend(find(child, guarded))
@@ -972,9 +1042,9 @@ class TestEverySchedulingViewTakesTheClaim:
     def test_the_scheduler_names_are_derived_from_the_one_real_scheduler(self):
         """A helper that calls the scheduler schedules too, so the wrappers must be found."""
         assert self._scheduler_names() >= {
-            "schedule_request_cache_mutation",
-            "_schedule_module_cache_mutation",
-            "_schedule_winner_cache_mutation",
+            "netbox_librenms_plugin.sync_cache.schedule_request_cache_mutation",
+            "netbox_librenms_plugin.views.sync.modules._schedule_module_cache_mutation",
+            "netbox_librenms_plugin.views.sync.migrate._schedule_winner_cache_mutation",
         }
 
     def test_a_wrapper_an_import_alias_and_an_assignment_all_reach_the_scheduler(self):
@@ -990,7 +1060,13 @@ class TestEverySchedulingViewTakesTheClaim:
             "shortcut = helper\n"
         )
 
-        assert self._scheduler_names([tree]) == {"schedule_request_cache_mutation", "run", "helper", "shortcut"}
+        assert self._scheduler_names([tree]) == {
+            "schedule_request_cache_mutation",
+            "netbox_librenms_plugin.sync_cache.schedule_request_cache_mutation",
+            "run",
+            "helper",
+            "shortcut",
+        }
 
     def test_a_scheduler_wrapped_in_a_partial_still_counts(self):
         """An alias is what the value refers to, not how it is written, so a partial is one too."""
@@ -1006,6 +1082,70 @@ class TestEverySchedulingViewTakesTheClaim:
 
         assert "run" in self._scheduler_names([tree])
 
+    def test_a_mapping_get_does_not_call_a_same_named_view_method(self):
+        """An unrelated mapping read must not inherit a view method's effects."""
+        import ast
+
+        tree = ast.parse(
+            "class Scheduling:\n"
+            "    def get(self):\n"
+            "        schedule_request_cache_mutation()\n"
+            "\n"
+            "def read_mapping(mapping):\n"
+            "    return mapping.get('value')\n"
+        )
+
+        names = self._scheduler_names([tree])
+        assert "Scheduling.get" in names
+        assert "read_mapping" not in names
+
+    def test_same_named_methods_keep_their_own_call_relationships(self):
+        """A self call resolves inside its own class instead of every same-named method."""
+        import ast
+
+        tree = ast.parse(
+            "class Scheduling:\n"
+            "    def run(self):\n"
+            "        schedule_request_cache_mutation()\n"
+            "    def post(self):\n"
+            "        self.run()\n"
+            "\n"
+            "class Reading:\n"
+            "    def run(self):\n"
+            "        return 1\n"
+            "    def post(self):\n"
+            "        return self.run()\n"
+        )
+
+        names = self._scheduler_names([tree])
+        assert "Scheduling.post" in names
+        assert "Reading.post" not in names
+
+    def test_same_named_module_functions_keep_their_import_targets(self):
+        """Imported functions and module aliases retain the module they call."""
+        import ast
+
+        trees = {
+            "example.writer": ast.parse(
+                "from netbox_librenms_plugin.sync_cache import schedule_request_cache_mutation\n"
+                "def run():\n"
+                "    schedule_request_cache_mutation()\n"
+            ),
+            "example.reader": ast.parse("def run():\n    return 1\n"),
+            "example.caller": ast.parse(
+                "import example.writer as writer\n"
+                "from example.reader import run as read\n"
+                "def dispatch():\n"
+                "    writer.run()\n"
+                "def inspect_value():\n"
+                "    return read()\n"
+            ),
+        }
+
+        names = self._scheduler_names(trees)
+        assert "example.caller.dispatch" in names
+        assert "example.caller.inspect_value" not in names
+
     def test_a_scheduler_wrapped_in_a_method_still_counts(self):
         """A method wrapper is callable by name through ``self`` and must stay in the closure."""
         import ast
@@ -1018,4 +1158,66 @@ class TestEverySchedulingViewTakesTheClaim:
             "        schedule_request_cache_mutation(request)\n"
         )
 
-        assert "run" in self._scheduler_names([tree])
+        assert "Helpers.run" in self._scheduler_names([tree])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("first_write", ["committed", "rolled_back", "description_only"])
+def test_repeated_ip_assignment_invalidates_the_last_persisted_owner(django_capture_on_commit_callbacks, first_write):
+    """Reusing one instance must invalidate the owner stored before each assignment."""
+    from django.db import transaction
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+    devices = [
+        make_device(f"signal-repeated-owner-{suffix}", librenms_cf={SERVER_KEY: port_id})
+        for suffix, port_id in (("a", 71), ("b", 72), ("c", 73))
+    ]
+    interfaces = [make_interface(device, "Ethernet1") for device in devices]
+    address = IPAddress.objects.create(address="198.18.35.1/24", assigned_object=interfaces[0])
+    address = IPAddress.objects.get(pk=address.pk)
+    keys = [key for device in devices for key in _seed_every_tab(device)]
+
+    class RollbackAssignment(Exception):
+        pass
+
+    try:
+        with django_capture_on_commit_callbacks(execute=True):
+            if first_write == "rolled_back":
+                with pytest.raises(RollbackAssignment), transaction.atomic():
+                    address.assigned_object = interfaces[1]
+                    address.save()
+                    raise RollbackAssignment
+            else:
+                with transaction.atomic():
+                    address.assigned_object = interfaces[1]
+                    if first_write == "description_only":
+                        address.description = "Assignment remains unchanged"
+                        address.save(update_fields=["description"])
+                    else:
+                        address.save()
+
+        previous_owner_index = 1 if first_write == "committed" else 0
+        assert IPAddress.objects.get(pk=address.pk).assigned_object_id == interfaces[previous_owner_index].pk
+        if first_write == "committed":
+            assert not any(_snapshot_state(devices[0]).values())
+            assert not any(_snapshot_state(devices[1]).values())
+        elif first_write == "rolled_back":
+            assert all(_snapshot_state(devices[0]).values())
+            assert all(_snapshot_state(devices[1]).values())
+
+        # Replenish snapshots after the first callbacks, keeping the same address instance.
+        for device in devices:
+            _seed_every_tab(device)
+        with django_capture_on_commit_callbacks(execute=True):
+            with transaction.atomic():
+                address.assigned_object = interfaces[2]
+                address.save()
+
+        assert IPAddress.objects.get(pk=address.pk).assigned_object_id == interfaces[2].pk
+        remaining = _snapshot_state(devices[previous_owner_index])
+        assert not any(remaining.values()), f"the departed owner kept stale snapshots: {remaining}"
+        assert not any(_snapshot_state(devices[2]).values())
+    finally:
+        _clear(keys)
