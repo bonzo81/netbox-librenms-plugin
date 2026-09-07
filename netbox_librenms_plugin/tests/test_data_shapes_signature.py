@@ -588,3 +588,36 @@ def test_compiler_rejects_fixed_outer_repeats_of_ambiguous_groups(pattern):
     from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
 
     assert compile_lag_patterns({"lag_patterns": {"example": pattern}}) == []
+
+
+def test_signature_skips_uncompilable_lag_pattern():
+    """A schema-valid recording can contain a repetition that Python cannot compile."""
+    from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+    recording = {
+        "schema_version": 1,
+        "name": "example",
+        "device_id": 1,
+        "lag_patterns": {"example": r"^a{99999999999999999999}$"},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "aaaa", "ifType": "ethernetCsmacd"}],
+            }
+        },
+    }
+
+    assert recording_schema_errors(recording) == []
+    assert compute_shape_signature(recording)["lag"]["present"] is False
+
+
+def test_sap_compiler_keeps_valid_patterns_after_an_uncompilable_repeat():
+    """An oversized repetition does not discard another usable SAP pattern."""
+    from netbox_librenms_plugin.data_shapes.ports import compile_sap_patterns
+
+    patterns = compile_sap_patterns(
+        {"sap_patterns": {"oversized": r"^a{99999999999999999999}$", "usable": r"^sap-[0-9]+$"}}
+    )
+
+    assert len(patterns) == 1
+    assert patterns[0].fullmatch("sap-42") is not None

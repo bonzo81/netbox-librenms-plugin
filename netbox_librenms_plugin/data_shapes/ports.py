@@ -116,14 +116,13 @@ def _compile_recording_patterns(recording, key):
     patterns = recording.get(key)
     patterns = patterns if isinstance(patterns, dict) else {}
     for pattern_str in list(patterns.values())[:_MAX_LAG_PATTERNS]:
-        # Skip a ReDoS-prone pattern (a length cap can't bound its backtracking — see
-        # _is_redos_prone) before compiling, and skip a typo'd regex (re.error) or a non-string
-        # value (TypeError) rather than crash — mirroring resolve_port_relationships' hardening.
+        # Reject unsafe patterns before compilation. Skip invalid expressions, oversized
+        # repetitions, and non-string values when compilation fails.
         if is_redos_prone(pattern_str):
             continue
         try:
             compiled.append(re.compile(pattern_str))
-        except (re.error, TypeError):
+        except (re.error, TypeError, OverflowError):
             continue
     return compiled
 
