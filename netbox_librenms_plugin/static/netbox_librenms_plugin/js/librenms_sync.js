@@ -155,6 +155,54 @@ function fetchErrorMessage(response) {
 }
 
 /**
+ * Show an error in NetBox's standard Django-message toast area.
+ *
+ * @param {string} message
+ */
+function showErrorToast(message) {
+    const container = document.getElementById('django-messages');
+    const text = String(message || 'Server error').trim();
+
+    if (!container) {
+        console.error('LibreNMS plugin error:', text);
+        return;
+    }
+
+    const toast = document.createElement('div');
+    toast.className = 'toast toast-dark border-0 shadow-sm';
+    toast.setAttribute('role', 'alert');
+    toast.setAttribute('aria-live', 'assertive');
+    toast.setAttribute('aria-atomic', 'true');
+    toast.setAttribute('data-bs-delay', '12000');
+
+    const header = document.createElement('div');
+    header.className = 'toast-header text-bg-danger';
+    const icon = document.createElement('i');
+    icon.className = 'mdi mdi-alert-circle me-1';
+    header.appendChild(icon);
+    header.appendChild(document.createTextNode(' Error'));
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'btn-close me-0 m-auto';
+    closeButton.setAttribute('data-bs-dismiss', 'toast');
+    closeButton.setAttribute('aria-label', 'Close');
+    header.appendChild(closeButton);
+
+    const body = document.createElement('div');
+    body.className = 'toast-body';
+    body.textContent = text;
+
+    toast.appendChild(header);
+    toast.appendChild(body);
+    container.appendChild(toast);
+    // NetBox bundles Bootstrap as an ES module, so `window.bootstrap` is not
+    // available to plugin scripts. Display the standard toast markup directly.
+    toast.classList.add('show');
+    closeButton.addEventListener('click', () => toast.remove());
+    window.setTimeout(() => toast.remove(), 12000);
+}
+
+/**
  * Extract device/VM ID and type from current URL pathname.
  * Supports multiple URL patterns:
  * - /dcim/devices/{id}/
@@ -1997,11 +2045,14 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
                     window.location.reload();
                 }
             } else {
-                alert('Error: ' + (data.error || 'Unknown error occurred'));
+                const message = data.error || 'Unknown error occurred';
+                console.error('Error deleting interfaces:', message);
+                showErrorToast(message);
             }
         })
         .catch(error => {
-            alert('Error deleting interfaces: ' + error.message);
+            console.error('Error deleting interfaces:', error);
+            showErrorToast('Error deleting interfaces: ' + error.message);
         })
         .finally(() => {
             // Restore button state

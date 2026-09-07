@@ -1,6 +1,7 @@
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.views import View
 from netbox.views import generic
+from utilities.views import register_model_view
 
 from netbox_librenms_plugin.filters import (
     CarrierAutoInstallRuleFilterSet,
