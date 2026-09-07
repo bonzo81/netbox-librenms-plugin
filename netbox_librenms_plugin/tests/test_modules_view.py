@@ -5869,3 +5869,56 @@ class TestInferVcMemberSerialNormalization:
 
         assert target.pk == master.pk
         assert source == "default"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("inventory_name", ["Slot 1", "Unmatched Card"])
+@pytest.mark.parametrize("description", ["", 123])
+def test_included_numeric_inventory_class_renders_on_the_sync_page(client, settings, inventory_name, description):
+    """An include rule must admit a numeric class through matching and rendering."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    device = make_device_with_module_bays("numeric-inventory-class", ["Slot 1"])
+    module_type = make_module_type("NUMERIC-CARD", manufacturer=device.device_type.manufacturer)
+    InventoryIgnoreRule.objects.create(
+        name="Numeric inventory modules", match_type="class_is", pattern="7", action="include"
+    )
+    payload = trusted_module_inventory_payload(
+        device,
+        [
+            {
+                "entPhysicalIndex": 81,
+                "entPhysicalClass": 7,
+                "entPhysicalName": inventory_name,
+                "entPhysicalContainedIn": 0,
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": "NUMERIC-1",
+                "entPhysicalDescr": description,
+            }
+        ],
+        librenms_id=9301,
+    )
+    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9301", (True, {"device_id": 9301, "hostname": device.name}), 300)
+    client.force_login(make_superuser("numeric-inventory-class-user"))
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+    assert response.status_code == 200
+    assert b"NUMERIC-1" in response.content
+    rows = list(response.context["module_sync"]["table"].data)
+    assert len(rows) == 1
+    if inventory_name == "Slot 1":
+        assert rows[0]["module_bay_id"] == device.modulebays.get(name="Slot 1").pk
+    else:
+        assert rows[0]["status"] == "No Bay"

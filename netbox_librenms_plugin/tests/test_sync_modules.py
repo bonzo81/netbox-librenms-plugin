@@ -6820,3 +6820,321 @@ class TestStandaloneAdoptionAcrossEveryComponentType:
         assert exc.value.component_label == component_model._meta.verbose_name, (
             "the refusal must name the component the caller could not adopt"
         )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mapping_kind", ["regex", "exact"])
+def test_existing_bay_mapping_reuses_pattern_proposal_without_creating_bays(client, settings, mapping_kind):
+    """Choose a free bay, preview a family rule, and save only the mapping."""
+    from dcim.models import ModuleBay, ModuleBayTemplate
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import ModuleBayMapping
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_superuser
+
+    device = make_device_with_module_bays("existing-bay-mapping", ["RE0", "RE1"])
+    client.force_login(make_superuser("existing-bay-mapping-user"))
+    url = reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": device.pk})
+    inputs = {"mode": "map_existing", "librenms_name": "Routing Engine 0", "librenms_class": "other"}
+    response = client.get(url, inputs)
+    assert response.status_code == 200
+    assert response.context["available_bay_names"] == ["RE0", "RE1"]
+    assert response.context["mapping_pattern"]["netbox_replacement"] == r"RE\1"
+    assert b"Map Existing Bay" in response.content
+    before_bays = list(ModuleBay.objects.values())
+    before_templates = list(ModuleBayTemplate.objects.values())
+    response = client.post(url, {**inputs, "name": "RE0", "mapping_kind": mapping_kind})
+    assert response.status_code == 302
+    mapping = ModuleBayMapping.objects.get(manufacturer=device.device_type.manufacturer, librenms_class="other")
+    assert mapping.is_regex == (mapping_kind == "regex")
+    if mapping_kind == "regex":
+        import re
+
+        assert re.fullmatch(mapping.librenms_name, "Routing Engine 1")
+        assert re.sub(mapping.librenms_name, mapping.netbox_bay_name, "Routing Engine 1") == "RE1"
+    else:
+        assert mapping.librenms_name == "Routing Engine 0"
+        assert mapping.netbox_bay_name == "RE0"
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    matcher = BaseModuleTableView()
+    matcher._current_manufacturer_id = device.device_type.manufacturer_id
+    bays = {bay.name: bay for bay in device.modulebays.all()}
+    for index in (0, 1):
+        item = {
+            "entPhysicalName": "ROUTING-CARD",
+            "entPhysicalDescr": f"Routing Engine {index}",
+            "entPhysicalClass": "other",
+        }
+        matched = matcher._match_module_bay(item, {}, bays)
+        if index == 0 or mapping_kind == "regex":
+            assert matched == bays[f"RE{index}"]
+        else:
+            assert matched is None
+    assert list(ModuleBay.objects.values()) == before_bays
+    assert list(ModuleBayTemplate.objects.values()) == before_templates
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("inventory_name", ["Routing Engine 0", ""])
+def test_unmatched_inventory_offers_existing_bay_mapping_on_the_sync_page(client, settings, inventory_name):
+    """A missing automatic suggestion must not hide the mapping proposal modal."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    TestModulesActionResponse()._configure_server(settings)
+    device = make_device_with_module_bays("unmatched-existing-bay", ["RE0", "RE1"])
+    module_type = make_module_type("ROUTING-CARD", manufacturer=device.device_type.manufacturer)
+    payload = trusted_module_inventory_payload(
+        device,
+        [
+            {
+                "entPhysicalIndex": 71,
+                "entPhysicalClass": "module",
+                "entPhysicalName": inventory_name,
+                "entPhysicalDescr": "Routing Engine 0",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": "ROUTING-1",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 72,
+                "entPhysicalClass": "port",
+                "entPhysicalName": "Nested Optic",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": "OPTIC-1",
+                "entPhysicalContainedIn": 71,
+            },
+        ],
+        server_key="prod",
+        librenms_id=9201,
+    )
+    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="prod"), payload, 300)
+    cache.set("librenms_device_info_prod_9201", (True, {"device_id": 9201, "hostname": device.name}), 300)
+    client.force_login(make_superuser("unmatched-existing-bay-user"))
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "modules", "server_key": "prod"},
+    )
+    assert response.status_code == 200
+    assert b"Routing Engine 0" in response.content
+    assert b"Map Existing Bay" in response.content
+    assert b"Nested Optic" in response.content
+    mapping_rows = [
+        row.record["name"]
+        for row in response.context["module_sync"]["table"].rows
+        if "mode=map_existing" in str(row.get_cell("actions"))
+    ]
+    assert mapping_rows == [inventory_name or "-"]
+    assert "librenms_name=Routing+Engine+0" in str(response.context["module_sync"]["table"].rows[0].get_cell("actions"))
+
+
+@pytest.mark.django_db
+def test_existing_bay_mapping_requires_mapping_permission_but_not_template_creation(client):
+    """Mapping an existing bay needs no permission to create templates or bays."""
+    from dcim.models import Device, ModuleBay
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import ModuleBayMapping
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    device = make_device_with_module_bays("mapping-permissions", ["RE0"])
+    user = make_user_with_perms("mapping-permissions-user", [("view", Device), ("view", ModuleBay)])
+    client.force_login(user)
+    url = reverse("plugins:netbox_librenms_plugin:add_bay_template", args=[device.pk])
+    inputs = {"mode": "map_existing", "librenms_name": "Routing Engine 0", "name": "RE0", "mapping_kind": "regex"}
+    from django.contrib.messages import get_messages
+
+    for response in (client.get(url, inputs), client.post(url, inputs)):
+        assert response.status_code == 302
+        assert any("add_modulebaymapping" in str(message) for message in get_messages(response.wsgi_request))
+    assert not ModuleBayMapping.objects.filter(manufacturer=device.device_type.manufacturer).exists()
+    client.force_login(grant(user, "add", ModuleBayMapping))
+    assert client.get(url, inputs).status_code == 200
+    assert client.post(url, inputs).status_code == 302
+    assert ModuleBayMapping.objects.filter(manufacturer=device.device_type.manufacturer).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("target", ["occupied", "other-device", "hidden"])
+def test_existing_bay_mapping_rejects_unavailable_targets(client, target):
+    """A forged target cannot select an occupied, foreign, or restricted bay."""
+    from dcim.models import Device, ModuleBay
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import ModuleBayMapping
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    device = make_device_with_module_bays("mapping-target-device", ["RE0", "RE1"])
+    visible = device.modulebays.get(name="RE0")
+    requested_name = "RE1"
+    if target == "occupied":
+        bay = device.modulebays.get(name="RE1")
+        from dcim.models import Module
+
+        Module.objects.create(
+            device=device, module_type=make_module_type("MAPPING-CARD"), module_bay=bay, status="active"
+        )
+    elif target == "other-device":
+        make_device_with_module_bays("mapping-other-device", ["RE2"])
+        requested_name = "RE2"
+    user = make_user_with_perms("mapping-target-user", [("view", Device), ("add", ModuleBayMapping)])
+    user = grant(user, "view", ModuleBay, constraints={"pk": visible.pk} if target == "hidden" else None)
+    client.force_login(user)
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:add_bay_template", args=[device.pk]),
+        {"mode": "map_existing", "librenms_name": "Routing Engine 0", "name": requested_name},
+    )
+    assert response.status_code == 400
+    assert not ModuleBayMapping.objects.filter(manufacturer=device.device_type.manufacturer).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("raw_serial, expected", [("S/N SERIAL123", "SERIAL123"), ("00123", "0123")])
+def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, expected):
+    """Preview and replacement must interpret raw cached serials like installation."""
+    from dcim.models import Module
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type, make_superuser
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    NormalizationRule.objects.filter(scope="serial").delete()
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^0(.*)$", replacement=r"\1")
+    device = make_device("serial-normalization")
+    module_type = make_module_type("serial-card", manufacturer=device.device_type.manufacturer)
+    bay = make_module_bay(device, "Slot 1")
+    installed = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial=expected)
+    key = CacheMixin().get_cache_key(device, "inventory", server_key="default")
+    cache.set(
+        key,
+        trusted_module_inventory_payload(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 100,
+                    "entPhysicalName": "Slot 1",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalSerialNum": raw_serial,
+                }
+            ],
+        ),
+    )
+    client.force_login(make_superuser())
+    params = {"module_id": installed.pk, "ent_index": 100, "server_key": "default"}
+    preview = client.get(
+        reverse("plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": device.pk}), params
+    )
+    assert preview.status_code == 200
+    assert preview.context["librenms_serial"] == expected
+    assert preview.context["serial_mismatch"] is False
+    response = client.post(reverse("plugins:netbox_librenms_plugin:replace_module", kwargs={"pk": device.pk}), params)
+    assert response.status_code == 302
+    assert Module.objects.get(module_bay=bay).serial == expected
+    assert cache.get(key)["inventory"][0]["entPhysicalSerialNum"] == raw_serial
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "endpoint,mixed_manufacturers", [("install_branch", False), ("install_selected", False), ("install_selected", True)]
+)
+def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint, mixed_manufacturers):
+    """A batch must normalize every serial without querying rules for every item."""
+    from dcim.models import Manufacturer, Module, VirtualChassis
+    from django.core.cache import cache
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    device = make_device_with_module_bays("serial-rule-batch", ["Slot 1", "Slot 2", "Slot 3"])
+    module_type = make_module_type("Batch Card", manufacturer=device.device_type.manufacturer)
+    member = None
+    if mixed_manufacturers:
+        manufacturer = Manufacturer.objects.create(name="Batch Vendor", slug="batch-vendor")
+        member = make_device_with_module_bays("serial-rule-member", ["Slot 2"], manufacturer=manufacturer)
+        chassis = VirtualChassis.objects.create(name="serial-rule-chassis", master=device)
+        device.virtual_chassis = chassis
+        device.vc_position = 1
+        device.save()
+        member.virtual_chassis = chassis
+        member.vc_position = 2
+        member.save()
+    NormalizationRule.objects.filter(scope="serial").delete()
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=device.device_type.manufacturer, match_pattern=r"^S/N (.+)$", replacement=r"\1"
+    )
+    if member is not None:
+        NormalizationRule.objects.create(
+            scope="serial",
+            manufacturer=member.device_type.manufacturer,
+            match_pattern=r"^S/N (.+)$",
+            replacement=r"MEMBER-\1",
+        )
+    rows = [{"entPhysicalIndex": 1, "entPhysicalClass": "chassis", "entPhysicalContainedIn": 0}]
+    rows.extend(
+        {
+            "entPhysicalIndex": number + 1,
+            "entPhysicalContainedIn": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalName": f"Slot {number}",
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": f"S/N BATCH-{number}",
+        }
+        for number in (1, 2, 3)
+    )
+    cache.set(
+        CacheMixin().get_cache_key(device, "inventory", "default"), trusted_module_inventory_payload(device, rows)
+    )
+    data = {"server_key": "default", "parent_index": "1", "select": ["2", "3", "4"]}
+    if member is not None:
+        data["device_selection_3"] = str(member.pk)
+    client.force_login(make_superuser("serial-rule-batch-user"))
+    with CaptureQueriesContext(connection) as queries:
+        response = client.post(reverse(f"plugins:netbox_librenms_plugin:{endpoint}", args=[device.pk]), data)
+    assert response.status_code == 302
+    expected = {"BATCH-1", "BATCH-3"}
+    if member is None:
+        expected.add("BATCH-2")
+    else:
+        assert Module.objects.get(device=member).serial == "MEMBER-BATCH-2"
+    assert set(Module.objects.filter(device=device).values_list("serial", flat=True)) == expected
+    serial_queries = [
+        query["sql"]
+        for query in queries
+        if "SELECT" in query["sql"] and "normalizationrule" in query["sql"] and "'serial'" in query["sql"]
+    ]
+    assert len(serial_queries) <= (4 if mixed_manufacturers else 2), serial_queries
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("index", [None, "", 200])
+def test_replace_action_requires_a_source_inventory_index(index):
+    """Only rows that can address the preview endpoint may offer replacement."""
+    from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("replace-source-index")
+    table = LibreNMSModuleTable(
+        [],
+        device=device,
+        has_write_permission=True,
+        can_add_module=True,
+        can_change_module=True,
+        can_delete_module=True,
+    )
+    html = str(
+        table.render_actions(None, {"can_replace": True, "installed_module_id": 55, "ent_physical_index": index})
+    )
+    assert ("Replace" in html) is (index == 200)

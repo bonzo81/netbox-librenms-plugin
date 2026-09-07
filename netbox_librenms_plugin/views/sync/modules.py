@@ -1062,11 +1062,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
-        # Same reason for the serial scope: normalize_inventory_serial() reads the rule table
-        # per item otherwise, inside the install transaction.
-        norm_rules_serial = preload_normalization_rules(
-            "serial", manufacturer=getattr(getattr(target_device, "device_type", None), "manufacturer", None)
-        )
+        norm_rules_serial = preload_normalization_rules("serial", target_device.device_type.manufacturer)
 
         # Install top-down: each install may create new child bays
         installed = []
@@ -1258,7 +1254,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             exact_mappings (list | None): The optional exact module bay mappings.
             regex_mappings (list | None): The optional regular expression module bay mappings.
             manufacturer_id (int | None): The optional device manufacturer ID.
-            norm_rules_bay (list | None): The optional module bay normalization rules.
+            norm_rules_bay (dict | None): The optional module bay normalization rules.
+            norm_rules_serial (dict | None): The optional serial normalization rules.
 
         Returns:
             dict: The install status and its result details.
@@ -1690,9 +1687,17 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
-        # The rows can target different manufacturers, so seed the unscoped scope only;
-        # apply_normalization_rules caches each manufacturer it meets into this same dict.
-        norm_rules_serial = preload_normalization_rules("serial")
+        norm_rules_serial = preload_normalization_rules("serial", page_device.device_type.manufacturer)
+        if page_device.virtual_chassis_id is not None:
+            members = (
+                self.restricted_queryset(Device)
+                .filter(virtual_chassis_id=page_device.virtual_chassis_id)
+                .select_related("device_type__manufacturer")
+            )
+            for member in members:
+                manufacturer = member.device_type.manufacturer
+                if ("serial", manufacturer.pk) not in norm_rules_serial:
+                    norm_rules_serial.update(preload_normalization_rules("serial", manufacturer))
 
         installed, skipped, failed = [], [], []
         bound_any = False
@@ -2771,7 +2776,85 @@ class AddBayTemplateView(
             qs = qs.filter(manufacturer__isnull=True)
         return qs.exists()
 
+    def _map_existing_bay(self, request, pk):
+        """Reuse the mapping proposal with a visible, empty bay on this device."""
+        from dcim.models import Device, ModuleBay
+
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        self.required_object_permissions = {
+            request.method: [("view", Device), ("view", ModuleBay), ("add", ModuleBayMapping)]
+        }
+        if error := self.require_all_permissions(request.method):
+            return error
+        device = self.restrict_object_or_404(Device, pk=pk)
+        available_bay_names = sorted(
+            set(
+                ModuleBay.objects.restrict(request.user, "view")
+                .filter(device=device, module__isnull=True, installed_module__isnull=True)
+                .values_list("name", flat=True)
+            )
+        )
+        inputs = request.POST if request.method == "POST" else request.GET
+        librenms_name = inputs.get("librenms_name", "").strip()
+        librenms_class = inputs.get("librenms_class", "").strip()
+        if not librenms_name:
+            return HttpResponse("LibreNMS inventory name is required.", status=400)
+        manufacturer = self._device_manufacturer(device)
+        if request.method == "POST":
+            name = inputs.get("name", "")
+            if name not in available_bay_names:
+                return HttpResponse("Select a visible, empty bay on this device.", status=400)
+            mapping_kind = inputs.get("mapping_kind", "exact")
+            if mapping_kind not in ("exact", "regex"):
+                return HttpResponse("Invalid mapping kind.", status=400)
+            pattern = self._derive_mapping_pattern(librenms_name, name) if mapping_kind == "regex" else None
+            if mapping_kind == "regex" and pattern is None:
+                return HttpResponse("These names do not support the proposed regex mapping.", status=400)
+            server_key = self.resolve_posted_server_key_or_none(request.POST)
+            mapping = ModuleBayMapping(
+                librenms_name=pattern["librenms_pattern"] if pattern else librenms_name,
+                librenms_class=librenms_class,
+                netbox_bay_name=pattern["netbox_replacement"] if pattern else name,
+                is_regex=pattern is not None,
+                manufacturer=manufacturer,
+            )
+            try:
+                with transaction.atomic():
+                    mapping.full_clean()
+                    mapping.save()
+            except (ValidationError, IntegrityError) as exc:
+                messages.error(request, f"Failed to add bay mapping: {exc}")
+            else:
+                messages.success(request, f"Added bay mapping for '{librenms_name}' to '{name}'.")
+                if server_key:
+                    _schedule_module_cache_mutation(request, device, server_key)
+            return _modules_action_response(request, device, server_key)
+
+        suggested_name = available_bay_names[0] if available_bay_names else ""
+        mapping_pattern = self._derive_mapping_pattern(librenms_name, suggested_name)
+        return render(
+            request,
+            "netbox_librenms_plugin/htmx/add_bay_template_modal.html",
+            {
+                "device_pk": pk,
+                "mapping_only": True,
+                "available_bay_names": available_bay_names,
+                "suggested_name": suggested_name,
+                "librenms_name": librenms_name,
+                "librenms_class": librenms_class,
+                "manufacturer_label": str(manufacturer) if manufacturer else "",
+                "offer_mapping_checkbox": bool(available_bay_names),
+                "mapping_pattern": mapping_pattern,
+                "mapping_default_kind": "regex" if mapping_pattern else "exact",
+                "server_key": request.GET.get("server_key", ""),
+            },
+        )
+
     def get(self, request, pk):
+        if request.GET.get("mode") == "map_existing":
+            return self._map_existing_bay(request, pk)
+
         from dcim.models import Device, DeviceType, ModuleBay, ModuleBayTemplate, ModuleType
 
         target_kind = request.GET.get("target_kind", "")
@@ -2844,6 +2927,9 @@ class AddBayTemplateView(
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
     def post(self, request, pk):
+        if request.POST.get("mode") == "map_existing":
+            return self._map_existing_bay(request, pk)
+
         from dcim.models import Device, DeviceType, ModuleBay, ModuleBayTemplate, ModuleType
 
         from netbox_librenms_plugin.models import ModuleBayMapping

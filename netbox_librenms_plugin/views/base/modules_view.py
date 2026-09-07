@@ -1065,7 +1065,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             row.get("name"),
             row.get("description"),
         ]:
-            label = (value or "").strip()
+            label = _normalize_librenms_text(value)
             if label and label not in candidates:
                 candidates.append(label)
         return candidates
@@ -1574,7 +1574,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             label_to_port_id.pop(label, None)
 
         for item in inventory_data:
-            if (item.get("entPhysicalClass") or "").strip().lower() != "port":
+            if _normalize_librenms_text(item.get("entPhysicalClass")).lower() != "port":
                 continue
 
             port_id = item.get("_librenms_port_id")
@@ -2017,7 +2017,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return
         device_type = getattr(selected_device, "device_type", None)
         device_type_model = getattr(device_type, "model", "") or ""
-        item_class = (item.get("entPhysicalClass") or "").strip().lower() if item else ""
+        item_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower() if item else ""
         item_name = (item.get("entPhysicalName") or "").strip() if item else ""
 
         options = []
@@ -2129,7 +2129,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Returns:
             ModuleBay | None: The matched module bay, or None if no bay matches.
         """
-        phys_class = (item.get("entPhysicalClass") or "").strip()
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         manufacturer_id = getattr(self, "_current_manufacturer_id", None)
 
         norm_rules_bay = getattr(self, "_norm_rules_bay", None)
@@ -2419,7 +2419,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # hardware class.  When NetBox lacks bays named for the item's class
         # (e.g. no "Fan Tray N" / "PSU N" defined on the device type), we
         # surface "No Bay" and let the user fix the model rather than guess.
-        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower()
         if phys_class == "fan":
             patterns = [f"Fan Tray {slot_num}", f"Fan {slot_num}", f"FT {slot_num}", f"FT{slot_num}"]
         elif phys_class == "powersupply":
@@ -2556,7 +2556,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         model_name = _normalize_librenms_text(item.get("entPhysicalModelName"))
         raw_serial = item.get("entPhysicalSerialNum") if normalized_serial is None else normalized_serial
         serial = _clean_librenms_value(raw_serial)
-        phys_class = item.get("entPhysicalClass", "")
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         name = item.get("entPhysicalName", "") or "-"
         description = _normalize_librenms_text(item.get("entPhysicalDescr"))
         # A class admitted by rule is hardware the vendor files outside the usual classes, and
@@ -2678,6 +2678,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Surface NetBox-model gaps that produced No Bay / No Type so the user
         # can fix the model rather than wonder why nothing matched.
         if status == "No Bay":
+            candidates = self._build_bay_candidate_names(item, index_map)
+            row["mapping_source_name"] = name if name in candidates else next(iter(candidates), "")
             suggestion = self._suggest_bay_mapping(item, module_bays, scope_preserved=scope_preserved)
             holder_hint = None
             if suggestion is None:
@@ -2837,8 +2839,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             dict: Suggested values with ``name``, ``position``, and ``label`` keys.
         """
         raw_name = (item.get("entPhysicalName") or "").strip()
-        descr = (item.get("entPhysicalDescr") or "").strip()
-        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+        descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower()
 
         position = ""
         if raw_name:
@@ -2866,7 +2868,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # matching is exact + case-sensitive dict lookup, so without a
             # mapping the row would still show "No Bay" after the bay is added.
             "librenms_name": (item.get("entPhysicalName") or "").strip(),
-            "librenms_class": (item.get("entPhysicalClass") or "").strip(),
+            "librenms_class": _normalize_librenms_text(item.get("entPhysicalClass")),
         }
 
     @staticmethod
@@ -2908,7 +2910,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Returns:
             str: The warning that describes how to resolve the missing bay.
         """
-        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower()
         class_hints = {
             "fan": "Fan Tray N or Fan N",
             "powersupply": "Power Supply N, PSU N, or PEM N",
@@ -3076,7 +3078,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         item_trail = m.group(0)
         item_prefix = item_name[: m.start()]
         trail_is_digits = item_trail.isdigit()
-        item_class = (item.get("entPhysicalClass") or "").strip()
+        item_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         # Description-based fallback: when the item description encodes a
         # class+slot hint like "MIC: ... @ 0/0/*" (Juniper), try mapping to a
         # bay named "<CLASS> <slot>" even when the LibreNMS name is just a
@@ -3182,7 +3184,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 ``"MIC \\1"``, or None when the description does not fit the pattern or the implied
                 bay is not present in scope.
         """
-        descr = (item.get("entPhysicalDescr") or "").strip()
+        descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
         if not descr or not module_bays:
             return None
         dm = re.match(r"^([A-Z][A-Za-z0-9_]{0,15}):\s+.*@\s*(\d+)(?:/|\s|$)", descr)
@@ -3240,7 +3242,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 there is no description, no trailing token, the description equals the name, or no
                 bay shares the trailing token.
         """
-        descr = (item.get("entPhysicalDescr") or "").strip()
+        descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
         if not descr or not candidate_names:
             return None
         # Skip when descr is identical to the name we already tried — the
@@ -3306,7 +3308,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return None
 
         parts = [f"Auto-suggested: maps LibreNMS model '{model}'"]
-        phys_descr = (item.get("entPhysicalDescr") or "").strip()
+        phys_descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
         if phys_descr:
             parts.append(f"described as '{phys_descr}'")
         if matched_bay:
@@ -3356,7 +3358,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if manufacturer is not None:
             suggestion["manufacturer"] = manufacturer.pk
 
-        phys_descr = (item.get("entPhysicalDescr") or "").strip()
+        phys_descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
         if phys_descr:
             suggestion["description"] = phys_descr[:200]
             if len(phys_descr) > 200:
@@ -3461,7 +3463,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             dict | None: The ancestor with the same serial and model, or None if no
                 such ancestor exists.
         """
-        item_class = (item.get("entPhysicalClass") or "").strip()
+        item_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         if item_class not in INVENTORY_CLASSES or item_class in {"container", "powerSupply", "fan"}:
             return None
         item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
@@ -3478,7 +3480,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             ancestor = index_map.get(current_idx)
             if ancestor is None:
                 return None
-            anc_class = (ancestor.get("entPhysicalClass") or "").strip()
+            anc_class = _normalize_librenms_text(ancestor.get("entPhysicalClass"))
             # Stop at chassis — never dedupe against the chassis itself.
             if anc_class == "chassis":
                 return None

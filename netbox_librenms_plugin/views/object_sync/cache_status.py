@@ -113,8 +113,9 @@ class SyncCacheFragmentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
         tab_view.cache_only = True
 
         if sync_tab == SyncTab.INTERFACES:
-            context = tab_view.get_context_data(request, obj, get_interface_name_field(request, obj))
-            payload = {"interface_sync": context}
+            interface_name_field = get_interface_name_field(request, obj)
+            context = tab_view.get_context_data(request, obj, interface_name_field)
+            payload = {"interface_sync": context, "interface_name_field": interface_name_field}
         elif sync_tab == SyncTab.CABLES:
             payload = {"cable_sync": tab_view.get_context_data(request, obj)}
         elif sync_tab == SyncTab.IP_ADDRESSES:

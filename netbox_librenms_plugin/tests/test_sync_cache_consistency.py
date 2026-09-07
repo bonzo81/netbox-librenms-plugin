@@ -2482,7 +2482,7 @@ def test_fragment_restores_from_cache_without_calling_librenms(client, settings)
             {
                 "port_id": 7301,
                 "ifName": "Ethernet1",
-                "ifDescr": "Ethernet1",
+                "ifDescr": "Access Ethernet1",
                 "ifType": "ethernetCsmacd",
                 "ifAdminStatus": "up",
             }
@@ -2500,11 +2500,14 @@ def test_fragment_restores_from_cache_without_calling_librenms(client, settings)
         "netbox_librenms_plugin.librenms_api.requests.get",
         side_effect=AssertionError("The cache fragment contacted LibreNMS"),
     ) as requests_get:
-        response = client.get(url, {"server_key": "primary"})
+        response = client.get(url, {"server_key": "primary", "interface_name_field": "ifDescr"})
 
     requests_get.assert_not_called()
     assert response.status_code == 200
     assert b"Ethernet1" in response.content
+
+    assert b"interface_name_field=ifDescr" in response.content
+    assert response.context["interface_name_field"] == "ifDescr"
 
 
 @pytest.mark.django_db

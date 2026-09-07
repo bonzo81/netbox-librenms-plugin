@@ -765,7 +765,12 @@ def test_cold_tab_does_not_flash_stale_during_tab_navigation(page):
 
     page.route(
         "https://plugin.example.com/page*",
-        lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
+        lambda route: route.fulfill(
+            body=_page_html(
+                initial, active_tab="ipaddresses" if "tab=ipaddresses" in route.request.url else "interfaces"
+            ),
+            content_type="text/html",
+        ),
     )
     page.route(
         "https://plugin.example.com/status?*",
@@ -788,6 +793,8 @@ def test_cold_tab_does_not_flash_stale_during_tab_navigation(page):
     )
     page.locator("#ipaddresses-tab").click()
     page.wait_for_url("**/page?tab=ipaddresses")
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate("initializeSyncCacheConsistency()")
 
     assert page.evaluate("sessionStorage.getItem('ip-state-flashed')") is None
     assert not page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
@@ -856,6 +863,8 @@ def test_healthy_tab_click_navigates_without_bootstrap_global(page):
     assert page.evaluate("typeof bootstrap") == "undefined"
     page.locator("#ipaddresses-tab").click()
     page.wait_for_url("**/page?tab=ipaddresses")
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate("initializeSyncCacheConsistency()")
 
     assert page.locator("#ipaddresses").evaluate("node => node.classList.contains('active')")
 
@@ -962,6 +971,9 @@ def test_selecting_an_unavailable_tab_acknowledges_its_attention_state(page):
 
     tab.click()
     page.wait_for_url("**/page?tab=ipaddresses")
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate("initializeSyncCacheConsistency()")
+    assert page.evaluate("typeof initializeSyncCacheConsistency") == "function"
     selected_tab = page.locator("#ipaddresses-tab")
 
     assert not selected_tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
@@ -1865,3 +1877,38 @@ def test_invalidation_reason_includes_relative_time(page):
     )
 
     assert "ago" in page.locator("#ipaddress-sync-content").inner_text()
+
+
+def test_existing_bay_selection_preserves_an_explicit_exact_mapping_choice(page):
+    """Changing the target bay must not broaden an exact rule to a family regex."""
+    from django.template import Context, Engine
+
+    template = (TEMPLATE_DIR / "htmx" / "add_bay_template_modal.html").read_text()
+    script = template.split("<script>", 1)[1].split("</script>", 1)[0]
+    script = (
+        Engine()
+        .from_string(script)
+        .render(
+            Context(
+                {
+                    "librenms_name": "Routing Engine 0",
+                    "mapping_only": True,
+                    "mapping_default_kind": "regex",
+                }
+            )
+        )
+    )
+    page.set_content("""<select id="add-bay-name">
+        <option value="RE0">RE0</option><option value="Backup RE0">Backup RE0</option>
+        <option value="RE1">RE1</option></select>
+        <input type="hidden" id="add-bay-also-create-mapping" value="1">
+        <span id="add-bay-mapping-summary"></span><div id="add-bay-mapping-kind-block">
+        <input type="radio" name="mapping_kind" id="add-bay-mapping-kind-regex" value="regex">
+        <input type="radio" name="mapping_kind" id="add-bay-mapping-kind-exact" value="exact"></div>
+        <div id="add-bay-mapping-preview"></div>""")
+    page.add_script_tag(content=script)
+    assert page.locator("#add-bay-mapping-kind-regex").is_checked()
+    page.locator("#add-bay-mapping-kind-exact").check()
+    page.locator("#add-bay-name").select_option("Backup RE0")
+    assert page.locator("#add-bay-mapping-kind-exact").is_checked()
+    assert "Will store exact:" in page.locator("#add-bay-mapping-preview").inner_text()

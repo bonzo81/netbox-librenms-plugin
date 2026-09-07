@@ -3,13 +3,14 @@
 {# Rendered by AddBayTemplateView.get and swapped into #htmx-modal-content. #}
 <div class="modal-header">
     <h5 id="htmx-modal-label" class="modal-title">
-        <i class="mdi mdi-wrench-outline me-1"></i>Add Bay Template
+        <i class="mdi mdi-wrench-outline me-1"></i>{% if mapping_only %}Map Existing Bay{% else %}Add Bay Template{% endif %}
     </h5>
     <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
 </div>
 <form method="post"
       action="{% url 'plugins:netbox_librenms_plugin:add_bay_template' pk=device_pk %}">
     {% csrf_token %}
+    {% if mapping_only %}<input type="hidden" name="mode" value="map_existing">{% endif %}
     <input type="hidden" name="target_kind" value="{{ target_kind }}">
     <input type="hidden" name="target_pk" value="{{ target_pk }}">
     <input type="hidden" name="librenms_name" value="{{ librenms_name }}">
@@ -17,6 +18,17 @@
     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
 
     <div class="modal-body">
+        {% if mapping_only %}
+        <p>Select an existing bay. Review the proposed mapping before saving.</p>
+        <div class="mb-3">
+            <label for="add-bay-name" class="form-label">Existing bay</label>
+            <select class="form-select" id="add-bay-name" name="name" required>
+                {% for bay_name in available_bay_names %}
+                <option value="{{ bay_name }}"{% if bay_name == suggested_name %} selected{% endif %}>{{ bay_name }}</option>
+                {% empty %}<option value="">No visible, empty bays available</option>{% endfor %}
+            </select>
+        </div>
+        {% else %}
         <p class="text-muted small mb-3">
             Add a new bay template to
             {% if target_kind == "device_type" %}device type{% else %}module type{% endif %}
@@ -54,13 +66,15 @@
             <textarea class="form-control" id="add-bay-description" name="description" rows="2"></textarea>
         </div>
 
+        {% endif %}
+
         {% if offer_mapping_checkbox %}
         <hr>
         <div class="form-check mb-2" id="add-bay-mapping-block">
-            <input class="form-check-input" type="checkbox" value="1"
+            <input class="form-check-input" type="{% if mapping_only %}hidden{% else %}checkbox{% endif %}" value="1"
                    id="add-bay-also-create-mapping" name="also_create_mapping">
             <label class="form-check-label" for="add-bay-also-create-mapping">
-                Also create a ModuleBayMapping
+                {% if mapping_only %}Create a ModuleBayMapping{% else %}Also create a ModuleBayMapping{% endif %}
                 <span id="add-bay-mapping-summary" class="text-muted small d-block"></span>
             </label>
             <div class="form-text">
@@ -105,6 +119,7 @@
             var radioRegex = document.getElementById("add-bay-mapping-kind-regex");
             var radioExact = document.getElementById("add-bay-mapping-kind-exact");
             var preview = document.getElementById("add-bay-mapping-preview");
+            var preferredMappingKind = null;
             if (!nameInput || !checkbox) return;
 
             // Mirror of AddBayTemplateView._derive_mapping_pattern. Maps
@@ -205,8 +220,19 @@
             }
 
             nameInput.addEventListener("input", refresh);
-            radioRegex.addEventListener("change", refresh);
-            radioExact.addEventListener("change", refresh);
+            {% if mapping_only %}
+            nameInput.addEventListener("change", function () {
+                radioRegex.checked = preferredMappingKind !== "exact";
+                radioExact.checked = preferredMappingKind === "exact";
+                refresh();
+            });
+            {% endif %}
+            function selectMappingKind(event) {
+                preferredMappingKind = event.target.value;
+                refresh();
+            }
+            radioRegex.addEventListener("change", selectMappingKind);
+            radioExact.addEventListener("change", selectMappingKind);
             // Server-supplied default kind, picked up on first render.
             {% if mapping_default_kind == "regex" %}radioRegex.checked = true;{% else %}radioExact.checked = true;{% endif %}
             refresh();
@@ -225,8 +251,8 @@
 
     <div class="modal-footer">
         <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
-        <button type="submit" class="btn btn-primary">
-            <i class="mdi mdi-plus me-1"></i>Add Bay Template
+        <button type="submit" class="btn btn-primary"{% if mapping_only and not available_bay_names %} disabled{% endif %}>
+            <i class="mdi mdi-plus me-1"></i>{% if mapping_only %}Save Mapping{% else %}Add Bay Template{% endif %}
         </button>
     </div>
 </form>

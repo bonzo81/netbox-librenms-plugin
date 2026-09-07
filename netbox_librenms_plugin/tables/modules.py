@@ -665,6 +665,8 @@ class LibreNMSModuleTable(tables.Table):
             and self.can_delete_module
             and record.get("can_replace")
             and record.get("installed_module_id")
+            and record.get("ent_physical_index") is not None
+            and record.get("ent_physical_index") != ""
         ):
             preview_url = reverse(
                 "plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": self.device.pk}
@@ -836,6 +838,40 @@ class LibreNMSModuleTable(tables.Table):
                     "</a>",
                     base_url,
                     qs,
+                )
+            )
+
+        if (
+            record.get("status") == "No Bay"
+            and not record.get("model_suggestion")
+            and record.get("device_empty_bay_names")
+            and not record.get("depth")
+            and not record.get("no_bay_reason")
+            and record.get("item_class") != "port"
+            and record.get("mapping_source_name")
+            and getattr(self, "can_add_module_bay_mapping", False)
+        ):
+            mapping_url = reverse(
+                "plugins:netbox_librenms_plugin:add_bay_template",
+                kwargs={"pk": record.get("selected_device_id") or self.device.pk},
+            )
+            mapping_params = urlencode(
+                {
+                    "mode": "map_existing",
+                    "librenms_name": record["mapping_source_name"],
+                    "librenms_class": record.get("item_class") or "",
+                    "server_key": self.server_key or "",
+                }
+            )
+            buttons.append(
+                format_html(
+                    '<button type="button" class="btn btn-sm btn-outline-primary ms-1"'
+                    ' hx-get="{}?{}" hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"'
+                    ' title="Choose an existing bay and review the proposed mapping">'
+                    '<i class="mdi mdi-link-variant"></i> Map Existing Bay</button>',
+                    mapping_url,
+                    mapping_params,
                 )
             )
 
