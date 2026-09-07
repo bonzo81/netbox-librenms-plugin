@@ -722,6 +722,16 @@ class LibreNMSAPI:
                 # A caller that supplies LAG patterns also supplies the SAP policy.
                 compiled_sap_patterns = []
 
+        def _has_sap_name(*ports) -> bool:
+            """Return whether any name on these ports matches an excluded SAP pattern."""
+            names = tuple(
+                name
+                for port in ports
+                for field in INTERFACE_NAME_FIELDS
+                if isinstance(name := port.get(field), str) and name
+            )
+            return any(pattern.search(name) for pattern in compiled_sap_patterns for name in names)
+
         # Validate and remove SAP rows once so fallback cannot reconsider them.
         filtered_port_pairs = []
         for entry in port_stack:
@@ -739,13 +749,7 @@ class LibreNMSAPI:
             low_port = by_id.get(low_id)
             if not high_port or not low_port:
                 continue
-            names = tuple(
-                name
-                for port in (high_port, low_port)
-                for field in INTERFACE_NAME_FIELDS
-                if isinstance(name := port.get(field), str) and name
-            )
-            if any(pattern.search(name) for pattern in compiled_sap_patterns for name in names):
+            if _has_sap_name(high_port, low_port):
                 continue
             filtered_port_pairs.append((high_port, low_port))
 
@@ -856,6 +860,9 @@ class LibreNMSAPI:
                     continue
                 parent_port = _name_derived_parent(port)
                 if parent_port is None or normalize_librenms_port_id(parent_port.get("port_id")) is None:
+                    continue
+                # This loop walks ports_with_id, not filtered_port_pairs, so rule 2 is reapplied here.
+                if _has_sap_name(port, parent_port):
                     continue
                 _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
 

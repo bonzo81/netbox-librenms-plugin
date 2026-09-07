@@ -29,6 +29,141 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
 
 
+@pytest.mark.django_db
+class TestCachedInterfaceUrlFallback:
+    """index_ip_source_interfaces builds a by_pk map for a rename-safe interface_url fallback.
+
+    resolve_ip_source_interface implements that fallback, but the view discarded by_pk and the
+    rebuilt entry dropped interface_url, so the last resort could never fire and a renamed
+    in-scope interface read as unmatched.
+    """
+
+    @staticmethod
+    def _view():
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        return object.__new__(BaseIPAddressTableView)
+
+    def test_prefetch_returns_the_by_pk_index(self):
+        """The map is built either way; the bug was that the view never handed it on."""
+        device = make_device("ipurl-prefetch")
+        interface = make_interface(device, "Ethernet1")
+
+        prefetched = self._view()._prefetch_netbox_data(device, [], server_key="default")
+
+        assert prefetched["interfaces_by_pk"] == {str(interface.pk): interface}
+
+    def test_a_renamed_interface_still_resolves_through_its_cached_url(self):
+        """port_id is unusable and the cached name is stale, so only the PK-backed URL is left."""
+        device = make_device("ipurl-rename")
+        interface = make_interface(device, "Ethernet1")
+        cached_url = interface.get_absolute_url()
+        interface.name = "Ethernet1-renamed"
+        interface.save()
+
+        enriched = self._view().enrich_ip_data(
+            [
+                {
+                    "ipv4_address": "192.0.2.50",
+                    "ipv4_prefixlen": 24,
+                    "port_id": 9999,
+                    "interface_name": "Ethernet1",
+                    "interface_url": cached_url,
+                }
+            ],
+            device,
+            "ifName",
+            server_key="default",
+            port_data_cache={9999: None},
+        )
+
+        assert len(enriched) == 1
+        assert enriched[0]["interface_name"] == "Ethernet1-renamed"
+        assert enriched[0]["interface_url"] == cached_url
+
+    def test_an_unknown_cached_url_stays_fail_closed(self):
+        """by_pk is scoped to this object, so a URL naming another device resolves to nothing."""
+        device = make_device("ipurl-foreign")
+        make_interface(device, "Ethernet1")
+        other = make_interface(make_device("ipurl-other"), "Ethernet9")
+
+        enriched = self._view().enrich_ip_data(
+            [
+                {
+                    "ipv4_address": "192.0.2.51",
+                    "ipv4_prefixlen": 24,
+                    "port_id": 9998,
+                    "interface_name": "Nonexistent",
+                    "interface_url": other.get_absolute_url(),
+                }
+            ],
+            device,
+            "ifName",
+            server_key="default",
+            port_data_cache={9998: None},
+        )
+
+        assert len(enriched) == 1
+        assert enriched[0].get("interface_name") != other.name
+
+
+@pytest.mark.django_db
+class TestIPAddressTableSelectionColumn:
+    """identify_ip_sync_rows leaves row_id None for a duplicate address with no usable port_id.
+
+    ToggleColumn passes default="" and django-tables2 substitutes a column default whenever the
+    accessor resolves to None, so render() never runs and the cell carries no <input> at all.
+    That is what keeps the row unselectable, by click and by select-all alike, so the cell must
+    stay empty rather than gain a valueless checkbox.
+    """
+
+    @staticmethod
+    def _rendered_rows(rows):
+        from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
+        from netbox_librenms_plugin.utils import identify_ip_sync_rows
+
+        table = IPAddressTable(identify_ip_sync_rows(rows))
+        return [row.get_cell("selection") for row in table.rows]
+
+    @staticmethod
+    def _row(address, port_id):
+        return {
+            "ip_with_mask": address,
+            "ip_address": address.split("/")[0],
+            "prefix_length": int(address.split("/")[1]),
+            "port_id": port_id,
+            "device": "dup-device",
+            "device_url": "/dcim/devices/1/",
+            "interface_name": "Ethernet1",
+            "vrf_id": None,
+            "vrfs": [],
+        }
+
+    def test_an_unidentifiable_duplicate_row_renders_no_checkbox_at_all(self):
+        """Both rows share an address and neither has a usable port_id, so row_id is None."""
+        cells = self._rendered_rows([self._row("192.0.2.10/24", None), self._row("192.0.2.10/24", None)])
+
+        assert len(cells) == 2
+        for cell in cells:
+            assert cell == "", f"an unselectable row must render no input: {cell!r}"
+            assert "<input" not in cell
+
+    def test_an_identifiable_row_stays_selectable(self):
+        """The guard must not disable rows the view can actually resolve."""
+        cells = self._rendered_rows([self._row("192.0.2.11/24", 7001)])
+
+        assert len(cells) == 1
+        assert 'value="192.0.2.11/24"' in cells[0], f"a resolvable row must carry its row_id: {cells[0]!r}"
+
+    def test_distinguishable_duplicates_stay_selectable(self):
+        """Duplicates with usable port_ids get distinct row_ids and remain selectable."""
+        cells = self._rendered_rows([self._row("192.0.2.12/24", 7002), self._row("192.0.2.12/24", 7003)])
+
+        assert len(cells) == 2
+        for cell, port_id in zip(cells, (7002, 7003), strict=True):
+            assert f'value="192.0.2.12/24@{port_id}"' in cell, f"duplicate must carry its port id: {cell!r}"
+
+
 def _json_response(url, payload, status=200):
     """Return a real requests response carrying a JSON payload."""
     response = Response()

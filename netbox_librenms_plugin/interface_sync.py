@@ -2,7 +2,9 @@
 
 import logging
 
+from dcim.fields import MACAddressField
 from dcim.models import Device, Interface, MACAddress
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from virtualization.models import VirtualMachine, VMInterface
 
@@ -39,6 +41,13 @@ def get_netbox_interface_type(librenms_interface, *, speed_converter=convert_spe
 def assign_interface_mac(interface, mac_address):
     """Assign one MAC address to an interface when LibreNMS supplies it."""
     if not isinstance(mac_address, str) or not mac_address.strip():
+        return
+    try:
+        # Validate through NetBox's own field: the macaddr column rejects whatever netaddr.EUI
+        # cannot parse, and that raises on the filter below, before create() is reached.
+        MACAddressField().to_python(mac_address)
+    except ValidationError:
+        logger.debug("LibreNMS reported an unusable MAC %r; skipping only the MAC.", mac_address)
         return
     existing_mac = interface.mac_addresses.filter(mac_address=mac_address).first()
     mac_obj = existing_mac or MACAddress.objects.create(mac_address=mac_address)

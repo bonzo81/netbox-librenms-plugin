@@ -1477,6 +1477,7 @@ class TestEnrichIpDataPortInfo:
         prefetched = {
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {},
+            "interfaces_by_pk": {},
             "all_interfaces": [],
             "device": obj,
             "ip_addresses_map": {},
@@ -1515,6 +1516,7 @@ class TestEnrichIpDataPortInfo:
         prefetched = {
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {},
+            "interfaces_by_pk": {},
             "all_interfaces": [],
             "device": obj,
             "ip_addresses_map": {},
@@ -1717,6 +1719,7 @@ class TestPrepareContextInterfaceNameFieldNone:
                 return_value={
                     "interfaces_by_librenms_id": {},
                     "interfaces_by_name": {},
+                    "interfaces_by_pk": {},
                     "all_interfaces": [],
                     "device": obj,
                     "ip_addresses_map": {},
@@ -1758,6 +1761,7 @@ class TestPrepareContextInterfaceNameFieldNone:
                 return_value={
                     "interfaces_by_librenms_id": {},
                     "interfaces_by_name": {},
+                    "interfaces_by_pk": {},
                     "all_interfaces": [],
                     "device": obj,
                     "ip_addresses_map": {},

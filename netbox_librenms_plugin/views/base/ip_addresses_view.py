@@ -134,7 +134,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             ip_matches = prefetched_data["ip_addresses_map"].get(ip_with_mask, [])
             if source_address_counts.get(ip_with_mask, 0) > 1:
                 source_interface = resolve_ip_source_interface(
-                    enriched_ip, prefetched_data["interfaces_by_librenms_id"], prefetched_data["interfaces_by_name"]
+                    enriched_ip,
+                    prefetched_data["interfaces_by_librenms_id"],
+                    prefetched_data["interfaces_by_name"],
+                    prefetched_data["interfaces_by_pk"],
                 )
                 ip_matches = [
                     ip for ip in ip_matches if source_interface is not None and ip.assigned_object == source_interface
@@ -239,7 +242,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             all_interfaces = list(obj.interfaces.all())
             obj_device_id = None
         server_key = server_key or self._render_server_key()
-        interfaces_by_librenms_id, interfaces_by_name, _by_pk = index_ip_source_interfaces(
+        interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk = index_ip_source_interfaces(
             all_interfaces, server_key, obj_device_id
         )
 
@@ -260,6 +263,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         return {
             "interfaces_by_librenms_id": interfaces_by_librenms_id,
             "interfaces_by_name": interfaces_by_name,
+            # Carries the rename-safe interface_url fallback in resolve_ip_source_interface().
+            "interfaces_by_pk": interfaces_by_pk,
             "all_interfaces": all_interfaces,
             "device": obj,
             "ip_addresses_map": ip_addresses_map,
@@ -287,7 +292,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         prefix_length = parsed.network.prefixlen
         ip_with_mask = str(parsed)
 
-        return {
+        entry = {
             "ip_address": ip_address,
             "prefix_length": prefix_length,
             "ip_with_mask": ip_with_mask,
@@ -297,6 +302,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "vrf_id": None,
             "vrfs": vrfs,
         }
+        # A re-rendered cached row already knows its interface URL; that PK survives a rename,
+        # so keep it as the last resort when port_id is unusable and the name has drifted.
+        cached_url = ip_entry.get("interface_url")
+        if isinstance(cached_url, str) and cached_url:
+            entry["interface_url"] = cached_url
+        return entry
 
     def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
         """Add information for IP addresses that exist in NetBox"""
@@ -320,9 +331,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         assigned_interface = ip_address.assigned_object
 
         interface = resolve_ip_source_interface(
-            {"port_id": port_id, "interface_name": librenms_interface_name},
+            {
+                "port_id": port_id,
+                "interface_name": librenms_interface_name,
+                "interface_url": enriched_ip.get("interface_url"),
+            },
             prefetched_data["interfaces_by_librenms_id"],
             prefetched_data["interfaces_by_name"],
+            prefetched_data["interfaces_by_pk"],
         )
         if interface is not None and assigned_interface == interface:
             enriched_ip["status"] = "matched"
@@ -332,9 +348,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
     def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
         """Add the same scoped interface that the sync writer will resolve."""
         interface = resolve_ip_source_interface(
-            {"port_id": port_id, "interface_name": librenms_interface_name},
+            {
+                "port_id": port_id,
+                "interface_name": librenms_interface_name,
+                "interface_url": enriched_ip.get("interface_url"),
+            },
             prefetched_data["interfaces_by_librenms_id"],
             prefetched_data["interfaces_by_name"],
+            prefetched_data["interfaces_by_pk"],
         )
         if interface is not None:
             enriched_ip["interface_name"] = interface.name

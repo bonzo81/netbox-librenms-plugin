@@ -4078,6 +4078,55 @@ class TestSyncLagAndParentRelationships:
             view._selected_port_ids = set(selected_port_ids)
         return view
 
+    @staticmethod
+    def _vm_iface(vm, name, port_id):
+        from virtualization.models import VMInterface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = VMInterface.objects.create(virtual_machine=vm, name=name)
+        set_librenms_device_id(iface, port_id, "default")
+        iface.save()
+        return iface
+
+    def _sync_vm_sub_interface(self, name_limit=None):
+        """Run the relationship pass for one VM sub-interface, optionally shrinking the
+        VMInterface name limit. Interface and VMInterface both allow 64 in NetBox 4.7, so the
+        gate reading the wrong model is only observable once the two differ."""
+        from unittest.mock import patch
+        from virtualization.models import VMInterface
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        vm = make_vm("relgate-vm")
+        parent = self._vm_iface(vm, "eth0", 10)
+        child = self._vm_iface(vm, "eth0.100", 11)
+        ports_data = [
+            {"ifName": "eth0", "ifDescr": "eth0", "port_id": 10},
+            {"ifName": "eth0.100", "ifDescr": "eth0.100", "port_id": 11},
+        ]
+        relationships = {"lag_members": {}, "sub_interfaces": {11: 10}}
+        view = self._make_view(selected_port_ids={11})
+
+        if name_limit is None:
+            view._sync_lag_and_parent_relationships(vm, ports_data, relationships, "default")
+        else:
+            with patch.object(VMInterface._meta.get_field("name"), "max_length", name_limit):
+                view._sync_lag_and_parent_relationships(vm, ports_data, relationships, "default")
+
+        child.refresh_from_db()
+        return child, parent
+
+    def test_the_relationship_gate_bounds_a_vm_name_by_vminterface(self, db):
+        """The writer refuses a name over VMInterface's limit, so the gate must refuse it too."""
+        child, _ = self._sync_vm_sub_interface(name_limit=5)
+
+        assert child.parent_id is None, "a name the VMInterface writer refuses must not gain a parent"
+
+    def test_the_relationship_gate_still_links_a_vm_name_that_fits(self, db):
+        """The model-aware gate must not stop linking ordinary VM sub-interfaces."""
+        child, parent = self._sync_vm_sub_interface()
+
+        assert child.parent_id == parent.pk
+
     def test_duplicate_display_name_links_only_selected_port(self, db):
         """Selecting one stable port ID must not link another port with the same ifDescr."""
         device = self._make_device()

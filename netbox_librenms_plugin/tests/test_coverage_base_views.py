@@ -2892,6 +2892,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
                 "ip_addresses_map": {},
                 "interfaces_by_librenms_id": {},
                 "interfaces_by_name": {},
+                "interfaces_by_pk": {},
                 "all_interfaces": [],
                 "device": obj,
             },
@@ -2914,6 +2915,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
                 "ip_addresses_map": {},
                 "interfaces_by_librenms_id": {},
                 "interfaces_by_name": {},
+                "interfaces_by_pk": {},
                 "all_interfaces": [],
                 "device": obj,
             },
@@ -2933,6 +2935,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
             "ip_addresses_map": {},
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {},
+            "interfaces_by_pk": {},
             "all_interfaces": [],
             "device": obj,
         }
@@ -2964,6 +2967,7 @@ class TestBaseIPAddressTableViewEnrichIpData:
             "ip_addresses_map": {"192.168.1.1/24": [existing_ip]},
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {},
+            "interfaces_by_pk": {},
             "all_interfaces": [],
             "device": obj,
         }
@@ -3058,6 +3062,7 @@ class TestBaseIPAddressTableViewEnrichExistingIp:
         prefetched = {
             "interfaces_by_librenms_id": {"10": assigned_iface},
             "interfaces_by_name": {},
+            "interfaces_by_pk": {},
         }
 
         enriched = {}
@@ -3080,6 +3085,7 @@ class TestBaseIPAddressTableViewEnrichExistingIp:
         prefetched = {
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {"Gi0/0": assigned_iface},
+            "interfaces_by_pk": {},
         }
 
         enriched = {}
@@ -3101,6 +3107,7 @@ class TestBaseIPAddressTableViewEnrichExistingIp:
         prefetched = {
             "interfaces_by_librenms_id": {},  # No librenms_id match
             "interfaces_by_name": {"Gi0/1": other_iface},
+            "interfaces_by_pk": {},
         }
 
         enriched = {}
@@ -3168,6 +3175,7 @@ class TestBaseIPAddressTableViewAddInterfaceInfo:
         prefetched = {
             "interfaces_by_librenms_id": {"10": iface_by_id},
             "interfaces_by_name": {},
+            "interfaces_by_pk": {},
         }
 
         enriched = {}
@@ -3186,6 +3194,7 @@ class TestBaseIPAddressTableViewAddInterfaceInfo:
         prefetched = {
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {"Gi0/1": iface_by_name},
+            "interfaces_by_pk": {},
         }
 
         enriched = {}
@@ -3200,6 +3209,7 @@ class TestBaseIPAddressTableViewAddInterfaceInfo:
         prefetched = {
             "interfaces_by_librenms_id": {},
             "interfaces_by_name": {},
+            "interfaces_by_pk": {},
         }
 
         enriched = {"ip_address": "10.0.0.1"}

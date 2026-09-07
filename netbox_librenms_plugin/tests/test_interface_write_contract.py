@@ -25,6 +25,46 @@ def _port(**overrides):
 
 
 @pytest.mark.django_db
+class TestInterfaceMacContract:
+    """A malformed ifPhysAddress must skip only the MAC, never abort the interface update."""
+
+    def _sync(self, name, mac):
+        from netbox_librenms_plugin.interface_sync import update_interface_from_port
+
+        device = make_device(f"mac-{name}")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        update_interface_from_port(
+            interface,
+            _port(ifPhysAddress=mac, ifAlias="Updated alias"),
+            server_key="default",
+            interface_name_field="ifName",
+            netbox_type="1000base-t",
+        )
+        interface.refresh_from_db()
+        return interface
+
+    @pytest.mark.parametrize("mac", ["unknown", "n/a", "zz:zz:zz:zz:zz:zz"])
+    def test_a_malformed_mac_is_skipped_and_the_interface_still_updates(self, mac):
+        """NetBox's macaddr column rejects these, and the rejection fires on the mac_addresses
+        lookup, so an unvalidated write aborts the whole interface update."""
+        from dcim.models import MACAddress
+
+        interface = self._sync(mac.replace(":", "").replace("/", "")[:8], mac)
+
+        assert interface.description == "Updated alias", "the interface update must still land"
+        assert not interface.mac_addresses.exists(), f"{mac!r} must not be persisted as a MAC"
+        # Not filter(mac_address=mac): the column parses the lookup value and would raise here too.
+        assert not MACAddress.objects.exists()
+
+    def test_a_well_formed_mac_is_still_written(self):
+        """The guard must not reject the valid case it is wrapped around."""
+        interface = self._sync("valid", "00:11:22:33:44:55")
+
+        assert interface.mac_addresses.count() == 1
+        assert str(interface.mac_addresses.first().mac_address) == "00:11:22:33:44:55"
+
+
+@pytest.mark.django_db
 class TestInterfaceMtuContract:
     """An out-of-range or non-numeric ifMtu must not reach the column."""
 

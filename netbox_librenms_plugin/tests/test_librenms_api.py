@@ -2511,6 +2511,31 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {101: 102}
         assert 200 not in result["lag_members"]
 
+    def test_sap_rows_stay_excluded_from_the_name_derived_sub_interface_fallback(self, mock_librenms_api):
+        """Rule 2 skips a SAP pair, but the name-derived fallback walks every port with an id,
+        not the filtered pairs, so a SAP child can still be recorded as a sub-interface."""
+        ports = [
+            {"port_id": 301, "ifName": "lag-1:10", "ifDescr": "lag-1:10", "ifType": "ipForward"},
+            {"port_id": 302, "ifName": "lag-1:10.100", "ifDescr": "lag-1:10.100", "ifType": "ipForward"},
+        ]
+        # No port_stack pair: the fallback is the only path that can relate these two.
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [], lag_patterns={}, compiled_sap_patterns=[re.compile(":")]
+        )
+        assert 302 not in result["sub_interfaces"], "a SAP row must not gain a name-derived parent"
+        assert result["sub_interfaces"] == {}
+
+    def test_the_name_derived_fallback_still_relates_non_sap_sub_interfaces(self, mock_librenms_api):
+        """The SAP guard must not disable the fallback for ordinary rows."""
+        ports = [
+            {"port_id": 401, "ifName": "ge-0/0/1", "ifDescr": "ge-0/0/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 402, "ifName": "ge-0/0/1.100", "ifDescr": "ge-0/0/1.100", "ifType": "l2vlan"},
+        ]
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [], lag_patterns={}, compiled_sap_patterns=[re.compile(":")]
+        )
+        assert result["sub_interfaces"] == {402: 401}
+
     def test_junos_sub_unit_stripping(self, mock_librenms_api):
         """Junos: xe-0/0/0.0 -> ae1.0 pair strips to xe-0/0/0 member of ae1."""
         result = mock_librenms_api.resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[:1], lag_patterns={})

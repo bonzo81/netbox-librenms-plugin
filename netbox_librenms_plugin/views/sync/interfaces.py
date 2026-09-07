@@ -407,10 +407,14 @@ class SyncInterfacesView(
             if normalize_librenms_port_id(port_id) in lag_members
             or normalize_librenms_port_id(port_id) in sub_interfaces
         }
+        # Same rule as the writer gate below: read the concrete model, since the default would
+        # admit a name VMInterface refuses and the pass would then persist its parent anyway.
+        relationship_writer_model = VMInterface if isinstance(obj, VirtualMachine) else Interface
         valid_name_port_ids = {
             normalize_librenms_port_id(port.get("port_id"))
             for port in ports_data
-            if port.get("_source") != "oob" and syncable_interface_name(port, interface_name_field) is not None
+            if port.get("_source") != "oob"
+            and syncable_interface_name(port, interface_name_field, relationship_writer_model) is not None
         }
         selected_edge_source_ids &= {str(port_id) for port_id in valid_name_port_ids if port_id is not None}
         if not selected_edge_source_ids:
