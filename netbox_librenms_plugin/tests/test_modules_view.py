@@ -149,6 +149,19 @@ class TestInventoryClassIncludeRule:
 
         assert names == ["Routing Engine 0", "Routing Engine 1"]
 
+    def test_a_numeric_description_still_names_the_rule_admitted_row(self):
+        """LibreNMS sends an all-digit entPhysicalDescr as a JSON number, which the name
+        fallback stripped directly."""
+        inventory = self._inventory()
+        inventory[1]["entPhysicalDescr"] = 20250907
+        collected = self._collect(inventory, [self._include_rule()])
+        view = _make_view()
+
+        row = view._build_row(collected[0], {item["entPhysicalIndex"]: item for item in collected}, {}, {})
+
+        assert row["name"] == "20250907"
+        assert row["description"] == "20250907"
+
     def test_a_skip_rule_still_wins_over_the_allowlist_admission(self):
         """An operator must still be able to drop an item the include rule let through."""
         from netbox_librenms_plugin.models import InventoryIgnoreRule

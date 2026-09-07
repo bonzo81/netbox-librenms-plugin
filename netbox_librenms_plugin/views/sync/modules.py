@@ -938,6 +938,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
+        # Same reason for the serial scope: normalize_inventory_serial() reads the rule table
+        # per item otherwise, inside the install transaction.
+        norm_rules_serial = preload_normalization_rules(
+            "serial", manufacturer=getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        )
 
         # Install top-down: each install may create new child bays
         installed = []
@@ -956,6 +961,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
+                        norm_rules_serial=norm_rules_serial,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
                         changeable_components=changeable_components,
@@ -1085,6 +1091,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         regex_mappings=None,
         manufacturer_id=None,
         norm_rules_bay=None,
+        norm_rules_serial=None,
     ):
         """
         Try to install a single inventory item.
@@ -1100,7 +1107,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # The serial-scope rules strip vendor markers such as Juniper's "S/N ", and the
         # coercion handles the all-digit serials LibreNMS sends as JSON numbers.
         serial = normalize_inventory_serial(
-            item.get("entPhysicalSerialNum"), manufacturer=device.device_type.manufacturer
+            item.get("entPhysicalSerialNum"),
+            manufacturer=device.device_type.manufacturer,
+            preloaded_rules=norm_rules_serial,
         )
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
@@ -1516,6 +1525,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
+        # The rows can target different manufacturers, so seed the unscoped scope only;
+        # apply_normalization_rules caches each manufacturer it meets into this same dict.
+        norm_rules_serial = preload_normalization_rules("serial")
 
         installed, skipped, failed = [], [], []
 
@@ -1556,6 +1568,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
+                        norm_rules_serial=norm_rules_serial,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
                         changeable_components=changeable_components,

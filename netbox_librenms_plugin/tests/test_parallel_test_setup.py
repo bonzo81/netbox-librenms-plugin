@@ -46,7 +46,7 @@ def test_no_test_module_registers_a_session_wide_plugin():
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
     """Assign one PostgreSQL database and two Redis databases to a worker."""
     assert isolated_test_database_name("test_netbox_librenms", "gw3") == "test_netbox_librenms_gw3"
-    assert isolated_redis_databases("gw3") == (3, 11)
+    assert isolated_redis_databases("gw3") == (3, MAX_PARALLEL_WORKERS + 3)
 
 
 def test_serial_run_keeps_default_database_targets():
@@ -85,7 +85,7 @@ def test_active_worker_uses_its_private_database_targets(settings):
     assert settings.CACHES["default"]["LOCATION"].endswith(f"/{cache_database}")
 
 
-def test_local_and_ci_commands_use_eight_workers():
+def test_local_and_ci_commands_use_the_supported_worker_count():
     """Keep local and CI test entry points on the supported worker count."""
     aliases = (REPOSITORY_ROOT / ".devcontainer/scripts/load-aliases.sh").read_text()
     workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()

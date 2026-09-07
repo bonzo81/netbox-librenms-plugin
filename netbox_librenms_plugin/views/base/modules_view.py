@@ -1538,16 +1538,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 port_id = None
 
             if port_id is None or port_id <= 0:
-                candidates = []
-                for value in [
-                    item.get("_librenms_ifname"),
-                    item.get("_librenms_ifdescr"),
-                    item.get("entPhysicalName"),
-                    item.get("entPhysicalDescr"),
-                ]:
-                    label = (value or "").strip()
-                    if label and label not in candidates:
-                        candidates.append(label)
+                candidates = BaseModuleTableView._interface_name_candidates(item)
 
                 matched_ids = [label_to_port_id[label] for label in candidates if label in label_to_port_id]
                 matched_ids = sorted(set(matched_ids))
@@ -1626,7 +1617,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             item.get("entPhysicalName"),
             item.get("entPhysicalDescr"),
         ]:
-            label = (value or "").strip()
+            label = _normalize_librenms_text(value)
             if label and label not in candidates:
                 candidates.append(label)
         return candidates
@@ -2385,12 +2376,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
         phys_class = item.get("entPhysicalClass", "")
         name = item.get("entPhysicalName", "") or "-"
-        description = item.get("entPhysicalDescr", "") or ""
+        description = _normalize_librenms_text(item.get("entPhysicalDescr"))
         # A class admitted by rule is hardware the vendor files outside the usual classes, and
         # it tends to carry the model in entPhysicalName: a Juniper MX304 names both Routing
         # Engines "JNP304-RE-S". The description holds the label that separates them.
         if item.get("_class_included"):
-            name = description.strip() or name
+            name = description or name
 
         # OOB-controller modules come from a *separate* device. Comparing them against this
         # host's bays/types/installed modules is meaningless, and the host matching below could

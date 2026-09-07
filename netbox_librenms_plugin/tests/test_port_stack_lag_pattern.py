@@ -34,6 +34,23 @@ class TestPortStackLagPattern:
         # resolved is a different case, covered by the test below.
         assert model.compiled_sap_patterns_for_os("junos") == []
 
+    def test_the_unscoped_lag_read_is_a_superset_of_every_scoped_read(self):
+        """The refresh gates the scoped LAG read on a name signal measured with the unscoped set.
+
+        That gate is only safe while the unscoped read returns every stored row, so a scoped
+        pattern can never match a name the unscoped signal missed. Narrowing the None case would
+        silently drop OS-scoped LAG matching from a structural-only snapshot.
+        """
+        model = self._model()
+        model.objects.create(librenms_os="eos", lag_name_pattern=r"^Port-Channel\d+$")
+
+        unscoped = {pattern.pattern for pattern in model.compiled_patterns_for_os(None)}
+
+        for stored_os in model.objects.exclude(lag_name_pattern="").values_list("librenms_os", flat=True):
+            scoped = {pattern.pattern for pattern in model.compiled_patterns_for_os(stored_os)}
+            assert scoped <= unscoped, f"{stored_os}: {scoped - unscoped}"
+        assert r"^Port-Channel\d+$" in unscoped
+
     def test_an_unknown_os_applies_every_stored_sap_rule(self):
         """The SAP reader over-skips rather than under-skips, the opposite of the LAG reader.
 

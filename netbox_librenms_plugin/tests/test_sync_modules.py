@@ -16,6 +16,106 @@ import pytest
 from netbox_librenms_plugin.tests.view_test_helpers import get as _get, post as _post
 
 
+@pytest.mark.django_db
+class TestInstallSerialRulePreloading:
+    """The install loop must not re-read the serial NormalizationRule rows per item."""
+
+    def _install_two_items(self, device, bays, module_type, **kwargs):
+        # Calls the installer directly: the shared _run_install_single helper is rewritten
+        # further up the stack and its signature is not stable across branches.
+        from unittest.mock import patch
+
+        from dcim.models import Interface, ModuleBay
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, _module_component_specs
+
+        items = [
+            {
+                "entPhysicalIndex": index,
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": f"S/N SN{index}",
+                "entPhysicalName": f"Line Card {index}",
+                "entPhysicalContainedIn": 0,
+            }
+            for index in (10, 11)
+        ]
+        index_map = {item["entPhysicalIndex"]: item for item in items}
+        remaining = list(bays)
+        with (
+            patch.object(InstallBranchView, "_find_parent_module_id", return_value=None),
+            patch.object(InstallBranchView, "_match_bay", side_effect=lambda *a, **kw: remaining.pop(0)),
+        ):
+            for item in items:
+                InstallBranchView._install_single(
+                    device,
+                    item,
+                    index_map,
+                    {module_type.model: module_type},
+                    module_bays=ModuleBay.objects.all(),
+                    allowed_module_type_ids={module_type.pk},
+                    changeable_components={model: model.objects.all() for _, _, model in _module_component_specs()},
+                    changeable_interfaces=Interface.objects.all(),
+                    deletable_interfaces=Interface.objects.all(),
+                    exact_mappings=[],
+                    regex_mappings=[],
+                    manufacturer_id=device.device_type.manufacturer_id,
+                    norm_rules_bay={},
+                    **kwargs,
+                )
+
+    @staticmethod
+    def _rule_queries(captured):
+        return [q["sql"] for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
+
+    def test_preloaded_serial_rules_replace_the_per_item_rule_queries(self):
+        """Without preloaded rules every installed item re-reads the serial rules."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.utils import preload_normalization_rules
+
+        module_type = make_module_type("WS-X4748")
+        device = make_device("install-serial-rules-dev")
+        first_bays = [make_module_bay(device, "Slot 1"), make_module_bay(device, "Slot 2")]
+
+        with CaptureQueriesContext(connection) as per_item:
+            self._install_two_items(device, first_bays, module_type)
+
+        # Two items, so the unpreloaded path reads the rule table more than once.
+        assert len(self._rule_queries(per_item)) > 2, self._rule_queries(per_item)
+
+        other = make_device("install-serial-rules-dev-2")
+        second_bays = [make_module_bay(other, "Slot 1"), make_module_bay(other, "Slot 2")]
+
+        with CaptureQueriesContext(connection) as preloaded:
+            rules = preload_normalization_rules("serial", manufacturer=other.device_type.manufacturer)
+            self._install_two_items(other, second_bays, module_type, norm_rules_serial=rules)
+
+        # The preload itself reads both scopes once; the install loop then reads nothing.
+        assert len(self._rule_queries(preloaded)) == 2, self._rule_queries(preloaded)
+
+    def test_both_install_views_forward_the_serial_rules(self):
+        """A behavioural test cannot reach the two post() loops, so pin their call shape."""
+        import ast
+        import inspect
+
+        from netbox_librenms_plugin.views.sync import modules as modules_module
+
+        tree = ast.parse(inspect.getsource(modules_module))
+        posts = [
+            child
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name in {"InstallBranchView", "InstallSelectedView"}
+            for child in node.body
+            if isinstance(child, ast.FunctionDef) and child.name == "post"
+        ]
+
+        assert len(posts) == 2, "both install views must define post()"
+        for install_post in posts:
+            assert "norm_rules_serial=" in ast.unparse(install_post), "a post() does not forward norm_rules_serial"
+
+
 @contextmanager
 def _patch_build_row_deps(view, match_bay_return=None):
     """Patch all utility imports used by _build_row to isolate bay/type matching tests."""
