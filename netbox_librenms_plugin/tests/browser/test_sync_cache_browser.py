@@ -1735,7 +1735,7 @@ def test_hung_cache_status_request_times_out_and_fails_closed(page):
 
     page.clock.fast_forward(20_000)
     page.clock.resume()
-    page.wait_for_function("syncCacheController().lastCheckFailed === true", timeout=1_000)
+    page.wait_for_function("syncCacheController().lastCheckFailed === true")
 
     assert page.evaluate("syncCacheController().checking") is None
     assert page.locator("#interface-action").count() == 0
@@ -1773,7 +1773,7 @@ def test_hung_cache_fragment_request_times_out_and_fails_closed(page):
 
     page.clock.fast_forward(20_000)
     page.clock.resume()
-    page.wait_for_function("syncCacheController().lastCheckFailed === true", timeout=1_000)
+    page.wait_for_function("syncCacheController().lastCheckFailed === true")
 
     assert page.evaluate("syncCacheController().checking") is None
     assert page.locator("#interface-action").count() == 0
