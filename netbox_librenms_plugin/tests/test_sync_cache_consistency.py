@@ -1191,6 +1191,8 @@ def test_module_install_invalidates_other_tabs_after_creating_a_module(
 @pytest.mark.django_db
 def test_unchanged_module_serial_preserves_other_snapshots(client, settings, django_capture_on_commit_callbacks):
     """Submitting the existing serial must not publish a cache mutation."""
+    from django.contrib.messages import get_messages
+
     _configure_servers(settings)
     device = make_device("cache-module-unchanged", librenms_cf={"primary": {"id": 641}})
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
@@ -1232,6 +1234,9 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
         )
 
     assert response.status_code == 302
+    assert [str(message) for message in get_messages(response.wsgi_request)] == [
+        "The module serial already matches LibreNMS. No change was needed."
+    ]
     assert cache.get(_cache_key("ports", device, "primary")) is not None
     coordinator = SyncCacheConsistency(device)
     assert cache.get(coordinator.state_key(SyncTab.MODULES, "primary")) is None
