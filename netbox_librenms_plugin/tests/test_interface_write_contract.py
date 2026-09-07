@@ -56,6 +56,17 @@ class TestInterfaceMacContract:
         # Not filter(mac_address=mac): the column parses the lookup value and would raise here too.
         assert not MACAddress.objects.exists()
 
+    def test_the_rejection_is_logged_without_the_mac_value(self, caplog):
+        """A MAC is private data, so the diagnostic must name the interface, not the value."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="netbox_librenms_plugin.interface_sync"):
+            interface = self._sync("logged", "unknown")
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(str(interface.pk) in message for message in messages), messages
+        assert not any("unknown" in message for message in messages), messages
+
     def test_a_well_formed_mac_is_still_written(self):
         """The guard must not reject the valid case it is wrapped around."""
         interface = self._sync("valid", "00:11:22:33:44:55")

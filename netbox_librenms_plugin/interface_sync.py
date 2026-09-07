@@ -47,7 +47,8 @@ def assign_interface_mac(interface, mac_address):
         # cannot parse, and that raises on the filter below, before create() is reached.
         MACAddressField().to_python(mac_address)
     except ValidationError:
-        logger.debug("LibreNMS reported an unusable MAC %r; skipping only the MAC.", mac_address)
+        # Name the interface, never the value: a MAC is private data to py/clear-text-logging.
+        logger.debug("LibreNMS reported an unusable MAC for interface %s; skipping only the MAC.", interface.pk)
         return
     existing_mac = interface.mac_addresses.filter(mac_address=mac_address).first()
     mac_obj = existing_mac or MACAddress.objects.create(mac_address=mac_address)
