@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 from django.core.cache import cache
+from django.db import connection
 
 from netbox_librenms_plugin.tests.conftest import (
     ip_on,
@@ -17,6 +18,48 @@ from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_serv
 
 
 SERVER_KEY = "test-server"
+
+
+@pytest.mark.django_db
+def test_trimmed_serial_lookup_uses_expression_index():
+    from netbox_librenms_plugin.utils import find_devices_by_serial
+
+    device = make_device("padded-serial", serial=" \t\n\r\v\fSERIAL-TRIM \t\n\r\v\f")
+    queries = []
+
+    def capture_query(execute, sql, params, many, context):
+        queries.append((sql, params))
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(capture_query):
+        assert find_devices_by_serial("SERIAL-TRIM") == [device]
+
+    fallback_queries = [(sql, params) for sql, params in queries if "BTRIM(" in sql]
+    assert len(fallback_queries) == 1
+    sql, params = fallback_queries[0]
+    index_name = "nblp_dcim_device_serial_trim_idx"
+    with connection.cursor() as cursor:
+        cursor.execute("SET LOCAL enable_seqscan = off")
+        cursor.execute("EXPLAIN " + sql, params)
+        plan = "\n".join(row[0] for row in cursor.fetchall())
+        assert index_name in plan, plan
+
+        cursor.execute(
+            """
+            SELECT indisvalid, indrelid = to_regclass('dcim_device'),
+                   pg_get_expr(indexprs, indrelid)
+            FROM pg_index
+            WHERE indexrelid = to_regclass(%s)
+            """,
+            [index_name],
+        )
+        index = cursor.fetchone()
+    assert index is not None
+    valid, on_device, expression = index
+    assert valid
+    assert on_device
+    assert "btrim" in expression.lower()
+    assert "serial" in expression
 
 
 def _device_payload(device_id=4101, **overrides):
