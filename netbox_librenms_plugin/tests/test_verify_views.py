@@ -831,7 +831,6 @@ class TestSingleInterfaceVerifyView:
 
     @pytest.mark.django_db
     def test_plugin_read_only_user_never_receives_relationship_write_button(self):
-        from django.apps import apps
         from django.core.cache import cache
         from dcim.models import Device, Interface
 
@@ -857,8 +856,9 @@ class TestSingleInterfaceVerifyView:
             [("view", Device), ("view", Interface), ("change", Interface)],
             plugin_write=False,
         )
-        settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
-        user = grant(user, "view", settings_model)
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        user = grant(user, "view", LibreNMSSettings)
         snapshot = {
             "ports": [
                 {
