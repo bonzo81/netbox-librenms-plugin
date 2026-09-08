@@ -409,6 +409,10 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
             f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before changing the mapping."
         )
     if id_conflict is not None:
+        if not view.restricted_queryset(type(id_conflict), "view").filter(pk=id_conflict.pk).exists():
+            return None, _htmx_error_response(
+                "LibreNMS ID is already assigned to another object outside your view scope."
+            )
         object_label = "VM" if isinstance(id_conflict, NetBoxVM) else "device"
         return None, _htmx_error_response(
             f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "

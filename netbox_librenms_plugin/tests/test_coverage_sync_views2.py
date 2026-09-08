@@ -1029,6 +1029,34 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
 
 
 class TestUpdateDeviceLocationView:
+    def test_repeated_server_keys_refuse_location_write(self, client, settings):
+        """An ambiguous server selection must stop before the LibreNMS write."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+        configure_librenms_servers(
+            settings,
+            {
+                key: {"librenms_url": f"https://{key}.example", "api_token": "test-token"}
+                for key in ("primary", "secondary")
+            },
+        )
+        device = make_device("location-ambiguous-server", librenms_cf={"primary": 777, "secondary": 888})
+        original_site = device.site_id
+        client.force_login(make_superuser("location-ambiguous-user"))
+        with patch.object(LibreNMSAPI, "update_device_field", return_value=(True, "ok")) as update:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk]),
+                {"server_key": ["primary", "secondary"]},
+            )
+        assert response.status_code == 302
+        update.assert_not_called()
+        assert message_texts(response.wsgi_request, "error") == ["Selected LibreNMS server is no longer configured."]
+        device.refresh_from_db()
+        assert device.site_id == original_site
+
     def test_permission_denied_returns_early(self):
         from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
 

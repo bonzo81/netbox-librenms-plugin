@@ -163,7 +163,7 @@ class UpdateDeviceLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         # librenms_id and writing the location, so a multi-server user acting on a
         # non-default tab isn't routed through the globally selected server (writing
         # the location to the wrong LibreNMS instance). Mirrors UpdateDeviceNameView.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)

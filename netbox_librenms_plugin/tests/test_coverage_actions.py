@@ -2437,7 +2437,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
                 "cluster_42": str(vm.cluster_id),
                 "force": "on",
             },
-            user=make_view_user("migrate-cross-model-user", [("change", VirtualMachine)]),
+            user=make_view_user("migrate-cross-model-user", [("change", VirtualMachine), ("view", Device)]),
             HTTP_HX_REQUEST="true",
         )
 
@@ -4974,7 +4974,7 @@ class TestPromoteToHostViewPost:
         request = make_view_request(
             "post",
             {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
-            user=self._device_writer("promote-conflict-race-user"),
+            user=self._device_writer("promote-conflict-race-user", (("view", Device),)),
             HTTP_HX_REQUEST="true",
         )
 
@@ -5008,7 +5008,7 @@ class TestPromoteToHostViewPost:
         request = make_view_request(
             "post",
             {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
-            user=self._device_writer("promote-vm-conflict-user"),
+            user=self._device_writer("promote-vm-conflict-user", (("view", type(conflicting_vm)),)),
             HTTP_HX_REQUEST="true",
         )
 
@@ -5114,7 +5114,7 @@ class TestPromoteToHostViewPost:
         request = make_view_request(
             "post",
             {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
-            user=self._device_writer("promote-owner-race-user"),
+            user=self._device_writer("promote-owner-race-user", (("view", Device),)),
             HTTP_HX_REQUEST="true",
         )
 
@@ -6857,6 +6857,46 @@ class TestConflictActionsObjectScope:
             HTTP_HX_REQUEST="true",
         )
         return post_view(DeviceConflictActionView(), request, device_id=4242)
+
+    @pytest.mark.parametrize("visible", [False, True])
+    def test_id_conflict_identity_respects_view_scope(self, visible):
+        """Only callers who can view the ID owner receive its identity."""
+        from unittest.mock import patch
+
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        target = make_device("conflict-scope-target")
+        conflict = VirtualMachine.objects.create(
+            pk=9000001, name="private-conflict-owner", cluster=make_cluster("conflict-scope"), status="active"
+        )
+        user = self._scoped_writer(target, "conflict-identity-reader")
+        if visible:
+            user = grant_view_permission(user, "view", VirtualMachine, constraints={"pk": conflict.pk})
+        assert VirtualMachine.objects.restrict(user, "view").filter(pk=conflict.pk).exists() is visible
+
+        get_inventory = LibreNMSAPI.get_device_inventory
+
+        def claim_during_inventory_fetch(api, *args, **kwargs):
+            result = get_inventory(api, *args, **kwargs)
+            conflict.custom_field_data = {"librenms_id": {"default": 4242}}
+            conflict.save(update_fields=["custom_field_data"])
+            return result
+
+        with patch.object(LibreNMSAPI, "get_device_inventory", claim_during_inventory_fetch):
+            response = self._post_conflict(user, target)
+
+        body = response.content.decode()
+        if visible:
+            assert conflict.name in body
+            assert f"(ID: {conflict.pk})" in body
+        else:
+            assert conflict.name not in body
+            assert str(conflict.pk) not in body
+            assert "already assigned to another object outside your view scope" in body
+        target.refresh_from_db()
+        assert not target.custom_field_data.get("librenms_id")
 
     def _post_add_as_oob(self, user, target):
         """Drive OOB attachment through real HTTP validation and object permissions."""
