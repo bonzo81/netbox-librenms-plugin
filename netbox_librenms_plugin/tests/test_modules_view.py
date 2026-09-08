@@ -297,6 +297,31 @@ class TestSerialRulesFollowTheTargetDevice:
         # The control: the page vendor declares no mapping, so nothing should resolve for it.
         assert row_for(page)["module_type_id"] is None
 
+    def test_a_member_rule_applies_even_though_the_preload_used_the_page_manufacturer(self):
+        """_build_context preloads for the page device, and rows resolve per target member.
+
+        apply_normalization_rules loads a manufacturer it was not preloaded for and caches it
+        into the same dict, so the member's rule still applies and costs one query per vendor.
+        """
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.utils import preload_normalization_rules
+
+        page = Manufacturer.objects.create(name="Preload Page Vendor", slug="preload-page-vendor")
+        member = Manufacturer.objects.create(name="Preload Member Vendor", slug="preload-member-vendor")
+        self._rule_for(member)
+        preloaded = preload_normalization_rules("serial", manufacturer=page)
+        assert ("serial", member.pk) not in preloaded, "the member was never preloaded"
+
+        view = _make_view()
+        view._current_manufacturer = member
+        view._norm_rules_serial = preloaded
+
+        serial = view._normalized_item_serial(self._item(), page)
+
+        assert serial == "12345"
+        assert ("serial", member.pk) in preloaded, "the member's rules were not cached for reuse"
+
     def test_build_row_reports_the_serial_it_is_given(self):
         """_build_row must stay free of database access, so the caller resolves the serial."""
         view = _make_view()

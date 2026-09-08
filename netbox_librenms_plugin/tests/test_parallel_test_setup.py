@@ -18,6 +18,34 @@ from netbox_librenms_plugin.tests.parallel import (
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def _pytest_plugins_lines(source):
+    """Return the line of every module-level ``pytest_plugins`` assignment in *source*."""
+    import ast
+
+    lines = []
+    for node in ast.parse(source).body:
+        # An annotated assignment registers the plugin just the same, and has one target.
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        elif isinstance(node, ast.Assign):
+            targets = node.targets
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id == "pytest_plugins" for target in targets):
+            lines.append(node.lineno)
+    return lines
+
+
+@pytest.mark.parametrize(
+    "source",
+    ['pytest_plugins = ["helpers"]', 'pytest_plugins: list[str] = ["helpers"]'],
+    ids=["plain", "annotated"],
+)
+def test_the_plugin_scan_sees_both_assignment_forms(source):
+    """pytest honours the annotated form too, and the scan below only knew the plain one."""
+    assert _pytest_plugins_lines(source) == [1]
+
+
 def test_no_test_module_registers_a_session_wide_plugin():
     """``pytest_plugins`` in a test module registers that plugin for the whole session.
 
@@ -25,16 +53,12 @@ def test_no_test_module_registers_a_session_wide_plugin():
     helper's config mock reached the virtual-chassis tests that way and pinned
     PLUGINS_CONFIG to a default-only server map, which only failed in a full-suite run.
     """
-    import ast
-
     tests_directory = Path(__file__).parent
     offenders = []
     for path in sorted(tests_directory.rglob("test_*.py")):
-        for node in ast.parse(path.read_text()).body:
-            if not isinstance(node, ast.Assign):
-                continue
-            if any(isinstance(target, ast.Name) and target.id == "pytest_plugins" for target in node.targets):
-                offenders.append(f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}")
+        offenders.extend(
+            f"{path.relative_to(REPOSITORY_ROOT)}:{line}" for line in _pytest_plugins_lines(path.read_text())
+        )
 
     assert offenders == [], (
         "pytest_plugins registers a plugin session-wide. Bind the fixture into the module "
