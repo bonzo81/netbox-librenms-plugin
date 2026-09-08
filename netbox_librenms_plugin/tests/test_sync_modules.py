@@ -2327,25 +2327,20 @@ def test_integrated_module_badge_tracks_the_active_theme():
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("oob_index,oob_parent", [(-500, 0), (1, -500)])
-def test_refresh_drops_out_of_spec_oob_inventory(settings, librenms_server, oob_index, oob_parent):
-    """A negative OOB index fails closed to a host-only snapshot instead of shifting onto main."""
+def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_parent):
+    """Negative OOB index fields prevent the refresh from caching an inventory snapshot."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request
     from netbox_librenms_plugin.utils import set_librenms_oob
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    configure_librenms_servers(
-        settings, {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}}
-    )
     device = make_device("signed-inventory", librenms_cf={"default": 777})
     set_librenms_oob(device, 999, "default", oob_type="idrac9")
     device.save(update_fields=["custom_field_data"])
-    # RFC 2737 defines entPhysicalIndex as 1..2147483647. The main index 1500 is the value a
-    # negative OOB index would land on once the old single-term offset shifted it.
+    # RFC 2737 defines entPhysicalIndex as 1..2147483647.
+    # The old offset would shift the negative OOB index onto main index 1500.
     for device_id, index, parent, name in ((777, 1500, 0, "Main card"), (999, oob_index, oob_parent, "OOB card")):
-        librenms_server.register(
+        live_librenms.server.register(
             f"/api/v0/inventory/{device_id}/all",
             {
                 "status": "ok",
@@ -2361,32 +2356,27 @@ def test_refresh_drops_out_of_spec_oob_inventory(settings, librenms_server, oob_
                 ],
             },
         )
-    librenms_server.register("/api/v0/devices/777/transceivers", {"status": "ok", "transceivers": []})
-    librenms_server.register("/api/v0/devices/777/ports", {"status": "ok", "ports": []})
-    view = DeviceModuleTableView()
-    response = view_post(view, make_request("post", {"server_key": "default"}), pk=device.pk)
+    live_librenms.server.register("/api/v0/devices/777/transceivers", {"status": "ok", "transceivers": []})
+    live_librenms.server.register("/api/v0/devices/777/ports", {"status": "ok", "ports": []})
+    request = _post_request({"server_key": "default"})
+    view = _view(DeviceModuleTableView, request, live_librenms)
+    response = view_post(view, request, pk=device.pk)
 
     assert response.status_code == 200
-    # The OOB payload is refused, so the refresh is incomplete and caches no snapshot. Merging it
-    # would have shifted the OOB row onto the main index 1500.
+    # The refused OOB payload makes the refresh incomplete, so it must cache no snapshot.
     assert cache.get(view.get_cache_key(device, "inventory", server_key="default")) is None
     assert b"OOB controller inventory fetch failed" in response.content
 
 
 @pytest.mark.django_db
-def test_refresh_rejects_a_negative_main_inventory_index(settings, librenms_server):
+def test_refresh_rejects_a_negative_main_inventory_index(live_librenms):
     """A negative index in the MAIN inventory fails the refresh instead of caching a bad snapshot."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    configure_librenms_servers(
-        settings, {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}}
-    )
     device = make_device("signed-main-inventory", librenms_cf={"default": 778})
-    librenms_server.register(
+    live_librenms.server.register(
         "/api/v0/inventory/778/all",
         {
             "status": "ok",
@@ -2402,10 +2392,11 @@ def test_refresh_rejects_a_negative_main_inventory_index(settings, librenms_serv
             ],
         },
     )
-    librenms_server.register("/api/v0/devices/778/transceivers", {"status": "ok", "transceivers": []})
-    librenms_server.register("/api/v0/devices/778/ports", {"status": "ok", "ports": []})
-    view = DeviceModuleTableView()
-    response = view_post(view, make_request("post", {"server_key": "default"}), pk=device.pk)
+    live_librenms.server.register("/api/v0/devices/778/transceivers", {"status": "ok", "transceivers": []})
+    live_librenms.server.register("/api/v0/devices/778/ports", {"status": "ok", "ports": []})
+    request = _post_request({"server_key": "default"})
+    view = _view(DeviceModuleTableView, request, live_librenms)
+    response = view_post(view, request, pk=device.pk)
 
     assert response.status_code == 200
     assert cache.get(view.get_cache_key(device, "inventory", server_key="default")) is None
