@@ -503,8 +503,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         }
         same_name_port_ids.discard(None)
         # The name rule lives in one helper, so this reader cannot drift from the writer that
-        # created the row; ambiguity stays a separate concern.
-        if syncable_interface_name(port, interface_name_field) is None or len(same_name_port_ids) != 1:
+        # created the row; ambiguity stays a separate concern. The limit is per writer model.
+        name_model = Interface if isinstance(obj, Device) else VMInterface
+        if syncable_interface_name(port, interface_name_field, name_model) is None or len(same_name_port_ids) != 1:
             raise ValueError("The cached LibreNMS interface name is missing or ambiguous. Refresh the IP data.")
 
         if interface_creation_state is None:

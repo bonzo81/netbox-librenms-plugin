@@ -1338,6 +1338,65 @@ def test_create_missing_interface_supports_virtual_machine_ip_sync(client, setti
 
 
 @pytest.mark.django_db
+def test_create_missing_interface_measures_the_name_against_the_vm_writer_model(client, settings):
+    """The cached name check must use the VM interface writer limit."""
+    from virtualization.models import VMInterface
+
+    _configure_test_server(settings)
+    virtual_machine = make_vm("ip-create-vm")
+    virtual_machine.custom_field_data["librenms_id"] = {"default": {"id": 42}}
+    virtual_machine.save(update_fields=["custom_field_data"])
+    rows = [
+        {
+            "address": "2001:db8:14::10",
+            "prefix_length": 64,
+            "port_id": 7014,
+            "interface": "eth0",
+            "port_fields": {"ifType": "ethernetCsmacd", "ifMtu": 9000},
+        }
+    ]
+    client.force_login(make_superuser("ip-create-vm-user"))
+    refresh_url = reverse("plugins:netbox_librenms_plugin:vm_ipaddress_sync", args=[virtual_machine.pk])
+    with patch(
+        "netbox_librenms_plugin.librenms_api.requests.get",
+        side_effect=_librenms_ip_rows_response(rows, device_name=virtual_machine.name),
+    ):
+        assert (
+            client.post(
+                refresh_url,
+                {"server_key": "default", "interface_name_field": "ifName"},
+                HTTP_HX_REQUEST="true",
+            ).status_code
+            == 200
+        )
+
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "virtualmachine", "pk": virtual_machine.pk},
+    )
+    vm_name_field = VMInterface._meta.get_field("name")
+    with patch.object(vm_name_field, "max_length", 3):
+        response = client.post(
+            sync_url,
+            {
+                "server_key": "default",
+                "create-missing-interfaces-toggle": "on",
+                "select": "2001:db8:14::10/64",
+                "vrf_2001:db8:14::10/64": "",
+            },
+        )
+
+    assert response.status_code == 302
+    message_texts = _message_texts(response)
+    assert any(
+        "The cached LibreNMS interface name is missing or ambiguous. Refresh the IP data." in message
+        for message in message_texts
+    ), message_texts
+    assert not any("longer than the 3 characters" in message for message in message_texts)
+    assert not VMInterface.objects.filter(virtual_machine=virtual_machine, name="eth0").exists()
+
+
+@pytest.mark.django_db
 def test_create_missing_interfaces_rejects_ambiguous_cached_port_names(client, settings):
     """Bulk IP sync must not merge distinct LibreNMS ports that share the selected name."""
     from dcim.models import Interface
