@@ -582,8 +582,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             else:
                 messages.error(
                     request,
-                    "Inventory data could not be cached, so the tab has no snapshot to show. "
-                    "Refresh again; see server logs for details.",
+                    "Inventory data could not be cached. The rows shown come from this refresh only "
+                    "and will not survive a reload. Refresh again before syncing; see server logs for details.",
                 )
         else:
             SyncCacheConsistency(obj).mark_refresh_failure(

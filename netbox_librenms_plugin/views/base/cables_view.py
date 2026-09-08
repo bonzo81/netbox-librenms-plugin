@@ -905,8 +905,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         else:
             messages.error(
                 request,
-                "Cable data could not be cached, so the tab has no snapshot to show. "
-                "Refresh again; see server logs for details.",
+                "Cable data could not be cached. The rows shown come from this refresh only "
+                "and will not survive a reload. Refresh again before syncing; see server logs for details.",
             )
         # A host LLDP failure no longer aborts the refresh (OOB/serial rows can still surface it
         # as "successful"), so warn when the host fetch failed but we had a host id to query —
