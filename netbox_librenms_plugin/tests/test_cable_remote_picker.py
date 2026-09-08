@@ -421,7 +421,7 @@ class TestRemotePickerEndpoint:
         client = self._client("unknown-row")
         _acs, _csp, _link, url = self._seed_serial("unknown-row")
 
-        with patch("netbox_librenms_plugin.librenms_api.requests.get") as external_get:
+        with patch("netbox_librenms_plugin.librenms_api._session.get") as external_get:
             response = client.get(url, {"row_id": "missing", "server_key": SERVER_KEY})
 
         assert response.status_code == 404
@@ -2321,7 +2321,7 @@ class TestManualRepointOfExistingCable:
         clear_test_cache(cache)  # the snapshot expired between render and pick
 
         with patch(
-            "netbox_librenms_plugin.librenms_api.requests.get",
+            "netbox_librenms_plugin.librenms_api._session.get",
             side_effect=_serial_refetch_get(link),
         ) as external_get:
             resp = client.post(
@@ -2371,7 +2371,7 @@ class TestManualRepointOfExistingCable:
         clear_test_cache(cache)
 
         with patch(
-            "netbox_librenms_plugin.librenms_api.requests.get",
+            "netbox_librenms_plugin.librenms_api._session.get",
             side_effect=_serial_refetch_get(link),
         ) as external_get:
             resp = client.get(picker_url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})

@@ -3198,9 +3198,9 @@ def test_add_device_posts_to_the_submitted_server(client, settings, prefix, vers
     data = _snmp_post(prefix, snmp_version=version, hostname="router.example", poller_group="22", **credentials)
     data["server_key"] = "secondary"
     with (
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=pollers),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=pollers),
         patch(
-            "netbox_librenms_plugin.librenms_api.requests.post",
+            "netbox_librenms_plugin.librenms_api._session.post",
             return_value=added,
         ) as post,
     ):
@@ -3234,9 +3234,9 @@ def test_add_device_rejects_ambiguous_or_removed_server_before_api_calls(client,
     data = _snmp_post("v1v2", hostname="router.example", community="test-community")
     data["server_key"] = server_keys
     with (
-        patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=external_response) as get,
+        patch("netbox_librenms_plugin.librenms_api._session.get", return_value=external_response) as get,
         patch(
-            "netbox_librenms_plugin.librenms_api.requests.post",
+            "netbox_librenms_plugin.librenms_api._session.post",
             return_value=external_response,
         ) as post,
     ):

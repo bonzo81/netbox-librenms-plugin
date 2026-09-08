@@ -146,7 +146,7 @@ def create_mock_vlan(vid, name, group=None):
 class TestVLANAPIClient:
     """Tests for LibreNMS VLAN API methods."""
 
-    @patch("requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_vlans_success(self, mock_get, mock_librenms_config):
         """Test successful VLAN fetch from /resources/vlans endpoint."""
         mock_get.return_value.status_code = 200
@@ -165,7 +165,7 @@ class TestVLANAPIClient:
         # Verify vlan_id is present from /resources/vlans endpoint
         assert data[1]["vlan_id"] == 102
 
-    @patch("requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_vlans_filters_by_device_id(self, mock_get, mock_librenms_config):
         """Test that VLANs are filtered by device_id."""
         # Response includes VLANs from multiple devices
@@ -189,7 +189,7 @@ class TestVLANAPIClient:
         assert len(data) == 2  # Only device 123's VLANs
         assert all(str(v["device_id"]) == "123" for v in data)
 
-    @patch("requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_vlans_error(self, mock_get, mock_librenms_config):
         """Test VLAN fetch with error."""
         from requests.exceptions import HTTPError
@@ -208,7 +208,7 @@ class TestVLANAPIClient:
         assert success is False
         assert "not found" in data.lower()
 
-    @patch("requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_port_vlan_details_trunk(self, mock_get, mock_librenms_config):
         """Test fetching trunk port VLAN details."""
         mock_get.return_value.status_code = 200
@@ -224,7 +224,7 @@ class TestVLANAPIClient:
         assert data["ifTrunk"] == "dot1Q"
         assert len(data["vlans"]) == 2
 
-    @patch("requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_port_vlan_details_not_found(self, mock_get, mock_librenms_config):
         """Test fetching port details when port not found."""
         mock_get.return_value.status_code = 200

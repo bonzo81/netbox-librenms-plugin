@@ -329,7 +329,7 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings):
     )
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=AssertionError("The cable fragment contacted LibreNMS"),
     ) as requests_get:
         response = client.get(url, {"server_key": "primary"})
@@ -359,7 +359,7 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
     )
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=AssertionError("The module fragment contacted LibreNMS"),
     ) as requests_get:
         response = client.get(url, {"server_key": "primary"})
@@ -383,7 +383,7 @@ def test_cold_sync_page_load_fetches_librenms_status(client, settings):
         raise AssertionError(f"Unexpected LibreNMS request: {url}")
 
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+    with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response):
         response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
 
     assert response.status_code == 200
@@ -453,7 +453,7 @@ def test_mapped_device_missing_from_librenms_renders_danger_status(client, setti
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         return_value=_json_response(
             "https://primary.example.com/api/v0/devices/7402",
             {"status": "error", "message": "Device not found"},
@@ -739,7 +739,7 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
 
     # The owner refreshes the shared snapshot both members read.
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": owner.pk})
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+    with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response):
         assert client.post(refresh_url, {"server_key": "primary"}, HTTP_HX_REQUEST="true").status_code == 200
     assert cache.get(_cache_key("links", owner, "primary")) is not None
 
@@ -1870,7 +1870,7 @@ def test_partial_cable_refresh_keeps_rows_from_available_sources(client, setting
         raise AssertionError(f"Unexpected LibreNMS request: {url}")
 
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+    with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response):
         response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
@@ -1964,7 +1964,7 @@ def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(cli
     # Inject the one condition the real flow cannot produce locally: the snapshot is gone by the
     # time the handler checks for it (an eviction between the write and the read).
     with (
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
         patch("netbox_librenms_plugin.views.base.cables_view.cache.has_key", return_value=False),
     ):
         response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
@@ -2009,7 +2009,7 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
     url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
     with (
         drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
     ):
         response = client.post(
             url,
@@ -2066,7 +2066,7 @@ def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(client,
     url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
     with (
         drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
     ):
         response = client.post(
             url,
@@ -2202,7 +2202,7 @@ def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_succes
     url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
     with (
         drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
     ):
         response = client.post(
             url,
@@ -2237,7 +2237,7 @@ def test_vlan_refresh_without_a_cached_snapshot_reports_failure_not_success(clie
     url = reverse("plugins:netbox_librenms_plugin:device_vlan_sync", kwargs={"pk": device.pk})
     with (
         drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
     ):
         response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
@@ -2272,7 +2272,7 @@ def test_module_refresh_without_a_cached_snapshot_reports_failure_not_success(cl
     url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
     with (
         drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
     ):
         response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
@@ -2317,7 +2317,7 @@ def test_partial_module_refresh_renders_no_inventory_rows(client, settings):
         raise AssertionError(f"Unexpected LibreNMS request: {url}")
 
     url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+    with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response):
         response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
@@ -2499,7 +2499,7 @@ def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings):
     )
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=AssertionError("The IP cache fragment contacted LibreNMS"),
     ) as requests_get:
         response = client.get(fragment_url, {"server_key": "primary"})
@@ -2536,7 +2536,7 @@ def test_refresh_failure_marks_server_rendered_tab_without_dynamic_content(clien
     page_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=lambda url, **_kwargs: _device_info_response(url, 655, device.name, "Cache rail hardware"),
     ):
         response = client.get(page_url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
@@ -2568,7 +2568,7 @@ def test_opening_unavailable_tab_acknowledges_only_its_current_revision(client, 
 
     def get_page(tab):
         with patch(
-            "netbox_librenms_plugin.librenms_api.requests.get",
+            "netbox_librenms_plugin.librenms_api._session.get",
             side_effect=lambda url, **_kwargs: _device_info_response(
                 url,
                 656,
@@ -2696,7 +2696,7 @@ def test_fragment_restores_from_cache_without_calling_librenms(client, settings)
     )
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=AssertionError("The cache fragment contacted LibreNMS"),
     ) as requests_get:
         response = client.get(url, {"server_key": "primary", "interface_name_field": "ifDescr"})
@@ -2747,7 +2747,7 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
     page_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=AssertionError("A cache-only browser flow contacted LibreNMS"),
     ) as requests_get:
         status_response = client.get(status_url, {"server_key": "primary"})
@@ -2988,7 +2988,7 @@ def test_acknowledged_revisions_stay_bounded_across_objects(client, settings):
             SyncCacheConsistency(device).mark_refresh_failure(SyncTab.INTERFACES, "primary")
             acknowledged_keys.append(f"device:{device.pk}:primary:interfaces")
             with patch(
-                "netbox_librenms_plugin.librenms_api.requests.get",
+                "netbox_librenms_plugin.librenms_api._session.get",
                 side_effect=lambda url, **_kwargs: _device_info_response(url, 6200, device.name, "Hardware"),
             ):
                 response = client.get(
@@ -3014,7 +3014,7 @@ def test_virtual_machine_sync_page_omits_the_cables_pane(client, settings):
     url = reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=lambda url, **_kwargs: _device_info_response(url, 7601, vm.name, "VM Hardware 7601"),
     ):
         response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
@@ -3048,7 +3048,7 @@ def test_blocked_active_tab_reads_device_info_from_cache_only(
     client.force_login(make_superuser(f"cache-blocked-{blocked_state.value}-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=AssertionError("A blocked tab contacted LibreNMS"),
     ) as requests_get:
         response = client.get(url, {"server_key": "primary", "tab": SyncTab.IP_ADDRESSES.value})
@@ -3084,7 +3084,7 @@ def test_blocked_tab_skips_the_virtual_chassis_inventory_lookup(
     client.force_login(make_superuser("cache-blocked-vc-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[member.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=AssertionError("A blocked tab fetched Virtual Chassis inventory"),
     ) as requests_get:
         response = client.get(url, {"server_key": "primary", "tab": SyncTab.IP_ADDRESSES.value})
@@ -3109,7 +3109,7 @@ def test_blocked_vlan_tab_does_not_render_its_cached_rows(client, settings):
     client.force_login(make_superuser("cache-vlan-blocked-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=lambda request_url, **_kwargs: _device_info_response(
             request_url, 7802, device.name, "VLAN Hardware 7802"
         ),
@@ -3199,14 +3199,14 @@ def test_a_cache_only_render_reports_the_vc_inventory_as_not_loaded(client, sett
         raise AssertionError(f"Unexpected LibreNMS request: {request_url}")
 
     # Warm the device-info cache so the cache-only render still reports the device as found.
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+    with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response):
         warm = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
     assert warm.status_code == 200
 
     SyncCacheConsistency(device).mark_refresh_failure(SyncTab.INTERFACES, "primary", actor_id=user.pk)
 
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=AssertionError("the cache-only render contacted LibreNMS"),
     ):
         response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})

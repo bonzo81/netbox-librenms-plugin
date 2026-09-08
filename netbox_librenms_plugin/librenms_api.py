@@ -105,6 +105,24 @@ class LibreNMSUnreachable(Exception):
     """
 
 
+class _TokenScopedSession(requests.Session):
+    """Keep ``X-Auth-Token`` on the host the request was addressed to.
+
+    ``requests`` drops only ``Authorization`` when a redirect crosses hosts and forwards every
+    other header, so a LibreNMS that redirects elsewhere would hand the API token to whatever
+    answered. Redirects still follow, which a reverse proxy in front of LibreNMS may rely on.
+    """
+
+    def rebuild_auth(self, prepared_request, response):
+        super().rebuild_auth(prepared_request, response)
+        if urllib.parse.urlparse(response.request.url).hostname != urllib.parse.urlparse(prepared_request.url).hostname:
+            prepared_request.headers.pop("X-Auth-Token", None)
+
+
+# Module-level so every call shares one connection pool, and so tests have one seam to patch.
+_session = _TokenScopedSession()
+
+
 class LibreNMSAPI:
     """Client to interact with the LibreNMS API and retrieve interface data for devices."""
 
@@ -247,7 +265,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/system",
                 headers=self.headers,
                 verify=self.verify_ssl,
@@ -558,7 +576,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{ip_address}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -582,7 +600,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{hostname}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -625,7 +643,7 @@ class LibreNMSAPI:
             return False, None
 
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -685,7 +703,7 @@ class LibreNMSAPI:
         """
         url = f"{self.librenms_url}/api/v0/{path.lstrip('/')}"
         try:
-            response = requests.get(
+            response = _session.get(
                 url,
                 headers=self.headers,
                 params=params or {},
@@ -723,7 +741,7 @@ class LibreNMSAPI:
             if with_vlans:
                 params["with"] = "vlans"
 
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/ports",
                 headers=self.headers,
                 params=params,
@@ -757,7 +775,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/port_stack",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1230,7 +1248,7 @@ class LibreNMSAPI:
                     payload[key] = value
 
         try:
-            response = requests.post(
+            response = _session.post(
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
                 json=payload,
@@ -1263,7 +1281,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.patch(
+            response = _session.patch(
                 f"{self.librenms_url}/api/v0/devices/{device_id}",
                 headers=self.headers,
                 json=field_data,
@@ -1297,7 +1315,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/resources/locations",
                 headers=self.headers,
                 timeout=EXTENDED_API_TIMEOUT,
@@ -1332,7 +1350,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.post(
+            response = _session.post(
                 f"{self.librenms_url}/api/v0/locations",
                 headers=self.headers,
                 json=location_data,
@@ -1373,7 +1391,7 @@ class LibreNMSAPI:
         """
         try:
             encoded_location_name = urllib.parse.quote(location_name, safe="")
-            response = requests.patch(
+            response = _session.patch(
                 f"{self.librenms_url}/api/v0/locations/{encoded_location_name}",
                 headers=self.headers,
                 json=location_data,
@@ -1405,7 +1423,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/links",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1441,7 +1459,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/ip",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1482,7 +1500,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/ports/{port_id}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1520,7 +1538,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/inventory/{device_id}/all",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1569,7 +1587,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/transceivers",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1620,7 +1638,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/poller_group",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1675,7 +1693,7 @@ class LibreNMSAPI:
                 params["entPhysicalContainedIn"] = str(ent_physical_contained_in)
 
             # Try the filtered endpoint first (non-/all)
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/inventory/{device_id}",
                 headers=self.headers,
                 params=params,
@@ -1779,7 +1797,7 @@ class LibreNMSAPI:
                     if value is not None and value != "":
                         params[key] = value
 
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
                 params=params,
@@ -1845,7 +1863,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/resources/vlans",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1938,7 +1956,7 @@ class LibreNMSAPI:
         serial_types = sensor_types if sensor_types is not None else get_serial_sensor_type_patterns()
 
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/resources/sensors",
                 headers=self.headers,
                 timeout=EXTENDED_API_TIMEOUT,
@@ -2082,7 +2100,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/ports/{port_id}",
                 headers=self.headers,
                 params={"with": "vlans"},
