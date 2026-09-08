@@ -2044,6 +2044,91 @@ def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
 
 
 @pytest.mark.django_db
+def test_a_failed_module_cache_write_does_not_claim_there_is_nothing_to_show(
+    client, settings, primary_librenms, monkeypatch
+):
+    """A failed cache write must still render fresh module rows with an accurate warning."""
+    _configure_servers(settings)
+    device = make_device("cache-module-rows", librenms_cf={"primary": {"id": 667}})
+    client.force_login(make_superuser("cache-module-rows-user"))
+    primary_librenms.register(
+        "/api/v0/inventory/667/all",
+        {
+            "status": "ok",
+            "inventory": [
+                {
+                    "entPhysicalIndex": 1,
+                    "entPhysicalName": "Fresh module slot",
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": "FRESH-MODULE-1",
+                    "entPhysicalSerialNum": "FRESH-SERIAL-1",
+                    "entPhysicalDescr": "module",
+                }
+            ],
+        },
+    )
+    primary_librenms.register("/api/v0/devices/667/ports", {"status": "ok", "ports": []})
+    primary_librenms.register("/api/v0/devices/667/transceivers", {"status": "ok", "transceivers": []})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.MODULES)
+
+    url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
+    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, "primary")]
+    assert b"FRESH-MODULE-1" in response.content
+    assert b"could not be cached" in response.content
+    assert b"no snapshot to show" not in response.content
+
+
+@pytest.mark.django_db
+def test_a_failed_cable_cache_write_does_not_claim_there_is_nothing_to_show(
+    client, settings, primary_librenms, monkeypatch
+):
+    """A failed cache write must still render fresh cable rows with an accurate warning."""
+    _configure_servers(settings)
+    device = make_device("cache-cable-rows", librenms_cf={"primary": {"id": 661}})
+    remote_device = make_device("cache-cable-rows-remote", librenms_cf={"primary": {"id": 662}})
+    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    remote = make_interface(remote_device, "Ethernet42", iface_type="1000base-t")
+    set_librenms_device_id(local, 7481, "primary")
+    set_librenms_device_id(remote, 7482, "primary")
+    local.save(update_fields=["custom_field_data"])
+    remote.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser("cache-cable-rows-user"))
+    primary_librenms.register(
+        "/api/v0/devices/661/links",
+        {
+            "status": "ok",
+            "links": [
+                {
+                    "local_port_id": 7481,
+                    "local_port": local.name,
+                    "remote_port_id": 7482,
+                    "remote_port": remote.name,
+                    "remote_hostname": remote_device.name,
+                    "remote_device_id": 662,
+                }
+            ],
+        },
+    )
+    primary_librenms.register(
+        "/api/v0/devices/661/ports",
+        {"status": "ok", "ports": [{"port_id": 7481, "ifName": local.name, "ifDescr": local.name}]},
+    )
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.CABLES)
+
+    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
+    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.CABLES, "primary")]
+    assert b"Ethernet42" in response.content
+    assert b"could not be cached" in response.content
+    assert b"no snapshot to show" not in response.content
+
+
+@pytest.mark.django_db
 def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_success(
     client, settings, primary_librenms, monkeypatch
 ):

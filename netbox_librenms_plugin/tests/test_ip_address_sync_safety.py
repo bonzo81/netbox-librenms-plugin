@@ -5,6 +5,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Barrier, BrokenBarrierError
+from unittest.mock import patch
 
 import pytest
 from django.apps import apps
@@ -1356,7 +1357,7 @@ def test_create_missing_interface_supports_virtual_machine_ip_sync(client, setti
 
 
 @pytest.mark.django_db
-def test_create_missing_interface_measures_the_name_against_the_vm_writer_model(client, settings):
+def test_create_missing_interface_measures_the_name_against_the_vm_writer_model(client, settings, live_librenms):
     """The cached name check must use the VM interface writer limit."""
     from virtualization.models import VMInterface
 
@@ -1375,18 +1376,15 @@ def test_create_missing_interface_measures_the_name_against_the_vm_writer_model(
     ]
     client.force_login(make_superuser("ip-create-vm-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:vm_ipaddress_sync", args=[virtual_machine.pk])
-    with patch(
-        "netbox_librenms_plugin.librenms_api._session.get",
-        side_effect=_librenms_ip_rows_response(rows, device_name=virtual_machine.name),
-    ):
-        assert (
-            client.post(
-                refresh_url,
-                {"server_key": "default", "interface_name_field": "ifName"},
-                HTTP_HX_REQUEST="true",
-            ).status_code
-            == 200
-        )
+    _serve_librenms_ip_rows(live_librenms.server, rows, device_name=virtual_machine.name)
+    assert (
+        client.post(
+            refresh_url,
+            {"server_key": "default", "interface_name_field": "ifName"},
+            HTTP_HX_REQUEST="true",
+        ).status_code
+        == 200
+    )
 
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
