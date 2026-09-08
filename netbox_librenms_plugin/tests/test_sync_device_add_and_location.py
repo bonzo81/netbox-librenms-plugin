@@ -187,6 +187,22 @@ class TestUpdateDeviceLocationBranches:
         assert received == []
         assert _messages(response, "error") == ["Missing permissions: dcim.view_device"]
 
+    def test_repeated_server_keys_refuse_the_location_write(self, client, librenms_server, settings):
+        """Two configured server keys stop the request before the LibreNMS PATCH."""
+        second_key = "secondary"
+        servers = settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]
+        configure_librenms_servers(settings, {**servers, second_key: dict(servers[SERVER_KEY])})
+        device = make_device("location-update-repeated-keys", librenms_cf={SERVER_KEY: 89, second_key: 89})
+        received = _record_route(librenms_server, "/api/v0/devices/89", "PATCH")
+        client.force_login(make_superuser("location-update-repeated-keys-user"))
+
+        response = client.post(_location_url(device), {"server_key": [SERVER_KEY, second_key]})
+
+        assert response.status_code == 302
+        assert received == []
+        assert _messages(response, "error")
+        assert _messages(response, "success") == []
+
     def test_librenms_refusal_is_reported_as_an_error(self, client, librenms_server):
         """A LibreNMS error body becomes the failure message, not a success toast."""
         device = make_device("location-update-failure", librenms_cf={SERVER_KEY: 88})
