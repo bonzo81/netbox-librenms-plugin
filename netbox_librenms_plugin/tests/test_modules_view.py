@@ -258,6 +258,45 @@ class TestSerialRulesFollowTheTargetDevice:
 
         assert self._serial_for(member, page_manufacturer=page) == "BBB-12345"
 
+    def test_module_type_matching_uses_the_targets_manufacturer(self):
+        """Type mappings are manufacturer-scoped too.
+
+        The member vendor maps this LibreNMS model to its own type; the page device has no such
+        mapping. Matching against the page manufacturer therefore resolves nothing at all, and a
+        virtual-chassis row lost the type its own member declares.
+        """
+        from dcim.models import Manufacturer, ModuleType
+
+        from netbox_librenms_plugin.models import ModuleTypeMapping
+        from netbox_librenms_plugin.utils import get_module_types_indexed
+
+        page = Manufacturer.objects.create(name="Page Vendor MT", slug="page-vendor-mt")
+        member = Manufacturer.objects.create(name="Member Vendor MT", slug="member-vendor-mt")
+        member_type = ModuleType.objects.create(manufacturer=member, model="MEMBER-TYPE")
+        ModuleTypeMapping.objects.create(
+            librenms_model="RAW-MODEL",
+            netbox_module_type=member_type,
+            manufacturer=member,
+        )
+        module_types = get_module_types_indexed()
+
+        item = {
+            "entPhysicalIndex": 7,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 1",
+            "entPhysicalModelName": "RAW-MODEL",
+            "entPhysicalContainedIn": 0,
+        }
+
+        def row_for(target_manufacturer):
+            view = _make_view()
+            view._current_manufacturer = target_manufacturer
+            return view._build_row(item, {item["entPhysicalIndex"]: item}, {}, module_types, manufacturer=page)
+
+        assert row_for(member)["module_type_id"] == member_type.pk
+        # The control: the page vendor declares no mapping, so nothing should resolve for it.
+        assert row_for(page)["module_type_id"] is None
+
     def test_build_row_reports_the_serial_it_is_given(self):
         """_build_row must stay free of database access, so the caller resolves the serial."""
         view = _make_view()

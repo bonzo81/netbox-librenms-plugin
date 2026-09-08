@@ -2455,13 +2455,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
-        # Match to NetBox module type (direct lookup, normalization fallback, then Generic fallback)
+        # Match to NetBox module type (direct lookup, normalization fallback, then Generic fallback).
+        # Type mappings are manufacturer-scoped, so a virtual-chassis row resolves against the
+        # member it targets rather than the page device.
+        row_manufacturer = getattr(self, "_current_manufacturer", None) or manufacturer
         norm_rules_type = getattr(self, "_norm_rules_type", None)
         generic_module_types = getattr(self, "_generic_module_types", None)
         matched_type = resolve_module_type(
             model_name,
             module_types,
-            manufacturer=manufacturer,
+            manufacturer=row_manufacturer,
             norm_rules=norm_rules_type,
             generic_fallback=generic_module_types,
         )
@@ -2545,7 +2548,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         elif status == "No Type":
             ambiguities = getattr(self, "_module_type_ambiguities", None)
             ambiguity_candidates = self._find_ambiguity_candidates(
-                model_name, ambiguities, manufacturer=manufacturer, norm_rules=norm_rules_type
+                model_name, ambiguities, manufacturer=row_manufacturer, norm_rules=norm_rules_type
             )
             row["model_warning"] = self._build_no_type_warning(item, ambiguity_candidates=ambiguity_candidates)
             if ambiguity_candidates:
