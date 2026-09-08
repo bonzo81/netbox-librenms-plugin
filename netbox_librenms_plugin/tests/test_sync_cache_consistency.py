@@ -2116,7 +2116,7 @@ def test_a_failed_module_cache_write_does_not_claim_there_is_nothing_to_show(cli
     url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
     with (
         drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
     ):
         response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
@@ -2171,7 +2171,7 @@ def test_a_failed_cable_cache_write_does_not_claim_there_is_nothing_to_show(clie
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
     with (
         drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
+        patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response),
     ):
         response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 

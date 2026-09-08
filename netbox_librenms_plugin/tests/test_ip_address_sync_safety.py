@@ -1432,7 +1432,7 @@ def test_create_missing_interface_measures_the_name_against_the_vm_writer_model(
     client.force_login(make_superuser("ip-create-vm-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:vm_ipaddress_sync", args=[virtual_machine.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=virtual_machine.name),
     ):
         assert (
