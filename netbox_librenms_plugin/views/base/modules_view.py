@@ -806,7 +806,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     current_idx = ancestor.get("entPhysicalContainedIn", 0)
                     continue
                 anc_class = ancestor.get("entPhysicalClass")
-                if anc_class in INVENTORY_CLASSES:
+                # A rule-admitted ancestor reaches the table as a row of its own, so it parents
+                # its children exactly like a built-in class. Ignoring it here let a standard
+                # child reach top level while _get_sub_components() also rendered it below.
+                if anc_class in INVENTORY_CLASSES or _class_is_included(ancestor, ignore_rules):
                     anc_model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
                     if anc_model in _GENERIC_CONTAINER_MODELS:
                         current_idx = ancestor.get("entPhysicalContainedIn", 0)

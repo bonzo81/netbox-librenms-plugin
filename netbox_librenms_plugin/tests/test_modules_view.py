@@ -162,6 +162,34 @@ class TestInventoryClassIncludeRule:
         assert row["name"] == "20250907"
         assert row["description"] == "20250907"
 
+    def test_a_child_of_a_rule_admitted_parent_is_not_also_a_top_row(self):
+        """The ancestor walk recognised only built-in classes.
+
+        A standard-class child of a rule-admitted parent therefore reached top level while
+        _get_sub_components() also rendered it under that parent: one duplicated row, and one
+        duplicated install candidate.
+        """
+        items = [
+            {
+                "entPhysicalIndex": 38,
+                "entPhysicalClass": "other",
+                "entPhysicalName": "JNP304-RE-S",
+                "entPhysicalModelName": "JNP304-RE-S",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 50,
+                "entPhysicalClass": "module",
+                "entPhysicalName": "RE daughter card",
+                "entPhysicalModelName": "RE-DAUGHTER",
+                "entPhysicalContainedIn": 38,
+            },
+        ]
+
+        collected = self._collect(items, [self._include_rule()])
+
+        assert [item["entPhysicalIndex"] for item in collected] == [38]
+
     def test_a_skip_rule_still_wins_over_the_allowlist_admission(self):
         """An operator must still be able to drop an item the include rule let through."""
         from netbox_librenms_plugin.models import InventoryIgnoreRule
