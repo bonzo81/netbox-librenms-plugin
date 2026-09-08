@@ -120,6 +120,22 @@ def test_missing_remote_device_id_groups_by_hostname(same_hostname):
 
 
 @pytest.mark.django_db
+def test_a_padded_hostname_resolves_the_same_device_as_the_grouping():
+    """The grouping identity trims, so a padded hostname must not group with its neighbour and
+    then still report the device as missing."""
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+    device = make_device("padded-neighbour")
+
+    found, matched, error = BaseCableTableView().get_device_by_id_or_name(None, "  padded-neighbour  ", "default")
+
+    assert found == device
+    assert matched
+    assert error is None
+
+
+@pytest.mark.django_db
 def test_hostname_grouping_folds_case_like_the_device_lookup():
     """get_device_by_id_or_name resolves a hostname with name__iexact, so two spellings of one
     neighbour must land in the same group and the physical row must still mask the sub-unit."""

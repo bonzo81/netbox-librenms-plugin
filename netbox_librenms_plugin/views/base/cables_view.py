@@ -505,6 +505,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         if not isinstance(hostname, str) or not hostname.strip():
             return None, False, None
+        # The grouping identity trims, so the lookups below must see the same value or a padded
+        # hostname groups with its neighbour yet still reports "Device Not Found in NetBox".
+        hostname = hostname.strip()
 
         # Fall back to name matching if no device found by ID. LibreNMS reports the neighbour
         # hostname as the device advertises it, which is commonly all lower case, while NetBox

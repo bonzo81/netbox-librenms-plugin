@@ -2111,6 +2111,31 @@ class TestSingleModuleVerifyPermissionOrder:
 
 
 @pytest.mark.django_db
+def test_module_verify_rejects_an_out_of_range_device_id_like_its_siblings():
+    """The module endpoint let a raw JSON value reach the pk lookup, so a bad request became a
+    database error and a 500 where the interface and VLAN-group endpoints answer 400."""
+    import json as json_module
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
+    from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
+
+    view = SingleModuleVerifyView()
+    request = make_request(
+        "post",
+        json_module.dumps({"device_id": _POSTGRES_BIGINT_MAX + 1, "ent_physical_index": 7}),
+        user=_verify_superuser("bigint-module-device-id"),
+        path="/verify/",
+        content_type="application/json",
+    )
+
+    response = view.post(request)
+
+    assert response.status_code == 400
+    assert json_module.loads(response.content)["message"] == "No device ID provided"
+
+
+@pytest.mark.django_db
 def test_verify_rejects_a_device_id_beyond_the_bigint_range():
     """An oversized primary key must fail validation here, not in the database driver."""
     import json as json_module

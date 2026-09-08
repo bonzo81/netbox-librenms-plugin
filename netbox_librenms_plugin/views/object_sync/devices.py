@@ -329,6 +329,11 @@ class SingleModuleVerifyView(
     required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request):
+        # Bind the request so require_object_permissions_json() (which reads self.request)
+        # works even when post() is invoked directly rather than through dispatch(), as the
+        # interface sibling already does.
+        self.request = request
+
         data, err = parse_request_json(request)
         if err:
             return err
@@ -337,14 +342,16 @@ class SingleModuleVerifyView(
         # SingleInterfaceVerifyView).
         if error := self.require_object_permissions_json("POST"):
             return error
-        selected_device_id = data.get("device_id")
+        # Coerced like the sibling verify views: a raw JSON value reaching the pk lookup turns a
+        # bad request into a database error and a 500 where the siblings answer 400.
+        selected_device_id = coerce_model_pk(data.get("device_id"))
         ent_physical_index = data.get("ent_physical_index")
         # Configured-string-key-or-fallback, mirroring SingleInterfaceVerifyView above: a
         # forged/non-string key must neither probe another namespace nor TypeError-500.
         server_key = self.resolve_requested_server_key(data)
         row_depth = data.get("depth", 0)
 
-        if not selected_device_id:
+        if selected_device_id is None:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
         if ent_physical_index in (None, ""):
             return JsonResponse({"status": "error", "message": "No entPhysicalIndex provided"}, status=400)
