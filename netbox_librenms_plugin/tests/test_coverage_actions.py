@@ -4658,7 +4658,9 @@ class TestAddAsOOBViewPost:
         request = make_view_request(
             "post",
             {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
-            user=self._device_writer("oob-owner-race-user"),
+            user=grant_view_permission(
+                self._device_writer("oob-owner-race-user"), "view", Device, constraints={"pk": conflicting_device.pk}
+            ),
             HTTP_HX_REQUEST="true",
         )
 
@@ -4695,7 +4697,12 @@ class TestAddAsOOBViewPost:
         request = make_view_request(
             "post",
             {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
-            user=self._device_writer("oob-vm-owner-user"),
+            user=grant_view_permission(
+                self._device_writer("oob-vm-owner-user"),
+                "view",
+                type(conflicting_vm),
+                constraints={"pk": conflicting_vm.pk},
+            ),
             HTTP_HX_REQUEST="true",
         )
 
@@ -6921,6 +6928,49 @@ class TestConflictActionsObjectScope:
             HTTP_HX_REQUEST="true",
         )
         return post_view(AddAsOOBView(), request, device_id=4343)
+
+    @pytest.mark.parametrize("visible", [False, True])
+    def test_oob_id_conflict_identity_respects_view_scope(self, visible):
+        """Only callers who can view the OOB ID owner receive its identity."""
+        from unittest.mock import patch
+
+        from django.utils.html import escape
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        target = make_device("oob-conflict-scope-target")
+        conflict = VirtualMachine.objects.create(
+            pk=9000001, name="private-oob-conflict-owner", cluster=make_cluster("oob-conflict-scope"), status="active"
+        )
+        user = self._scoped_writer(target, "oob-conflict-identity-reader")
+        assert not user.is_superuser
+        if visible:
+            user = grant_view_permission(user, "view", VirtualMachine, constraints={"pk": conflict.pk})
+        assert VirtualMachine.objects.restrict(user, "view").filter(pk=conflict.pk).exists() is visible
+
+        get_inventory = LibreNMSAPI.get_device_inventory
+
+        def claim_during_inventory_fetch(api, *args, **kwargs):
+            result = get_inventory(api, *args, **kwargs)
+            conflict.custom_field_data = {"librenms_id": {"default": 4343}}
+            conflict.save(update_fields=["custom_field_data"])
+            return result
+
+        with patch.object(LibreNMSAPI, "get_device_inventory", claim_during_inventory_fetch):
+            response = self._post_add_as_oob(user, target)
+
+        body = response.content.decode()
+        if visible:
+            assert (
+                escape(f"LibreNMS device #4343 is already assigned to VM '{conflict.name}'; refresh and retry.") in body
+            )
+        else:
+            assert conflict.name not in body
+            assert str(conflict.pk) not in body
+            assert "already assigned to another object outside your view scope" in body
+        target.refresh_from_db()
+        assert not target.custom_field_data.get("librenms_id")
 
     def test_conflict_action_cannot_link_an_out_of_scope_device(self):
         """A pk-constrained change_device grant clears the model-level gate but must not link a device outside its scope."""

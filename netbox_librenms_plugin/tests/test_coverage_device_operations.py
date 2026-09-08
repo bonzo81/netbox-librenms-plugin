@@ -62,6 +62,30 @@ def test_trimmed_serial_lookup_uses_expression_index():
     assert expression == f"btrim((serial)::text, '{trim_characters}'::text)", expression
 
 
+@pytest.mark.django_db
+def test_preexisting_valid_serial_trim_index_is_reused():
+    """Retrying the serial trim migration accepts the existing index without rebuilding it."""
+    import importlib
+
+    from django.apps import apps
+
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0018_device_serial_trim_index")
+    index_name = "nblp_dcim_device_serial_trim_idx"
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass(%s)::oid", [index_name])
+        original_oid = cursor.fetchone()[0]
+    assert original_oid is not None, f"{index_name} is missing; migration 0018 did not run"
+
+    # This pins the shape check against the catalog's rendering of the trim characters.
+    with connection.schema_editor(atomic=False) as schema_editor:
+        module.ensure_device_serial_trim_index(apps, schema_editor)
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass(%s)::oid", [index_name])
+        reused_oid = cursor.fetchone()[0]
+    assert reused_oid == original_oid
+
+
 def _device_payload(device_id=4101, **overrides):
     """Return one complete LibreNMS device response row."""
     payload = {

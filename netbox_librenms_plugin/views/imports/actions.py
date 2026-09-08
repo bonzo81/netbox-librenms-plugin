@@ -2953,6 +2953,10 @@ class AddAsOOBView(
                     "attaching as OOB."
                 )
             if id_conflict is not None:
+                if not self.restricted_queryset(type(id_conflict), "view").filter(pk=id_conflict.pk).exists():
+                    return _htmx_error_response(
+                        f"LibreNMS device #{librenms_id} is already assigned to another object outside your view scope."
+                    )
                 object_label = "VM" if id_conflict._meta.model_name == "virtualmachine" else "device"
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
