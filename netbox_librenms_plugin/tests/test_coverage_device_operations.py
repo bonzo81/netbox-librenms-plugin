@@ -37,13 +37,13 @@ def test_trimmed_serial_lookup_uses_expression_index():
     fallback_queries = [(sql, params) for sql, params in queries if "BTRIM(" in sql]
     assert len(fallback_queries) == 1
     sql, params = fallback_queries[0]
+    # The trim characters come from the captured query, not a literal, so this compares what the
+    # ORM actually sends against what the index stores. Asserting on an EXPLAIN plan instead would
+    # be unsound: on a near-empty table the planner picks any index it likes, so the assertion
+    # passes or fails on table statistics rather than on the index being correct.
+    trim_characters = params[0]
     index_name = "nblp_dcim_device_serial_trim_idx"
     with connection.cursor() as cursor:
-        cursor.execute("SET LOCAL enable_seqscan = off")
-        cursor.execute("EXPLAIN " + sql, params)
-        plan = "\n".join(row[0] for row in cursor.fetchall())
-        assert index_name in plan, plan
-
         cursor.execute(
             """
             SELECT indisvalid, indrelid = to_regclass('dcim_device'),
@@ -54,12 +54,12 @@ def test_trimmed_serial_lookup_uses_expression_index():
             [index_name],
         )
         index = cursor.fetchone()
-    assert index is not None
+    assert index is not None, f"{index_name} is missing; migration 0018 did not run"
     valid, on_device, expression = index
     assert valid
     assert on_device
-    assert "btrim" in expression.lower()
-    assert "serial" in expression
+    # A drifted expression leaves the index present but unusable for this predicate.
+    assert expression == f"btrim((serial)::text, '{trim_characters}'::text)", expression
 
 
 def _device_payload(device_id=4101, **overrides):
