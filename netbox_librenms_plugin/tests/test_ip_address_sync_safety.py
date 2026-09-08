@@ -82,6 +82,36 @@ class TestCachedInterfaceUrlFallback:
         assert enriched[0]["interface_name"] == "Ethernet1-renamed"
         assert enriched[0]["interface_url"] == cached_url
 
+    def test_a_deleted_interface_drops_its_cached_url(self):
+        """The cached URL feeds resolution; it is not an answer.
+
+        When scoped resolution rejects it, the row kept the stale link and the table rendered a
+        URL for an interface that is gone or out of scope.
+        """
+        device = make_device("ipurl-deleted")
+        interface = make_interface(device, "Ethernet1")
+        cached_url = interface.get_absolute_url()
+        interface.delete()
+
+        enriched = self._view().enrich_ip_data(
+            [
+                {
+                    "ipv4_address": "192.0.2.51",
+                    "ipv4_prefixlen": 24,
+                    "port_id": 9999,
+                    "interface_name": "Ethernet1",
+                    "interface_url": cached_url,
+                }
+            ],
+            device,
+            "ifName",
+            server_key="default",
+            port_data_cache={9999: None},
+        )
+
+        assert len(enriched) == 1
+        assert "interface_url" not in enriched[0]
+
     def test_a_row_without_address_fields_is_skipped_not_raised(self):
         """enrich_ip_data guards only isinstance/port_id, so an unparseable row aborted the
         whole call for a direct caller instead of being skipped like the first loop does."""

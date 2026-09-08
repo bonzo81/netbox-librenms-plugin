@@ -361,6 +361,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         if interface is not None:
             enriched_ip["interface_name"] = interface.name
             enriched_ip["interface_url"] = interface.get_absolute_url()
+        else:
+            # The cached URL is an input to resolution, not an answer. Scoped resolution just
+            # rejected it, so the row must not keep linking to a deleted or out-of-scope pk.
+            enriched_ip.pop("interface_url", None)
 
     def get_table(self, data, obj, request, server_key=None):
         """Get the table instance for the view."""
