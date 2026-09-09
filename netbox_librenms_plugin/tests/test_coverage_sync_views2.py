@@ -863,6 +863,14 @@ class TestSyncCablesViewHelpers:
             seen["child_request"] = self.request
             # A child that writes on its request must not reach the caller's copy.
             self.request.cable_delegation_marker = "child"
+            seen["child_get"] = self.request.GET
+            seen["child_post"] = self.request.POST
+            # A child that tries to REWRITE the shared query state must be refused outright.
+            for querydict in (self.request.GET, self.request.POST):
+                try:
+                    querydict["injected"] = "child"
+                except Exception as exc:  # noqa: BLE001 - the type is the assertion below
+                    seen.setdefault("refusals", []).append(type(exc).__name__)
             return real_enrich(self, *args, **kwargs)
 
         with patch.object(DeviceCableTableView, "enrich_links_data", enrich_and_scribble):
@@ -870,6 +878,13 @@ class TestSyncCablesViewHelpers:
 
         assert seen["child_request"] is not request
         assert not hasattr(request, "cable_delegation_marker")
+        # Sharing is only safe because a request QueryDict is immutable, so neither write landed.
+        assert seen.get("refusals") == ["AttributeError", "AttributeError"], seen.get("refusals")
+        assert "injected" not in request.GET
+        assert "injected" not in request.POST
+        # copy.copy() is shallow, so the child can still reach the caller's own QueryDict
+        # (GET here; POST is loaded lazily, so which object it gets depends on access order).
+        assert seen["child_get"] is request.GET
 
     def test_duplicate_cached_row_identities_report_the_real_cause(self):
         """Duplicate row identities must not be reported as an expired cache."""

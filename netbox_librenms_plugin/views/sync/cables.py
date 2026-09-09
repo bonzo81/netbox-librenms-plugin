@@ -197,8 +197,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         view = DeviceCableTableView()
-        # Give the child its own request, like every other object_sync table-view delegation, so it
-        # cannot mutate the GET/POST state this handler still reads.
+        # Give the child its own attribute namespace, like every other object_sync table-view
+        # delegation. copy() is shallow, so GET/POST stay shared; both are immutable, so the child
+        # cannot rewrite the query state this handler still reads either.
         view.request = copy.copy(request)
         return view.enrich_links_data(
             links,
