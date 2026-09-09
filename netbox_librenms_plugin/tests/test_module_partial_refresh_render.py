@@ -101,12 +101,29 @@ class TestPartialModuleRefreshRendersEmpty:
 
     def test_a_complete_refresh_renders_a_table(self, librenms_server):
         """Positive control: the failures below must not pass for the wrong reason."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+
         device = self._device("partial-refresh-complete")
+        # Built by the production helpers, so a renamed key cannot make the cleanup a silent no-op.
+        # The modules tab has no last-fetched key (TAB_SPECS[MODULES].has_last_fetched_key is False).
+        written_keys = (
+            sync_snapshot_key(device, "inventory", SERVER_KEY),
+            SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY),
+        )
 
-        _response, context, request = _refresh(device, librenms_server)
+        try:
+            _response, context, request = _refresh(device, librenms_server)
 
-        assert context.get("table") is not None, "a complete refresh must still build the table"
-        assert "Inventory data refreshed successfully." in message_texts(request)
+            assert context.get("table") is not None, "a complete refresh must still build the table"
+            assert "Inventory data refreshed successfully." in message_texts(request)
+            # The DB rolls back but the cache does not, so the finally below must reach every key
+            # a success writes; a later test reusing this device pk would read whatever leaks.
+            assert [key for key in written_keys if cache.get(key) is not None] == list(written_keys)
+        finally:
+            for key in written_keys:
+                cache.delete(key)
 
     @pytest.mark.parametrize(
         "failure,expected,empty_rows_notice",
