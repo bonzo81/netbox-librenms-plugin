@@ -226,6 +226,10 @@ def test_location_update_reports_a_discovered_id_conflict(client, librenms_serve
 
     assert response.status_code == 302
     assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages
+    # The docstring's no-write claim: the conflict must abort before any LibreNMS mutation, so
+    # only the identity lookup may reach the server. A GET-only route would answer an unexpected
+    # PATCH with 404 and leave this test green without it.
+    assert {request["method"] for request in librenms_server.requests} == {"GET"}, librenms_server.requests
 
 
 @pytest.mark.django_db
@@ -248,7 +252,11 @@ def test_device_status_reports_a_discovered_id_conflict(client, librenms_server,
     rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
 
     assert response.status_code == 200
-    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages
+    # The conflict lookup is unrestricted, so the list view must not name the other object.
+    assert any("already assigned to another NetBox object" in message for message in rendered_messages), (
+        rendered_messages
+    )
+    assert not [message for message in rendered_messages if owner.name in message], rendered_messages
 
 
 @pytest.mark.django_db
@@ -289,10 +297,11 @@ def test_status_lists_report_each_discovery_conflict_once(
 
     response = client.get(reverse(f"plugins:netbox_librenms_plugin:{url_name}"), {"q": prefix})
     rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
-    expected = f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to {object_label} '{owner.name}'"
+    expected = "A discovered LibreNMS ID is already assigned to another NetBox object. Open the object to resolve the conflict."
 
     assert response.status_code == 200
     assert rendered_messages.count(expected) == 1
+    assert not [message for message in rendered_messages if owner.name in message], rendered_messages
 
 
 @pytest.mark.django_db

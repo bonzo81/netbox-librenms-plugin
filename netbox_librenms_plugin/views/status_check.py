@@ -18,6 +18,14 @@ from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGeneri
 logger = logging.getLogger(__name__)
 
 
+# The conflict lookup behind LibreNMSIDConflictError uses an unrestricted queryset, so its
+# message names an object the viewer may not be allowed to see. These list views report the
+# conflict generically; the object page resolves it through the scope-checked path.
+DISCOVERY_CONFLICT_MESSAGE = (
+    "A discovered LibreNMS ID is already assigned to another NetBox object. Open the object to resolve the conflict."
+)
+
+
 class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
     Check the status of NetBox devices in LibreNMS.
@@ -66,7 +74,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(device)
                     if lookup_error is not None:
-                        lookup_errors.add(lookup_error.message)
+                        lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
                     device_status_map[device.pk] = bool(librenms_id)
                 except Exception:
                     device_status_map[device.pk] = False
@@ -124,7 +132,7 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(vm)
                     if lookup_error is not None:
-                        lookup_errors.add(lookup_error.message)
+                        lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
                     vm_status_map[vm.pk] = bool(librenms_id)
                 except Exception:
                     vm_status_map[vm.pk] = False
