@@ -447,7 +447,10 @@ class TestMoveModuleView:
         device = make_device("move-invalid")
         request = make_request("post", {})
 
-        response = view_post(_view(MoveModuleView, request), request, pk=device.pk)
+        # Relocation exists from NetBox 4.7; CI also gates 4.4/4.6, where the view refuses before
+        # it reads these parameters, so the assertion below would pass for the wrong reason.
+        with patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True):
+            response = view_post(_view(MoveModuleView, request), request, pk=device.pk)
 
         assert response.status_code == 302
         assert any("Missing or invalid conflict_module_id/target_bay_id" in text for text in message_texts(request))
