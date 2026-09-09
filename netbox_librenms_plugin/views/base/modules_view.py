@@ -3593,7 +3593,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         serial_rows: dict = {}
         for row in table_data:
-            if row.get("_source") == "oob" or row.get("status") == "Integrated":
+            if row.get("_source") == OOB_INVENTORY_SOURCE or row.get("status") == "Integrated":
                 continue
             serial = row.get("serial", "")
             if not serial or serial.lower() in _PLACEHOLDER_VALUES:
