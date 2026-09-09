@@ -1252,13 +1252,14 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # successes / failures / skips, so this banner must not claim every selected row
                 # was imported when the synchronous run may have failed or skipped some.
                 sync_fallback_msg = (
-                    "Background job requested but no workers are available. "
-                    f"The request ran synchronously for {total_import_count} selected row(s)."
+                    f"Ran directly instead of in the background: {total_import_count} selected row(s) processed. "
+                    "No background worker was available."
                 )
                 if not is_htmx:
-                    messages.warning(
+                    messages.info(
                         request,
-                        f"Background job requested but no workers available. Importing {total_import_count} devices synchronously...",
+                        f"Running the {total_import_count} selected row(s) directly instead of in the background. "
+                        "No background worker was available.",
                     )
 
         # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
@@ -1373,7 +1374,9 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # only htmx_toasts — without this entry the blocking synchronous run happens
         # with no explanation and the user may re-submit or assume the job system worked.
         if sync_fallback_msg is not None:
-            htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", sync_fallback_msg))
+            # Informational: the fallback did the work, so a warning next to the success toast
+            # reads as a failed import.
+            htmx_toasts.append(("text-bg-info", "mdi-information", "Info", sync_fallback_msg))
 
         if success_count:
             _msg = f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}"

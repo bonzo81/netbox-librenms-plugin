@@ -1316,9 +1316,17 @@ class TestBulkImportDevicesViewPost:
         assert response.status_code == 200
         # Outcome-neutral wording: the fallback banner must NOT claim every selected row was
         # "Imported" — the per-row summary toasts report the actual successes/failures/skips.
-        assert b"no workers are available" in response.content
-        assert b"ran synchronously" in response.content
-        assert b"devices synchronously" not in response.content
+        assert b"Ran directly instead of in the background" in response.content
+        assert b"1 selected row(s) processed" in response.content
+        assert b"No background worker was available" in response.content
+        # The HTMX path must queue NO Django messages: this response never renders
+        # inc/messages.html, so a queued message is invisible here and resurfaces as a stale
+        # toast on the next full page load. Asserting on response.content cannot catch that.
+        assert view_message_texts(request) == []
+        # Informational, not a warning: the fallback sits next to a green success toast, and a
+        # yellow alert there reads as a failed import.
+        assert b"text-bg-info" in response.content
+        assert b"text-bg-warning" not in response.content
 
     def test_import_denied_without_model_add_perms_before_collision_precheck(self, settings, librenms_server):
         """A user with the plugin change perm but WITHOUT dcim.add_device is denied BEFORE the sync collision pre-check (which surfaces NetBox object names/pks in its modal) — mirroring the async job's authorize-before-scan ordering."""
@@ -5312,8 +5320,9 @@ class TestBulkImportDevicesMorePaths:
             response = post_view(view, request)
 
         mock_import.assert_called_once()
-        warnings = view_message_texts(request, "warning")
-        assert any("Background job requested but no workers available" in message for message in warnings)
+        assert view_message_texts(request, "warning") == []
+        infos = view_message_texts(request, "info")
+        assert any("directly instead of in the background" in message for message in infos)
         assert response.status_code == 302
         assert response["Location"] == url_for("plugins:netbox_librenms_plugin:librenms_import")
 
