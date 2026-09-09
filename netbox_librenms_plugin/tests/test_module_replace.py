@@ -482,6 +482,9 @@ class TestReplaceModuleView:
             ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            # Relocation exists from NetBox 4.7; the CI matrix also gates 4.4/4.6, where the view
+            # refuses before this assertion's code path is reached.
+            patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
@@ -1036,6 +1039,9 @@ class TestMoveModuleView:
             ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            # Relocation exists from NetBox 4.7; the CI matrix also gates 4.4/4.6, where the view
+            # refuses before this assertion's code path is reached.
+            patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
