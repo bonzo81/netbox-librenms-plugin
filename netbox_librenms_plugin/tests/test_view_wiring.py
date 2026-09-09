@@ -485,7 +485,10 @@ class TestSyncCablesServerKey:
     @pytest.mark.parametrize(
         "server_key",
         [
-            pytest.param(" primary ", id="whitespace-padded"),
+            # Both name no configured server. rebind_api_for_server() strips first, so " primary "
+            # is rejected for being unknown after the strip, NOT for its padding: see
+            # test_a_padded_configured_key_still_resolves below for the padding contract.
+            pytest.param(" primary ", id="unknown-after-strip"),
             pytest.param("bad__key", id="dunder"),
         ],
     )
@@ -514,6 +517,37 @@ class TestSyncCablesServerKey:
         assert response.url == f"{sync_url}?tab=cables"
         assert [str(message) for message in get_messages(response.wsgi_request)] == [
             "Selected LibreNMS server is no longer configured."
+        ]
+
+    def test_a_padded_configured_key_still_resolves(self, client, settings):
+        """rebind_api_for_server() strips the posted key, so padding alone is not a rejection."""
+        from django.contrib.messages import get_messages
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_librenms_servers,
+            make_device,
+            make_superuser,
+        )
+
+        configure_librenms_servers(
+            settings,
+            {
+                key: {"librenms_url": f"https://{key}.example.com", "api_token": "test-token"}
+                for key in ("default", "primary")
+            },
+        )
+        device = make_device("cable-padded-server-key")
+        client.force_login(make_superuser("cable-padded-server-su"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk]),
+            {"server_key": " primary "},
+        )
+
+        # The padded key names a CONFIGURED server, so it must not take the unusable-server path.
+        assert "Selected LibreNMS server is no longer configured." not in [
+            str(message) for message in get_messages(response.wsgi_request)
         ]
 
     def test_repeated_server_keys_fail_closed(self, client, settings):
