@@ -1,4 +1,5 @@
 import logging
+import re
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface
@@ -81,6 +82,53 @@ def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
     # shapes resolve.
     host_q, oob_q = build_librenms_id_qs(server_key, value)
     return host_q | oob_q if include_oob else host_q
+
+
+_SUB_UNIT_RE = re.compile(r"^(?P<physical>.+)\.\d+$")
+
+
+def _drop_masked_sub_units(rows):
+    """Drop a neighbour row for a sub-unit whose own physical port is reported beside it.
+
+    A router advertises LLDP from the physical port and from each sub-unit configured on
+    it, so one local port can report the same neighbour several times. A cable terminates
+    on the physical port only, so every sub-unit row renders as a mismatch.
+
+    Masking is deliberately narrow: a sub-unit is dropped only when the SAME local port
+    reports its exact parent name on the SAME remote device. A sub-unit reported on its
+    own is kept, because it is then the only evidence of that neighbour.
+    """
+
+    def group_key(row):
+        local_port_id = coerce_librenms_id(row["local_port_id"])
+        if local_port_id is None:
+            return None
+        remote_device = coerce_librenms_id(row["remote_device_id"])
+        hostname = row.get("remote_device")
+        if remote_device is not None:
+            remote_identity = ("id", remote_device)
+        elif isinstance(hostname, str) and hostname.strip():
+            # The hostname lookup below is name__iexact, so the grouping identity folds case too.
+            remote_identity = ("hostname", hostname.strip().casefold())
+        else:
+            return None
+        return local_port_id, remote_identity
+
+    physical_by_group = {}
+    for row in rows:
+        remote_port = row["remote_port"]
+        key = group_key(row)
+        if key is not None and isinstance(remote_port, str) and not _SUB_UNIT_RE.match(remote_port):
+            physical_by_group.setdefault(key, set()).add(remote_port)
+
+    kept = []
+    for row in rows:
+        remote_port = row["remote_port"]
+        match = _SUB_UNIT_RE.match(remote_port) if isinstance(remote_port, str) else None
+        if match and match.group("physical") in physical_by_group.get(group_key(row), ()):
+            continue
+        kept.append(row)
+    return kept
 
 
 def _extract_cached_links(cached, cache_key=None):
@@ -264,7 +312,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     "_source": source,
                 }
             )
-        return rows
+        return _drop_masked_sub_units(rows)
 
     @staticmethod
     def _classify_links_fetch_error(success, data):
@@ -384,7 +432,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # post() can surface the actual LibreNMS error instead of a generic "No links found".
             self._links_fetch_error = self._classify_links_fetch_error(success, data)
 
-        interface_name_field = get_interface_name_field(getattr(self, "request", None))
+        interface_name_field = get_interface_name_field(getattr(self, "request", None), obj)
         # The alternate LibreNMS name field: when the user displays ifName, a NetBox
         # interface may still be named from ifDescr (and vice versa). Carrying the alternate
         # name lets enrich_local_port fall back to either field (issue #88).
@@ -455,15 +503,24 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     f"Multiple devices found with the same LibreNMS ID: {remote_device_id}.",
                 )
 
-        # Fall back to name matching if no device found by ID
+        if not isinstance(hostname, str) or not hostname.strip():
+            return None, False, None
+        # The grouping identity trims, so the lookups below must see the same value or a padded
+        # hostname groups with its neighbour yet still reports "Device Not Found in NetBox".
+        hostname = hostname.strip()
+
+        # Fall back to name matching if no device found by ID. LibreNMS reports the neighbour
+        # hostname as the device advertises it, which is commonly all lower case, while NetBox
+        # holds the operator's capitalisation. Match case insensitively or the remote end only
+        # ever resolves through librenms_id.
         try:
-            device = Device.objects.get(name=hostname)
+            device = Device.objects.get(name__iexact=hostname)
             return device, True, None
         except Device.DoesNotExist:
             # Try without domain name
             simple_hostname = hostname.split(".")[0]
             try:
-                device = Device.objects.get(name=simple_hostname)
+                device = Device.objects.get(name__iexact=simple_hostname)
                 return device, True, None
             except Device.DoesNotExist:
                 return None, False, None
@@ -518,7 +575,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
     def enrich_remote_port(self, link, device, server_key=None):
         """Add remote port URL if device and interface exist in NetBox"""
-        if remote_port := link.get("remote_port"):
+        remote_port = link.get("remote_port")
+        if isinstance(remote_port, str) and remote_port:
             netbox_remote_interface = None
             librenms_remote_port_id = link.get("remote_port_id")
             if server_key is None:

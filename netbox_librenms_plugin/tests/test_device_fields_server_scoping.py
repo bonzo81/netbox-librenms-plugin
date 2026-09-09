@@ -26,18 +26,6 @@ from netbox_librenms_plugin.tests.conftest import make_device
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
-@pytest.fixture(autouse=True)
-def mock_librenms_config():
-    """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
-
-    That mock patches ``netbox_librenms_plugin.librenms_api.get_plugin_config``, which would
-    shadow the real ``settings.PLUGINS_CONFIG`` these tests drive through ``override_settings``.
-    Overriding the fixture here (same name, module scope) takes precedence over the plugin's
-    autouse one, so this module runs against the real ``get_plugin_config``.
-    """
-    yield
-
-
 TWO_SERVERS = {
     "default": {"librenms_url": "https://default.example.com", "api_token": "default-token"},
     "siteB": {"librenms_url": "https://siteb.example.com", "api_token": "siteb-token"},

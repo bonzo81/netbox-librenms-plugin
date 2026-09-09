@@ -332,6 +332,29 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
     )
 
 
+def stack_dedup_key(vc_data, device_id):
+    """Return the dedup key shared by every LibreNMS device in one physical stack.
+
+    Member serials identify a stack best. Without them a fingerprint over member
+    name/model/position still groups the members. With no member identity at all
+    there is nothing to group on, so the key falls back to the device: a shared key
+    would let the first such stack suppress virtual-chassis creation for every other
+    one in the same batch.
+    """
+    member_serials = sorted(
+        serial for m in vc_data.get("members", []) if (serial := normalize_serial(m.get("serial"))) and serial != "-"
+    )
+    if member_serials:
+        return f"librenms-stack-{','.join(member_serials)}"
+    member_parts = sorted(
+        f"{m.get('name', '')}/{m.get('model', '')}:{m.get('position', 0)}" for m in vc_data.get("members", [])
+    )
+    if not member_parts:
+        return f"librenms-stack-device-{device_id}"
+    fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
+    return f"librenms-stack-{fingerprint}"
+
+
 def bulk_import_devices_shared(
     device_ids: List[int],
     server_key: str = None,
@@ -529,30 +552,8 @@ def bulk_import_devices_shared(
 
                 # Handle virtual chassis creation for stacks
                 if vc_data.get("is_stack", False):
-                    # Derive a stack-level dedup key from member serials so that all
-                    # LibreNMS devices belonging to the same physical stack (e.g. each
-                    # switch in a stacked chassis that appears as a separate device in
-                    # LibreNMS) share the same key and VC creation is triggered only once.
-                    # Fall back to device_id when no member serials are available.
-                    member_serials = sorted(
-                        serial
-                        for m in vc_data.get("members", [])
-                        if (serial := normalize_serial(m.get("serial"))) and serial != "-"
-                    )
-                    if member_serials:
-                        vc_domain = f"librenms-stack-{','.join(member_serials)}"
-                    else:
-                        # No serials available — build a stable fingerprint from member name/model/position
-                        # so all LibreNMS devices in the same physical stack share the same dedup key.
-                        member_parts = sorted(
-                            f"{m.get('name', '')}/{m.get('model', '')}:{m.get('position', 0)}"
-                            for m in vc_data.get("members", [])
-                        )
-                        if member_parts:
-                            fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
-                            vc_domain = f"librenms-stack-{fingerprint}"
-                        else:
-                            vc_domain = f"librenms-{device_id}"
+                    # One key per physical stack, so VC creation is triggered only once for it.
+                    vc_domain = stack_dedup_key(vc_data, device_id)
 
                     # Only create VC if we haven't processed this stack yet.
                     # Permission was already validated before device import.
@@ -873,9 +874,6 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 else:
                     if hasattr(refreshed, "role") and refreshed.role:
                         apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
-                    elif not validation.get("import_as_vm"):
-                        _reset_device_role(validation)
-                        remove_validation_issue(validation, "role")
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                     # Re-assert non-importable state: recalculate bases can_import on
                     # issues alone, but an existing matched device must never be import-ready.
@@ -1252,7 +1250,6 @@ def process_device_filters(
     show_disabled: bool,
     exclude_existing: bool = False,
     job=None,
-    request=None,
     return_cache_status: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
@@ -1272,7 +1269,6 @@ def process_device_filters(
         show_disabled: Whether to include disabled devices
         exclude_existing: Whether to exclude devices that already exist in NetBox
         job: Optional JobRunner instance for logging job events
-        request: Optional Django request for client disconnect detection (synchronous only)
         return_cache_status: When True, returns (devices, from_cache) tuple
         use_sysname: If True, prefer sysName over hostname for device name resolution
         strip_domain: If True, strip domain suffix from device name
@@ -1326,15 +1322,9 @@ def process_device_filters(
         else:
             logger.info(f"Pre-fetching VC data for {len(device_ids)} devices")
 
-        try:
-            prefetch_vc_data_for_devices(api, device_ids, force_refresh=clear_cache)
-            if job:
-                job.logger.info("Virtual chassis data pre-fetch completed")
-        except (BrokenPipeError, ConnectionError, IOError) as e:
-            if request:
-                logger.info(f"Client disconnected during VC prefetch: {e}")
-                return _empty_return(return_cache_status)
-            raise
+        prefetch_vc_data_for_devices(api, device_ids, force_refresh=clear_cache)
+        if job:
+            job.logger.info("Virtual chassis data pre-fetch completed")
 
     # Validate each device
     validated_devices = []
@@ -1392,21 +1382,15 @@ def process_device_filters(
                 continue
 
         # Not in cache or forcing refresh - validate now
-        try:
-            validation = validate_device_for_import(
-                device,
-                api=api,
-                include_vc_detection=vc_detection_enabled,
-                force_vc_refresh=False,
-                server_key=api.server_key,
-                use_sysname=use_sysname,
-                strip_domain=strip_domain,
-            )
-        except (BrokenPipeError, ConnectionError, IOError) as e:
-            if request:
-                logger.info(f"Client disconnected during device validation: {e}")
-                return _empty_return(return_cache_status)
-            raise
+        validation = validate_device_for_import(
+            device,
+            api=api,
+            include_vc_detection=vc_detection_enabled,
+            force_vc_refresh=False,
+            server_key=api.server_key,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
+        )
 
         # Set VC detection metadata
         if not vc_detection_enabled:

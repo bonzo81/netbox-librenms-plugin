@@ -8,7 +8,7 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.views import ViewTab, register_model_view
 
-from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_relationships import (
     build_candidate_relationship_context,
     build_relationship_maps,
@@ -26,7 +26,7 @@ from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleT
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
-    coerce_positive_int,
+    coerce_model_pk,
     get_interface_name_field,
     get_librenms_sync_device,
     get_missing_vlan_warning,
@@ -65,7 +65,7 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
 
     def get_interface_context(self, request, obj):
         """Return interface sync context for the device."""
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
         interface_table_view = DeviceInterfaceTableView()
         interface_table_view.request = copy.copy(request)
         return interface_table_view.get_context_data(request, obj, interface_name_field)
@@ -158,11 +158,8 @@ class SingleInterfaceVerifyView(
         data, err = parse_request_json(request)
         if err:
             return err
-        selected_device_id = coerce_positive_int(data.get("device_id"))
+        selected_device_id = coerce_model_pk(data.get("device_id"))
         posted_name_field = data.get("interface_name_field")
-        interface_name_field = (
-            posted_name_field if posted_name_field in ("ifName", "ifDescr") else get_interface_name_field()
-        )
 
         if selected_device_id is None:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
@@ -177,10 +174,15 @@ class SingleInterfaceVerifyView(
         # model-level view_device perm, so a site-scoped grant would otherwise read another
         # device's cached verify payload by raw pk.
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
+        interface_name_field = (
+            posted_name_field
+            if is_supported_interface_name_field(posted_name_field)
+            else get_interface_name_field(request, selected_device)
+        )
         origin_device = selected_device
         raw_origin_device_id = data.get("origin_device_id")
         if raw_origin_device_id is not None:
-            origin_device_id = coerce_positive_int(raw_origin_device_id)
+            origin_device_id = coerce_model_pk(raw_origin_device_id)
             if origin_device_id is None:
                 return JsonResponse({"status": "error", "message": "A valid origin device ID is required."}, status=400)
             origin_device = self.restrict_object_or_404(Device, pk=origin_device_id)
@@ -250,14 +252,13 @@ class SingleInterfaceVerifyView(
                 vlan_group_overrides = cache.get(self.get_vlan_overrides_key(primary_device, server_key)) or {}
                 # Set before the selection call: it validates overrides against this row's groups.
                 port_data["vlan_groups"] = vlan_groups
-                BaseInterfaceTableView._add_vlan_group_selection(
-                    self,
+                self._add_vlan_group_selection(
                     port_data,
                     vlan_lookup_maps,
                     selected_device,
                     vlan_group_overrides,
                 )
-                BaseInterfaceTableView._add_missing_vlans_info(self, port_data, vlan_lookup_maps)
+                self._add_missing_vlans_info(port_data, vlan_lookup_maps)
                 # The caller keeps its existing VC member selector. The verify response only
                 # repaints comparison and relationship cells, so it does not need another
                 # member dropdown in the JSON payload.
@@ -328,6 +329,11 @@ class SingleModuleVerifyView(
     required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request):
+        # Bind the request so require_object_permissions_json() (which reads self.request)
+        # works even when post() is invoked directly rather than through dispatch(), as the
+        # interface sibling already does.
+        self.request = request
+
         data, err = parse_request_json(request)
         if err:
             return err
@@ -336,14 +342,16 @@ class SingleModuleVerifyView(
         # SingleInterfaceVerifyView).
         if error := self.require_object_permissions_json("POST"):
             return error
-        selected_device_id = data.get("device_id")
+        # Coerced like the sibling verify views: a raw JSON value reaching the pk lookup turns a
+        # bad request into a database error and a 500 where the siblings answer 400.
+        selected_device_id = coerce_model_pk(data.get("device_id"))
         ent_physical_index = data.get("ent_physical_index")
         # Configured-string-key-or-fallback, mirroring SingleInterfaceVerifyView above: a
         # forged/non-string key must neither probe another namespace nor TypeError-500.
         server_key = self.resolve_requested_server_key(data)
         row_depth = data.get("depth", 0)
 
-        if not selected_device_id:
+        if selected_device_id is None:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
         if ent_physical_index in (None, ""):
             return JsonResponse({"status": "error", "message": "No entPhysicalIndex provided"}, status=400)
@@ -528,9 +536,8 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         except (ValueError, TypeError):
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
-        try:
-            selected_gid = int(vlan_group_id) if vlan_group_id else None
-        except (ValueError, TypeError):
+        selected_gid = coerce_model_pk(vlan_group_id)
+        if vlan_group_id not in (None, "") and selected_gid is None:
             return JsonResponse({"status": "error", "message": "Invalid VLAN group ID"}, status=400)
 
         # Build lookup for the selected group
@@ -661,9 +668,8 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         except (ValueError, TypeError):
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
-        try:
-            selected_gid = int(vlan_group_id) if vlan_group_id else None
-        except (ValueError, TypeError):
+        selected_gid = coerce_model_pk(vlan_group_id)
+        if vlan_group_id not in (None, "") and selected_gid is None:
             return JsonResponse({"status": "error", "message": "Invalid VLAN group ID"}, status=400)
 
         # Check if VLAN exists in the selected group (or globally)

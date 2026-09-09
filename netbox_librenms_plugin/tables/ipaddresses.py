@@ -3,7 +3,7 @@ from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count
+from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_sync_rows
 
 
 class IPAddressTable(tables.Table):
@@ -13,6 +13,10 @@ class IPAddressTable(tables.Table):
 
     def __init__(self, *args, **kwargs):
         """Initialize IP address table."""
+        if args:
+            args = (identify_ip_sync_rows(list(args[0])), *args[1:])
+        elif kwargs.get("data") is not None:
+            kwargs["data"] = identify_ip_sync_rows(list(kwargs["data"]))
         super().__init__(*args, **kwargs)
         # Identify the owning sync tab so the paginator links (inc/paginator.html builds
         # ?tab={{ table.tab }}) keep the user on the IP Addresses tab. Without this, table.tab
@@ -42,8 +46,8 @@ class IPAddressTable(tables.Table):
             "id": "librenms-ipaddress-table",
         }
         row_attrs = {
-            "data-interface": lambda record: record["ip_address"],
-            "data-name": lambda record: record["ip_address"],
+            "data-interface": lambda record: record["row_id"],
+            "data-name": lambda record: record["ip_with_mask"],
             "data-mgmt-ip": lambda record: "true" if record.get("is_mgmt_ip") else "",
         }
 
@@ -51,7 +55,7 @@ class IPAddressTable(tables.Table):
         orderable=False,
         visible=True,
         attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
-        accessor="ip_address",
+        accessor="row_id",
     )
 
     address = tables.Column(
@@ -77,7 +81,7 @@ class IPAddressTable(tables.Table):
     )
     vrf = tables.TemplateColumn(
         template_code="""
-        <select id="vrf_select_{{ record.ip_address|slugify }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.ip_address }}" name="vrf_{{ record.ip_address }}">
+        <select id="vrf_select_{{ record.row_id }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.row_id }}" name="vrf_{{ record.row_id }}">
             <option value="">Global</option>
             {% for vrf in record.vrfs %}
                 <option value="{{ vrf.pk }}" {% if record.vrf_id == vrf.pk %}selected{% endif %}>
@@ -96,19 +100,22 @@ class IPAddressTable(tables.Table):
 
     def render_status(self, value, record):
         """Render the status column with appropriate buttons or text styling"""
+        row_id = record.get("row_id", record.get("ip_with_mask"))
+        if row_id is None:
+            return "Ambiguous source row"
         if value == "update":
             return format_html(
-                '<button type="submit" class="btn btn-sm btn-warning" onclick="document.getElementById(\'selected_ip\').value=\'{}\'">'
+                '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}">'
                 '<i class="mdi mdi-pencil" aria-hidden="true"></i> Update</button>',
-                record["ip_address"],
+                row_id,
             )
         elif value == "matched":
             return mark_safe('<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>')
         elif record.get("interface_url"):
             return format_html(
-                '<button type="submit" class="btn btn-sm btn-primary" onclick="document.getElementById(\'selected_ip\').value=\'{}\'">'
+                '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}">'
                 '<i class="mdi mdi-plus-thick" aria-hidden="true"></i> Create</button>',
-                record["ip_address"],
+                row_id,
             )
         return mark_safe('<span class="text-muted">Missing NetBox Object</span>')
 

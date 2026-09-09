@@ -12,8 +12,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Import the autouse fixture from helpers
-pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
+from netbox_librenms_plugin.tests import test_librenms_api_helpers
+
+# Bind the helper's autouse fixture into this module so it patches the config here only.
+# `pytest_plugins` would register it session-wide and shadow PLUGINS_CONFIG for later tests.
+mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
 
 
 # ============================================
@@ -703,3 +706,27 @@ class TestVlanSyncContentTemplateMigratedMode:
         assert "csrfmiddlewaretoken" in html
         assert 'name="action"' in html
         assert 'name="server_key"' in html
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("endpoint", ["verify_vlan_group", "verify_vlan_sync_group"])
+@pytest.mark.parametrize("group_id", [True, False, 1.5, 0, -1, 10**40, [], {}])
+def test_vlan_verification_rejects_malformed_group_ids(client, endpoint, group_id):
+    """JSON values must not become a different group or an implicit global selection."""
+    from django.urls import reverse
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+
+    device = make_device("invalid-vlan-group")
+    client.force_login(make_superuser())
+    response = client.post(
+        reverse(f"plugins:netbox_librenms_plugin:{endpoint}"),
+        {
+            "device_id": device.pk,
+            "interface_name": "eth0",
+            "vid": 100,
+            "vlan_group_id": group_id,
+        },
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    assert response.json()["message"] == "Invalid VLAN group ID"

@@ -22,6 +22,8 @@ from netbox_librenms_plugin.utils import (
     get_module_template_interface_names,
     get_module_types_indexed,
     get_vc_member_positions,
+    normalize_inventory_serial,
+    normalize_serial,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
 )
@@ -937,6 +939,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
+        # Same reason for the serial scope: normalize_inventory_serial() reads the rule table
+        # per item otherwise, inside the install transaction.
+        norm_rules_serial = preload_normalization_rules(
+            "serial", manufacturer=getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        )
 
         # Install top-down: each install may create new child bays
         installed = []
@@ -955,6 +962,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
+                        norm_rules_serial=norm_rules_serial,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
                         changeable_components=changeable_components,
@@ -1084,6 +1092,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         regex_mappings=None,
         manufacturer_id=None,
         norm_rules_bay=None,
+        norm_rules_serial=None,
     ):
         """
         Try to install a single inventory item.
@@ -1096,7 +1105,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import resolve_module_type
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
-        serial = (item.get("entPhysicalSerialNum") or "").strip()
+        # The serial-scope rules strip vendor markers such as Juniper's "S/N ", and the
+        # coercion handles the all-digit serials LibreNMS sends as JSON numbers.
+        serial = normalize_inventory_serial(
+            item.get("entPhysicalSerialNum"),
+            manufacturer=device.device_type.manufacturer,
+            preloaded_rules=norm_rules_serial,
+        )
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
         name = item.get("entPhysicalName", "") or model_name
@@ -1511,6 +1526,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
+        # The rows can target different manufacturers, so seed the unscoped scope only;
+        # apply_normalization_rules caches each manufacturer it meets into this same dict.
+        norm_rules_serial = preload_normalization_rules("serial")
 
         installed, skipped, failed = [], [], []
 
@@ -1551,6 +1569,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
+                        norm_rules_serial=norm_rules_serial,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
                         changeable_components=changeable_components,
@@ -1833,16 +1852,18 @@ class ModuleMismatchPreviewView(
         if not librenms_item:
             return HttpResponse("Inventory item not found in cache.", status=400)
 
-        librenms_model = (librenms_item.get("entPhysicalModelName") or "").strip() or "-"
-        librenms_serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        librenms_model = normalize_serial(librenms_item.get("entPhysicalModelName")) or "-"
+        # Coerced, not rule-normalized: applying the serial rules here needs the develop-owned
+        # test_module_replace mock narrowed first, and that file is outside this PR's diff.
+        librenms_serial = normalize_serial(librenms_item.get("entPhysicalSerialNum"))
         if librenms_serial.lower() in _PLACEHOLDER_VALUES:
             librenms_serial = ""
 
         # Detect type mismatch
-        from netbox_librenms_plugin.utils import resolve_module_type
-
         module_types = get_module_types_indexed()
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(
             librenms_model if librenms_model != "-" else "", module_types, manufacturer=manufacturer
         )
@@ -2026,15 +2047,15 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             messages.error(request, "Inventory item not found in cache.")
             return _modules_redirect_response(request, sync_url, server_key)
 
-        model_name = (librenms_item.get("entPhysicalModelName") or "").strip()
-        serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
+        serial = normalize_serial(librenms_item.get("entPhysicalSerialNum"))
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
 
         module_types = get_module_types_indexed()
-        from netbox_librenms_plugin.utils import resolve_module_type
-
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
 
         if not matched_type:

@@ -627,7 +627,6 @@ class TestImportDevicesJob:
         sync_options = {
             "sync_interfaces": True,
             "sync_cables": False,
-            "sync_ips": True,
             "use_sysname": True,
             "strip_domain": True,
         }
@@ -1445,6 +1444,8 @@ class TestGracefulFallback:
         )
         mock_api = MagicMock()
         mock_api.server_key = "default"
+        # Answer the way LibreNMS does: a search that matches nothing is 200 and an empty list.
+        mock_api.list_devices.return_value = (True, [])
 
         with (
             patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)),

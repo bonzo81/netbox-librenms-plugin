@@ -15,17 +15,6 @@ from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
 
-@pytest.fixture(autouse=True)
-def mock_librenms_config():
-    """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
-
-    That mock pins ``get_plugin_config`` to a ``default``-only server map, so the ``stub`` key
-    these tests post becomes an unknown explicit key and the view fails closed before it reaches
-    the behaviour under test. Same-name module fixture wins over the plugin's autouse one.
-    """
-    yield
-
-
 def _make_request(body: dict) -> MagicMock:
     """Create a mock POST request with JSON body."""
     request = MagicMock()
@@ -2006,9 +1995,6 @@ class TestSaveVlanGroupOverridesObjectScope:
         from django.contrib.auth import get_user_model
         from users.models import ObjectPermission
 
-        # Resolve via the app registry, not `from ...models import LibreNMSSettings`: the autouse
-        # mock_librenms_config fixture patches the module attribute to a MagicMock during the full
-        # suite, so a plain import would hand get_for_model() a mock class.
         LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
 
         user = get_user_model().objects.create_user(username="scoped-writer", password="x")
@@ -2122,3 +2108,52 @@ class TestSingleModuleVerifyPermissionOrder:
             )
         assert response.status_code == 403
         assert "view_device" in json.loads(response.content)["error"]
+
+
+@pytest.mark.django_db
+def test_module_verify_rejects_an_out_of_range_device_id_like_its_siblings():
+    """The module endpoint let a raw JSON value reach the pk lookup, so a bad request became a
+    database error and a 500 where the interface and VLAN-group endpoints answer 400."""
+    import json as json_module
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
+    from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
+
+    view = SingleModuleVerifyView()
+    request = make_request(
+        "post",
+        json_module.dumps({"device_id": _POSTGRES_BIGINT_MAX + 1, "ent_physical_index": 7}),
+        user=_verify_superuser("bigint-module-device-id"),
+        path="/verify/",
+        content_type="application/json",
+    )
+
+    response = view.post(request)
+
+    assert response.status_code == 400
+    assert json_module.loads(response.content)["message"] == "No device ID provided"
+
+
+@pytest.mark.django_db
+def test_verify_rejects_a_device_id_beyond_the_bigint_range():
+    """An oversized primary key must fail validation here, not in the database driver."""
+    import json as json_module
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
+    from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
+
+    view = SingleInterfaceVerifyView()
+    request = make_request(
+        "post",
+        json_module.dumps({"device_id": _POSTGRES_BIGINT_MAX + 1, "port_id": 10}),
+        user=_verify_superuser("bigint-device-id"),
+        path="/verify/",
+        content_type="application/json",
+    )
+
+    response = view.post(request)
+
+    assert response.status_code == 400
+    assert json_module.loads(response.content)["message"] == "No device ID provided"

@@ -739,17 +739,7 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
         </li>
         {% endif %}
     </ul>
-    <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top"
-        title="Select preferred interface name field"
-        data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
-        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifDescr"
-            id="ifDescr" {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
-        <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
-
-        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifName"
-            id="ifName" {% if interface_name_field == 'ifName' %}checked{% endif %}>
-        <label class="btn btn-outline-primary" for="ifName">ifName</label>
-    </div>
+    {% include 'netbox_librenms_plugin/inc/_interface_name_field_selector.html' %}
 </div>
 <!-- Tab Content -->
 <div class="tab-content mt-3" id="librenmsTabContent">

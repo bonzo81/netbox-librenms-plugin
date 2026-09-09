@@ -1,20 +1,19 @@
 """
 Minimal HTTP mock for LibreNMS API responses.
 
-Usage in tests (add to conftest.py or inline):
+Usage in tests: take the ``librenms_server`` fixture from ``conftest.py``, or open the context
+manager directly:
 
     from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
-    @pytest.fixture
-    def librenms_server():
-        with librenms_mock_server() as server:
-            yield server
+    with librenms_mock_server() as server:
+        ...
 """
 
 import json
 import threading
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
@@ -29,8 +28,12 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # A timeout test can close its socket before the delayed response is ready.
+            pass
 
     def _handle_request(self, method, body=None):
         """Dispatch to the registered route for this path, with optional method+query fallback."""
@@ -38,6 +41,14 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parsed.query
         routes = self.server.routes  # type: ignore[attr-defined]
+        request = {
+            "method": method,
+            "path": path,
+            "query": parse_qs(query),
+            "headers": dict(self.headers),
+            "body": body,
+        }
+        self.server.requests.append(request)  # type: ignore[attr-defined]
 
         # Build lookup keys: prefer method+path+query, then path+query, then path-only.
         candidates = []
@@ -51,13 +62,7 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
             if key in routes:
                 entry = routes[key]
                 if callable(entry):
-                    status, resp_body = entry(
-                        method=method,
-                        path=path,
-                        query=parse_qs(query),
-                        headers=dict(self.headers),
-                        body=body,
-                    )
+                    status, resp_body = entry(**request)
                 else:
                     status, resp_body = entry
                 self._send_json(status, resp_body)
@@ -68,14 +73,19 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._handle_request("GET")
 
-    def do_POST(self):
+    def _read_json_body(self):
         length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(length) if length else b""
         try:
-            body = json.loads(raw_body) if raw_body else None
-        except json.JSONDecodeError:
-            body = raw_body.decode(errors="replace")
-        self._handle_request("POST", body=body)
+            return json.loads(raw_body) if raw_body else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return raw_body.decode(errors="replace")
+
+    def do_POST(self):
+        self._handle_request("POST", body=self._read_json_body())
+
+    def do_PATCH(self):
+        self._handle_request("PATCH", body=self._read_json_body())
 
 
 class MockLibreNMSServer:
@@ -89,12 +99,20 @@ class MockLibreNMSServer:
             and must return (status_code, body_dict).
             Routes can also be keyed as "METHOD /path" for method-specific matching,
             or "/path?query" for query-specific matching.
+        requests (list): Every received request as a method/path/query/headers/body dict.
     """
 
     def __init__(self):
-        self._server = HTTPServer(("127.0.0.1", 0), _LibreNMSHandler)
-        self._server.routes = {}
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _LibreNMSHandler)
+        # A real LibreNMS always serves /system, and the settings page reads it to report the
+        # server version. Seed a default so a test only registers it to assert something
+        # specific, and can still override it to simulate an unhealthy server.
+        self._server.routes = {
+            "/api/v0/system": (200, {"status": "ok", "system": [{"local_ver": "24.1.0"}]}),
+        }
+        self._server.requests = []
         self.routes = self._server.routes  # expose on wrapper as documented
+        self.requests = self._server.requests
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         _, port = self._server.server_address
         self.url = f"http://127.0.0.1:{port}"

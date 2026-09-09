@@ -39,6 +39,469 @@ def _captured_table_view(view):
     return rows_store
 
 
+@pytest.mark.django_db
+class TestInventoryClassIncludeRule:
+    """Admit an entPhysicalClass the built-in allowlist does not carry.
+
+    A Juniper MX304 reports both Routing Engines with entPhysicalClass "other".
+    INVENTORY_CLASSES has no "other", so the modules tab showed neither of them.
+    """
+
+    def _inventory(self):
+        """A chassis with the two Routing Engines under it, as LibreNMS reports them."""
+        return [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalClass": "chassis",
+                "entPhysicalName": "Chassis",
+                "entPhysicalDescr": "MX304",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 38,
+                "entPhysicalClass": "other",
+                "entPhysicalName": "JNP304-RE-S",
+                "entPhysicalModelName": "JNP304-RE-S",
+                "entPhysicalDescr": "Routing Engine 0",
+                "entPhysicalSerialNum": "S/N BCFB9793",
+                "entPhysicalContainedIn": 1,
+            },
+            {
+                "entPhysicalIndex": 39,
+                "entPhysicalClass": "other",
+                "entPhysicalName": "JNP304-RE-S",
+                "entPhysicalModelName": "JNP304-RE-S",
+                "entPhysicalDescr": "Routing Engine 1",
+                "entPhysicalSerialNum": "S/N BCFB9751",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+
+    def _collect(self, items, rules):
+        """Collect top-level rows the way _build_context does, cache included."""
+        from netbox_librenms_plugin.views.base.modules_view import (
+            BaseModuleTableView,
+            _check_ignore_rules,
+        )
+
+        index_map = {item["entPhysicalIndex"]: item for item in items}
+        # _collect_top_items reads this cache for any item carrying an index, so a test that
+        # passed {} would report that no rule ever matched.
+        ignore_cache = {
+            item["entPhysicalIndex"]: _check_ignore_rules(
+                item, index_map.get(item.get("entPhysicalContainedIn")), rules, index_map, ""
+            )
+            for item in items
+        }
+        transparent = BaseModuleTableView._find_transparent_indices(items, ignore_cache)
+        return BaseModuleTableView._collect_top_items(items, index_map, rules, "", transparent, ignore_cache)
+
+    def _include_rule(self, pattern="other"):
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        return InventoryIgnoreRule.objects.create(
+            name="Routing engines reported as other",
+            match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
+            pattern=pattern,
+            action=InventoryIgnoreRule.ACTION_INCLUDE,
+            require_serial_match_parent=False,
+        )
+
+    def test_without_a_rule_the_class_is_dropped(self):
+        """The built-in allowlist still governs when no rule says otherwise."""
+        assert self._collect(self._inventory(), []) == []
+
+    def test_an_include_rule_admits_every_item_of_that_class(self):
+        collected = self._collect(self._inventory(), [self._include_rule()])
+
+        assert [item["entPhysicalIndex"] for item in collected] == [38, 39]
+
+    def test_a_rule_for_another_class_admits_nothing(self):
+        assert self._collect(self._inventory(), [self._include_rule(pattern="sensor")]) == []
+
+    def test_the_class_match_is_case_insensitive(self):
+        collected = self._collect(self._inventory(), [self._include_rule(pattern="Other")])
+
+        assert [item["entPhysicalIndex"] for item in collected] == [38, 39]
+
+    def test_the_migration_seeds_the_rule_that_admits_routing_engines(self):
+        """The fix ships working: a fresh install admits the class without operator setup."""
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        seeded = InventoryIgnoreRule.objects.filter(
+            match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
+            action=InventoryIgnoreRule.ACTION_INCLUDE,
+            pattern="other",
+        )
+
+        assert seeded.exists()
+        assert seeded.get().enabled is True
+
+    def test_the_row_name_falls_back_to_the_description(self):
+        """Both Routing Engines report entPhysicalName "JNP304-RE-S", so the name cannot
+        tell them apart. The description carries "Routing Engine 0" and "1"."""
+        collected = self._collect(self._inventory(), [self._include_rule()])
+        view = _make_view()
+        names = [
+            view._build_row(item, {item["entPhysicalIndex"]: item for item in collected}, {}, {})["name"]
+            for item in collected
+        ]
+
+        assert names == ["Routing Engine 0", "Routing Engine 1"]
+
+    def test_a_numeric_description_still_names_the_rule_admitted_row(self):
+        """LibreNMS sends an all-digit entPhysicalDescr as a JSON number, which the name
+        fallback stripped directly."""
+        inventory = self._inventory()
+        inventory[1]["entPhysicalDescr"] = 20250907
+        collected = self._collect(inventory, [self._include_rule()])
+        view = _make_view()
+
+        row = view._build_row(collected[0], {item["entPhysicalIndex"]: item for item in collected}, {}, {})
+
+        assert row["name"] == "20250907"
+        assert row["description"] == "20250907"
+
+    def test_a_child_of_a_rule_admitted_parent_is_not_also_a_top_row(self):
+        """The ancestor walk recognised only built-in classes.
+
+        A standard-class child of a rule-admitted parent therefore reached top level while
+        _get_sub_components() also rendered it under that parent: one duplicated row, and one
+        duplicated install candidate.
+        """
+        items = [
+            {
+                "entPhysicalIndex": 38,
+                "entPhysicalClass": "other",
+                "entPhysicalName": "JNP304-RE-S",
+                "entPhysicalModelName": "JNP304-RE-S",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 50,
+                "entPhysicalClass": "module",
+                "entPhysicalName": "RE daughter card",
+                "entPhysicalModelName": "RE-DAUGHTER",
+                "entPhysicalContainedIn": 38,
+            },
+        ]
+
+        collected = self._collect(items, [self._include_rule()])
+
+        assert [item["entPhysicalIndex"] for item in collected] == [38]
+
+    def test_a_skip_rule_still_wins_over_the_allowlist_admission(self):
+        """An operator must still be able to drop an item the include rule let through."""
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        skip = InventoryIgnoreRule.objects.create(
+            name="Drop RE 1",
+            match_type=InventoryIgnoreRule.MATCH_CONTAINS,
+            pattern="JNP304-RE-S",
+            action=InventoryIgnoreRule.ACTION_SKIP,
+            require_serial_match_parent=False,
+        )
+
+        assert self._collect(self._inventory(), [self._include_rule(), skip]) == []
+
+
+@pytest.mark.django_db
+class TestSerialRulesFollowTheTargetDevice:
+    """Serial rules are manufacturer-scoped, so the device a row targets picks them.
+
+    A virtual-chassis row can resolve to a member whose manufacturer differs from the page
+    device's. Normalizing the whole snapshot up front with the page manufacturer gave those
+    rows a serial normalized under the wrong vendor's rules.
+    """
+
+    def _rule_for(self, manufacturer):
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        return NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_SERIAL,
+            manufacturer=manufacturer,
+            match_pattern=r"^BBB-(.+)$",
+            replacement=r"\1",
+            priority=10,
+        )
+
+    def _item(self):
+        return {
+            "entPhysicalIndex": 5,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 1",
+            "entPhysicalModelName": "WS-X4748",
+            "entPhysicalSerialNum": "BBB-12345",
+            "entPhysicalContainedIn": 0,
+        }
+
+    def _serial_for(self, target_manufacturer, page_manufacturer=None):
+        view = _make_view()
+        view._current_manufacturer = target_manufacturer
+        return view._normalized_item_serial(self._item(), page_manufacturer)
+
+    def test_the_targets_own_rule_normalizes_the_serial(self):
+        from dcim.models import Manufacturer
+
+        owner = Manufacturer.objects.create(name="Serial Rule Owner", slug="serial-rule-owner")
+        self._rule_for(owner)
+
+        assert self._serial_for(owner) == "12345"
+
+    def test_the_page_manufacturers_rule_does_not_reach_another_members_row(self):
+        """The page device owns the rule; a VC row resolving to another vendor keeps the raw value."""
+        from dcim.models import Manufacturer
+
+        page = Manufacturer.objects.create(name="Page Vendor", slug="page-vendor")
+        member = Manufacturer.objects.create(name="Member Vendor", slug="member-vendor")
+        self._rule_for(page)
+
+        assert self._serial_for(member, page_manufacturer=page) == "BBB-12345"
+
+    def test_module_type_matching_uses_the_targets_manufacturer(self):
+        """Type mappings are manufacturer-scoped too.
+
+        The member vendor maps this LibreNMS model to its own type; the page device has no such
+        mapping. Matching against the page manufacturer therefore resolves nothing at all, and a
+        virtual-chassis row lost the type its own member declares.
+        """
+        from dcim.models import Manufacturer, ModuleType
+
+        from netbox_librenms_plugin.models import ModuleTypeMapping
+        from netbox_librenms_plugin.utils import get_module_types_indexed
+
+        page = Manufacturer.objects.create(name="Page Vendor MT", slug="page-vendor-mt")
+        member = Manufacturer.objects.create(name="Member Vendor MT", slug="member-vendor-mt")
+        member_type = ModuleType.objects.create(manufacturer=member, model="MEMBER-TYPE")
+        ModuleTypeMapping.objects.create(
+            librenms_model="RAW-MODEL",
+            netbox_module_type=member_type,
+            manufacturer=member,
+        )
+        module_types = get_module_types_indexed()
+
+        item = {
+            "entPhysicalIndex": 7,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 1",
+            "entPhysicalModelName": "RAW-MODEL",
+            "entPhysicalContainedIn": 0,
+        }
+
+        def row_for(target_manufacturer):
+            view = _make_view()
+            view._current_manufacturer = target_manufacturer
+            return view._build_row(item, {item["entPhysicalIndex"]: item}, {}, module_types, manufacturer=page)
+
+        assert row_for(member)["module_type_id"] == member_type.pk
+        # The control: the page vendor declares no mapping, so nothing should resolve for it.
+        assert row_for(page)["module_type_id"] is None
+
+    def test_a_member_rule_applies_even_though_the_preload_used_the_page_manufacturer(self):
+        """_build_context preloads for the page device, and rows resolve per target member.
+
+        apply_normalization_rules loads a manufacturer it was not preloaded for and caches it
+        into the same dict, so the member's rule still applies and costs one query per vendor.
+        """
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.utils import preload_normalization_rules
+
+        page = Manufacturer.objects.create(name="Preload Page Vendor", slug="preload-page-vendor")
+        member = Manufacturer.objects.create(name="Preload Member Vendor", slug="preload-member-vendor")
+        self._rule_for(member)
+        preloaded = preload_normalization_rules("serial", manufacturer=page)
+        assert ("serial", member.pk) not in preloaded, "the member was never preloaded"
+
+        view = _make_view()
+        view._current_manufacturer = member
+        view._norm_rules_serial = preloaded
+
+        serial = view._normalized_item_serial(self._item(), page)
+
+        assert serial == "12345"
+        assert ("serial", member.pk) in preloaded, "the member's rules were not cached for reuse"
+
+    def test_build_row_reports_the_serial_it_is_given(self):
+        """_build_row must stay free of database access, so the caller resolves the serial."""
+        view = _make_view()
+        item = self._item()
+
+        row = view._build_row(item, {item["entPhysicalIndex"]: item}, {}, {}, normalized_serial="12345")
+
+        assert row["serial"] == "12345"
+
+
+class TestRowOrderIsStableAcrossAnInstall:
+    """Installing a module must not move its row.
+
+    The rows used to be grouped by status, and installing a module flips its status to
+    "Installed", which pulled the row to the top of the table under the user.
+    """
+
+    def _rows(self, *statuses):
+        """One top-level row per status, each carrying a child, in inventory order."""
+        rows = []
+        for index, status in enumerate(statuses):
+            rows.append({"name": f"bay{index}", "status": status, "depth": 0})
+            rows.append({"name": f"bay{index}-child", "status": "Unmatched", "depth": 1})
+        return rows
+
+    def test_rows_keep_their_inventory_order(self):
+        view = _make_view()
+        rows = self._rows("Unmatched", "Matched", "Installed", "Serial Mismatch")
+
+        assert [row["name"] for row in view._group_children_under_parents(rows)] == [row["name"] for row in rows]
+
+    def test_installing_a_module_does_not_move_its_row(self):
+        """The same table before and after one bay's status becomes Installed."""
+        view = _make_view()
+        # Statuses chosen so the old status sort genuinely reordered them: installing bay1
+        # moved it from last to second.
+        before = self._rows("Installed", "Unmatched", "Matched")
+        after = self._rows("Installed", "Installed", "Matched")
+
+        order_before = [row["name"] for row in view._group_children_under_parents(before)]
+        order_after = [row["name"] for row in view._group_children_under_parents(after)]
+
+        assert order_before == order_after
+
+    def test_children_stay_under_their_own_parent(self):
+        view = _make_view()
+        rows = self._rows("Installed", "Unmatched")
+
+        result = view._group_children_under_parents(rows)
+
+        assert [(row["name"], row["depth"]) for row in result] == [
+            ("bay0", 0),
+            ("bay0-child", 1),
+            ("bay1", 0),
+            ("bay1-child", 1),
+        ]
+
+
+@pytest.mark.django_db
+class TestFpcSlotMatchesOnSlashedPositions:
+    """A Juniper module bay position is "fpc/pic", so the guard must read the FPC from it.
+
+    Reported from live NetBox: an MX304 MIC sits in bay LCMIC0 at position "0/0", which the
+    device-type library needs so the module type's "Transceiver {module}/N" template expands to
+    "Transceiver 0/0/0". int("0/0") raises, and the guard turned that into "no match", so every
+    transceiver bay under the MIC was silently discarded.
+    """
+
+    def _child_bay(self, parent_position):
+        """Build a real transceiver bay nested under a module installed at *parent_position*."""
+        from dcim.models import Module, ModuleBay
+
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+
+        device = make_device_with_module_bays(f"mx304-{parent_position.replace('/', '-')}", [])
+        parent_bay = ModuleBay.objects.create(device=device, name="LCMIC0", position=parent_position)
+        module = Module.objects.create(
+            device=device, module_bay=parent_bay, module_type=make_module_type("JNP-MIC1"), status="active"
+        )
+        return ModuleBay.objects.create(device=device, module=module, name="Transceiver 0/0/0", position="0")
+
+    def test_a_slashed_parent_position_still_matches_its_own_fpc(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("0/0")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP56-DD @ 0/0/0", bay) is True
+
+    def test_the_second_pic_of_the_same_fpc_still_matches(self):
+        """Only the FPC is compared, so pic 1 under fpc 0 is the same slot for this guard."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("0/1")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP56-DD @ 0/1/3", bay) is True
+
+    def test_a_different_fpc_is_still_rejected(self):
+        """The guard exists to drop an orphan belonging to another FPC. That must survive."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("0/0")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP56-DD @ 1/0/2", bay) is False
+
+    def test_a_bare_integer_position_keeps_working(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("2")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 2/0/1", bay) is True
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 3/0/1", bay) is False
+
+    @pytest.mark.parametrize("position", ["01A", "02A", "03D", "PCIe1", "swp3", "FPC1", "PSU0"])
+    def test_a_digit_bearing_but_non_numeric_position_fails_closed(self, position):
+        """These are real bay positions, and none of them names an FPC.
+
+        A fix that pulled the leading digits out of "01A" would read FPC 1 and match a
+        descriptor for a different slot. Only a wholly numeric component counts.
+        """
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay(position)
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 0/0/1", bay) is False
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 1/0/1", bay) is False
+
+    @pytest.mark.parametrize(
+        "position",
+        ["0/FT0", "0/PM0", "0/RP0", "0/RP1", "0/IMD", "0/PS0/M0", "2/x1", "1/1/c1"],
+    )
+    def test_a_compound_position_whose_tail_is_not_numeric_fails_closed(self, position):
+        """Real shipping positions: fan trays, power modules, route processors, Nokia XIOM.
+
+        The leading digit is a chassis index, not an FPC, so reading it alone would accept a
+        transceiver descriptor against a fan tray bay. Only a wholly numeric fpc/pic counts.
+
+        "2/x1" is the case that separates a leading-segment parse from a whole-position one:
+        it is a live parent bay carrying 34 nested bays, so it really reaches this guard.
+        """
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay(position)
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 0/0/1", bay) is False
+
+    def test_the_regex_mapping_resolves_through_to_the_bay(self):
+        """The whole sequence: the mapping resolves the bay name, then the guard keeps it.
+
+        This is the shape the bug actually broke. The mapping matched and produced the right
+        bay name, and the guard then discarded it, so the lookup returned None.
+        """
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("0/0")
+        manufacturer = Manufacturer.objects.get(pk=bay.device.device_type.manufacturer_id)
+        mapping = ModuleBayMapping.objects.create(
+            librenms_name=r"^.+ @ (\d+/\d+/\d+)$",
+            netbox_bay_name=r"Transceiver \1",
+            librenms_class="port",
+            is_regex=True,
+            manufacturer=manufacturer,
+        )
+
+        resolved = BaseModuleTableView._lookup_regex_bay_mapping(
+            "QSFP56-DD @ 0/0/0", "port", {bay.name: bay}, [mapping], manufacturer_id=manufacturer.pk
+        )
+
+        assert resolved == bay
+
+    def test_an_unparseable_position_still_fails_closed(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = self._child_bay("slot-a")
+
+        assert BaseModuleTableView._fpc_slot_matches("QSFP @ 0/0/1", bay) is False
+
+
 class TestMergeTransceiverDataPortIdentity:
     """Transceiver merge should preserve stable port identity metadata."""
 
@@ -1655,7 +2118,10 @@ class TestPositionalMatchScaffoldingChain:
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[transparent_rule]),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
-            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
+            patch(
+                "netbox_librenms_plugin.utils.preload_normalization_rules",
+                side_effect=lambda scope, manufacturer=None: {(scope, None): []},
+            ),
             patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
         ):

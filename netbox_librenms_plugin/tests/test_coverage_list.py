@@ -14,6 +14,8 @@ Conventions:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestGetRequiredPermission:
     """Tests for get_required_permission()."""
@@ -778,6 +780,65 @@ class TestGetView:
                                         assert "job_pk" in data
                                         assert "poll_url" in data
 
+    @pytest.mark.django_db
+    def test_get_unreachable_preflight_skips_the_background_job(self):
+        """An unreachable count preflight must not enqueue a job that repeats the same call.
+
+        The job would fail on its own instead of showing the synchronous error, so the user
+        sees a polling response where the outage should have been reported.
+        """
+        from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        view, request = self._make_view_with_request(
+            superuser=True,
+            query_params={"apply_filters": "1", "librenms_location": "DC1"},
+        )
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        # The synchronous path this must fall through to calls LibreNMS again and reports it.
+        mock_api.list_devices.return_value = (False, "LibreNMS did not answer")
+
+        with patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)):
+            with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
+                mock_settings.objects.first.return_value = None
+                mock_settings.objects.get_or_create.return_value = (None, False)
+
+                with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
+                    mock_pref.return_value = None
+
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = True
+                    mock_form.cleaned_data = {
+                        "enable_vc_detection": False,
+                        "clear_cache": False,
+                        "use_background_job": True,
+                    }
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
+
+                    with patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue") as mock_workers:
+                        mock_workers.return_value = 1
+
+                        with patch("netbox_librenms_plugin.import_utils.get_cache_metadata_key") as mock_meta:
+                            mock_meta.return_value = "meta_key"
+
+                            with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
+                                mock_cache.get.return_value = None
+
+                                with patch(
+                                    "netbox_librenms_plugin.import_utils.get_device_count_for_filters"
+                                ) as mock_count:
+                                    mock_count.side_effect = LibreNMSUnreachable("LibreNMS did not answer")
+
+                                    with patch("netbox_librenms_plugin.jobs.FilterDevicesJob") as mock_job_cls:
+                                        view.get(request)
+
+                                        assert mock_count.called, "the preflight never ran, so nothing was injected"
+                                        mock_job_cls.enqueue.assert_not_called()
+
     def test_get_no_workers_falls_back_to_sync(self):
         """With no RQ workers, falls back to synchronous processing."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
@@ -1183,6 +1244,8 @@ class TestGetViewFilterFields:
 
         mock_api = MagicMock()
         mock_api.server_key = "default"
+        # Answer the way LibreNMS does: a search that matches nothing is 200 and an empty list.
+        mock_api.list_devices.return_value = (True, [])
 
         with patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)):
             with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
