@@ -180,11 +180,14 @@ class TestAddDeviceFormsScopeToTheActiveServer:
         cache.delete("librenms_poller_group_choices_secondary")
         cache.delete("librenms_poller_group_choices_ghost")
         device = make_device("poller-stale", librenms_cf={"secondary": 42})
-        _response, requested = self._render_unknown_device(device, "?server_key=ghost")
+        response, requested = self._render_unknown_device(device, "?server_key=ghost")
 
-        assert not [(key, path) for key, path in requested if "poller_group" in path], (
-            f"a stale server selection asked for poller groups anyway: {requested}"
-        )
+        # The page must still render: a 500 would otherwise satisfy every negative below.
+        assert response.status_code == 200
+        # Measured: a stale key contacts NO server at all, so assert that directly rather than
+        # only the poller-group subset. The sibling test above is the positive control that this
+        # helper does record requests when the key resolves.
+        assert requested == [], f"a stale server selection contacted a LibreNMS server: {requested}"
 
 
 class TestSyncPageFormsCarryServerKey:
