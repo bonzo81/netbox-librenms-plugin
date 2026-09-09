@@ -27,7 +27,7 @@ All background jobs appear in NetBox's **Jobs** interface, where you can view st
 
 ## Caching
 
-The import table caches data for 5 minutes to reduce load times and minimize API calls to LibreNMS. Cache keys are unique per LibreNMS server and filter combination.
+The import table caches data for the configured cache timeout to reduce load times and minimize API calls to LibreNMS. Cache keys are unique per LibreNMS server and filter combination.
 
 ### What Gets Cached
 
@@ -43,7 +43,7 @@ The cache includes both LibreNMS device data AND NetBox reference data used in t
 - Available VM clusters (for VM imports)
 - Available racks for each site (filtered by the device's matched site)
 
-This means if you add a new role, create a new rack, or add a new cluster in NetBox, those changes won't appear in the import table dropdowns until you clear the cache or wait for it to expire (5 minutes).
+This means if you add a new role, create a new rack, or add a new cluster in NetBox, those changes won't appear in the import table dropdowns until you clear the cache or wait for it to expire (the configured cache timeout).
 
 ### Controlling Cache
 
