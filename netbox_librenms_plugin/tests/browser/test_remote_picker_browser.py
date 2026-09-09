@@ -1,5 +1,6 @@
 """Browser-level checks for remote cable endpoint selection."""
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,19 @@ def _render_template(template_name, context):
     template_root = Path(__file__).parents[2] / "templates"
     template = Engine(dirs=[template_root]).get_template(template_name)
     return template.render(Context(context))
+
+
+def _wait_for_route(page, predicate, timeout=5_000):
+    """Wait until a held route has reached its handler.
+
+    ``expect_request`` resolves on the request event, which Playwright dispatches independently
+    of the ``page.route`` handler, so the handler may not have appended its route yet.
+    """
+    deadline = time.monotonic() + timeout / 1000
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("the route handler did not run within the timeout")
+        page.wait_for_timeout(50)
 
 
 def _device(pk, name):
@@ -108,7 +122,7 @@ def test_new_search_rejects_a_late_port_response(page):
 
     with page.expect_request(f"{PORTS_URL}*"):
         page.get_by_role("button", name="Device A").click()
-    assert old_port_routes
+    _wait_for_route(page, lambda: old_port_routes)
 
     try:
         with page.expect_event(
@@ -147,7 +161,7 @@ def test_last_device_click_wins_when_port_responses_arrive_out_of_order(page):
 
     with page.expect_request(f"{PORTS_URL}*&device_id=1"):
         page.get_by_role("button", name="Device A").click()
-    assert "1" in port_routes
+    _wait_for_route(page, lambda: "1" in port_routes)
 
     try:
         with page.expect_event(
@@ -160,7 +174,7 @@ def test_last_device_click_wins_when_port_responses_arrive_out_of_order(page):
     except PlaywrightTimeoutError:
         first_request_aborted = False
 
-    assert "2" in port_routes
+    _wait_for_route(page, lambda: "2" in port_routes)
     port_routes["2"].fulfill(body=_render_ports(device_b, 202), content_type="text/html")
     page.locator("#remote-picker-ports strong").wait_for()
     if not first_request_aborted:
