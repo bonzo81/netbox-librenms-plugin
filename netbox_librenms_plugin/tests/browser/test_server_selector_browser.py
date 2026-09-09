@@ -11,8 +11,18 @@ def test_browser_modules_defer_their_django_imports():
 
     def django_imports(path):
         module = ast.parse(path.read_text())
+        # A module-level try/if/with still runs at collection time, so walk the whole tree and
+        # exclude only imports deferred inside a function or class body.
+        deferred = {
+            node
+            for parent in ast.walk(module)
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            for node in ast.walk(parent)
+        }
         names = []
-        for node in module.body:
+        for node in ast.walk(module):
+            if node in deferred:
+                continue
             if isinstance(node, ast.Import):
                 names += [alias.name for alias in node.names if alias.name.startswith("django")]
             elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("django"):
