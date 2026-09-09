@@ -43,8 +43,12 @@ def seed_every_tab(obj, server_key="default"):
     return keys
 
 
-def seed_inventory(view, device, inventory, *, librenms_id=None, server_key="default"):
-    """Write one inventory payload the way ``BaseModuleTableView.post`` writes it."""
+def seed_inventory(view, device, inventory, *, librenms_id, server_key="default"):
+    """Write one inventory payload the way ``BaseModuleTableView.post`` writes it.
+
+    ``librenms_id`` is required: the reader rejects a payload whose id is missing, so a defaulted
+    ``None`` would seed a cache entry that can never be read back and silently pass as a miss.
+    """
     from django.core.cache import cache
 
     key = view.get_cache_key(device, "inventory", server_key=server_key)

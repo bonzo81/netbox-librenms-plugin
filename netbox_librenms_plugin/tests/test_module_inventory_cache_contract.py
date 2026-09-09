@@ -12,6 +12,43 @@ CACHE_MISS_TEXT = "No cached inventory data. Please refresh modules first."
 
 
 @pytest.mark.django_db
+class TestSeedInventoryMatchesTheReaderContract:
+    """The shared seed helper must write a payload the production reader accepts."""
+
+    @staticmethod
+    def _view_and_device(name, librenms_id):
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        device = make_device(name, librenms_cf={"default": librenms_id})
+        request = make_request("post", {"server_key": "default"})
+        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        return view, device
+
+    def test_a_seeded_payload_is_read_back_by_the_production_reader(self):
+        """Without a matching id the reader returns None, so every seeded assertion would be vacuous."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+
+        view, device = self._view_and_device("seed-inventory-contract", 7)
+        inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
+        key = seed_inventory(view, device, inventory, librenms_id=7)
+
+        try:
+            assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) == inventory
+        finally:
+            cache.delete(key)
+
+    def test_the_helper_refuses_to_seed_without_a_librenms_id(self):
+        """A defaulted id would cache an entry the reader always rejects, faking a cache miss."""
+        view, device = self._view_and_device("seed-inventory-no-id", 7)
+
+        with pytest.raises(TypeError, match="librenms_id"):
+            seed_inventory(view, device, [])
+
+
+@pytest.mark.django_db
 class TestEmptyInventoryIsNotACacheMiss:
     """A refreshed device whose LibreNMS inventory is empty is data, not a missing snapshot."""
 
