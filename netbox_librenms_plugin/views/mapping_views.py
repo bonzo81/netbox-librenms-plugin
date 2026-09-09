@@ -773,7 +773,7 @@ class PortStackLagPatternBulkExportYAMLView(BulkExportYAMLView):
     queryset = PortStackLagPattern.objects.all()
 
 
-class SerialSensorTypePatternListView(LibreNMSPermissionMixin, generic.ObjectListView):
+class SerialSensorTypePatternListView(LibreNMSGenericPermissionMixin, generic.ObjectListView):
     """Provides a view for listing all SerialSensorTypePattern objects."""
 
     queryset = SerialSensorTypePattern.objects.all()
@@ -783,47 +783,47 @@ class SerialSensorTypePatternListView(LibreNMSPermissionMixin, generic.ObjectLis
     template_name = "netbox_librenms_plugin/serialsensortypepattern_list.html"
 
 
-class SerialSensorTypePatternCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+class SerialSensorTypePatternCreateView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for creating a new SerialSensorTypePattern object."""
 
     queryset = SerialSensorTypePattern.objects.all()
     form = SerialSensorTypePatternForm
 
 
-class SerialSensorTypePatternBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
+class SerialSensorTypePatternBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing SerialSensorTypePattern objects from CSV/JSON/YAML."""
 
     queryset = SerialSensorTypePattern.objects.all()
     model_form = SerialSensorTypePatternImportForm
 
 
-class SerialSensorTypePatternView(LibreNMSPermissionMixin, generic.ObjectView):
+class SerialSensorTypePatternView(LibreNMSGenericPermissionMixin, generic.ObjectView):
     """Provides a view for displaying a SerialSensorTypePattern object."""
 
     queryset = SerialSensorTypePattern.objects.all()
 
 
-class SerialSensorTypePatternEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+class SerialSensorTypePatternEditView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for editing a SerialSensorTypePattern object."""
 
     queryset = SerialSensorTypePattern.objects.all()
     form = SerialSensorTypePatternForm
 
 
-class SerialSensorTypePatternDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
+class SerialSensorTypePatternDeleteView(LibreNMSGenericWritePermissionMixin, generic.ObjectDeleteView):
     """Provides a view for deleting a SerialSensorTypePattern object."""
 
     queryset = SerialSensorTypePattern.objects.all()
 
 
-class SerialSensorTypePatternBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
+class SerialSensorTypePatternBulkDeleteView(LibreNMSGenericWritePermissionMixin, generic.BulkDeleteView):
     """Provides a view for bulk deleting SerialSensorTypePattern objects."""
 
     queryset = SerialSensorTypePattern.objects.all()
     table = SerialSensorTypePatternTable
 
 
-class SerialSensorTypePatternChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+class SerialSensorTypePatternChangeLogView(LibreNMSGenericPermissionMixin, generic.ObjectChangeLogView):
     """Provides a view for displaying the changelog of a SerialSensorTypePattern object."""
 
     queryset = SerialSensorTypePattern.objects.all()
