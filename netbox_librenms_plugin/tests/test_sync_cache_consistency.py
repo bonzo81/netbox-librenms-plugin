@@ -2542,6 +2542,9 @@ def test_cache_get_endpoint_requires_plugin_and_object_view_permissions(client, 
     client.force_login(read_only_user)
     response = client.get(url, {"server_key": "primary"})
     assert response.status_code == 200
+    # Both endpoints answer with per-viewer sync state, so neither may be written to a browser
+    # or shared cache. NetBox installs no cache-control middleware, so each view sets it.
+    assert response["Cache-Control"] == "no-store"
     if route_name == "sync_cache_status":
         assert "tabs" in response.json()
     else:

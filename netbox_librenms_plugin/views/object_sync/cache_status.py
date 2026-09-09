@@ -39,7 +39,7 @@ class SyncCacheStatusView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             raise Http404("LibreNMS server is not mapped to this object.")
 
         coordinator = SyncCacheConsistency(obj)
-        return JsonResponse(
+        response = JsonResponse(
             {
                 "object_type": object_type,
                 "object_id": obj.pk,
@@ -47,6 +47,9 @@ class SyncCacheStatusView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "tabs": coordinator.status_for_request(request, server_key),
             }
         )
+        # Per-viewer sync state, so it must not be written to any browser or shared cache.
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class SyncCacheFragmentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -125,4 +128,7 @@ class SyncCacheFragmentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
         else:
             payload = {"vlan_sync": tab_view.get_vlan_context(request, obj, server_key)}
 
-        return tab_view.render_sync_partial(request, obj, server_key, payload)
+        response = tab_view.render_sync_partial(request, obj, server_key, payload)
+        # Same identity-varying content as the status endpoint above.
+        response["Cache-Control"] = "no-store"
+        return response
