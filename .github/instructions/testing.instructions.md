@@ -147,8 +147,10 @@ request:
   `make_superuser`, `make_serial_device`, `make_virtual_chassis_members`,
   `make_device_with_module_bays`
 - **Configuration**: `mock_multi_server_config`, `mock_legacy_config`
-- **HTTP boundary**: `mock_response_factory`, `mock_success_response`, `mock_device_response`,
-  `mock_error_response`, `mock_auth_error_response`
+- **HTTP boundary** (legacy tests only): `mock_response_factory`, `mock_success_response`,
+  `mock_device_response`, `mock_error_response`, `mock_auth_error_response`. Drive a new
+  `LibreNMSAPI` test through the `librenms_server` loopback fixture. Use these mocks only where
+  the loopback server cannot serve the case.
 - **Import workflow**: `sample_librenms_device`, `sample_librenms_device_minimal`,
   `sample_validation_state`, `sample_validation_state_vm`
 
