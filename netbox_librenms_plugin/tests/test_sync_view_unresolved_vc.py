@@ -58,22 +58,21 @@ class TestUnresolvedServerKeyVCLeak:
         member.save()
         return member
 
-    def _get(self, client, member, server_key):
+    def _get(self, client, member, server_key, server):
         """Render the page under ``?server_key=<server_key>``; return it with the stub's paths."""
-        from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-
         user = make_user_with_perms(f"vc-viewer-{server_key}", [("view", Device)])
         client.force_login(user)
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[member.pk])
         # A resolved key reaches get_device_info, so the default server must be the loopback
         # stub. A hostname would make the test depend on DNS, the proxy and the HTTP timeout.
-        with librenms_mock_server() as server:
-            server.device_info_response(device_id=55, hostname=member.name)
-            with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(_default_only(server.url))):
-                response = client.get(url, {"server_key": server_key})
-            return response, [request["path"] for request in server.requests]
+        # The shared `librenms_server` fixture owns the stub and the NO_PROXY/no_proxy exports
+        # that keep a loopback request away from a configured proxy.
+        server.device_info_response(device_id=55, hostname=member.name)
+        with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(_default_only(server.url))):
+            response = client.get(url, {"server_key": server_key})
+        return response, [request["path"] for request in server.requests]
 
-    def test_resolved_server_key_reports_the_vc_linkage(self, client):
+    def test_resolved_server_key_reports_the_vc_linkage(self, client, librenms_server):
         """Positive control: the same page on a RESOLVED key must publish the VC linkage.
 
         Without it the unresolved assertion below passes even if the VC block stopped
@@ -81,17 +80,17 @@ class TestUnresolvedServerKeyVCLeak:
         """
         member = self._vc_member("resolved-control")
 
-        response, paths = self._get(client, member, "default")
+        response, paths = self._get(client, member, "default", librenms_server)
 
         assert response.status_code == 200
         # The header lookup must land on the loopback stub, not on a name the test cannot serve.
         assert "/api/v0/devices/55" in paths
         assert response.context["sync_device_has_librenms_id"] is True
 
-    def test_unresolved_server_key_does_not_leak_default_vc_linkage(self, client):
+    def test_unresolved_server_key_does_not_leak_default_vc_linkage(self, client, librenms_server):
         member = self._vc_member("unresolved-leak")
 
-        response, paths = self._get(client, member, "ghost")
+        response, paths = self._get(client, member, "ghost", librenms_server)
 
         assert response.status_code == 200
         # Failing closed means no lookup at all, so nothing reaches the default server.

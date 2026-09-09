@@ -125,7 +125,7 @@ class TestPartialModuleRefreshRendersEmpty:
     def test_a_partial_refresh_renders_no_table(self, failure, expected, empty_rows_notice, librenms_server):
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
 
         device = self._device(f"partial-refresh-{'-'.join(failure)}")
         # Built by the production helper, so a change to the key scheme cannot silently make
@@ -133,13 +133,19 @@ class TestPartialModuleRefreshRendersEmpty:
         cache_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
         cache.set(cache_key, {"inventory": INVENTORY, "librenms_id": 42, "oob_librenms_id": None}, timeout=300)
         assert cache.get(cache_key) is not None, "the seed never landed, so the drop assertion proves nothing"
+        state_key = SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY)
 
         try:
             _response, context, request = _refresh(device, librenms_server, **failure)
             snapshot_dropped = cache.get(cache_key) is None
+            state_recorded = cache.get(state_key)
         finally:
             cache.delete(cache_key)
+            cache.delete(state_key)
 
+        # mark_refresh_failure() writes this alongside dropping the snapshot; the finally above
+        # must remove it, or a reused device pk carries REFRESH_FAILED into a later test.
+        assert state_recorded["state"] == "refresh_failed", state_recorded
         assert context.get("table") is None, "an incomplete refresh rendered a degraded table"
         assert context.get("cache_expiry") is None
         assert snapshot_dropped, "the truncated snapshot was left to be served as complete"

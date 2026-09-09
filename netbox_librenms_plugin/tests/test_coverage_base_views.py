@@ -2109,24 +2109,26 @@ class TestBaseInterfaceTableViewPost:
             url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
             response = client.post(url, {"server_key": "default", "interface_name_field": "ifName"})
 
-        assert response.status_code == 200
-
-        # Prove the OOB path actually ran end-to-end first — otherwise the assertions below
-        # would also pass if OOB ports were never fetched or merged (the whole point of the
-        # filter being that there *was* an OOB LAG row to exclude).
-        assert "/api/v0/devices/99/ports" in requested_paths
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 
         view_for_keys = DeviceInterfaceTableView()
         cache_key = view_for_keys.get_cache_key(device, "ports", "default")
         # post() writes three real entries; the device pk is reused after rollback, so a stale
-        # timestamp or tab state would leak into a later test's object.
+        # timestamp or tab state would leak into a later test's object. The cleanup opens here,
+        # before the first assertion, because a rollback does not remove cache entries.
         written_keys = [
             cache_key,
             view_for_keys.get_last_fetched_key(device, "ports", "default"),
             SyncCacheConsistency(device).state_key(SyncTab.INTERFACES, "default"),
         ]
         try:
+            assert response.status_code == 200
+
+            # Prove the OOB path actually ran end-to-end first — otherwise the assertions below
+            # would also pass if OOB ports were never fetched or merged (the whole point of the
+            # filter being that there *was* an OOB LAG row to exclude).
+            assert "/api/v0/devices/99/ports" in requested_paths
+
             cached_snapshot = real_cache.get(cache_key)
             assert cached_snapshot is not None
             assert any(p.get("_source") == "oob" for p in cached_snapshot["ports"]), (

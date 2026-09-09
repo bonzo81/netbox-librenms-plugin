@@ -140,7 +140,9 @@ class TestTrailingSlashResilience:
 
         response = client.get(f"/plugins/librenms_plugin/devices/7/module-mismatch-preview?{query}")
 
-        assert response.status_code != 301
+        # The fixture creates no Device(pk=7), so the view answers 404 from
+        # restrict_object_or_404. Assert that exact code: "not 301" also accepts a 500.
+        assert response.status_code == 404, response.status_code
 
 
 class TestCacheMixinWiring:
