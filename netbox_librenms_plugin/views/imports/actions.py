@@ -388,6 +388,17 @@ def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
     return locked, None
 
 
+def _visible_conflict_label(view, id_conflict):
+    """Return ``(object_label, name)`` when the viewer may see *id_conflict*, else ``None``.
+
+    The scope check is a disclosure control, so it lives in one place: a second copy could drift
+    and let a caller name an object outside the viewer's scope.
+    """
+    if not view.restricted_queryset(type(id_conflict), "view").filter(pk=id_conflict.pk).exists():
+        return None
+    return ("VM" if id_conflict._meta.model_name == "virtualmachine" else "device", id_conflict.name)
+
+
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
     """Lock one server/ID claim and its target, then reject ownership across Devices and VMs."""
     from virtualization.models import VirtualMachine as NetBoxVM
@@ -409,14 +420,15 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
             f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before changing the mapping."
         )
     if id_conflict is not None:
-        if not view.restricted_queryset(type(id_conflict), "view").filter(pk=id_conflict.pk).exists():
+        visible = _visible_conflict_label(view, id_conflict)
+        if visible is None:
             return None, _htmx_error_response(
                 "LibreNMS ID is already assigned to another object outside your view scope."
             )
-        object_label = "VM" if isinstance(id_conflict, NetBoxVM) else "device"
+        object_label, conflict_name = visible
         return None, _htmx_error_response(
             f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "
-            f"'{id_conflict.name}' (ID: {id_conflict.pk})"
+            f"'{conflict_name}' (ID: {id_conflict.pk})"
         )
 
     return locked_target, None
@@ -2953,14 +2965,15 @@ class AddAsOOBView(
                     "attaching as OOB."
                 )
             if id_conflict is not None:
-                if not self.restricted_queryset(type(id_conflict), "view").filter(pk=id_conflict.pk).exists():
+                visible = _visible_conflict_label(self, id_conflict)
+                if visible is None:
                     return _htmx_error_response(
                         f"LibreNMS device #{librenms_id} is already assigned to another object outside your view scope."
                     )
-                object_label = "VM" if id_conflict._meta.model_name == "virtualmachine" else "device"
+                object_label, conflict_name = visible
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
-                    f"'{id_conflict.name}'; refresh and retry."
+                    f"'{conflict_name}'; refresh and retry."
                 )
 
             # Re-verify the legacy gate on the LOCKED row (mirrors DeviceConflictActionView's
