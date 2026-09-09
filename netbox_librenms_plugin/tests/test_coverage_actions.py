@@ -4021,6 +4021,60 @@ class TestCreatePlatformAssignmentIndependence:
 
 
 @pytest.mark.django_db
+class TestBulkImportRunsInlineWithoutWorkers:
+    """A background import with no RQ worker runs inline and says so as information.
+
+    The wording matters: this notice sits beside the per-row success toast, so a warning-level
+    "no workers available" reads as a failed import when the rows actually imported.
+    """
+
+    @staticmethod
+    def _view(settings, server_key, server_url):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
+
+        configure_test_servers(
+            settings,
+            {server_key: {"librenms_url": server_url, "api_token": "test-token", "verify_ssl": False}},
+        )
+        return BulkImportDevicesView()
+
+    def test_the_fallback_is_reported_as_information(self, settings, monkeypatch):
+        """Only the RQ worker registry is faked; the view, the import and the DB are real."""
+        from unittest.mock import patch
+
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        server_key = "bulk-no-workers"
+        existing = make_device("fallback-existing")
+        user = make_superuser("bulk-no-workers-user")
+
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=1,
+                hostname=existing.name,
+                serial="fallback-serial",
+                ip="198.18.4.1",
+            )
+            view = self._view(settings, server_key, server.url)
+            request = make_view_request(
+                "post",
+                {"server_key": server_key, "select": ["1"], "use_background_job": "on"},
+                user=user,
+            )
+            with patch("utilities.rqworker.get_workers_for_queue", return_value=0):
+                response = post_view(view, request)
+
+        assert response.status_code == 302
+        infos = view_message_texts(request, "info")
+        # Precondition: the request really took the synchronous path, not the job path.
+        assert not any("Import job started" in message for message in infos)
+        assert any("directly instead of in the background" in message for message in infos)
+        # The notice must not arrive as a warning, and must not use the old failure-sounding wording.
+        every_message = infos + view_message_texts(request, "warning") + view_message_texts(request, "error")
+        assert not any("no workers" in message.lower() for message in every_message)
+
+
+@pytest.mark.django_db
 class TestBulkImportDevicesViewCollisionGate:
     """The direct-import view re-runs the collision check the confirm preview can be bypassed on."""
 
