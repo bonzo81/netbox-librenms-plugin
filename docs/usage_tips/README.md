@@ -74,6 +74,14 @@ For best results, align chassis member positions with interface naming patterns.
 2. Exclude columns to exclude from interface sync
     - Sync only the values you want to sync
 3. Sync VLANs first to ensure that VLANs are created in NetBox before syncing interfaces, allowing for proper VLAN assignments. Use the VLAN tab on the device sync page to create VLANs from LibreNMS data.
+4. Selecting a row selects what that row depends on
+    - With "Auto-select LAG members & parents" on, checking a sub-interface also checks its parent, and that parent's aggregate, and so on up the chain
+    - Checking an aggregate also checks its members
+    - Clear any of those rows by hand and it stays cleared
+    - A parent or aggregate on another page raises a notice naming it; open that page to include it
+5. Your selection is kept while you page through the table
+    - A banner above the table counts the rows selected on other pages, with a control to clear them
+    - Every selected row is submitted when you sync, not just the rows on the page you are looking at
 
 ## Cable Management
 

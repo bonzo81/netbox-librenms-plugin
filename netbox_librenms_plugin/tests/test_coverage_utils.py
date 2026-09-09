@@ -5,6 +5,56 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.mark.django_db
+class TestSerialScopeNormalization:
+    """Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
+
+    The rewrite is a NormalizationRule rather than compiled-in, so an operator can see why a
+    stored serial differs from the raw inventory and add the next vendor without a release.
+    """
+
+    def test_the_migration_seeds_the_juniper_rule(self):
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        assert NormalizationRule.objects.filter(
+            scope=NormalizationRule.SCOPE_SERIAL, match_pattern=r"^S/N\s+(.+)$"
+        ).exists()
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("S/N BCFB9793", "BCFB9793"),
+            ("  S/N BCFB9751  ", "BCFB9751"),
+            ("BCFB9793", "BCFB9793"),
+            ("SN12345", "SN12345"),
+            ("S/NABC", "S/NABC"),
+            (12345, "12345"),
+            (0, "0"),
+            ("", ""),
+            (None, ""),
+        ],
+    )
+    def test_the_seeded_rule_strips_only_the_marker(self, raw, expected):
+        from netbox_librenms_plugin.utils import normalize_inventory_serial
+
+        assert normalize_inventory_serial(raw) == expected
+
+    def test_normalize_serial_itself_no_longer_strips(self):
+        """The transformation lives in the rule, so there is one place to look."""
+        from netbox_librenms_plugin.utils import normalize_serial
+
+        assert normalize_serial("S/N BCFB9793") == "S/N BCFB9793"
+
+    def test_disabling_the_rule_stops_the_rewrite(self):
+        """Proves the stored serial follows the rule rather than compiled-in behaviour."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.utils import normalize_inventory_serial
+
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+
+        assert normalize_inventory_serial("S/N BCFB9793") == "S/N BCFB9793"
+
+
 class TestConvertSpeedToKbps:
     """Boundary and type tests for convert_speed_to_kbps."""
 
@@ -852,6 +902,42 @@ class TestNetboxResolvesModuleTokenPerLeaf:
             assert utils.netbox_resolves_module_token_per_leaf() is True
 
 
+class TestNetboxCleanReadsParentVirtualChassis:
+    """Version gate for the NetBox 4.4.0 Interface.clean() parent dereference (issue #20197)."""
+
+    def test_true_for_the_affected_release(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is True
+
+    def test_false_once_the_fix_shipped(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 1)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is False
+
+    def test_false_for_a_later_release(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 6, 5)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is False
+
+    def test_false_for_a_release_older_than_the_defect(self):
+        """Pins the equality: widening the gate to <= would silently pass every other case."""
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 3, 9)):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is False
+
+    def test_true_when_version_undetectable(self):
+        """Keep the tolerance rather than turn a known core defect into a 500."""
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=None):
+            assert utils.netbox_clean_reads_parent_virtual_chassis() is True
+
+
 class TestHasNestedNameConflictVersionGating:
     """has_nested_name_conflict() must short-circuit on NetBox >= 4.5.6 (issue #20467)."""
 
@@ -1017,3 +1103,95 @@ class TestValidateRegexField:
                 mapping.clean()
         assert "librenms_name" in exc_info.value.message_dict
         assert "Invalid regex" in exc_info.value.message_dict["librenms_name"][0]
+
+
+@pytest.mark.django_db
+class TestInterfaceNameFallbackMatchesPort:
+    """The fallback reader must agree with get_librenms_device_id on every stored shape.
+
+    The two used to walk custom_field_data separately, so they could drift on which shapes
+    resolve. Only the "no binding recorded" rules stay local to the fallback.
+    """
+
+    def _interface(self, stored):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("iface-fallback-shapes")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        if stored is not None:
+            interface.custom_field_data["librenms_id"] = stored
+            interface.save(update_fields=["custom_field_data"])
+        return interface
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            {"default": 42},
+            {"default": "42"},
+            {"default": {"id": 42}},
+            {"default": {"id": "42"}},
+            42,
+            "42",
+        ],
+    )
+    def test_agrees_with_the_shared_reader(self, stored):
+        from netbox_librenms_plugin.utils import get_librenms_device_id, interface_name_fallback_matches_port
+
+        interface = self._interface(stored)
+        assert get_librenms_device_id(interface, "default", auto_save=False) == 42
+        assert interface_name_fallback_matches_port(interface, 42, "default") is True
+        assert interface_name_fallback_matches_port(interface, 43, "default") is False
+
+    def test_absent_field_counts_as_unbound(self):
+        from netbox_librenms_plugin.utils import interface_name_fallback_matches_port
+
+        interface = self._interface(None)
+        assert interface_name_fallback_matches_port(interface, 42, "default") is True
+
+    def test_other_server_key_counts_as_unbound(self):
+        from netbox_librenms_plugin.utils import interface_name_fallback_matches_port
+
+        interface = self._interface({"other": 42})
+        assert interface_name_fallback_matches_port(interface, 42, "default") is True
+
+    def test_unusable_entry_for_this_server_is_not_a_match(self):
+        from netbox_librenms_plugin.utils import interface_name_fallback_matches_port
+
+        interface = self._interface({"default": {"no_id": 42}})
+        assert interface_name_fallback_matches_port(interface, 42, "default") is False
+
+
+@pytest.mark.django_db(transaction=True)
+class TestAcquireAdvisoryTransactionLock:
+    """The lock must bind to the connection that owns the caller's transaction."""
+
+    def test_requires_an_open_transaction(self):
+        from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
+
+        with pytest.raises(RuntimeError, match="requires an open transaction"):
+            acquire_advisory_transaction_lock("nblp-test:no-transaction")
+
+    def test_takes_the_lock_on_the_named_alias(self):
+        from django.db import transaction
+
+        from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
+
+        with transaction.atomic(using="default"):
+            acquire_advisory_transaction_lock("nblp-test:aliased", using="default")
+
+    def test_the_named_alias_selects_the_connection(self):
+        """The named alias must select its connection."""
+        from django.db import transaction
+        from django.utils.connection import ConnectionDoesNotExist
+
+        from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
+
+        with transaction.atomic(using="default"):
+            with pytest.raises(ConnectionDoesNotExist):
+                acquire_advisory_transaction_lock("nblp-test:unknown-alias", using="nblp-no-such-alias")
+
+    def test_named_alias_outside_a_transaction_still_refuses(self):
+        from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
+
+        with pytest.raises(RuntimeError, match="requires an open transaction"):
+            acquire_advisory_transaction_lock("nblp-test:aliased-no-transaction", using="default")

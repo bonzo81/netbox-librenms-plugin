@@ -1,2 +1,4 @@
 pytest
+pytest-cov>=7.1.0
 pytest-django
+pytest-xdist>=3.8

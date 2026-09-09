@@ -2,6 +2,8 @@
 
 import importlib
 
+import pytest
+
 
 def test_migration_0013_field_help_text_matches_model():
     """Migration 0013's PortStackLagPattern fields must carry the same help_text as the model (else the migration state drifts and makemigrations tracks a phantom AlterField)."""
@@ -35,3 +37,112 @@ def test_migration_0014_librenms_os_help_text_matches_model():
     )
     model_help = PortStackLagPattern._meta.get_field("librenms_os").help_text
     assert alter_op.field.help_text == model_help, "0014 AlterField librenms_os help_text drifted from the model"
+
+
+@pytest.mark.django_db
+def test_plugin_migrations_do_not_redeclare_squashed_core_ancestors():
+    """A plugin migration must not repeat a squashed core dependency from its plugin parent."""
+    from django.db import connection
+    from django.db.migrations.loader import MigrationLoader
+
+    loader = MigrationLoader(connection, ignore_no_migrations=True)
+    plugin_migrations = {
+        key: migration for key, migration in loader.disk_migrations.items() if key[0] == "netbox_librenms_plugin"
+    }
+    assert plugin_migrations, "No plugin migrations were loaded"
+
+    for migration_key, migration in plugin_migrations.items():
+        plugin_parents = [dependency for dependency in migration.dependencies if dependency[0] == migration_key[0]]
+        inherited_dependencies = {
+            ancestor for parent in plugin_parents for ancestor in loader.graph.forwards_plan(parent)
+        }
+        for dependency in migration.dependencies:
+            dependency_migration = loader.disk_migrations.get(dependency)
+            if (
+                dependency[0] != migration_key[0]
+                and dependency in inherited_dependencies
+                and dependency_migration is not None
+                and dependency_migration.replaces
+            ):
+                raise AssertionError(
+                    f"{migration_key} repeats squashed core dependency {dependency}; "
+                    "the plugin parent already reaches it"
+                )
+
+
+def test_plugin_migrations_have_one_leaf():
+    """Every plugin migration must belong to one ordered migration graph."""
+    from django.db.migrations.graph import MigrationGraph
+    from django.db.migrations.loader import MigrationLoader
+
+    loader = MigrationLoader(None, load=False)
+    loader.load_disk()
+    graph = MigrationGraph()
+    migrations = {key: value for key, value in loader.disk_migrations.items() if key[0] == "netbox_librenms_plugin"}
+    assert migrations, "No plugin migrations were loaded"
+    for key, migration in migrations.items():
+        graph.add_node(key, migration)
+    for key, migration in migrations.items():
+        for dependency in migration.dependencies:
+            if dependency[0] == key[0] and not dependency[1].startswith("__"):
+                graph.add_dependency(migration, key, dependency)
+    graph.validate_consistency()
+    graph.ensure_not_cyclic()
+
+    leaves = graph.leaf_nodes()
+    assert len(leaves) == 1, f"Plugin migrations have multiple leaves: {leaves}"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operator_edited", [False, True])
+def test_reverse_inventory_seed_preserves_operator_rules(operator_edited):
+    """Rollback cannot identify whether matching rules belong to the operator."""
+    from django.apps import apps
+    from django.db import connection, migrations
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+    InventoryIgnoreRule.objects.filter(name=module.DEFAULT_RULE["name"]).delete()
+    NormalizationRule.objects.filter(scope="serial", match_pattern=module.SERIAL_RULE["match_pattern"]).delete()
+    inventory_rule = InventoryIgnoreRule.objects.create(**module.DEFAULT_RULE)
+    serial_rule = NormalizationRule.objects.create(**module.SERIAL_RULE)
+    if operator_edited:
+        inventory_rule.description = "Operator-owned inventory rule"
+        inventory_rule.save()
+        serial_rule.replacement = r"serial-\1"
+        serial_rule.save()
+    before_inventory = InventoryIgnoreRule.objects.filter(pk=inventory_rule.pk).values().get()
+    before_serial = NormalizationRule.objects.filter(pk=serial_rule.pk).values().get()
+    operation = next(op for op in module.Migration.operations if isinstance(op, migrations.RunPython))
+    with connection.schema_editor() as editor:
+        operation.code(apps, editor)
+        operation.reverse_code(apps, editor)
+    assert InventoryIgnoreRule.objects.filter(pk=inventory_rule.pk).values().get() == before_inventory
+    assert NormalizationRule.objects.filter(pk=serial_rule.pk).values().get() == before_serial
+
+
+@pytest.mark.django_db
+def test_inventory_seed_survives_duplicate_operator_rules():
+    """Neither seeded model enforces uniqueness, so the seed lookups must not assume one row."""
+    from django.apps import apps
+    from django.db import connection, migrations
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+    InventoryIgnoreRule.objects.filter(name=module.DEFAULT_RULE["name"]).delete()
+    NormalizationRule.objects.filter(scope="serial", match_pattern=module.SERIAL_RULE["match_pattern"]).delete()
+    # An operator may keep two rules that share the seed's lookup fields; both are valid rows.
+    for _ in range(2):
+        InventoryIgnoreRule.objects.create(**module.DEFAULT_RULE)
+        NormalizationRule.objects.create(**module.SERIAL_RULE)
+
+    operation = next(op for op in module.Migration.operations if isinstance(op, migrations.RunPython))
+    with connection.schema_editor() as editor:
+        operation.code(apps, editor)
+
+    # The seed found existing rows, so it must not have added a third of either.
+    assert InventoryIgnoreRule.objects.filter(name=module.DEFAULT_RULE["name"]).count() == 2
+    assert (
+        NormalizationRule.objects.filter(scope="serial", match_pattern=module.SERIAL_RULE["match_pattern"]).count() == 2
+    )

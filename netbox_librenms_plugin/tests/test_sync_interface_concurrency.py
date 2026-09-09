@@ -3,10 +3,20 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
+import os
+
 import pytest
 from django.apps import apps
 
 from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+# Window a competing thread must NOT get through while the row lock is held. A negative wait
+# proves only that nothing happened inside it, so keep the four sites on one name and raise it
+# here (or via the environment) when a loaded runner needs more headroom.
+BLOCKED_WAIT_SECONDS = float(os.environ.get("NBLP_BLOCKED_WAIT_SECONDS", "0.75"))
+# Raising BLOCKED_WAIT_SECONDS makes a negative assertion stricter but would make a positive one
+# weaker, so the "this must happen" wait gets its own, generous budget.
+ALLOWED_WAIT_SECONDS = float(os.environ.get("NBLP_ALLOWED_WAIT_SECONDS", "5"))
 
 pytestmark = pytest.mark.django_db(
     transaction=True,
@@ -14,17 +24,6 @@ pytestmark = pytest.mark.django_db(
     # plugins whose M2M tables are outside Django's default flush list.
     available_apps=[app.name for app in apps.get_app_configs()],
 )
-
-
-@pytest.fixture(autouse=True)
-def mock_librenms_config():
-    """Neutralize the suite-wide autouse config mock (registered via ``pytest_plugins``).
-
-    That mock pins ``get_plugin_config`` to a ``default``-only server map, so the ``stub`` key
-    these tests post becomes an unknown explicit key and the view fails closed before it reaches
-    the behaviour under test. Same-name module fixture wins over the plugin's autouse one.
-    """
-    yield
 
 
 @pytest.fixture(autouse=True)
@@ -114,8 +113,14 @@ def test_selected_vc_target_is_locked_through_interface_sync():
     assert Interface.objects.filter(device=target_device, name="Gi0/1").exists()
 
 
-def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked():
-    """A site change must not commit between VLAN scope resolution and interface sync."""
+def _run_vlan_scope_sync(*, move_target, suffix):
+    """Run the VLAN-scope sync once and return the synced interface.
+
+    ``move_target`` commits the target's site change inside the lock window. The caller with
+    ``move_target=False`` is the positive control: it proves the POST keys and the row itself
+    reach VLAN assignment, so an empty result in the racing run means the scope was rejected
+    rather than never attempted.
+    """
     from types import SimpleNamespace
 
     from dcim.models import Device, Site
@@ -130,22 +135,24 @@ def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked():
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-    _vc, (page_device, target_device) = make_virtual_chassis_members("sync-vlan-scope-lock")
+    _vc, (page_device, target_device) = make_virtual_chassis_members(f"sync-vlan-scope-{suffix}")
     # Use the real configured key. The devcontainer and CI use different names, and the request
     # must pass the configured-server guard before this test can reach the lock boundary.
     server_key = next(iter(LibreNMSAPI.get_available_servers()))
     set_librenms_device_id(page_device, 1, server_key)
     page_device.save()
-    new_site = Site.objects.create(name="Sync VLAN New Site", slug="sync-vlan-new-site", status="active")
+    new_site = Site.objects.create(
+        name=f"Sync VLAN New Site {suffix}", slug=f"sync-vlan-new-site-{suffix}", status="active"
+    )
     site_type = ContentType.objects.get_for_model(Site)
     vlan_group = VLANGroup.objects.create(
-        name="Sync VLAN Original Site",
-        slug="sync-vlan-original-site",
+        name=f"Sync VLAN Original Site {suffix}",
+        slug=f"sync-vlan-original-site-{suffix}",
         scope_type=site_type,
         scope_id=target_device.site_id,
     )
     VLAN.objects.create(vid=100, name="Sync VLAN 100", group=vlan_group, status="active")
-    user = make_superuser("sync-vlan-scope-lock-user")
+    user = make_superuser(f"sync-vlan-scope-{suffix}-user")
     view_template = SyncInterfacesView()
     cache_key = view_template.get_cache_key(page_device, "ports", server_key)
     cache.set(
@@ -219,16 +226,33 @@ def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked():
         with ThreadPoolExecutor(max_workers=2) as executor:
             sync_future = executor.submit(sync_interface)
             assert target_lock_reached.wait(20), "interface sync did not reach target locking"
-            move_future = executor.submit(move_target_to_new_site)
-            try:
-                move_future.result(timeout=5)
-            finally:
+            if move_target:
+                move_future = executor.submit(move_target_to_new_site)
+                try:
+                    move_future.result(timeout=5)
+                finally:
+                    release_sync.set()
+            else:
                 release_sync.set()
             sync_future.result(timeout=20)
     finally:
         cache.delete(cache_key)
 
-    interface = target_device.interfaces.get(name="Ethernet2")
+    return target_device.interfaces.get(name="Ethernet2")
+
+
+def test_vlan_scope_assigns_the_selected_group_without_a_race():
+    """Positive control: the posted vlan_group key really does assign the VLAN."""
+    interface = _run_vlan_scope_sync(move_target=False, suffix="no-race")
+
+    assert [vlan.vid for vlan in interface.tagged_vlans.all()] == [100]
+
+
+def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked():
+    """A site change must not commit between VLAN scope resolution and interface sync."""
+    interface = _run_vlan_scope_sync(move_target=True, suffix="race")
+
+    # Meaningful only because the control above assigns VLAN 100 through the same POST key.
     assert list(interface.tagged_vlans.all()) == []
 
 
@@ -470,7 +494,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution():
         first_future = executor.submit(sync_port, 10, first_resolved, True)
         assert first_resolved.wait(5), "first VM sync did not resolve the interface"
         second_future = executor.submit(sync_port, 11, second_resolved, False)
-        resolved_during_first = second_resolved.wait(0.5)
+        resolved_during_first = second_resolved.wait(BLOCKED_WAIT_SECONDS)
         release_first.set()
         first_skips = first_future.result(timeout=10)
         second_skips = second_future.result(timeout=10)
@@ -571,7 +595,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
             relationship_future.result(timeout=10)
             pytest.fail("relationship sync did not reach validation")
         membership_future = executor.submit(move_member_out_of_chassis)
-        changed_during_relationship = membership_changed.wait(0.5)
+        changed_during_relationship = membership_changed.wait(BLOCKED_WAIT_SECONDS)
         release_relationship.set()
         relationship_future.result(timeout=10)
         membership_future.result(timeout=10)
@@ -928,7 +952,7 @@ def test_relationship_scope_lock_blocks_new_virtual_chassis_members():
         lock_future = executor.submit(lock_scope)
         assert scope_locked.wait(5), "relationship scope was not locked"
         join_future = executor.submit(join_scope)
-        joined_while_scope_locked = member_joined.wait(0.75)
+        joined_while_scope_locked = member_joined.wait(BLOCKED_WAIT_SECONDS)
         release_scope.set()
         lock_future.result(timeout=10)
         join_future.result(timeout=10)

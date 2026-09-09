@@ -9,8 +9,11 @@ Tests cover:
 
 from unittest.mock import MagicMock, patch
 
-# Import the autouse fixture from helpers
-pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
+from netbox_librenms_plugin.tests import test_librenms_api_helpers
+
+# Bind the helper's autouse fixture into this module so it patches the config here only.
+# `pytest_plugins` would register it session-wide and shadow PLUGINS_CONFIG for later tests.
+mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
 
 
 class TestVlanAssignmentMixin:
@@ -228,8 +231,6 @@ class TestVlanAssignmentMixin:
 class TestPortVlanEnrichment:
     """Tests for port VLAN data enrichment."""
 
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
-
     @patch("requests.get")
     def test_parse_port_vlan_data_access_port(self, mock_get, mock_librenms_config):
         """Test parsing access port VLAN data."""
@@ -303,8 +304,6 @@ class TestPortVlanEnrichment:
 
 class TestInterfaceVlanSync:
     """Tests for interface VLAN sync action."""
-
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
 
     def test_update_interface_vlan_assignment_access_mode(self, mock_librenms_config):
         """Test that access mode is set correctly for untagged-only ports."""

@@ -1,6 +1,5 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
-import hashlib
 import json
 import logging
 import re
@@ -45,15 +44,19 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
     merge_candidate_pks,
 )
+from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
+    acquire_advisory_transaction_lock,
     coerce_librenms_id,
+    coerce_model_pk,
     get_librenms_sync_device,
     is_legacy_librenms_id,
     normalize_serial,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
     same_host,
+    save_interface_name_preference,
     save_user_pref,
     set_device_ip_fk,
     set_librenms_device_id,
@@ -326,20 +329,7 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
     Raises:
         RuntimeError: When called in autocommit — the lock would release immediately.
     """
-    from django.db import connection
-
-    if not connection.in_atomic_block:
-        raise RuntimeError("_acquire_serial_assignment_lock() requires an open transaction")
-    lock_key = int.from_bytes(
-        hashlib.blake2b(
-            f"netbox-librenms-plugin:device-serial:{serial}".encode(),
-            digest_size=8,
-        ).digest(),
-        byteorder="big",
-        signed=True,
-    )
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:device-serial:{serial}")
 
 
 def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse | None:
@@ -1053,7 +1043,6 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
             "sync_cables": request.POST.get("sync_cables") == "on",
-            "sync_ips": request.POST.get("sync_ips") == "on",
             "vc_detection_enabled": vc_detection_enabled,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
@@ -2915,7 +2904,7 @@ class AddAsOOBView(
                 # clobber an operator-set address — but don't let the user believe the controller's
                 # IP was applied either. Surface that the existing OOB IP was kept when it differs
                 # from the LibreNMS controller's IP (an equal one needs no message; it's correct).
-                existing_oob_host = str(sync_device.oob_ip).split("/")[0]
+                existing_oob_host = str(parse_host_address(str(sync_device.oob_ip)))
                 # Compare version-aware (same_host parses both sides) so an equal address in a
                 # different textual form — expanded vs compressed IPv6, or hex case — isn't reported
                 # as "a different OOB IP". A raw != would warn on 2001:db8::1 vs 2001:0db8:...:0001.
@@ -2998,14 +2987,12 @@ class AddAsOOBView(
             str | None: A warning naming the missing permission(s) or invalid IP, or
                 None when no extra permission is needed.
         """
-        from ipaddress import ip_address as _ip
-
         from dcim.models import Interface
         from ipam.models import IPAddress
         from utilities.permissions import get_permission_for_model
 
         try:
-            _ip(ip_str)
+            canonical_host = str(parse_host_address(ip_str))
         except ValueError:
             return f"OOB linked, but OOB IP {ip_str} not set — the IP address is invalid."
 
@@ -3042,7 +3029,7 @@ class AddAsOOBView(
         # Global table only (vrf__isnull) — the write path never touches VRF rows: it
         # creates a global /32, so a same-host address in a tenant VRF must demand 'add',
         # not 'change'.
-        matches = list(IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True)[:2])
+        matches = list(IPAddress.objects.filter(address__net_host=canonical_host, vrf__isnull=True)[:2])
         ambiguous = len(matches) > 1
         existing = matches[0] if matches else None
         if existing is None:
@@ -3208,13 +3195,11 @@ class AddAsOOBView(
                 ``"invalid"``, ``"conflict"`` (already on another device / create
                 race), or ``"permission"``.
         """
-        from ipaddress import ip_address as _ip
-
         from ipam.models import IPAddress
         from utilities.permissions import get_permission_for_model
 
         try:
-            parsed = _ip(ip_str)
+            parsed = parse_host_address(ip_str)
         except ValueError:
             return None, "invalid"
 
@@ -3230,7 +3215,7 @@ class AddAsOOBView(
         # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see and
         # stall concurrent work on it. The ambiguity check still has to see every row, so it
         # reads unlocked and by pk only, then the lock is taken inside the caller's change scope.
-        host_rows = list(IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True)[:2])
+        host_rows = list(IPAddress.objects.filter(address__net_host=str(parsed), vrf__isnull=True)[:2])
         if len(host_rows) > 1:
             return None, "conflict"
         existing = None
@@ -3280,7 +3265,7 @@ class AddAsOOBView(
         try:
             with transaction.atomic():
                 return (
-                    IPAddress.objects.create(address=f"{ip_str}{mask}", assigned_object=interface, status="active"),
+                    IPAddress.objects.create(address=f"{parsed}{mask}", assigned_object=interface, status="active"),
                     None,
                 )
         except IntegrityError:
@@ -3837,6 +3822,15 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
 
         if key not in self.ALLOWED_PREFS:
             return JsonResponse({"error": "Invalid preference key"}, status=400)
+
+        if key == "interface_name_field":
+            raw_platform_id = data.get("platform_id")
+            platform_id = coerce_model_pk(raw_platform_id)
+            if raw_platform_id is not None and platform_id is None:
+                return JsonResponse({"error": "Invalid platform ID"}, status=400)
+            if not save_interface_name_preference(request, value, platform_id):
+                return JsonResponse({"error": "Invalid interface name field"}, status=400)
+            return JsonResponse({"status": "ok"})
 
         save_user_pref(request, self.ALLOWED_PREFS[key], value)
         return JsonResponse({"status": "ok"})

@@ -17,6 +17,7 @@ from ..import_validation_helpers import (
     apply_oob_detection_result,
     clear_match_derived_action_fields,
 )
+from ..ip_addressing import parse_host_address
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     AmbiguousLibreNMSIdError,
@@ -190,13 +191,19 @@ def resolve_device_by_host_ip(primary_ip):
             match; ``ambiguous`` is ``True`` only when >1 distinct device shares the address
             (the caller must block the import); ``matching_ips`` is the net_host queryset so
             callers can reuse it (e.g. for the ``oob_ip`` membership check).
+
+    Raises:
+        ValueError: When *primary_ip* is not a parseable host address. Callers catch it and
+            fail closed for that device.
     """
     from dcim.models import Device
     from ipam.models import IPAddress
 
+    canonical_host = str(parse_host_address(primary_ip))
+
     # prefetch_related on the assigned_object GenericForeignKey resolves every duplicate net_host
     # row's interface in one bulk pass instead of a per-row content-type lookup (small N, but free).
-    matching_ips = IPAddress.objects.filter(address__net_host=primary_ip).prefetch_related("assigned_object")
+    matching_ips = IPAddress.objects.filter(address__net_host=canonical_host).prefetch_related("assigned_object")
     candidate_devices = {}
     matching_exists = False
     for existing_ip in matching_ips:
@@ -309,9 +316,7 @@ def _determine_device_name(
     # Strip domain if requested (but not for IP addresses)
     if strip_domain and name and "." in name:
         try:
-            from ipaddress import ip_address
-
-            ip_address(name)
+            parse_host_address(name)
             # It's a valid IP address, don't strip
         except ValueError:
             # Not an IP, safe to strip domain
@@ -1494,7 +1499,6 @@ def validate_device_for_import(
                     cache.set(cache_key, available_racks, cache_timeout)
 
                 result["rack"]["available_racks"] = available_racks
-                parsed_location = parse_location_for_import(libre_device.get("location", ""))
                 result["rack"]["rack"] = _resolve_rack_for_import(site, parsed_location.get("rack"))
                 # Rack is optional, don't add to issues
                 result["rack"]["found"] = True  # Mark as "found" even if None (optional field)
@@ -1631,7 +1635,6 @@ def import_single_device(
         sync_options: Sync options (optional):
             - sync_interfaces: bool (default True)
             - sync_cables: bool (default True)
-            - sync_ips: bool (default True)
             - sync_fields: bool (default True)
         libre_device: Pre-fetched LibreNMS device data (optional).
             If provided, skips API call to fetch device info.
@@ -1861,10 +1864,6 @@ def import_single_device(
             # Sync cables
             if sync_options.get("sync_cables", True):
                 logger.info(f"Cable sync should be performed for device {device.name}")
-
-            # Sync IP addresses
-            if sync_options.get("sync_ips", True):
-                logger.info(f"IP address sync should be performed for device {device.name}")
 
         except Exception as e:
             logger.warning(f"Error during post-import sync: {str(e)}")

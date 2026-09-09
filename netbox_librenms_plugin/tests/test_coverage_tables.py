@@ -1825,6 +1825,9 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
                 record={},
                 btn_class="lag-sync-btn",
                 data_related_key="data-lag-port-id",
+                # render_parent always passes a label; without it the guard inspects markup
+                # and title text the application never renders.
+                type_label="LAG",
             )
         )
         m = re.search(r'class="badge ([^"]*)"', html)
@@ -2399,6 +2402,42 @@ class TestLibreNMSInterfaceTableRenderVlans:
 
         result = str(table.render_vlans(value=None, record=record))
         assert "—" in result
+
+    def test_vlan_keys_use_the_canonical_port_id(self):
+        """The rendered key must match the one _sync_interface_vlans() reads back."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        table = object.__new__(LibreNMSInterfaceTable)
+        table.interface_name_field = "ifName"
+        table.device = MagicMock()
+        table.device.pk = 1
+        table.vlan_groups = []
+
+        # A leading-zero port id is the shape the view normalises but the table used raw.
+        record = {
+            "ifName": "eth0",
+            "port_id": "010",
+            "untagged_vlan": 100,
+            "tagged_vlans": [],
+            "missing_vlans": [],
+            "exists_in_netbox": False,
+            "netbox_interface": None,
+            "vlan_group_map": {},
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.interfaces.check_vlan_group_matches", return_value=True),
+            patch("netbox_librenms_plugin.tables.interfaces.get_untagged_vlan_css_class", return_value="text-danger"),
+            patch("netbox_librenms_plugin.tables.interfaces.get_missing_vlan_warning", return_value=""),
+        ):
+            result = str(table.render_vlans(value=None, record=record))
+
+        canonical = normalize_librenms_port_id("010")
+        assert canonical == 10
+        assert f'name="vlan_group_{canonical}_100"' in result
+        assert 'name="vlan_group_010_100"' not in result
+        assert f'data-row-key="{canonical}"' in result
 
     def test_untagged_vlan_rendered(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
