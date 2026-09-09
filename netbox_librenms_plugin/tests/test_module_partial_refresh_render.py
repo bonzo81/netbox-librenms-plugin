@@ -97,14 +97,20 @@ class TestPartialModuleRefreshRendersEmpty:
         assert "Inventory data refreshed successfully." in message_texts(request)
 
     @pytest.mark.parametrize(
-        "failure,expected",
+        "failure,expected,empty_rows_notice",
         [
-            ({"transceivers": (False, "transceiver fetch failed")}, "transceiver fetch failed"),
-            ({"ports": (False, "port fetch failed")}, "port metadata fetch failed"),
+            ({"transceivers": (False, "transceiver fetch failed")}, "transceiver fetch failed", True),
+            ({"ports": (False, "port fetch failed")}, "port metadata fetch failed", True),
+            # An inventory failure returns before the partial-outcome warning, so it carries none.
+            (
+                {"inventory": (False, "inventory fetch failed")},
+                "Failed to fetch inventory from LibreNMS; see server logs for details.",
+                False,
+            ),
         ],
-        ids=["transceivers", "ports"],
+        ids=["transceivers", "ports", "inventory"],
     )
-    def test_a_partial_refresh_renders_no_table(self, failure, expected):
+    def test_a_partial_refresh_renders_no_table(self, failure, expected, empty_rows_notice):
         from django.core.cache import cache
 
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
@@ -129,4 +135,5 @@ class TestPartialModuleRefreshRendersEmpty:
         assert "Inventory data refreshed successfully." not in message_texts(request)
         warning = next(text for text in message_texts(request) if expected in text)
         assert "Inventory refreshed" not in warning, warning
-        assert "no module rows were loaded" in warning, warning
+        if empty_rows_notice:
+            assert "no module rows were loaded" in warning, warning
