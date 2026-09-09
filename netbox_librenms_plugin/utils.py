@@ -3859,7 +3859,7 @@ def slashless_route_aliases(patterns):
         route = str(entry.pattern)
         if not route.endswith("/") or route[:-1] in routes:
             continue
-        aliases.append(path(route[:-1], entry.callback, entry.default_args))
+        aliases.append(path(route[:-1], entry.callback, kwargs=entry.default_args))
     return aliases
 
 

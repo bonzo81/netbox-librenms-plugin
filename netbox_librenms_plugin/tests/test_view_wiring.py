@@ -15,6 +15,26 @@ import pytest
 from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
 
+class TestSlashlessRouteAliases:
+    """Each slash-tolerant alias must carry its route's defaults, not only its callback."""
+
+    def test_an_alias_keeps_the_routes_default_kwargs(self):
+        """``kwargs`` is the third ``path()`` argument, so a positional slip drops ``model``."""
+        from django.urls import resolve, reverse
+
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
+
+        slashed_url = reverse("plugins:netbox_librenms_plugin:interfacetypemapping_changelog", kwargs={"pk": 1})
+        expected = {"pk": 1, "model": InterfaceTypeMapping}
+
+        assert resolve(slashed_url).kwargs == expected, "the canonical route lost its defaults"
+
+        alias = resolve(slashed_url.rstrip("/"))
+
+        assert alias.func == resolve(slashed_url).func
+        assert alias.kwargs == expected
+
+
 class TestLibreNMSAPIMixinWiring:
     """Views that need LibreNMSAPIMixin must have it in their MRO."""
 
