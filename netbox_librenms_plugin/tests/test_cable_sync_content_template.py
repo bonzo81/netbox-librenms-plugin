@@ -77,6 +77,9 @@ class TestCableSyncContentTemplateMigratedMode:
             ],
         )
 
+        # Prove the read-only row rendered first: the negative assertion below also passes
+        # when the table or the row is missing entirely.
+        assert "Gi0/1" in html
         assert "Sync Cable" not in html
 
     def test_verify_url_uses_the_active_script_prefix(self):

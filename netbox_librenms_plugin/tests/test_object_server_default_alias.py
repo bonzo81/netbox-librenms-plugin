@@ -1,11 +1,9 @@
 """The stale ``server_key=default`` alias on an object sync page (see test_object_server_selection.py)."""
 
-from copy import deepcopy
-
 import pytest
 from django.urls import reverse
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 DEVICE_ID = 13501
@@ -17,20 +15,18 @@ def primary_only(settings, monkeypatch):
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     with librenms_mock_server() as server:
-        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-        plugin_settings = plugin_config["netbox_librenms_plugin"]
-        plugin_settings["servers"] = {
-            "primary": {
-                "display_name": "Primary LibreNMS",
-                "librenms_url": server.url,
-                "api_token": "default-alias-token",
-                "cache_timeout": 300,
-                "verify_ssl": False,
-            }
-        }
-        plugin_settings.pop("librenms_url", None)
-        plugin_settings.pop("api_token", None)
-        settings.PLUGINS_CONFIG = plugin_config
+        configure_librenms_servers(
+            settings,
+            {
+                "primary": {
+                    "display_name": "Primary LibreNMS",
+                    "librenms_url": server.url,
+                    "api_token": "default-alias-token",
+                    "cache_timeout": 300,
+                    "verify_ssl": False,
+                }
+            },
+        )
         yield server
 
 
