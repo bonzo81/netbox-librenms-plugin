@@ -3523,6 +3523,40 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 return True
         return False
 
+    def _identity_candidate_rows(self, table_data, index_map):
+        """Group rows that carry usable serial evidence by serial.
+
+        Eligibility is a property of the row's own data, never of what bay matching enabled.
+        Rows with no usable serial, read-only rows, and rows repeating an ancestor's serial
+        carry no evidence about a separate physical part.
+        """
+        serial_rows: dict = {}
+        for row in table_data:
+            if row.get("_source") == "oob" or row.get("status") == "Integrated":
+                continue
+            serial = row.get("serial", "")
+            if not serial or serial.lower() in _PLACEHOLDER_VALUES:
+                continue
+            if self._shares_serial_with_ancestor(row, index_map):
+                continue
+            serial_rows.setdefault(serial, []).append(row)
+        return serial_rows
+
+    @staticmethod
+    def _identity_scope_device_ids(obj):
+        """Return the device ids an install on this page would target.
+
+        Only a match on one of these contradicts an install here. The write guard is device
+        scoped for the same reason: a vendor may reuse one serial across unrelated devices.
+        """
+        if obj is None:
+            return set()
+        scope = {obj.pk}
+        chassis = getattr(obj, "virtual_chassis", None)
+        if chassis is not None:
+            scope.update(chassis.members.values_list("pk", flat=True))
+        return scope
+
     def _detect_serial_conflicts(self, table_data, index_map=None, obj=None):
         """
         Bulk-check whether a row's LibreNMS serial already names a Module in NetBox.
@@ -3545,18 +3579,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         from dcim.models import Module
 
-        # Map serial → list of rows that may be affected
-        serial_rows: dict = {}
-        for row in table_data:
-            if row.get("_source") == "oob" or row.get("status") == "Integrated":
-                continue
-            serial = row.get("serial", "")
-            if not serial or serial.lower() in _PLACEHOLDER_VALUES:
-                continue
-            if self._shares_serial_with_ancestor(row, index_map):
-                continue
-            serial_rows.setdefault(serial, []).append(row)
-
+        serial_rows = self._identity_candidate_rows(table_data, index_map)
         if not serial_rows:
             return
 
@@ -3572,14 +3595,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             visible_conflict_pks = set(
                 self.restricted_queryset(Module).filter(serial__in=serial_rows.keys()).values_list("pk", flat=True)
             )
-        # Only a match on this page's own devices contradicts an install here; the write guard is
-        # device scoped for the same reason, and a vendor may reuse one serial across devices.
-        scope_device_ids = set()
-        if obj is not None:
-            scope_device_ids.add(obj.pk)
-            chassis = getattr(obj, "virtual_chassis", None)
-            if chassis is not None:
-                scope_device_ids.update(chassis.members.values_list("pk", flat=True))
+        scope_device_ids = self._identity_scope_device_ids(obj)
 
         # Group conflict modules by serial
         conflicts_by_serial: dict = {}
