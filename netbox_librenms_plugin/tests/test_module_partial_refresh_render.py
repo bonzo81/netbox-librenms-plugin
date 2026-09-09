@@ -6,10 +6,11 @@ drops the snapshot and renders an empty tab whenever any of the three fetches fa
 of building a table from data it knows to be incomplete.
 """
 
-from contextlib import ExitStack
-from unittest.mock import patch
+from copy import deepcopy
 
 import pytest
+from django.conf import settings
+from django.test import override_settings
 
 from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
@@ -28,20 +29,32 @@ INVENTORY = [
 ]
 
 
-def _patched_client(*, transceivers=(True, []), ports=(True, {"ports": []}), inventory=(True, INVENTORY)):
-    """Patch only the LibreNMS HTTP client methods; the view resolves its own real client."""
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+def _server_settings(server_key, server):
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        server_key: {"librenms_url": server.url, "api_token": "test-token"}
+    }
+    return override_settings(PLUGINS_CONFIG=plugin_config)
 
-    return (
-        patch.object(LibreNMSAPI, "get_librenms_id", lambda self, obj: 42),
-        patch.object(LibreNMSAPI, "get_stored_librenms_id", lambda self, obj, server_key=None: 42),
-        patch.object(LibreNMSAPI, "get_device_inventory", lambda self, *a, **k: inventory),
-        patch.object(LibreNMSAPI, "get_device_transceivers", lambda self, *a, **k: transceivers),
-        patch.object(LibreNMSAPI, "get_ports", lambda self, *a, **k: ports),
+
+def _register_refresh(server, *, transceivers=(True, []), ports=(True, {"ports": []}), inventory=(True, INVENTORY)):
+    inventory_ok, inventory_data = inventory
+    server.inventory_response(42, inventory_data if inventory_ok else [], status=200 if inventory_ok else 500)
+    transceivers_ok, transceiver_data = transceivers
+    server.register(
+        "/api/v0/devices/42/transceivers",
+        {"status": "ok", "transceivers": transceiver_data} if transceivers_ok else {"status": "error"},
+        status=200 if transceivers_ok else 500,
+    )
+    ports_ok, ports_data = ports
+    server.register(
+        "/api/v0/devices/42/ports",
+        {"status": "ok", **ports_data} if ports_ok else {"status": "error"},
+        status=200 if ports_ok else 500,
     )
 
 
-def _refresh(device, **failure):
+def _refresh(device, server, **failure):
     """Run a real modules refresh POST and return the rendered tab context."""
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -56,12 +69,11 @@ def _refresh(device, **failure):
     request = make_request("post", {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
     # The concrete subclass, so a complete refresh can actually build its table.
     view = DeviceModuleTableView()
+    _register_refresh(server, **failure)
 
     BaseModuleTableView.render_sync_partial = capture
     try:
-        with ExitStack() as stack:
-            for patcher in _patched_client(**failure):
-                stack.enter_context(patcher)
+        with _server_settings(SERVER_KEY, server):
             response = _post(view, request, pk=device.pk)
     finally:
         BaseModuleTableView.render_sync_partial = original
@@ -87,11 +99,11 @@ class TestPartialModuleRefreshRendersEmpty:
         make_module_bay(device, "Bay 1")
         return device
 
-    def test_a_complete_refresh_renders_a_table(self):
+    def test_a_complete_refresh_renders_a_table(self, librenms_server):
         """Positive control: the failures below must not pass for the wrong reason."""
         device = self._device("partial-refresh-complete")
 
-        _response, context, request = _refresh(device)
+        _response, context, request = _refresh(device, librenms_server)
 
         assert context.get("table") is not None, "a complete refresh must still build the table"
         assert "Inventory data refreshed successfully." in message_texts(request)
@@ -110,7 +122,7 @@ class TestPartialModuleRefreshRendersEmpty:
         ],
         ids=["transceivers", "ports", "inventory"],
     )
-    def test_a_partial_refresh_renders_no_table(self, failure, expected, empty_rows_notice):
+    def test_a_partial_refresh_renders_no_table(self, failure, expected, empty_rows_notice, librenms_server):
         from django.core.cache import cache
 
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
@@ -123,7 +135,7 @@ class TestPartialModuleRefreshRendersEmpty:
         assert cache.get(cache_key) is not None, "the seed never landed, so the drop assertion proves nothing"
 
         try:
-            _response, context, request = _refresh(device, **failure)
+            _response, context, request = _refresh(device, librenms_server, **failure)
             snapshot_dropped = cache.get(cache_key) is None
         finally:
             cache.delete(cache_key)
