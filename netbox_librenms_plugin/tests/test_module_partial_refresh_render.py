@@ -172,3 +172,7 @@ class TestPartialModuleRefreshRendersEmpty:
         assert "Inventory refreshed" not in warning, warning
         if empty_rows_notice:
             assert "no module rows were loaded" in warning, warning
+        else:
+            # The inventory failure returns before the partial-outcome warning, so the notice must
+            # not appear. Without this branch the parameter set asserts nothing.
+            assert "no module rows were loaded" not in warning, warning

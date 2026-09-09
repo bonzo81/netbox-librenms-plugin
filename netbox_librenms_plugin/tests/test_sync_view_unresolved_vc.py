@@ -74,10 +74,15 @@ class TestUnresolvedServerKeyVCLeak:
         # that keep a loopback request away from a configured proxy.
         server.device_info_response(device_id=VC_LIBRENMS_ID, hostname=member.name)
         # get_device_info caches a success under this key, and the cache outlives the DB rollback.
-        # A key warmed by an earlier test would serve the device with no HTTP request at all.
-        cache.delete(f"librenms_device_info_default_{VC_LIBRENMS_ID}")
-        with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(_default_only(server.url))):
-            response = client.get(url, {"server_key": server_key})
+        # Clear it before the render, or a key warmed earlier serves the device with no HTTP
+        # request; clear it after, because the resolved case writes it back.
+        device_info_key = f"librenms_device_info_default_{VC_LIBRENMS_ID}"
+        cache.delete(device_info_key)
+        try:
+            with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(_default_only(server.url))):
+                response = client.get(url, {"server_key": server_key})
+        finally:
+            cache.delete(device_info_key)
         return response, [request["path"] for request in server.requests]
 
     def test_resolved_server_key_reports_the_vc_linkage(self, client, librenms_server):
