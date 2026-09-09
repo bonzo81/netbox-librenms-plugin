@@ -22,6 +22,7 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
+    acquire_advisory_transaction_lock,
     coerce_positive_int as _coerce_positive_int,
     find_by_librenms_id,
     get_librenms_device_id,
@@ -29,6 +30,7 @@ from netbox_librenms_plugin.utils import (
     get_module_template_interface_names,
     get_module_types_indexed,
     get_vc_member_positions,
+    netbox_relocates_module_subtree,
     normalize_inventory_serial,
     normalize_serial,
     rewrite_interface_name_for_vc_member,
@@ -47,6 +49,7 @@ from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableVi
 logger = logging.getLogger(__name__)
 
 # Every module action below scopes its cache reads and its LibreNMS id writes by server key.
+MODULE_MOVE_REQUIRES_NETBOX_MESSAGE = "Moving a module needs NetBox 4.7 or later. Earlier releases move only the module itself and leave its interfaces, its module bays and any modules installed in them on the original device."
 NO_LIBRENMS_SERVER_MESSAGE = (
     "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
 )
@@ -173,6 +176,26 @@ def _extract_inventory_list(cached_payload):
     if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
         return None
     return inventory
+
+
+def _module_already_on_device(device, serial, module_qs, *, exclude_pk=None):
+    """Return the Module already holding ``serial`` on ``device``, or None.
+
+    Identity is device-scoped on purpose. A serial is evidence about one physical part, and
+    vendors reuse a serial across unrelated parts, so a match on another device must not block a
+    genuine first install here.
+
+    Takes the device advisory lock before reading: on a first install there is no matching row
+    for ``select_for_update`` to lock, so two concurrent installs of one serial into different
+    bays would otherwise both see nothing and both create.
+    """
+    if not serial:
+        return None
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{device.pk}")
+    conflicts = module_qs.select_for_update(of=("self",)).filter(device=device, serial=serial)
+    if exclude_pk:
+        conflicts = conflicts.exclude(pk=exclude_pk)
+    return conflicts.first()
 
 
 def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
@@ -902,6 +925,15 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
                     return _modules_action_response(request, page_device, server_key)
+                if duplicate := _module_already_on_device(
+                    target_device, serial, self.restricted_queryset(Module, "change")
+                ):
+                    messages.error(
+                        request,
+                        f"Serial '{serial}' is already installed on this device in "
+                        f"{duplicate.module_bay.name}. Nothing was installed.",
+                    )
+                    return _modules_action_response(request, page_device, server_key)
                 module = Module(
                     device=target_device,
                     module_bay=locked_bay,
@@ -1088,6 +1120,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         changeable_components=changeable_components,
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
+                        changeable_modules=self.restricted_queryset(Module, "change"),
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -1234,6 +1267,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         manufacturer_id=None,
         norm_rules_bay=None,
         norm_rules_serial=None,
+        changeable_modules=None,
     ):
         """
         Try to install a single inventory item.
@@ -1335,6 +1369,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         "name": name,
                         "reason": "bay already occupied",
                         "module_pk": locked_bay.installed_module.pk,
+                    }
+                if changeable_modules is not None and (
+                    duplicate := _module_already_on_device(device, serial, changeable_modules)
+                ):
+                    return {
+                        "status": "skipped",
+                        "name": name,
+                        "reason": f"serial already installed in {duplicate.module_bay.name}",
+                        "module_pk": duplicate.pk,
                     }
 
                 module = Module(
@@ -1745,6 +1788,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         changeable_components=changeable_components,
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
+                        changeable_modules=self.restricted_queryset(Module, "change"),
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -2455,6 +2499,11 @@ class MoveModuleView(
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
         server_key = self.resolve_posted_server_key_or_none(request.POST)
+
+        # The rendered control is advisory; a scripted POST never reads it.
+        if not netbox_relocates_module_subtree():
+            messages.error(request, MODULE_MOVE_REQUIRES_NETBOX_MESSAGE)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             conflict_module_id = int(request.POST.get("conflict_module_id"))

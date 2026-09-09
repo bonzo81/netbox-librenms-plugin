@@ -2721,6 +2721,7 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
 
 _MODULE_TOKEN_LEAF_FIX_VERSION = (4, 5, 6)
 _PARENT_CHASSIS_CLEAN_BUG_VERSION = (4, 4, 0)
+_MODULE_RELOCATION_VERSION = (4, 7, 0)
 _NETBOX_VERSION_PREFIX_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 
@@ -2756,6 +2757,23 @@ def netbox_clean_reads_parent_virtual_chassis():
     if version is None:
         return True
     return version == _PARENT_CHASSIS_CLEAN_BUG_VERSION
+
+
+def netbox_relocates_module_subtree():
+    """Return True when the running NetBox moves a module's whole subtree with it.
+
+    NetBox 4.7 (issue #15289) relocates the module's components, its own module bays and any
+    child modules installed in them, and re-resolves template-derived names for the destination
+    bay. Below 4.7 the same assignment is accepted with no error but moves only the module row,
+    leaving its interfaces, its nested bays and its child modules on the source device.
+
+    Unlike the other version predicates here, an undetectable version returns False. The two
+    above tolerate a wrong guess; this one would write a half-moved subtree.
+    """
+    version = _get_netbox_version_tuple()
+    if version is None:
+        return False
+    return version >= _MODULE_RELOCATION_VERSION
 
 
 def netbox_resolves_module_token_per_leaf():

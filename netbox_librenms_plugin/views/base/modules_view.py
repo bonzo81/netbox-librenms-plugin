@@ -755,7 +755,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         table_data = self._group_children_under_parents(table_data)
 
         # Bulk-detect serial conflicts for rows that can be replaced/installed
-        self._detect_serial_conflicts(table_data)
+        self._detect_serial_conflicts(table_data, index_map)
 
         table = self.get_table(table_data, obj)
         table.configure(request)
@@ -3492,30 +3492,66 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             current_idx = ancestor.get("entPhysicalContainedIn", 0)
         return None
 
-    def _detect_serial_conflicts(self, table_data):
-        """
-        Bulk-check whether LibreNMS serials for replaceable or installable rows already exist elsewhere in NetBox.
+    @staticmethod
+    def _shares_serial_with_ancestor(row, index_map):
+        """Return True when this row repeats a serial one of its own inventory ancestors reports.
 
-        For each row with can_replace or can_install, checks whether the LibreNMS
-        serial (the value we want to write) is already assigned to a *different*
-        module. When a conflict is found the row gets two extra keys:
+        A fan tray and its fans, or a PSU and its sensors, routinely report one serial. Those rows
+        describe parts of the same physical unit, so a match between them is not evidence that the
+        unit is installed twice.
+        """
+        if not index_map:
+            return False
+        serial = (row.get("serial") or "").strip().lower()
+        if not serial:
+            return False
+        item = index_map.get(row.get("ent_physical_index"))
+        seen = set()
+        while item is not None:
+            parent_index = item.get("entPhysicalContainedIn")
+            if parent_index is None or parent_index in seen:
+                return False
+            seen.add(parent_index)
+            item = index_map.get(parent_index)
+            if item is None:
+                return False
+            if _clean_librenms_value(item.get("entPhysicalSerialNum")).strip().lower() == serial:
+                return True
+        return False
+
+    def _detect_serial_conflicts(self, table_data, index_map=None):
+        """
+        Bulk-check whether a row's LibreNMS serial already names a Module in NetBox.
+
+        Eligibility is a property of the row's own data, not of what bay matching enabled. Gating
+        this on ``can_replace``/``can_install`` meant the rows where bay matching FAILED — the ones
+        that most need to say "this is already installed over there" — were the ones skipped.
+
+        When a single conflict is found the row gets:
 
           serial_conflict_module: the conflicting Module object (with device/module_bay loaded)
           can_move_from: True (convenience flag for templates/tests)
 
+        and ``can_install`` is cleared: a part NetBox already holds must not also be offered as a
+        fresh install. More than one match sets ``serial_conflict_ambiguous`` and picks nothing.
+
         Args:
             table_data (list): The table rows to check and update.
+            index_map (dict | None): Inventory items by entPhysicalIndex, for ancestry checks.
         """
         from dcim.models import Module
 
         # Map serial → list of rows that may be affected
         serial_rows: dict = {}
         for row in table_data:
-            if not row.get("can_replace") and not row.get("can_install"):
+            if row.get("_source") == "oob" or row.get("status") == "Integrated":
                 continue
             serial = row.get("serial", "")
-            if serial and serial.lower() not in _PLACEHOLDER_VALUES:
-                serial_rows.setdefault(serial, []).append(row)
+            if not serial or serial.lower() in _PLACEHOLDER_VALUES:
+                continue
+            if self._shares_serial_with_ancestor(row, index_map):
+                continue
+            serial_rows.setdefault(serial, []).append(row)
 
         if not serial_rows:
             return
@@ -3538,5 +3574,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 if len(candidates) == 1:
                     row["serial_conflict_module"] = candidates[0]
                     row["can_move_from"] = True
+                    # Evidence revokes the offer: this part is already recorded in NetBox.
+                    row["can_install"] = False
                 elif len(candidates) > 1:
                     row["serial_conflict_ambiguous"] = True
+                    row["can_install"] = False

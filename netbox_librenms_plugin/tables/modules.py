@@ -7,7 +7,12 @@ from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count, oob_badge_html, render_vc_member_options
+from netbox_librenms_plugin.utils import (
+    get_table_paginate_count,
+    netbox_relocates_module_subtree,
+    oob_badge_html,
+    render_vc_member_options,
+)
 
 
 class LibreNMSModuleTable(tables.Table):
@@ -234,6 +239,29 @@ class LibreNMSModuleTable(tables.Table):
         icon = icons.get(value, "mdi-card-outline")
         return format_html('<i class="mdi {} me-1"></i> {}', icon, value)
 
+    @staticmethod
+    def _unmatched_bay_html(record):
+        """Report where this row's serial already sits in NetBox, when bay matching found nothing.
+
+        A failed bay match does not mean the part is absent. The serial may already name an
+        installed module, and saying only "No matching bay" hides that from the operator who
+        then cannot tell a mapping mistake from missing hardware.
+        """
+        if record.get("serial_conflict_ambiguous"):
+            return format_html(
+                '<span class="text-warning">{}</span>',
+                "No matching bay; this serial matches more than one module",
+            )
+        conflict = record.get("serial_conflict_module")
+        if conflict is None:
+            return format_html('<span class="text-danger">{}</span>', "No matching bay")
+        return format_html(
+            '<span class="text-warning">No matching bay; installed at <a href="{}">{} / {}</a></span>',
+            conflict.get_absolute_url(),
+            conflict.device.name,
+            conflict.module_bay.name,
+        )
+
     def render_module_bay(self, value, record):
         """Render module bay with link if found in NetBox."""
         if record.get("status") == "Integrated":
@@ -242,7 +270,7 @@ class LibreNMSModuleTable(tables.Table):
             # to match the muted status badge and absent actions on these rows.
             rendered_value = "-"
         elif not value or value == "-":
-            rendered_value = format_html('<span class="text-danger">{}</span>', "No matching bay")
+            rendered_value = self._unmatched_bay_html(record)
         elif url := record.get("module_bay_url"):
             rendered_value = format_html('<a href="{}">{}</a>', url, value)
         else:
@@ -688,9 +716,11 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        # Move button for can_install rows where a single serial conflict exists (requires change+delete)
+        # Move button for can_install rows where a single serial conflict exists (requires change+delete).
+        # Below NetBox 4.7 a move strands the module's components and nested modules, so it is not offered.
         if (
-            self.can_change_module
+            netbox_relocates_module_subtree()
+            and self.can_change_module
             and self.can_delete_module
             and record.get("can_move_from")
             and record.get("serial_conflict_module")

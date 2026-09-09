@@ -2737,13 +2737,24 @@ class TestDetectSerialConflicts:
         device = make_device_with_module_bays(f"serial-conflict-{tag}", ["Slot 1"])
         return install_module(device, "Slot 1", f"SERIAL-CONFLICT-{tag}", serial=serial)
 
-    def test_no_can_replace_or_install_rows_does_nothing(self, django_assert_num_queries):
-        """When no rows have can_replace or can_install, the method returns without DB query."""
+    def test_rows_without_a_usable_serial_do_no_query(self, django_assert_num_queries):
+        """A blank or placeholder serial carries no identity, so it must not cost a query."""
         view = self._view()
-        table_data = [{"serial": "S1", "status": "Installed"}]
+        table_data = [{"serial": "", "status": "Installed"}, {"serial": "n/a", "status": "No Bay"}]
         with django_assert_num_queries(0):
             view._detect_serial_conflicts(table_data)
         assert "serial_conflict_module" not in table_data[0]
+        assert "serial_conflict_module" not in table_data[1]
+
+    def test_a_row_with_no_action_flags_is_still_checked(self):
+        """Identity must not depend on bay matching having succeeded — that was the defect."""
+        view = self._view()
+        conflict = self._make_module("nobay", "NOBAY_SERIAL")
+
+        row = {"serial": "NOBAY_SERIAL", "status": "No Bay"}
+        view._detect_serial_conflicts([row])
+
+        assert row.get("serial_conflict_module") == conflict
 
     def test_conflict_detected_for_can_replace_row(self):
         """When a conflicting module exists, serial_conflict_module is set on the row."""
