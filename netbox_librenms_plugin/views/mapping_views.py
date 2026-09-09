@@ -790,6 +790,7 @@ class SerialSensorTypePatternCreateView(LibreNMSGenericWritePermissionMixin, gen
     form = SerialSensorTypePatternForm
 
 
+@register_model_view(SerialSensorTypePattern, "bulk_import", path="import", detail=False)
 class SerialSensorTypePatternBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing SerialSensorTypePattern objects from CSV/JSON/YAML."""
 
