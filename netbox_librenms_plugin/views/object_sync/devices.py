@@ -753,6 +753,12 @@ class DeviceModuleTableView(BaseModuleTableView):
             can_add_module_bay_mapping=(
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
             ),
+            can_map_existing_bay=(
+                has_write_permission
+                and user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+                and user.has_perm("dcim.view_device")
+                and user.has_perm("dcim.view_modulebay")
+            ),
             can_add_module_type_mapping=(
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
             ),

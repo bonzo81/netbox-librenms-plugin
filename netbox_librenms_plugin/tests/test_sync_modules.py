@@ -8381,6 +8381,69 @@ def test_saving_the_reviewed_regex_mapping_stores_the_family_rule(client):
 
 
 @pytest.mark.django_db
+def test_the_map_existing_bay_button_needs_the_modals_view_permissions(client, settings):
+    """The button must not offer a modal that the user's permissions then refuse."""
+    from dcim.models import Device, ModuleBay
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import ModuleBayMapping
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    TestModulesActionResponse()._configure_server(settings)
+    device = make_device_with_module_bays("map-existing-view-perms", ["RE0"])
+    module_type = make_module_type("VIEWPERM-CARD", manufacturer=device.device_type.manufacturer)
+    payload = trusted_module_inventory_payload(
+        device,
+        [
+            {
+                "entPhysicalIndex": 81,
+                "entPhysicalClass": "module",
+                "entPhysicalName": "Routing Engine 0",
+                "entPhysicalDescr": "Routing Engine 0",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": "VIEWPERM-1",
+                "entPhysicalContainedIn": 0,
+            }
+        ],
+        server_key="prod",
+        librenms_id=9203,
+    )
+    snapshot_key = DeviceModuleTableView().get_cache_key(device, "inventory", server_key="prod")
+    device_info_key = "librenms_device_info_prod_9203"
+    page_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+    modal_url = reverse("plugins:netbox_librenms_plugin:add_bay_template", args=[device.pk])
+    modal_inputs = {"mode": "map_existing", "librenms_name": "Routing Engine 0", "librenms_class": "other"}
+
+    try:
+        cache.set(snapshot_key, payload, 300)
+        cache.set(device_info_key, (True, {"device_id": 9203, "hostname": device.name}), 300)
+
+        # Positive control: with every permission _map_existing_bay requires, the modal opens and
+        # the button is offered. Without it the negative case below could pass for any reason.
+        allowed = make_user_with_perms(
+            "map-existing-allowed",
+            [("view", Device), ("view", ModuleBay), ("add", ModuleBayMapping)],
+        )
+        client.force_login(allowed)
+        assert client.get(modal_url, modal_inputs).status_code == 200
+        assert b"Map Existing Bay" in client.get(page_url, {"tab": "modules", "server_key": "prod"}).content
+
+        # view_modulebay is the permission the button gate missed.
+        denied = make_user_with_perms("map-existing-denied", [("view", Device), ("add", ModuleBayMapping)])
+        client.force_login(denied)
+        # Precondition: the modal really does refuse this user.
+        assert client.get(modal_url, modal_inputs).status_code == 302
+        # Effect: so the row must not render a button that leads there.
+        assert b"Map Existing Bay" not in client.get(page_url, {"tab": "modules", "server_key": "prod"}).content
+    finally:
+        cache.delete(snapshot_key)
+        cache.delete(device_info_key)
+
+
+@pytest.mark.django_db
 def test_existing_bay_mapping_requires_mapping_permission_but_not_template_creation(client):
     """Mapping an existing bay needs no permission to create templates or bays."""
     from dcim.models import Device, ModuleBay

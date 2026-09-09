@@ -1639,6 +1639,8 @@ class TestDeviceModuleTableView:
             side_effect=lambda p: (
                 p
                 in {
+                    "dcim.view_device",
+                    "dcim.view_modulebay",
                     "dcim.add_module",
                     "dcim.change_module",
                     "dcim.change_interface",
@@ -1677,6 +1679,7 @@ class TestDeviceModuleTableView:
             can_add_module_type=True,
             can_add_carrier_rule=True,
             can_add_module_bay_mapping=True,
+            can_map_existing_bay=True,
             can_add_module_type_mapping=True,
         )
         assert result is mock_table
