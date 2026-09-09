@@ -1879,6 +1879,47 @@ def test_invalidation_reason_includes_relative_time(page):
     assert "ago" in page.locator("#ipaddress-sync-content").inner_text()
 
 
+def test_existing_bay_selection_keeps_the_server_default_exact_kind(page):
+    """A bay change before any radio click must keep the server-supplied exact default.
+
+    The server sends ``mapping_default_kind="exact"`` when no pattern derives for the first
+    offered bay. Selecting a bay that does derive one must not silently broaden the rule to a
+    family regex: only an explicit radio choice may change the kind.
+    """
+    from django.template import Context, Engine
+
+    template = (TEMPLATE_DIR / "htmx" / "add_bay_template_modal.html").read_text()
+    script = template.split("<script>", 1)[1].split("</script>", 1)[0]
+    script = (
+        Engine()
+        .from_string(script)
+        .render(
+            Context(
+                {
+                    "librenms_name": "Routing Engine 0",
+                    "mapping_only": True,
+                    "mapping_default_kind": "exact",
+                }
+            )
+        )
+    )
+    # "RE1" derives no pattern (its digit is absent from the LibreNMS name), which is why the
+    # server defaulted to exact; "RE0" does derive one, so the kind block appears on the change.
+    page.set_content("""<select id="add-bay-name">
+        <option value="RE1">RE1</option><option value="RE0">RE0</option></select>
+        <input type="hidden" id="add-bay-also-create-mapping" value="1">
+        <span id="add-bay-mapping-summary"></span><div id="add-bay-mapping-kind-block">
+        <input type="radio" name="mapping_kind" id="add-bay-mapping-kind-regex" value="regex">
+        <input type="radio" name="mapping_kind" id="add-bay-mapping-kind-exact" value="exact"></div>
+        <div id="add-bay-mapping-preview"></div>""")
+    page.add_script_tag(content=script)
+    assert page.locator("#add-bay-mapping-kind-exact").is_checked()
+    page.locator("#add-bay-name").select_option("RE0")
+    assert page.locator("#add-bay-mapping-kind-exact").is_checked()
+    assert not page.locator("#add-bay-mapping-kind-regex").is_checked()
+    assert "Will store exact:" in page.locator("#add-bay-mapping-preview").inner_text()
+
+
 def test_existing_bay_selection_preserves_an_explicit_exact_mapping_choice(page):
     """Changing the target bay must not broaden an exact rule to a family regex."""
     from django.template import Context, Engine

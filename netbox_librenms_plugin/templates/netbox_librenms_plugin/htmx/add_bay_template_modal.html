@@ -119,7 +119,8 @@
             var radioRegex = document.getElementById("add-bay-mapping-kind-regex");
             var radioExact = document.getElementById("add-bay-mapping-kind-exact");
             var preview = document.getElementById("add-bay-mapping-preview");
-            var preferredMappingKind = null;
+            // Seeded from the server default so a bay change before any radio click keeps it.
+            var preferredMappingKind = {% if mapping_default_kind == "regex" %}"regex"{% else %}"exact"{% endif %};
             if (!nameInput || !checkbox) return;
 
             // Mirror of AddBayTemplateView._derive_mapping_pattern. Maps
