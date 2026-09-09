@@ -1470,8 +1470,12 @@ class TestInstallRefusesADuplicateSerial:
         return device, module_type, installed, make_module_bay(device, "Slot 2")
 
     @staticmethod
-    def _post_install(device, module_type, empty_bay, serial):
-        """Drive a real InstallModuleView POST for a cached row carrying `serial`."""
+    def _post_install(device, module_type, empty_bay, serial, user=None):
+        """Drive a real InstallModuleView POST for a cached row carrying `serial`.
+
+        Both the posted field and the cached row carry the serial: this branch reads it from the
+        POST, and branches above take it from the selected cached inventory row.
+        """
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
@@ -1488,7 +1492,7 @@ class TestInstallRefusesADuplicateSerial:
                 "module_bay_id": str(empty_bay.pk),
                 "module_type_id": str(module_type.pk),
             },
-            user=make_superuser(f"dupserial-{empty_bay.pk}"),
+            user=user or make_superuser(f"dupserial-{empty_bay.pk}"),
             path="/x/",
         )
         view.setup(request)
@@ -1543,8 +1547,7 @@ class TestInstallRefusesADuplicateSerial:
         """
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
-        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
-        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
         device, module_type, _installed, empty_bay = self._device_with_installed_serial("dupserial-addonly", "ADD-SN")
 
@@ -1563,21 +1566,7 @@ class TestInstallRefusesADuplicateSerial:
             user = grant(user, action, model, constraints=None, name=f"addonly-{i}")
         assert not user.has_perm("dcim.change_module"), "precondition: this operator cannot change modules"
 
-        view = InstallModuleView()
-        view._librenms_api = MagicMock(server_key="default")
-        request = make_request(
-            "post",
-            {
-                "server_key": "default",
-                "serial": "ADD-SN",
-                "module_bay_id": str(empty_bay.pk),
-                "module_type_id": str(module_type.pk),
-            },
-            user=user,
-            path="/x/",
-        )
-        view.setup(request)
-        view.post(request, pk=device.pk)
+        self._post_install(device, module_type, empty_bay, "ADD-SN", user=user)
 
         assert Module.objects.filter(device=device).count() == 1, "an add-only operator created a duplicate"
 
