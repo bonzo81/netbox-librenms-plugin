@@ -778,7 +778,7 @@ def _ipaddress_toggle_fragment():
     """Build an IP address fragment around the template's own "Set Primary IP" script."""
     markup = (TEMPLATE_DIR / "_ipaddress_sync_content.html").read_text()
     assert markup.count("<script") == 1, "the IP address template must carry exactly one inline script"
-    start = markup.index("<script>")
+    start = markup.index("<script")
     end = markup.index("</script>", start) + len("</script>")
     script = _replace_fixture_markup(
         markup[start:end],

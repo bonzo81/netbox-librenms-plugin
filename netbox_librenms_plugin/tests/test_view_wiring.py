@@ -549,6 +549,10 @@ class TestSyncCablesServerKey:
         assert "Selected LibreNMS server is no longer configured." not in [
             str(message) for message in get_messages(response.wsgi_request)
         ]
+        # The stripped key must also reach the redirect, not merely avoid the error path.
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+        assert response.status_code == 302
+        assert response.url == f"{sync_url}?tab=cables&server_key=primary"
 
     def test_repeated_server_keys_fail_closed(self, client, settings):
         """Two different configured keys in one POST are ambiguous, so no server may be chosen."""

@@ -29,7 +29,7 @@ Include Virtual Chassis Detection
 : When checked, analyzes device inventory to detect stackable switches and chassis. This adds processing time but provides helpful information about multi-member devices. See [Virtual Chassis](../usage_tips/virtual_chassis.md) for details.
 
 Clear cache before search
-: Forces the plugin to fetch fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance.
+: Forces the plugin to fetch fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for the configured cache timeout to improve performance.
 
 Exclude Existing Devices
 : When checked, hides devices that already exist in NetBox. By default, all devices are shown including those already imported.
@@ -86,7 +86,7 @@ Run as background job
 : Enabled by default. Runs searches asynchronously, allowing you to track progress and cancel operations. Recommended for most use cases, especially with Virtual Chassis detection or large device sets. See [Background Jobs & Caching](background_jobs.md) for details.
 
 Clear cache before search
-: Forces fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance. See [Background Jobs & Caching](background_jobs.md) for caching details.
+: Forces fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for the configured cache timeout to improve performance. See [Background Jobs & Caching](background_jobs.md) for caching details.
 
 ## Saved Cached Searches
 

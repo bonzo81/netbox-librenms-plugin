@@ -28,9 +28,13 @@ def _configure_server(settings, server):
 
 
 @pytest.fixture
-def librenms_api(settings):
+def librenms_api(settings, monkeypatch):
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
+    # The tests below drive real loopback HTTP through this client, so keep a configured
+    # proxy out of the way like the sibling fixtures do.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     with librenms_mock_server() as server:
         _configure_server(settings, server)
         yield LibreNMSAPI(SERVER_KEY), server
@@ -241,11 +245,15 @@ class TestBulkImportVms:
         from django.core.exceptions import PermissionDenied
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
-        api, _server = librenms_api
+        api, server = librenms_api
         user = django_user_model.objects.create_user(username="vm-import-denied")
 
         with pytest.raises(PermissionDenied, match="virtualization.add_virtualmachine"):
             bulk_import_vms({6201: {}}, api, user=user)
+
+        # "before any HTTP request" is the whole claim: a regression that checks the
+        # permission after the fetch would otherwise still pass.
+        assert server.requests == [], server.requests
 
     def test_missing_librenms_device_is_recorded_as_failed(self, librenms_api):
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
