@@ -40,6 +40,18 @@ class TestSeedInventoryMatchesTheReaderContract:
         finally:
             cache.delete(key)
 
+    def test_the_trusted_payload_helper_leaves_cf_recomputable(self):
+        """Assigning custom_field_data to cf would alias raw JSON into the cached property."""
+        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
+        view, device = self._view_and_device("trusted-payload-cf", 11)
+        trusted_module_inventory_payload(device, [], server_key="default", librenms_id=11)
+
+        # cf is a cached_property over the APPLICABLE custom fields, not the raw column, so it
+        # must recompute rather than be the same object the write went into.
+        assert device.cf is not device.custom_field_data
+        assert device.cf["librenms_id"] == device.custom_field_data["librenms_id"]
+
     def test_the_helper_refuses_to_seed_without_a_librenms_id(self):
         """A defaulted id would cache an entry the reader always rejects, faking a cache miss."""
         view, device = self._view_and_device("seed-inventory-no-id", 7)

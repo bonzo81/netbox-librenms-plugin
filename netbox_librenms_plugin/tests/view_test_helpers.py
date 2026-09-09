@@ -137,14 +137,22 @@ def missing_pk(model, offset=1000):
 
 def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
+    from django.db.models import Model
+
     from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 
     if not isinstance(device.custom_field_data, dict):
         device.custom_field_data = {}
     set_librenms_device_id(device, librenms_id, server_key)
     device.save(update_fields=["custom_field_data"])
-    # obj.cf is a @cached_property, so refresh it from the write before verifying it below.
-    device.cf = device.custom_field_data
+    if isinstance(device, Model):
+        # cf is a cached_property over the APPLICABLE custom fields. Drop the cached value so the
+        # next read recomputes it from the write; assigning custom_field_data would cache the raw
+        # column in its place and alias the two attributes to one object.
+        device.__dict__.pop("cf", None)
+    else:
+        # A stub caller has no cached_property to invalidate, so give it the written mapping.
+        device.cf = device.custom_field_data
     # set_librenms_device_id() only logs and returns when it refuses a write (legacy bare
     # integer, non-positive id), which would leave the payload claiming a mapping the device
     # does not have; every caller would then fail on the production staleness guard instead.
