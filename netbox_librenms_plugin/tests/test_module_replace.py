@@ -992,6 +992,7 @@ class TestMoveModuleView:
             ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),

@@ -755,7 +755,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         table_data = self._group_children_under_parents(table_data)
 
         # Bulk-detect serial conflicts for rows that can be replaced/installed
-        self._detect_serial_conflicts(table_data, index_map)
+        self._detect_serial_conflicts(table_data, index_map, obj=obj)
 
         table = self.get_table(table_data, obj)
         table.configure(request)
@@ -3502,10 +3502,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         if not index_map:
             return False
-        serial = (row.get("serial") or "").strip().lower()
+        item = index_map.get(row.get("ent_physical_index"))
+        if item is None:
+            return False
+        # Compare raw inventory serials on both sides. The row's own serial is normalized, so a
+        # rule that strips a vendor marker ("S/N ") would otherwise never match a parent's raw value.
+        serial = _clean_librenms_value(item.get("entPhysicalSerialNum")).strip().lower()
         if not serial:
             return False
-        item = index_map.get(row.get("ent_physical_index"))
         seen = set()
         while item is not None:
             parent_index = item.get("entPhysicalContainedIn")
@@ -3519,7 +3523,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 return True
         return False
 
-    def _detect_serial_conflicts(self, table_data, index_map=None):
+    def _detect_serial_conflicts(self, table_data, index_map=None, obj=None):
         """
         Bulk-check whether a row's LibreNMS serial already names a Module in NetBox.
 
@@ -3556,9 +3560,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if not serial_rows:
             return
 
+        # Existence is read unrestricted: a module the operator cannot see still occupies the
+        # serial. Which of them may be NAMED is decided separately, below.
         conflicts = Module.objects.filter(serial__in=serial_rows.keys()).select_related(
             "module_type", "module_bay", "device"
         )
+        # Fail closed when there is no request to scope against: name nothing rather than risk
+        # disclosing a module the operator cannot see.
+        visible_conflict_pks = set()
+        if getattr(self, "request", None) is not None:
+            visible_conflict_pks = set(
+                self.restricted_queryset(Module).filter(serial__in=serial_rows.keys()).values_list("pk", flat=True)
+            )
+        # Only a match on this page's own devices contradicts an install here; the write guard is
+        # device scoped for the same reason, and a vendor may reuse one serial across devices.
+        scope_device_ids = set()
+        if obj is not None:
+            scope_device_ids.add(obj.pk)
+            chassis = getattr(obj, "virtual_chassis", None)
+            if chassis is not None:
+                scope_device_ids.update(chassis.members.values_list("pk", flat=True))
 
         # Group conflict modules by serial
         conflicts_by_serial: dict = {}
@@ -3572,10 +3593,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # Exclude the module already in the current bay
                 candidates = [m for m in modules if not (installed_id and m.pk == installed_id)]
                 if len(candidates) == 1:
-                    row["serial_conflict_module"] = candidates[0]
+                    conflict = candidates[0]
+                    row["serial_conflict_module"] = conflict
+                    row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
                     row["can_move_from"] = True
-                    # Evidence revokes the offer: this part is already recorded in NetBox.
-                    row["can_install"] = False
+                    # Evidence revokes the offer only where the write path would also refuse it.
+                    if conflict.device_id in scope_device_ids:
+                        row["can_install"] = False
                 elif len(candidates) > 1:
                     row["serial_conflict_ambiguous"] = True
-                    row["can_install"] = False
+                    if any(c.device_id in scope_device_ids for c in candidates):
+                        row["can_install"] = False

@@ -178,21 +178,36 @@ def _extract_inventory_list(cached_payload):
     return inventory
 
 
-def _module_already_on_device(device, serial, module_qs, *, exclude_pk=None):
+def _lock_page_device_serials(page_device):
+    """Serialise serial checks for one sync page, before any row lock is taken.
+
+    Must be the FIRST lock in the transaction. A bulk install holds one transaction across its
+    whole loop, so acquiring this after a bay lock lets a bulk run holding the advisory lock wait
+    on a bay a single install holds, while that install waits on the advisory lock.
+
+    One key per page device, so a transaction never acquires a second key of this kind and the
+    incremental-acquisition ordering problem cannot arise.
+    """
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
+
+
+def _module_already_on_device(device, serial, *, exclude_pk=None):
     """Return the Module already holding ``serial`` on ``device``, or None.
 
     Identity is device-scoped on purpose. A serial is evidence about one physical part, and
     vendors reuse a serial across unrelated parts, so a match on another device must not block a
     genuine first install here.
 
-    Takes the device advisory lock before reading: on a first install there is no matching row
-    for ``select_for_update`` to lock, so two concurrent installs of one serial into different
-    bays would otherwise both see nothing and both create.
+    Existence is read WITHOUT permission filtering. Installing needs ``add_module``, not
+    ``change_module``, so a restricted queryset can come back empty for an operator who may still
+    create the duplicate. Callers must report the hit without naming objects the operator cannot
+    see; ``_lock_page_device_serials`` must already be held.
     """
+    from dcim.models import Module
+
     if not serial:
         return None
-    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{device.pk}")
-    conflicts = module_qs.select_for_update(of=("self",)).filter(device=device, serial=serial)
+    conflicts = Module.objects.select_for_update(of=("self",)).filter(device=device, serial=serial)
     if exclude_pk:
         conflicts = conflicts.exclude(pk=exclude_pk)
     return conflicts.first()
@@ -912,6 +927,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         try:
             with transaction.atomic():
+                _lock_page_device_serials(page_device)
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -925,13 +941,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
                     return _modules_action_response(request, page_device, server_key)
-                if duplicate := _module_already_on_device(
-                    target_device, serial, self.restricted_queryset(Module, "change")
-                ):
+                if _module_already_on_device(target_device, serial):
+                    # The bay is deliberately not named: the conflicting module may be outside
+                    # this operator's scope, and its existence is what blocks the install.
                     messages.error(
                         request,
-                        f"Serial '{serial}' is already installed on this device in "
-                        f"{duplicate.module_bay.name}. Nothing was installed.",
+                        f"Serial '{serial}' is already installed on this device. Nothing was installed.",
                     )
                     return _modules_action_response(request, page_device, server_key)
                 module = Module(
@@ -1104,6 +1119,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         try:
             with transaction.atomic():
+                _lock_page_device_serials(page_device)
                 for item in branch_items:
                     result = self._install_single(
                         target_device,
@@ -1120,7 +1136,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         changeable_components=changeable_components,
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
-                        changeable_modules=self.restricted_queryset(Module, "change"),
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -1267,7 +1282,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         manufacturer_id=None,
         norm_rules_bay=None,
         norm_rules_serial=None,
-        changeable_modules=None,
     ):
         """
         Try to install a single inventory item.
@@ -1370,14 +1384,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         "reason": "bay already occupied",
                         "module_pk": locked_bay.installed_module.pk,
                     }
-                if changeable_modules is not None and (
-                    duplicate := _module_already_on_device(device, serial, changeable_modules)
-                ):
+                if _module_already_on_device(device, serial):
                     return {
                         "status": "skipped",
                         "name": name,
-                        "reason": f"serial already installed in {duplicate.module_bay.name}",
-                        "module_pk": duplicate.pk,
+                        "reason": "serial already installed on this device",
                     }
 
                 module = Module(
@@ -1748,6 +1759,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         invalid_selection_seen = False
         try:
             with transaction.atomic():
+                _lock_page_device_serials(page_device)
                 for item in items:
                     ent_index = item.get("entPhysicalIndex")
                     selected_device_id = request.POST.get(f"device_selection_{ent_index}")
@@ -1788,7 +1800,6 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         changeable_components=changeable_components,
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
-                        changeable_modules=self.restricted_queryset(Module, "change"),
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":

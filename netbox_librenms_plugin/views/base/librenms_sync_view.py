@@ -23,12 +23,18 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
+    get_user_pref,
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
+    save_user_pref,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+# Remembering the tab is what makes the page usable across a detour into NetBox proper:
+# an operator who leaves to fix a bay mapping comes back to the tab they were working in.
+SYNC_TAB_PREFERENCE = "plugins.netbox_librenms_plugin.sync_tab"
 
 INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
 
@@ -148,8 +154,14 @@ class BaseLibreNMSSyncView(
         coordinator = SyncCacheConsistency(obj)
         applicable_tabs = coordinator.applicable_tabs()
         applicable_tab_names = {tab.value for tab in applicable_tabs}
-        requested_sync_tab = request.GET.get("tab") or SyncTab.INTERFACES.value
+        posted_sync_tab = request.GET.get("tab")
+        remembered_sync_tab = get_user_pref(request, SYNC_TAB_PREFERENCE)
+        requested_sync_tab = posted_sync_tab or remembered_sync_tab or SyncTab.INTERFACES.value
         active_sync_tab = requested_sync_tab if requested_sync_tab in applicable_tab_names else SyncTab.INTERFACES.value
+        # Remember only a tab the operator actually asked for. A fallback render must not
+        # overwrite the choice, and an unchanged choice must not cost a write per page view.
+        if posted_sync_tab in applicable_tab_names and active_sync_tab != remembered_sync_tab:
+            save_user_pref(request, SYNC_TAB_PREFERENCE, active_sync_tab)
         sync_tab_urls = {}
         for sync_tab in applicable_tabs:
             query = request.GET.copy()

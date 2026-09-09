@@ -255,6 +255,13 @@ class LibreNMSModuleTable(tables.Table):
         conflict = record.get("serial_conflict_module")
         if conflict is None:
             return format_html('<span class="text-danger">{}</span>', "No matching bay")
+        if not record.get("serial_conflict_visible"):
+            # The module holding this serial is outside the operator's scope. Its existence is
+            # what matters here; naming its device or bay would disclose an object they cannot view.
+            return format_html(
+                '<span class="text-warning">{}</span>',
+                "No matching bay; this serial is already installed elsewhere in NetBox",
+            )
         return format_html(
             '<span class="text-warning">No matching bay; installed at <a href="{}">{} / {}</a></span>',
             conflict.get_absolute_url(),

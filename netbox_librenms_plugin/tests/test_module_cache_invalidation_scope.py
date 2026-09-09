@@ -1,6 +1,7 @@
 """A module action must drop the snapshots of every device it changes, and only those."""
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -119,7 +120,12 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         seeded = seed_every_tab(source_device)
 
         try:
-            with django_capture_on_commit_callbacks(execute=True):
+            # Relocation exists from NetBox 4.7; CI also gates 4.4/4.6 where the view refuses.
+            # Pin it so this test covers cache invalidation, not the version gate.
+            with (
+                patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True),
+                django_capture_on_commit_callbacks(execute=True),
+            ):
                 _post(view, request, pk=page_device.pk)
             moving.refresh_from_db()
             assert moving.device_id == page_device.pk, (

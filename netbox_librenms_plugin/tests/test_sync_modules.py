@@ -1690,6 +1690,7 @@ class TestSingleInstallInterfaceBinding:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
             patch("dcim.models.Module") as mock_module_cls,
@@ -1778,6 +1779,7 @@ class TestSingleInstallInterfaceBinding:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
             patch("dcim.models.Module") as mock_module_cls,
@@ -1872,6 +1874,7 @@ class TestSingleInstallInterfaceBinding:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
             patch("dcim.models.Module") as mock_module_cls,
@@ -4675,6 +4678,7 @@ class TestInstallModuleViewBehavior:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
             patch.object(ModuleBay, "objects") as mock_objects,
@@ -4723,6 +4727,7 @@ class TestInstallModuleViewBehavior:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
             patch.object(ModuleBay, "objects") as mock_objects,
@@ -4783,6 +4788,7 @@ class TestInstallModuleViewBehavior:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
             patch("dcim.models.Module") as mock_module_cls,
@@ -4862,6 +4868,7 @@ class TestUpdateModuleSerialViewBehavior:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
             patch.object(Module, "objects") as mock_objects,
@@ -5543,6 +5550,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
@@ -5593,6 +5601,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
             patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
@@ -5629,6 +5638,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
             patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
@@ -5960,6 +5970,7 @@ class TestAddBayTemplateViewRegexMapping:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
             patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
@@ -6004,6 +6015,7 @@ class TestAddBayTemplateViewRegexMapping:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
             patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
@@ -6046,6 +6058,7 @@ class TestAddBayTemplateViewRegexMapping:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
             patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
@@ -6088,6 +6101,7 @@ class TestAddBayTemplateViewRegexMapping:
             # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
             # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
             patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
             patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,

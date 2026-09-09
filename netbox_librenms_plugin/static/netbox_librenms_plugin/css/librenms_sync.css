@@ -21,3 +21,13 @@
 #librenmsSync .nav-link.sync-cache-unavailable::before {
     background-color: var(--tblr-warning);
 }
+
+/* NetBox marks the active tab with --tblr-bg-surface-tertiary, which sits close to the inactive
+   tab background and is hard to pick out. Shade the whole tab instead. The tint is mixed from
+   --tblr-primary, so it follows the light and dark themes without a second rule. NetBox sets its
+   background with !important, so this needs one too. */
+#librenmsSync .nav-link.active {
+    background-color: color-mix(in oklab, var(--tblr-primary) 18%, transparent) !important;
+    color: var(--tblr-primary);
+    font-weight: 600;
+}

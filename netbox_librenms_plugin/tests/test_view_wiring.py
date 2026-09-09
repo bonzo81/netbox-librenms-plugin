@@ -1535,6 +1535,52 @@ class TestInstallRefusesADuplicateSerial:
         assert Module.objects.filter(module_bay=empty_bay).exists(), "an unrelated serial was refused"
         assert Module.objects.filter(device=device).count() == 2
 
+    def test_an_add_only_operator_is_refused_too(self):
+        """Installing needs add_module, not change_module, so existence must be read unrestricted.
+
+        A guard that searched only modules this operator may CHANGE would come back empty here and
+        let the duplicate through.
+        """
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device, module_type, _installed, empty_bay = self._device_with_installed_serial("dupserial-addonly", "ADD-SN")
+
+        user = make_user_with_perms("dupserial-addonly-user", [])
+        for i, (model, action) in enumerate(
+            [
+                (Device, "view"),
+                (ModuleBay, "view"),
+                (ModuleType, "view"),
+                (Module, "add"),
+                (Interface, "add"),
+                (Interface, "change"),
+                (Interface, "delete"),
+            ]
+        ):
+            user = grant(user, action, model, constraints=None, name=f"addonly-{i}")
+        assert not user.has_perm("dcim.change_module"), "precondition: this operator cannot change modules"
+
+        view = InstallModuleView()
+        view._librenms_api = MagicMock(server_key="default")
+        request = make_request(
+            "post",
+            {
+                "server_key": "default",
+                "serial": "ADD-SN",
+                "module_bay_id": str(empty_bay.pk),
+                "module_type_id": str(module_type.pk),
+            },
+            user=user,
+            path="/x/",
+        )
+        view.setup(request)
+        view.post(request, pk=device.pk)
+
+        assert Module.objects.filter(device=device).count() == 1, "an add-only operator created a duplicate"
+
     def test_bulk_install_is_refused_when_the_serial_is_already_on_the_device(self):
         """InstallSelectedView builds its work list from the cache, so the row's flags cannot guard it."""
         from types import SimpleNamespace

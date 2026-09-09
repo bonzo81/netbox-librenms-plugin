@@ -1488,7 +1488,9 @@ def test_module_move_succeeds_without_a_configured_librenms_server(client, setti
     client.force_login(make_superuser("cache-move-without-server-user"))
     url = reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": device.pk})
 
-    response = client.post(url, {"conflict_module_id": str(module.pk), "target_bay_id": str(target_bay.pk)})
+    # Relocation exists from NetBox 4.7; CI also gates 4.4/4.6, where the view refuses.
+    with patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True):
+        response = client.post(url, {"conflict_module_id": str(module.pk), "target_bay_id": str(target_bay.pk)})
 
     assert response.status_code == 302
     module.refresh_from_db()
