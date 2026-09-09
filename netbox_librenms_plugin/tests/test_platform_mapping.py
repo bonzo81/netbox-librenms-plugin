@@ -461,13 +461,17 @@ class TestBulkExportYAMLView:
         mock_mapping.to_yaml.return_value = "librenms_hardware: Cisco 4321\n"
 
         mock_qs = MagicMock()
-        mock_qs.filter.return_value.order_by.return_value = [mock_mapping, mock_mapping]
+        restricted_qs = MagicMock()
+        restricted_qs.filter.return_value.order_by.return_value = [mock_mapping, mock_mapping]
+        mock_qs.model.objects.restrict.return_value = restricted_qs
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
             response = view.post(request)
 
         assert "text/yaml" in response.get("Content-Type", "")
+        mock_qs.model.objects.restrict.assert_called_once_with(request.user, "view")
+        restricted_qs.filter.assert_called_once_with(pk__in=[1, 2])
 
     def test_returns_yaml_for_selected_pks(self):
         """Response body contains YAML from selected objects."""
@@ -480,7 +484,9 @@ class TestBulkExportYAMLView:
         mock_mapping.to_yaml.return_value = "librenms_hardware: Cisco 4321\n"
 
         mock_qs = MagicMock()
-        mock_qs.filter.return_value.order_by.return_value = [mock_mapping]
+        restricted_qs = MagicMock()
+        restricted_qs.filter.return_value.order_by.return_value = [mock_mapping]
+        mock_qs.model.objects.restrict.return_value = restricted_qs
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
@@ -488,22 +494,28 @@ class TestBulkExportYAMLView:
 
         content = response.content.decode()
         assert "Cisco 4321" in content
+        mock_qs.model.objects.restrict.assert_called_once_with(request.user, "view")
+        restricted_qs.filter.assert_called_once_with(pk__in=[1])
 
     def test_filters_by_selected_pks(self):
-        """View filters queryset by the selected PKs from POST data."""
+        """View filters the user-restricted queryset by the selected PKs from POST data."""
         from netbox_librenms_plugin.views.mapping_views import DeviceTypeMappingBulkExportYAMLView
 
         view = DeviceTypeMappingBulkExportYAMLView.__new__(DeviceTypeMappingBulkExportYAMLView)
         request = self._make_request(["3", "7"])
 
         mock_qs = MagicMock()
+        restricted_qs = MagicMock()
+        mock_qs.model.objects.restrict.return_value = restricted_qs
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
             view.post(request)
 
-        mock_qs.filter.assert_called_once_with(pk__in=[3, 7])
-        mock_qs.filter.return_value.order_by.assert_called_once_with("pk")
+        mock_qs.model.objects.restrict.assert_called_once_with(request.user, "view")
+        mock_qs.filter.assert_not_called()
+        restricted_qs.filter.assert_called_once_with(pk__in=[3, 7])
+        restricted_qs.filter.return_value.order_by.assert_called_once_with("pk")
 
     def test_returns_200_with_empty_selection(self):
         """Response is 400 when no PKs are selected."""

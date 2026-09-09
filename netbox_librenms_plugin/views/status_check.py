@@ -12,12 +12,12 @@ from netbox_librenms_plugin.forms import (
 )
 from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGenericPermissionMixin
 
 logger = logging.getLogger(__name__)
 
 
-class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
+class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
     Check the status of NetBox devices in LibreNMS.
     Shows NetBox devices with their LibreNMS status.
@@ -31,16 +31,26 @@ class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
     actions = {}
     title = "Device LibreNMS Status"
 
+    def get_required_permission(self):
+        """Return the NetBox permission required to view device status."""
+        from utilities.permissions import get_permission_for_model
+
+        return get_permission_for_model(Device, "view")
+
     def get_queryset(self, request):
         """
         Override get_queryset to return filtered devices and check LibreNMS status
         """
         # Only get devices if filters are applied
         if self.request.GET:
-            queryset = Device.objects.select_related("device_type__manufacturer").prefetch_related(
-                "site",
-                "location",
-                "rack",
+            queryset = (
+                Device.objects.restrict(request.user, "view")
+                .select_related("device_type__manufacturer")
+                .prefetch_related(
+                    "site",
+                    "location",
+                    "rack",
+                )
             )
 
             # Create a list to store device IDs and their status
@@ -71,7 +81,7 @@ class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         return Device.objects.none()
 
 
-class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
+class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
     Check the status of virtual machines in NetBox against LibreNMS
     """
@@ -84,10 +94,16 @@ class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Object
     actions = {}
     title = "Virtual Machine LibreNMS Status"
 
+    def get_required_permission(self):
+        """Return the NetBox permission required to view VM status."""
+        from utilities.permissions import get_permission_for_model
+
+        return get_permission_for_model(VirtualMachine, "view")
+
     def get_queryset(self, request):
         """Return VMs annotated with their LibreNMS status."""
         if self.request.GET:
-            queryset = VirtualMachine.objects.select_related("cluster", "site")
+            queryset = VirtualMachine.objects.restrict(request.user, "view").select_related("cluster", "site")
 
             # Create a list to store VM IDs and their status
             vm_status_map = {}

@@ -133,6 +133,45 @@ class TestPermissionMixinWiring:
         self._assert_has_permission_mixin(AddDeviceToLibreNMSView)
 
 
+class TestGenericViewPermissionWiring:
+    """Generic views must retain NetBox's queryset-restricting permission mixin."""
+
+    def test_generic_views_use_netbox_object_permission_mixin(self):
+        from django.contrib.auth.mixins import PermissionRequiredMixin
+        from utilities.views import ObjectPermissionRequiredMixin
+
+        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+        from netbox_librenms_plugin.views.mapping_views import (
+            LocationMappingCreateView,
+            LocationMappingListView,
+        )
+        from netbox_librenms_plugin.views.mixins import (
+            LibreNMSGenericPermissionMixin,
+            LibreNMSGenericWritePermissionMixin,
+        )
+        from netbox_librenms_plugin.views.status_check import DeviceStatusListView, VMStatusListView
+
+        generic_views = (
+            (LocationMappingListView, LibreNMSGenericPermissionMixin, (PERM_VIEW_PLUGIN,)),
+            (
+                LocationMappingCreateView,
+                LibreNMSGenericWritePermissionMixin,
+                (PERM_VIEW_PLUGIN, PERM_CHANGE_PLUGIN),
+            ),
+            (LibreNMSImportView, LibreNMSGenericPermissionMixin, (PERM_VIEW_PLUGIN,)),
+            (DeviceStatusListView, LibreNMSGenericPermissionMixin, (PERM_VIEW_PLUGIN,)),
+            (VMStatusListView, LibreNMSGenericPermissionMixin, (PERM_VIEW_PLUGIN,)),
+        )
+
+        for view_class, plugin_mixin, expected_perms in generic_views:
+            assert view_class.has_permission is ObjectPermissionRequiredMixin.has_permission
+            assert ObjectPermissionRequiredMixin in view_class.__mro__
+            assert PermissionRequiredMixin not in view_class.__mro__
+            assert plugin_mixin in view_class.__mro__, f"{view_class.__name__} is missing {plugin_mixin.__name__}"
+            assert tuple(view_class.additional_permissions) == expected_perms
+
+
 class TestRequiredObjectPermissionsWiring:
     """
     POST-only sync views that modify NetBox objects must declare required_object_permissions
