@@ -119,19 +119,11 @@ def test_a_remembered_tab_that_does_not_apply_falls_back(client, settings):
 @pytest.mark.django_db
 def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
     """Tab links must work normally and enhance the same navigation through HTMX."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}
-    }
-    settings.PLUGINS_CONFIG = plugin_config
-    device = make_device("htmx-sync-tabs")
-    winner = make_device("htmx-sync-tabs-winner")
-    mark_librenms_migrated(device, winner.pk, "default")
-    device.save(update_fields=["custom_field_data"])
+    _device, url = _sync_page(settings, "htmx-sync-tabs")
     client.force_login(make_superuser("htmx-sync-tabs-user"))
 
     response = client.get(
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        url,
         {"tab": "ipaddresses", "server_key": "default", "interface_name_field": "ifDescr"},
     )
 
@@ -157,21 +149,10 @@ def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
 @pytest.mark.parametrize("tab", ["interfaces", "ipaddresses"])
 def test_the_swapped_tab_region_carries_the_active_tab_marker(client, settings, tab):
     """activeSyncTab() reads data-active-tab off the swapped container, so the swap must replace it."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}
-    }
-    settings.PLUGINS_CONFIG = plugin_config
-    device = make_device(f"active-tab-marker-{tab}")
-    winner = make_device(f"active-tab-marker-winner-{tab}")
-    mark_librenms_migrated(device, winner.pk, "default")
-    device.save(update_fields=["custom_field_data"])
+    _device, url = _sync_page(settings, f"active-tab-marker-{tab}")
     client.force_login(make_superuser(f"active-tab-marker-user-{tab}"))
 
-    response = client.get(
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
-        {"tab": tab, "server_key": "default"},
-    )
+    response = client.get(url, {"tab": tab, "server_key": "default"})
 
     assert response.status_code == 200
     html = response.content.decode()
