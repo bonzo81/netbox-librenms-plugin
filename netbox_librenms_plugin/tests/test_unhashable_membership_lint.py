@@ -199,6 +199,9 @@ LATE_OR_NEGATED_GUARDS = {
     "QueryDict getlist returns a list even though its values are strings": (
         'def f(request):\n    v = request.POST.getlist("select")\n    return v in NAMES\n'
     ),
+    "QueryDict pop returns the stored list of values, not one string": (
+        'def f(request):\n    v = request.POST.pop("select")\n    return v in NAMES\n'
+    ),
     "QueryDict get default built by a call is unhashable too": (
         'def f(request):\n    v = request.POST.get("select", set())\n    return v in NAMES\n'
     ),

@@ -284,12 +284,12 @@ class MembershipChecker(ast.NodeVisitor):
     def _querydict_read_can_be_unhashable(attr, call):
         """Return whether a QueryDict read can yield something other than a string.
 
-        A present key always yields str, which is why these reads are otherwise suppressed. Two
-        of them escape that: ``getlist()`` always returns a list, and ``get()`` returns the caller's
-        own default unchanged when the key is absent, so ``request.POST.get("select", [])`` reaches
-        a membership test as a list.
+        A present key always yields str, which is why these reads are otherwise suppressed. Three
+        of them escape that: ``getlist()`` and ``pop()`` both return the stored list of values, and
+        ``get()`` returns the caller's own default unchanged when the key is absent, so
+        ``request.POST.get("select", [])`` reaches a membership test as a list.
         """
-        if attr == "getlist":
+        if attr in ("getlist", "pop"):
             return True
         if attr == "get" and len(call.args) >= 2:
             return not _is_provably_hashable(call.args[1])
