@@ -404,6 +404,7 @@ class TestDeleteNetBoxInterfacesPost:
         response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
 
         assert response.status_code == 403
+        assert self._payload(response)["error"] == "Missing permissions: dcim.delete_interface"
         assert Interface.objects.filter(pk=iface.pk).exists()
 
     def test_invalid_object_type_raises_http404(self):
