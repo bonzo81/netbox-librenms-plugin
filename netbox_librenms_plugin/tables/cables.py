@@ -210,6 +210,25 @@ class VCCableTable(LibreNMSCableTable):
                 members = members.filter(pk__in=allowed_vc_member_ids)
             self._vc_members = list(members)
             self._vc_member_by_position = {m.vc_position: m for m in self._vc_members}
+        # Done here, not in a render method: the selection checkbox reads can_create_cable and
+        # its column is sequenced BEFORE device_selection, so a render-time flip would arrive
+        # after the checkbox had already been drawn enabled.
+        self._disable_serial_rows_owned_outside_the_chassis(args[0] if args else kwargs.get("data") or [])
+
+    def _disable_serial_rows_owned_outside_the_chassis(self, rows):
+        """Take serial rows out of play when their owning device is not selectable.
+
+        The sync view matches the submitted device against the ConsoleServerPort's own device and
+        rejects a mismatch, so a row whose owner is missing from the member set can never be
+        synced from here. Offering it would fail after the click.
+        """
+        member_ids = {str(member.pk) for member in self._vc_members}
+        for row in rows:
+            if not isinstance(row, dict) or row.get("_source") != "serial":
+                continue
+            owner_id = row.get("device_id")
+            if owner_id and str(owner_id) not in member_ids:
+                row["can_create_cable"] = False
 
     def _selected_member_id(self, port_name):
         """
@@ -234,11 +253,10 @@ class VCCableTable(LibreNMSCableTable):
     def render_device_selection(self, value, record):
         """Render a dropdown to select the virtual chassis member for a port."""
         serial_owner_id = record.get("device_id") if record.get("_source") == "serial" else None
-        selected_member_id = (
-            serial_owner_id
-            if serial_owner_id and any(str(member.pk) == str(serial_owner_id) for member in self._vc_members)
-            else self._selected_member_id(record["local_port"])
+        owner_is_member = bool(serial_owner_id) and any(
+            str(member.pk) == str(serial_owner_id) for member in self._vc_members
         )
+        selected_member_id = serial_owner_id if owner_is_member else self._selected_member_id(record["local_port"])
         row_id = record["row_id"]
 
         if serial_owner_id:
@@ -247,7 +265,9 @@ class VCCableTable(LibreNMSCableTable):
                 '<input type="hidden" name="device_selection_{0}" value="{2}">',
                 row_id,
                 render_vc_member_options(self._vc_members, selected_member_id),
-                selected_member_id,
+                # The port's own device, never a substitute member: the sync view compares this
+                # against the ConsoleServerPort's device and rejects anything else.
+                serial_owner_id,
             )
 
         return format_html(

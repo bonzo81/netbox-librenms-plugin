@@ -119,6 +119,11 @@ def strip_status_suffix(descr: str) -> str:
     return descr
 
 
+def _usable_port_name_pattern(candidate):
+    """Return *candidate* when it can name a port, else None."""
+    return candidate if isinstance(candidate, str) and "{N}" in candidate else None
+
+
 def map_sensors_to_serial_links(
     sensors: list[dict],
     port_name_pattern: str = DEFAULT_SERIAL_PORT_NAME_PATTERN,
@@ -190,8 +195,13 @@ def map_sensors_to_serial_links(
         if port_num is None:
             continue
 
-        pattern = type_patterns.get(sensor_type) or port_name_pattern
-        local_port = pattern.replace("{N}", str(port_num))
+        # Both patterns are free text: the configured one comes from SerialSensorTypePattern,
+        # the fallback from the caller. A non-string raises on .replace, and one without {N}
+        # names every port the same. Neither may cost the device its whole serial link set.
+        pattern = _usable_port_name_pattern(type_patterns.get(sensor_type)) or _usable_port_name_pattern(
+            port_name_pattern
+        )
+        local_port = (pattern or DEFAULT_SERIAL_PORT_NAME_PATTERN).replace("{N}", str(port_num))
         raw_descr = sensor.get("sensor_descr")
         label = strip_status_suffix(raw_descr if isinstance(raw_descr, str) else "")
 

@@ -288,7 +288,11 @@ class TestCableAdoptHtmx:
         csp.refresh_from_db()
         assert csp.cable_id == cable.pk  # SAME cable, not recreated
         assert Cable.objects.filter(pk=cable.pk).exists()
-        assert "librenms" in set(csp.cable.tags.values_list("slug", flat=True))  # adopted
+        # By identity, not slug: get_librenms_cable_tag() resolves the tag by NAME and
+        # _free_cable_tag_slug() gives it a suffixed slug when "librenms" is already taken.
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        assert get_librenms_cable_tag().pk in set(csp.cable.tags.values_list("pk", flat=True))  # adopted
         # The re-rendered row now shows the tagged state: Cable Found with no Sync button.
         assert "Cable Found" in content
 

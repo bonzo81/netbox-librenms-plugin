@@ -463,6 +463,36 @@ class TestConfigurableSensorTypes:
         )
         assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "ttyS11")]
 
+    def test_an_unusable_configured_pattern_falls_back_instead_of_aborting(self):
+        """One bad pattern must not drop every serial row.
+
+        The pattern comes from the SerialSensorTypePattern table, which takes free text. A
+        truthy non-string reaches ``.replace`` and raises, and nothing catches it, so a single
+        bad row would lose the whole device's serial links.
+        """
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        for unusable in (123, ["console{N}"], {"pattern": "console{N}"}, "console-no-placeholder"):
+            links = map_sensors_to_serial_links(
+                [self._acs_line(port=11)],
+                sensor_types={"acsSerialPortTable": unusable},
+            )
+
+            assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "ttyS11")], unusable
+
+    def test_an_unusable_fallback_pattern_still_names_every_port_uniquely(self):
+        """The caller-supplied fallback is no safer than a configured one, so guard it too."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(
+            [self._acs_line(port=11), self._acs_line(sid=1976, port=12)],
+            port_name_pattern="console",
+            sensor_types=frozenset({"acsSerialPortTable"}),
+        )
+
+        # A pattern with no {N} would name both ports the same, so the default has to take over.
+        assert sorted(r["local_port"] for r in links) == ["ttyS11", "ttyS12"]
+
     def test_generator_sensor_types_not_consumed_by_membership_checks(self):
         """Verify a generator of sensor types is materialized once so every matching row is recognized."""
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
