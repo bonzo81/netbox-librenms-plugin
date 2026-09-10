@@ -4380,7 +4380,7 @@ class TestInstallViewsPreserveInventoryCache:
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
         from dcim.models import Manufacturer
@@ -4433,6 +4433,9 @@ class TestInstallViewsPreserveInventoryCache:
 
         assert not Module.objects.filter(device__in=[page, member]).exists()
         assert Device.objects.filter(pk=member.pk).exists()
+        # Without this, a regression in bay matching or module-type resolution also installs
+        # nothing and keeps the test green for a reason the rule never caused.
+        assert any("matched ignore rule" in text for text in message_texts(request, "info")), message_texts(request)
 
     @pytest.mark.parametrize(
         ("view_name", "request_data"),

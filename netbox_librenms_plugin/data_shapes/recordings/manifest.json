@@ -172,9 +172,9 @@
         "position_base": null
       },
       "lag": {
-        "present": false,
-        "ieee8023ad": false,
-        "name_prefix": null
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "ae"
       },
       "sub_interfaces": {
         "present": true,
@@ -184,7 +184,7 @@
       },
       "port_stack": true,
       "vlans": false,
-      "transceivers": false,
+      "transceivers": true,
       "serial": false,
       "oob": false
     }
