@@ -3,7 +3,7 @@ from urllib.parse import urlencode
 
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
-from django.core.exceptions import ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 from django.db import IntegrityError, transaction
 from django.utils.text import slugify
 
@@ -98,6 +98,22 @@ def _server_mapping_redirect(object_type, pk, active_server_key=None, active_syn
     if query:
         url = f"{url}?{urlencode(query)}"
     return redirect(url)
+
+
+def _write_failure_message(exc, action, written_field):
+    """Describe a failed single-field write, naming the fields that actually failed validation."""
+    errors = getattr(exc, "message_dict", None)
+    if not errors:
+        return f"Failed to {action}: {exc}"
+    detail = "; ".join(f"{field}: {' '.join(texts)}" for field, texts in sorted(errors.items()))
+    # full_clean() validates the whole object, so the failure can sit on a field this write never
+    # touched. Name that field rather than report the raw dict, which reads as though the write
+    # needed it. Whether the write caused the failure is not knowable from the error keys alone:
+    # a custom validator can add any key, so the wording states what failed, never when it broke.
+    elsewhere = [field for field in errors if field not in (written_field, NON_FIELD_ERRORS)]
+    if elsewhere and len(elsewhere) == len(errors):
+        return f"Cannot {action}: validation fails on {detail} Resolve that, then retry."
+    return f"Failed to {action}: {detail}"
 
 
 def _device_sync_redirect(request, pk, server_key):
@@ -212,8 +228,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.name = old_name
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update device name to '{resolved_name}': {error_msg}")
+            messages.error(request, _write_failure_message(e, f"update device name to '{resolved_name}'", "name"))
             return _device_sync_redirect(request, pk, server_key)
 
         messages.success(request, f"Device name updated from '{old_name}' to '{resolved_name}'")
@@ -274,8 +289,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.serial = old_serial
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update serial to '{serial}': {error_msg}")
+            messages.error(request, _write_failure_message(e, f"update serial to '{serial}'", "serial"))
             return _device_sync_redirect(request, pk, server_key)
 
         if old_serial:
@@ -359,8 +373,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.device_type = old_device_type
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update device type to '{device_type}': {error_msg}")
+            messages.error(request, _write_failure_message(e, f"update device type to '{device_type}'", "device_type"))
             return _device_sync_redirect(request, pk, server_key)
 
         messages.success(
@@ -442,8 +455,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.platform = old_platform
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update platform to '{platform}': {error_msg}")
+            messages.error(request, _write_failure_message(e, f"update platform to '{platform}'", "platform"))
             return _device_sync_redirect(request, pk, server_key)
 
         if old_platform:
@@ -628,7 +640,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 )
                 messages.error(
                     request,
-                    f"Device (pk={pk}) validation failed: {error_msg}",
+                    _write_failure_message(e, f"assign platform '{platform}' to device (pk={pk})", "platform"),
                 )
                 return self._sync_redirect(
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
@@ -824,8 +836,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                     member.save()
                 except (ValidationError, IntegrityError) as e:
                     member.serial = old_serial
-                    error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-                    errors.append(f"Failed to set serial on {member.name}: {error_msg}")
+                    errors.append(_write_failure_message(e, f"set serial on {member.name}", "serial"))
                     counter += 1
                     continue
 
@@ -1189,8 +1200,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 locked.save()
             except ValidationError as exc:
                 transaction.set_rollback(True)
-                error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-                messages.error(request, f"Failed to save converted librenms_id: {error_msg}")
+                messages.error(request, _write_failure_message(exc, "save converted librenms_id", "custom_field_data"))
                 return self._sync_url(object_type, pk)
             except Exception as exc:
                 transaction.set_rollback(True)

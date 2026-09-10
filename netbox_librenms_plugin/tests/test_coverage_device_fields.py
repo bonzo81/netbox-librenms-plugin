@@ -140,6 +140,27 @@ class TestUpdateDeviceNameView:
         assert device.name == "name-before-duplicate"
         assert any("Failed to update device name" in text for text in _messages(response, "error"))
 
+    def test_a_pre_existing_invalid_field_is_reported_as_unrelated(self, logged_in_client, librenms_server):
+        """A device already failing validation elsewhere must not read as a name problem."""
+        from ipam.models import IPAddress
+
+        from dcim.models import Device
+
+        device = _linked_device("name-before-invalid-oob", 6505)
+        stray = IPAddress.objects.create(address="192.0.2.50/24")
+        # Written past validation, which is how such a row reaches the database at all.
+        Device.objects.filter(pk=device.pk).update(oob_ip=stray)
+        librenms_server.device_info_response(device_id=6505, hostname="renamed-host")
+
+        response = _post(logged_in_client, "update_device_name", device)
+
+        device.refresh_from_db()
+        assert device.name == "name-before-invalid-oob"
+        errors = _messages(response, "error")
+        assert any("validation fails on oob_ip" in text for text in errors), errors
+        # The old rendering dumped a raw error dict, which read as though the rename needed oob_ip.
+        assert not any("{'oob_ip'" in text for text in errors), errors
+
     def test_unknown_server_fails_closed_without_an_http_fallback(self, logged_in_client, librenms_server):
         device = _linked_device("name-stale-server", 6504)
 
@@ -207,6 +228,37 @@ class TestUpdateDeviceTypeView:
             model=model,
             slug=f"device-type-{tag}",
         )
+
+    def test_an_error_the_write_itself_caused_is_not_called_pre_existing(self, logged_in_client, librenms_server):
+        """A new device type can invalidate the platform, which the sync caused rather than found."""
+        from dcim.models import Platform
+
+        device = _linked_device("device-type-causes-platform-error", 6529)
+        platform = Platform.objects.create(
+            name="Type-bound platform",
+            slug="type-bound-platform",
+            manufacturer=device.device_type.manufacturer,
+        )
+        device.platform = platform
+        device.full_clean()
+        device.save()
+        replacement = self._device_type("causes-conflict", "Conflicting Router")
+        librenms_server.device_info_response(
+            device_id=6529,
+            hostname=device.name,
+            hardware=replacement.model,
+        )
+
+        response = _post(logged_in_client, "update_device_type", device)
+
+        device.refresh_from_db()
+        assert device.device_type != replacement, "the incompatible type must not persist"
+        errors = _messages(response, "error")
+        assert errors, "the refusal must be reported"
+        # The device validated cleanly before this write, so blaming a pre-existing condition
+        # would send the operator looking for a fault that was never there.
+        assert not any("already fails validation" in text for text in errors), errors
+        assert any("platform" in text for text in errors), errors
 
     def test_exact_hardware_match_changes_the_real_device_type(self, logged_in_client, librenms_server):
         device = _linked_device("device-type-update", 6521)
@@ -499,7 +551,11 @@ class TestCreateAndAssignPlatformView:
         device.refresh_from_db()
         assert device.platform is None
         assert not Platform.objects.filter(name="Incompatible Platform").exists()
-        assert any("validation failed" in text for text in _messages(response, "error"))
+        errors = _messages(response, "error")
+        # The platform is the field being written, so this reports as a failed write, not as a
+        # pre-existing problem elsewhere on the device.
+        assert any("Failed to assign platform 'Incompatible Platform'" in text for text in errors), errors
+        assert any("limited to Incompatible platform manufacturer" in text for text in errors), errors
 
     def test_missing_mapping_permission_keeps_the_primary_assignment(self, client, librenms_server):
         from dcim.models import Device, Platform
