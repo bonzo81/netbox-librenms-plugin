@@ -1,309 +1,338 @@
-"""Tests for device sync views: AddDeviceToLibreNMSView and field update views."""
+"""Integration tests for device and VM synchronization actions."""
 
-from unittest.mock import MagicMock, patch
+from copy import deepcopy
 
+import pytest
+from django.contrib import messages
+from django.contrib.messages import get_messages
+from django.core.cache import cache
+from django.urls import reverse
 
-from netbox_librenms_plugin.tests.view_test_helpers import post as _post
-
-
-def _make_view(cls_name, module_path="netbox_librenms_plugin.views.sync.devices"):
-    import importlib
-
-    mod = importlib.import_module(module_path)
-    cls = getattr(mod, cls_name)
-    view = object.__new__(cls)
-    view._librenms_api = MagicMock()
-    view._librenms_api.server_key = "default"
-    view.request = MagicMock()
-    return view
+from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 
-def _make_field_view(cls_name):
-    return _make_view(cls_name, "netbox_librenms_plugin.views.sync.device_fields")
+SERVER_KEY = "default"
 
 
-class TestAddDeviceToLibreNMSViewWiring:
-    """AddDeviceToLibreNMSView must be correctly wired to LibreNMSAPIMixin."""
+def _point_plugin_at(settings, url):
+    """Configure the loopback server without changing unrelated plugin settings."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        SERVER_KEY: {
+            "display_name": "Synchronization test server",
+            "librenms_url": url,
+            "api_token": "sync-test-token",
+            "cache_timeout": 300,
+            "verify_ssl": False,
+        }
+    }
+    plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
+    settings.PLUGINS_CONFIG = plugin_config
 
-    def test_has_librenms_api_mixin(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
-        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
-        assert LibreNMSAPIMixin in AddDeviceToLibreNMSView.__mro__
-
-    def test_has_permission_mixin(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
-
-        assert LibreNMSPermissionMixin in AddDeviceToLibreNMSView.__mro__
-
-
-class TestAddDeviceToLibreNMSViewFormValid:
-    """form_valid() builds correct device_data payload and calls librenms_api.add_device."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
-
-        view = object.__new__(AddDeviceToLibreNMSView)
-        view._librenms_api = MagicMock()
-        view.request = MagicMock()
-        view.object = MagicMock()
-        view.object.get_absolute_url.return_value = "/dcim/devices/1/"
-        return view
-
-    def _make_form(self, data):
-        form = MagicMock()
-        form.cleaned_data = data
-        return form
-
-    def test_v2c_form_includes_community(self):
-        view = self._make_view()
-        view._librenms_api.add_device.return_value = (True, "Device added")
-        form = self._make_form(
-            {
-                "hostname": "switch1.example.com",
-                "community": "public",
-                "force_add": False,
-            }
+@pytest.fixture
+def librenms_server(settings, monkeypatch):
+    """Run the real HTTP boundary against a controlled loopback server."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    cache.delete("librenms_poller_group_choices_default")
+    with librenms_mock_server() as server:
+        _point_plugin_at(settings, server.url)
+        server.register(
+            "/api/v0/poller_group",
+            {"status": "ok", "get_poller_group": []},
         )
-
-        with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
-            with patch("netbox_librenms_plugin.views.sync.devices.messages"):
-                view.form_valid(form, snmp_version="v2c")
-
-        call_args = view._librenms_api.add_device.call_args[0][0]
-        assert call_args["snmp_version"] == "v2c"
-        assert call_args["community"] == "public"
-        assert call_args["hostname"] == "switch1.example.com"
-
-    def test_v3_form_includes_auth_fields(self):
-        view = self._make_view()
-        view._librenms_api.add_device.return_value = (True, "Device added")
-        form = self._make_form(
-            {
-                "hostname": "switch2.example.com",
-                "authlevel": "authPriv",
-                "authname": "admin",
-                "authpass": "secret",
-                "authalgo": "SHA",
-                "cryptopass": "crypt",
-                "cryptoalgo": "AES",
-                "force_add": False,
-            }
-        )
-
-        with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
-            with patch("netbox_librenms_plugin.views.sync.devices.messages"):
-                view.form_valid(form, snmp_version="v3")
-
-        call_args = view._librenms_api.add_device.call_args[0][0]
-        assert call_args["snmp_version"] == "v3"
-        assert call_args["authlevel"] == "authPriv"
-        assert "community" not in call_args
-
-    def test_api_failure_adds_error_message(self):
-        view = self._make_view()
-        view._librenms_api.add_device.return_value = (False, "Connection refused")
-
-        form = self._make_form(
-            {
-                "hostname": "fail.example.com",
-                "community": "public",
-                "force_add": False,
-            }
-        )
-
-        with patch("netbox_librenms_plugin.views.sync.devices.redirect"):
-            with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                view.form_valid(form, snmp_version="v2c")
-
-        mock_msg.error.assert_called_once()
+        yield server
+    cache.delete("librenms_poller_group_choices_default")
 
 
-class TestUpdateDeviceLocationView:
-    """UpdateDeviceLocationView.post calls update_device_field with site name."""
-
-    def test_calls_update_device_field_with_site(self):
-        """post() resolves the NetBox site name and passes the exact API payload
-        expected by LibreNMS's PATCH /api/v0/devices/{id}/field endpoint:
-        ``{"field": ["location", "override_sysLocation"], "data": [name, "1"]}``.
-        """
-        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
-
-        view = object.__new__(UpdateDeviceLocationView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"  # blank-POST rebind reuses the cached client
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.update_device_field.return_value = (True, "ok")
-        view.request = MagicMock()
-        view.request.POST.get.return_value = None  # no posted server_key -> session/default
-
-        device = MagicMock()
-        device.site = MagicMock()
-        device.site.name = "London"
-        device.get_absolute_url.return_value = "/dcim/devices/1/"
-
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-            return_value=device,
-        ):
-            with patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"):
-                with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                    _post(view, view.request, pk=1)
-
-        view._librenms_api.update_device_field.assert_called_once_with(
-            42,
-            {"field": ["location", "override_sysLocation"], "data": ["London", "1"]},
-        )
-        mock_msg.success.assert_called_once()
-
-    def test_warning_when_no_site(self):
-        from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
-
-        view = object.__new__(UpdateDeviceLocationView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"  # blank-POST rebind reuses the cached client
-        view._librenms_api.get_librenms_id.return_value = 42
-        view.request = MagicMock()
-        view.request.POST.get.return_value = None  # no posted server_key -> session/default
-
-        device = MagicMock()
-        device.site = None
-        device.pk = 1
-
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-            return_value=device,
-        ):
-            with patch("netbox_librenms_plugin.views.sync.devices._device_sync_redirect"):
-                with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
-                    _post(view, view.request, pk=1)
-
-        view._librenms_api.update_device_field.assert_not_called()
-        mock_msg.warning.assert_called_once()
+def _messages(response, level=None):
+    wanted = None if level is None else getattr(messages, level.upper())
+    return [
+        str(message) for message in get_messages(response.wsgi_request) if wanted is None or message.level == wanted
+    ]
 
 
-class TestAddDeviceObjectResolution:
-    """Regression tests for AddDeviceToLibreNMSView.get_object()."""
-
-    def test_get_object_resolves_a_virtualmachine_through_the_restricted_queryset(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
-        from virtualization.models import VirtualMachine
-
-        view = object.__new__(AddDeviceToLibreNMSView)
-        vm_obj = MagicMock()
-
-        with patch(
-            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-            return_value=vm_obj,
-        ) as mock_get_obj:
-            result = view.get_object(123, object_type="virtualmachine")
-
-        assert result is vm_obj
-        mock_get_obj.assert_called_once_with(VirtualMachine, "change", pk=123)
+def _add_url(obj):
+    return reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[obj.pk])
 
 
-class TestUpdateDeviceNameViewWiring:
-    def test_has_all_required_mixins(self):
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
-        from netbox_librenms_plugin.views.mixins import (
-            LibreNMSAPIMixin,
-            LibreNMSPermissionMixin,
-            NetBoxObjectPermissionMixin,
-        )
+def _v2_payload(obj, **overrides):
+    data = {
+        "object_type": obj._meta.model_name,
+        "v1v2-snmp_version": "v2c",
+        "v1v2-hostname": "router.example.test",
+        "v1v2-community": "test-community",
+    }
+    data.update(overrides)
+    return data
 
-        mro = UpdateDeviceNameView.__mro__
-        assert LibreNMSAPIMixin in mro
-        assert LibreNMSPermissionMixin in mro
-        assert NetBoxObjectPermissionMixin in mro
 
-    def test_requires_change_device_permission(self):
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
+def _v3_payload(obj, **overrides):
+    data = {
+        "object_type": obj._meta.model_name,
+        "v3-snmp_version": "v3",
+        "v3-hostname": "router-v3.example.test",
+        "v3-authlevel": "authPriv",
+        "v3-authname": "snmp-user",
+        "v3-authpass": "test-auth-password",
+        "v3-authalgo": "SHA",
+        "v3-cryptopass": "test-crypto-password",
+        "v3-cryptoalgo": "AES",
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.mark.django_db
+class TestAddDeviceToLibreNMSView:
+    def test_v2c_device_submission_sends_the_validated_payload(self, client, librenms_server):
         from dcim.models import Device
 
-        perms = UpdateDeviceNameView.required_object_permissions
-        assert "POST" in perms
-        assert any(action == "change" and model == Device for action, model in perms["POST"])
+        device = make_device("add-v2c-device")
+        user = make_user_with_perms("add-v2c-writer", [("change", Device)])
+        received = []
 
+        def add_device(**request):
+            received.append(request)
+            return 200, {"status": "ok"}
 
-class TestUpdateDeviceSerialViewWiring:
-    def test_has_all_required_mixins(self):
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from netbox_librenms_plugin.views.mixins import (
-            LibreNMSAPIMixin,
-            LibreNMSPermissionMixin,
-            NetBoxObjectPermissionMixin,
-        )
+        librenms_server.register("/api/v0/devices", add_device, method="POST")
+        client.force_login(user)
 
-        assert LibreNMSAPIMixin in UpdateDeviceSerialView.__mro__
-        assert LibreNMSPermissionMixin in UpdateDeviceSerialView.__mro__
-        assert NetBoxObjectPermissionMixin in UpdateDeviceSerialView.__mro__
-
-    def test_requires_change_device_permission(self):
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from dcim.models import Device
-
-        perms = UpdateDeviceSerialView.required_object_permissions
-        assert "POST" in perms
-        assert any(action == "change" and model == Device for action, model in perms["POST"])
-
-
-class TestRemoveServerMappingViewWiring:
-    def test_does_not_have_librenms_api_mixin(self):
-        """RemoveServerMappingView does not call LibreNMS API — it only modifies NetBox."""
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
-
-        assert LibreNMSAPIMixin not in RemoveServerMappingView.__mro__
-
-    def test_has_permission_mixin(self):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
-
-        assert LibreNMSPermissionMixin in RemoveServerMappingView.__mro__
-        assert NetBoxObjectPermissionMixin in RemoveServerMappingView.__mro__
-
-    def test_post_with_virtualmachine_sets_vm_permissions_and_redirects(self):
-        """post() with object_type='virtualmachine' sets VirtualMachine permissions and redirects to VM URL."""
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-        from virtualization.models import VirtualMachine
-
-        view = object.__new__(RemoveServerMappingView)
-
-        permissions_at_check = {}
-
-        def capture_perms(method):
-            permissions_at_check[method] = list(view.required_object_permissions.get(method, []))
-            return None  # permission passes
-
-        mock_vm = MagicMock()
-        mock_vm.pk = 10
-        mock_vm.custom_field_data = {"librenms_id": {"orphaned-server": 42}}
-
-        # Use a mock model class so the select_for_update().get() call doesn't hit the DB
-        mock_model = MagicMock()
-        mock_model.objects.restrict.return_value = mock_model.objects
-        mock_model.objects.select_for_update.return_value.get.return_value = mock_vm
-
-        request = MagicMock()
-        request.POST = {"object_type": "virtualmachine", "server_key": "orphaned-server"}
-
-        with (
-            patch.object(view, "require_all_permissions", side_effect=capture_perms),
-            patch.object(view, "_get_object", return_value=(mock_vm, mock_model)),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch(
-                "django.conf.settings",
-                PLUGINS_CONFIG={"netbox_librenms_plugin": {}},
+        response = client.post(
+            _add_url(device),
+            _v2_payload(
+                device,
+                **{
+                    "v1v2-port": "1161",
+                    "v1v2-transport": "udp6",
+                    "v1v2-port_association_mode": "ifName",
+                    "v1v2-force_add": "on",
+                },
             ),
-        ):
-            view.request = request
-            view.post(request, pk=10)
+        )
 
-        # required_object_permissions must be scoped to VirtualMachine, not Device
-        assert ("change", VirtualMachine) in permissions_at_check.get("POST", [])
-        mock_model.objects.restrict.assert_called_once_with(request.user, "change")
-        # Response must redirect to the VM-specific sync URL
-        mock_redirect.assert_called_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=10)
+        assert response.status_code == 302
+        assert response.url == device.get_absolute_url()
+        assert [request["body"] for request in received] == [
+            {
+                "hostname": "router.example.test",
+                "snmpver": "v2c",
+                "force_add": True,
+                "port": 1161,
+                "transport": "udp6",
+                "port_association_mode": "ifName",
+                "community": "test-community",
+            }
+        ]
+        assert _messages(response, "success") == ["Device added successfully."]
+
+    def test_v3_vm_submission_resolves_the_vm_and_sends_auth_fields(self, client, librenms_server):
+        from virtualization.models import VirtualMachine
+
+        vm = make_vm("add-v3-vm")
+        user = make_user_with_perms("add-v3-vm-writer", [("change", VirtualMachine)])
+        received = []
+
+        def add_device(**request):
+            received.append(request)
+            return 200, {"status": "ok"}
+
+        librenms_server.register("/api/v0/devices", add_device, method="POST")
+        client.force_login(user)
+
+        response = client.post(_add_url(vm), _v3_payload(vm))
+
+        assert response.status_code == 302
+        assert response.url == vm.get_absolute_url()
+        assert [request["body"] for request in received] == [
+            {
+                "hostname": "router-v3.example.test",
+                "snmpver": "v3",
+                "force_add": False,
+                "authlevel": "authPriv",
+                "authname": "snmp-user",
+                "authpass": "test-auth-password",
+                "authalgo": "SHA",
+                "cryptopass": "test-crypto-password",
+                "cryptoalgo": "AES",
+            }
+        ]
+
+    def test_librenms_failure_is_reported_to_the_user(self, client, librenms_server):
+        from dcim.models import Device
+
+        device = make_device("add-device-api-failure")
+        user = make_user_with_perms("add-device-api-failure-writer", [("change", Device)])
+        librenms_server.register(
+            "/api/v0/devices",
+            {"status": "error", "message": "SNMP discovery failed"},
+            method="POST",
+        )
+        client.force_login(user)
+
+        response = client.post(_add_url(device), _v2_payload(device))
+
+        assert response.status_code == 302
+        assert _messages(response, "error") == ["SNMP discovery failed"]
+
+    def test_invalid_form_reports_real_field_errors_without_an_add_request(self, client, librenms_server):
+        from dcim.models import Device
+
+        device = make_device("add-device-invalid-form")
+        user = make_user_with_perms("add-device-invalid-form-writer", [("change", Device)])
+        received = []
+
+        def add_device(**request):
+            received.append(request)
+            return 200, {"status": "ok"}
+
+        librenms_server.register("/api/v0/devices", add_device, method="POST")
+        client.force_login(user)
+
+        response = client.post(
+            _add_url(device),
+            {"object_type": "device", "v1v2-snmp_version": "v2c"},
+        )
+
+        assert response.status_code == 302
+        assert received == []
+        errors = _messages(response, "error")
+        assert any(message.startswith("hostname:") for message in errors)
+        assert any(message.startswith("community:") for message in errors)
+
+    def test_invalid_object_type_is_rejected_before_object_or_api_access(self, client, librenms_server):
+        device = make_device("add-device-invalid-type")
+        client.force_login(make_superuser("add-device-invalid-type-user"))
+
+        response = client.post(
+            _add_url(device),
+            {"object_type": "rack<script>", "v1v2-snmp_version": "v2c"},
+        )
+
+        assert response.status_code == 400
+        assert b"rack&lt;script&gt;" in response.content
+        # The test name claims rejection happens BEFORE api access, which the status code alone
+        # does not show: resolving the object and calling LibreNMS first would also return 400.
+        assert librenms_server.requests == [], librenms_server.requests
+
+    def test_user_without_device_change_permission_cannot_submit(self, client, librenms_server):
+        device = make_device("add-device-permission-denied")
+        user = make_user_with_perms("add-device-permission-denied-user", [])
+        received = []
+
+        def add_device(**request):
+            received.append(request)
+            return 200, {"status": "ok"}
+
+        librenms_server.register("/api/v0/devices", add_device, method="POST")
+        client.force_login(user)
+
+        response = client.post(
+            _add_url(device),
+            _v2_payload(device),
+            HTTP_REFERER=device.get_absolute_url(),
+        )
+
+        assert response.status_code == 302
+        assert response.url == device.get_absolute_url()
+        assert received == []
+        assert _messages(response, "error") == ["Missing permissions: dcim.change_device"]
+
+
+@pytest.mark.django_db
+class TestUpdateDeviceLocationView:
+    def test_location_update_sends_the_netbox_site_to_the_active_server(self, client, librenms_server):
+        device_id = 42
+        device = make_device("location-update-target", librenms_cf={SERVER_KEY: device_id})
+        received = []
+
+        def record_update(**request):
+            received.append(request)
+            return 200, {"status": "ok"}
+
+        librenms_server.register(f"/api/v0/devices/{device_id}", record_update, method="PATCH")
+        client.force_login(make_superuser("location-update-writer"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk]),
+            {"server_key": SERVER_KEY},
+        )
+
+        assert response.status_code == 302
+        assert response.url == (
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}"
+            f"?server_key={SERVER_KEY}"
+        )
+        assert [(request["method"], request["path"], request["body"]) for request in received] == [
+            (
+                "PATCH",
+                f"/api/v0/devices/{device_id}",
+                {"field": ["location", "override_sysLocation"], "data": ["TestSite", "1"]},
+            )
+        ]
+        assert _messages(response, "success") == ["Device location updated in LibreNMS to TestSite"]
+
+    def test_unlinked_device_does_not_patch_a_missing_id(self, client, librenms_server):
+        """An unlinked device must stop before the LibreNMS update request."""
+        device = make_device("location-update-unlinked", librenms_cf={SERVER_KEY: None})
+        client.force_login(make_superuser("location-update-unlinked-writer"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk]),
+            {"server_key": SERVER_KEY},
+        )
+
+        assert response.status_code == 302
+        assert response.url == (
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}"
+            f"?server_key={SERVER_KEY}"
+        )
+        assert _messages(response, "error") == ["Device not found in LibreNMS"]
+        assert all("/devices/None" not in request["path"] for request in librenms_server.requests)
+        assert all(request["method"] != "PATCH" for request in librenms_server.requests)
+
+
+@pytest.mark.django_db
+class TestRemoveServerMappingView:
+    def test_vm_writer_removes_an_orphaned_mapping_and_returns_to_vm_sync(self, client):
+        from virtualization.models import VirtualMachine
+
+        vm = make_vm("remove-orphaned-vm-mapping")
+        vm.custom_field_data["librenms_id"] = {"orphaned-server": 42}
+        vm.save(update_fields=["custom_field_data"])
+        user = make_user_with_perms("remove-orphaned-vm-writer", [("change", VirtualMachine)])
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[vm.pk]),
+            {"object_type": "virtualmachine", "server_key": "orphaned-server"},
+        )
+
+        assert response.status_code == 302
+        assert response.url == reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
+        assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
+        vm.refresh_from_db()
+        assert vm.custom_field_data["librenms_id"] is None
+
+    def test_mapping_removal_preserves_unrelated_legacy_device_state(self, client):
+        from dcim.models import Device
+
+        device = make_device("remove-orphaned-device-mapping", librenms_cf={"orphaned-server": 42})
+        Device.objects.filter(pk=device.pk).update(face="front")
+        user = make_user_with_perms("remove-orphaned-device-writer", [("change", Device)])
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[device.pk]),
+            {"object_type": "device", "server_key": "orphaned-server"},
+        )
+
+        assert response.status_code == 302
+        assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] is None
+        assert device.face == "front"

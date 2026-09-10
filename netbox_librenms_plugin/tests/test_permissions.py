@@ -1,140 +1,148 @@
-from unittest.mock import MagicMock, patch
+"""Permission coverage through real users, grants, requests, and import flows."""
+
+import json
+from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
+from django.apps import apps
+from django.contrib.auth import get_user_model
+from django.core.exceptions import PermissionDenied
+from django.db import transaction
+from django.test.utils import override_script_prefix
+
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    make_request,
+    make_user_with_perms,
+    message_texts,
+)
+
+
+pytestmark = pytest.mark.django_db
+
+SERVER_KEY = "default"
+
+
+def _user(username, permissions=()):
+    """Create a real user with the specified NetBox object permissions."""
+    user = get_user_model().objects.create_user(username=username, password="test-password")
+    for action, model in permissions:
+        user = grant(user, action, model)
+    return user
+
+
+def _plugin_user(username, *, write):
+    """Create a real user with view-only or view-and-change plugin access."""
+    settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+    user = _user(username)
+    user = grant(user, "view", settings_model)
+    if write:
+        user = grant(user, "change", settings_model)
+    return user
+
+
+def _permission_view(*, user=None, requirements=None, request_method="post", request_kwargs=None):
+    from netbox_librenms_plugin.views.mixins import (
+        LibreNMSPermissionMixin,
+        NetBoxObjectPermissionMixin,
+    )
+
+    class PermissionView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin):
+        required_object_permissions = requirements or {}
+
+    view = PermissionView()
+    if user is not None:
+        request_kwargs = request_kwargs or {}
+        view.request = make_request(request_method, user=user, **request_kwargs)
+    return view
+
+
+@pytest.fixture
+def librenms_server(settings, monkeypatch):
+    """Configure a real LibreNMS client against the local HTTP boundary."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {
+            SERVER_KEY: {
+                "display_name": "Permission test server",
+                "librenms_url": server.url,
+                "api_token": "permission-test-token",
+                "cache_timeout": 300,
+                "verify_ssl": False,
+            }
+        }
+        plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
+        settings.PLUGINS_CONFIG = plugin_config
+        yield server
 
 
 class TestLibreNMSPermissionMixin:
-    """Tests for permission mixin functionality."""
+    def test_real_plugin_grants_control_write_access(self):
+        writer = _plugin_user("permission-writer", write=True)
+        reader = _plugin_user("permission-reader", write=False)
 
-    def test_has_write_permission_granted(self):
-        """User with change permission has write access."""
+        assert _permission_view(user=writer).has_write_permission() is True
+        assert _permission_view(user=reader).has_write_permission() is False
+
+    def test_missing_request_fails_closed_for_html_and_json(self):
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = True
+        view = LibreNMSPermissionMixin()
 
-        assert mixin.has_write_permission() is True
+        assert view.has_write_permission() is False
+        assert view.require_write_permission().status_code == 403
+        assert view.require_write_permission_json().status_code == 403
 
-    def test_has_write_permission_denied(self):
-        """User without change permission lacks write access."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+    def test_writer_passes_html_and_json_guards(self):
+        writer = _plugin_user("permission-guard-writer", write=True)
+        view = _permission_view(user=writer)
 
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
+        assert view.require_write_permission() is None
+        assert view.require_write_permission_json() is None
 
-        assert mixin.has_write_permission() is False
+    def test_denied_regular_request_redirects_to_the_safe_referrer(self):
+        reader = _plugin_user("permission-regular-reader", write=False)
+        view = _permission_view(
+            user=reader,
+            request_kwargs={"path": "/write-action/", "HTTP_REFERER": "/objects/"},
+        )
 
-    def test_has_write_permission_no_request_fails_closed(self):
-        """Without self.request (invoked outside dispatch), has_write_permission() returns False instead of raising AttributeError on self.request.user."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+        response = view.require_write_permission()
 
-        mixin = LibreNMSPermissionMixin()  # no .request assigned
-        assert mixin.has_write_permission() is False
+        assert response.status_code == 302
+        assert response.url == "/objects/"
+        assert message_texts(view.request, "error") == ["You do not have permission to perform this action."]
 
-    def test_require_write_permission_no_request_returns_403(self):
-        """The write-permission denial path must short-circuit to a 403 when there is no request, rather than crash in messages.error()/_safe_redirect_response()."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+    def test_denied_htmx_request_uses_hx_redirect(self):
+        reader = _plugin_user("permission-htmx-reader", write=False)
+        view = _permission_view(
+            user=reader,
+            request_kwargs={
+                "path": "/write-action/",
+                "HTTP_REFERER": "/objects/",
+                "HTTP_HX_REQUEST": "true",
+            },
+        )
 
-        mixin = LibreNMSPermissionMixin()  # no .request assigned
-        response = mixin.require_write_permission()
-        assert response is not None
-        assert response.status_code == 403
+        response = view.require_write_permission()
 
-    def test_require_write_permission_allowed(self):
-        """User with write permission gets None (allowed to proceed)."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+        assert response.status_code == 200
+        assert response["HX-Redirect"] == "/objects/"
 
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = True
+    def test_json_denial_uses_default_and_custom_messages(self):
+        reader = _plugin_user("permission-json-reader", write=False)
+        view = _permission_view(user=reader)
 
-        result = mixin.require_write_permission()
-        assert result is None
+        default = view.require_write_permission_json()
+        custom = view.require_write_permission_json("Custom denied message")
 
-    def test_require_write_permission_denied(self):
-        """User without write permission gets redirect response to referrer."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
-
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-        mixin.request.path = "/some/path/"
-        mixin.request.META = {"HTTP_REFERER": "/original/page/"}
-        mixin.request.get_host.return_value = "testserver"
-        mixin.request.is_secure.return_value = False
-        mixin.request.headers = {}  # Not an HTMX request
-
-        with patch("netbox_librenms_plugin.views.mixins.redirect") as mock_redirect:
-            with patch("netbox_librenms_plugin.views.mixins.messages"):
-                result = mixin.require_write_permission()
-
-        mock_redirect.assert_called_once_with("/original/page/")
-        assert result is not None
-
-    def test_require_write_permission_denied_htmx(self):
-        """HTMX request without write permission gets HX-Redirect response."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
-
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-        mixin.request.path = "/some/path/"
-        mixin.request.META = {"HTTP_REFERER": "/original/page/"}
-        mixin.request.get_host.return_value = "testserver"
-        mixin.request.is_secure.return_value = False
-        mixin.request.headers = {"HX-Request": "true"}
-
-        with patch("netbox_librenms_plugin.views.mixins.messages"):
-            result = mixin.require_write_permission()
-
-        # Should return HttpResponse with HX-Redirect header
-        assert result is not None
-        assert result["HX-Redirect"] == "/original/page/"
-
-    def test_require_write_permission_json_allowed(self):
-        """User with write permission gets None (allowed to proceed)."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
-
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = True
-
-        result = mixin.require_write_permission_json()
-        assert result is None
-
-    def test_require_write_permission_json_denied(self):
-        """User without write permission gets JsonResponse with 403."""
-        import json
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
-
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-
-        result = mixin.require_write_permission_json()
-
-        assert result is not None
-        assert result.status_code == 403
-        content = json.loads(result.content)
-        assert content["error"] == "You do not have permission to perform this action."
-
-    def test_require_write_permission_json_custom_message(self):
-        """Custom error message is returned in JsonResponse."""
-        import json
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
-
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-
-        result = mixin.require_write_permission_json(error_message="Custom denied message")
-
-        assert result is not None
-        assert result.status_code == 403
-        content = json.loads(result.content)
-        assert content["error"] == "Custom denied message"
+        assert default.status_code == 403
+        assert json.loads(default.content) == {"error": "You do not have permission to perform this action."}
+        assert json.loads(custom.content) == {"error": "Custom denied message"}
 
 
 class TestLibreNMSGenericPermissionMixins:
@@ -168,202 +176,86 @@ class TestLibreNMSGenericPermissionMixins:
 
 
 class TestAPIPermissions:
-    """Tests for API permission class."""
-
-    def test_get_requires_view_permission(self):
-        """GET requests require view permission."""
-        from netbox_librenms_plugin.api.views import LibreNMSPluginPermission
-        from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
-
-        permission = LibreNMSPluginPermission()
-        request = MagicMock()
-        request.method = "GET"
-        request.user.has_perm.return_value = True
-
-        assert permission.has_permission(request, None) is True
-        request.user.has_perm.assert_called_with(PERM_VIEW_PLUGIN)
-
-    def test_post_requires_change_permission(self):
-        """POST requests require change permission."""
-        from netbox_librenms_plugin.api.views import LibreNMSPluginPermission
-        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN
-
-        permission = LibreNMSPluginPermission()
-        request = MagicMock()
-        request.method = "POST"
-        request.user.has_perm.return_value = True
-
-        assert permission.has_permission(request, None) is True
-        request.user.has_perm.assert_called_with(PERM_CHANGE_PLUGIN)
-
-    def test_put_requires_change_permission(self):
-        """PUT requests require change permission."""
-        from netbox_librenms_plugin.api.views import LibreNMSPluginPermission
-        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN
-
-        permission = LibreNMSPluginPermission()
-        request = MagicMock()
-        request.method = "PUT"
-        request.user.has_perm.return_value = True
-
-        assert permission.has_permission(request, None) is True
-        request.user.has_perm.assert_called_with(PERM_CHANGE_PLUGIN)
-
-    def test_delete_requires_change_permission(self):
-        """DELETE requests require change permission."""
-        from netbox_librenms_plugin.api.views import LibreNMSPluginPermission
-        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN
-
-        permission = LibreNMSPluginPermission()
-        request = MagicMock()
-        request.method = "DELETE"
-        request.user.has_perm.return_value = True
-
-        assert permission.has_permission(request, None) is True
-        request.user.has_perm.assert_called_with(PERM_CHANGE_PLUGIN)
-
-    def test_get_denied_without_view_permission(self):
-        """GET requests denied without view permission."""
+    @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
+    def test_safe_methods_require_the_real_view_grant(self, method):
         from netbox_librenms_plugin.api.views import LibreNMSPluginPermission
 
-        permission = LibreNMSPluginPermission()
-        request = MagicMock()
-        request.method = "GET"
-        request.user.has_perm.return_value = False
+        reader = _plugin_user(f"api-safe-{method.lower()}", write=False)
+        denied = _user(f"api-safe-denied-{method.lower()}")
 
-        assert permission.has_permission(request, None) is False
+        assert LibreNMSPluginPermission().has_permission(make_request(method.lower(), user=reader), None) is True
+        assert LibreNMSPluginPermission().has_permission(make_request(method.lower(), user=denied), None) is False
 
-    def test_post_denied_without_change_permission(self):
-        """POST requests denied without change permission."""
+    @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+    def test_mutating_methods_require_the_real_change_grant(self, method):
         from netbox_librenms_plugin.api.views import LibreNMSPluginPermission
 
-        permission = LibreNMSPluginPermission()
-        request = MagicMock()
-        request.method = "POST"
-        request.user.has_perm.return_value = False
+        writer = _plugin_user(f"api-write-{method.lower()}", write=True)
+        reader = _plugin_user(f"api-write-denied-{method.lower()}", write=False)
 
-        assert permission.has_permission(request, None) is False
+        assert LibreNMSPluginPermission().has_permission(make_request(method.lower(), user=writer), None) is True
+        assert LibreNMSPluginPermission().has_permission(make_request(method.lower(), user=reader), None) is False
 
 
 class TestPermissionConstants:
-    """Tests for permission constants."""
-
-    def test_view_permission_constant(self):
-        """View permission constant is correct."""
-        from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
+    def test_plugin_permission_names_are_stable(self):
+        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 
         assert PERM_VIEW_PLUGIN == "netbox_librenms_plugin.view_librenmssettings"
-
-    def test_change_permission_constant(self):
-        """Change permission constant is correct."""
-        from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN
-
         assert PERM_CHANGE_PLUGIN == "netbox_librenms_plugin.change_librenmssettings"
 
 
-# =============================================================================
-# Phase 2: Object Permission Tests
-# =============================================================================
-
-
 class TestObjectPermissionHelpers:
-    """Tests for Phase 2 object permission helper functions."""
+    def test_real_grants_report_only_missing_permissions(self):
+        from dcim.models import Device, Interface
 
-    def test_check_user_permissions_all_granted(self):
-        """Returns True when user has all permissions."""
         from netbox_librenms_plugin.import_utils import check_user_permissions
 
-        user = MagicMock()
-        user.has_perm.return_value = True
+        user = _user("helper-partial", [("add", Device), ("change", Device), ("change", Interface)])
 
-        has_all, missing = check_user_permissions(user, ["dcim.add_device", "dcim.add_interface"])
-
-        assert has_all is True
-        assert missing == []
-        assert user.has_perm.call_count == 2
-
-    def test_check_user_permissions_some_missing(self):
-        """Returns False with list of missing permissions."""
-        from netbox_librenms_plugin.import_utils import check_user_permissions
-
-        user = MagicMock()
-        user.has_perm.side_effect = lambda p: p != "dcim.add_interface"
-
-        has_all, missing = check_user_permissions(user, ["dcim.add_device", "dcim.add_interface"])
+        has_all, missing = check_user_permissions(
+            user,
+            ["dcim.add_device", "dcim.change_device", "dcim.add_interface"],
+        )
 
         assert has_all is False
         assert missing == ["dcim.add_interface"]
 
-    def test_check_user_permissions_all_missing(self):
-        """Returns False with all permissions listed as missing."""
+    def test_all_real_grants_pass(self):
+        from dcim.models import Device, Interface
+
         from netbox_librenms_plugin.import_utils import check_user_permissions
 
-        user = MagicMock()
-        user.has_perm.return_value = False
+        user = _user("helper-complete", [("add", Device), ("add", Interface)])
 
-        has_all, missing = check_user_permissions(user, ["dcim.add_device", "dcim.add_interface"])
+        assert check_user_permissions(user, ["dcim.add_device", "dcim.add_interface"]) == (True, [])
 
-        assert has_all is False
-        assert "dcim.add_device" in missing
-        assert "dcim.add_interface" in missing
-
-    def test_check_user_permissions_no_user(self):
-        """Raises PermissionDenied when user is None."""
-        import pytest
-        from django.core.exceptions import PermissionDenied
-
+    def test_missing_user_is_rejected(self):
         from netbox_librenms_plugin.import_utils import check_user_permissions
 
         with pytest.raises(PermissionDenied, match="No user context"):
             check_user_permissions(None, ["dcim.add_device"])
 
-    def test_require_permissions_passes_when_granted(self):
-        """Does not raise when user has all permissions."""
+    def test_require_permissions_names_the_action_and_every_missing_grant(self):
         from netbox_librenms_plugin.import_utils import require_permissions
 
-        user = MagicMock()
-        user.has_perm.return_value = True
-
-        # Should not raise
-        require_permissions(user, ["dcim.add_device", "dcim.add_interface"], "import devices")
-
-    def test_require_permissions_raises_on_missing(self):
-        """Raises PermissionDenied with descriptive message."""
-        import pytest
-        from django.core.exceptions import PermissionDenied
-
-        from netbox_librenms_plugin.import_utils import require_permissions
-
-        user = MagicMock()
-        user.has_perm.return_value = False
+        user = _user("helper-denied")
 
         with pytest.raises(PermissionDenied) as exc_info:
-            require_permissions(user, ["dcim.add_device"], "import devices")
+            require_permissions(user, ["dcim.add_device", "dcim.add_interface"], "import devices")
 
-        # Check error message contains action description and missing permission
-        assert "import devices" in str(exc_info.value)
-        assert "dcim.add_device" in str(exc_info.value)
+        assert str(exc_info.value) == (
+            "You do not have permission to import devices. Missing permissions: dcim.add_device, dcim.add_interface"
+        )
 
-    def test_require_permissions_lists_multiple_missing(self):
-        """Error message includes all missing permissions."""
-        import pytest
-        from django.core.exceptions import PermissionDenied
+    def test_require_permissions_accepts_real_grants(self):
+        from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.import_utils import require_permissions
 
-        user = MagicMock()
-        user.has_perm.return_value = False
+        user = _user("helper-allowed", [("add", Device), ("add", Interface)])
 
-        with pytest.raises(PermissionDenied) as exc_info:
-            require_permissions(
-                user,
-                ["dcim.add_device", "dcim.add_interface"],
-                "import devices",
-            )
-
-        error_msg = str(exc_info.value)
-        assert "dcim.add_device" in error_msg
-        assert "dcim.add_interface" in error_msg
+        assert require_permissions(user, ["dcim.add_device", "dcim.add_interface"], "import devices") is None
 
     @pytest.mark.parametrize(
         ("device_ids", "vm_imports", "expected"),
@@ -385,19 +277,10 @@ class TestObjectPermissionHelpers:
 
 
 class TestNetBoxObjectPermissionMixin:
-    """Tests for the NetBoxObjectPermissionMixin class."""
-
-    @pytest.mark.django_db
-    def test_restricted_queryset_locks_only_model_row_with_nullable_constraint(self):
-        """A PostgreSQL lock must exclude nullable joins added by object permission constraints."""
-        from types import SimpleNamespace
-
+    def test_restricted_queryset_locks_only_the_model_row_with_nullable_constraints(self):
         from dcim.models import Device
-        from django.db import transaction
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
 
         device = make_device("permission-lock-nullable")
         user = make_user_with_perms(
@@ -405,797 +288,328 @@ class TestNetBoxObjectPermissionMixin:
             [("change", Device)],
             constraints={"site__region": None},
         )
-        view = NetBoxObjectPermissionMixin()
-        view.request = SimpleNamespace(user=user)
+        view = _permission_view(user=user)
 
         with transaction.atomic():
             locked = view.restricted_queryset(Device, "change").select_for_update(of=("self",)).get(pk=device.pk)
 
         assert locked == device
 
-    def test_check_object_permissions_all_granted(self):
-        """Returns True when user has all object permissions."""
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+    def test_real_object_grants_control_the_permission_matrix(self):
+        from dcim.models import Interface
 
-        mixin = NetBoxObjectPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = True
+        granted = make_user_with_perms(
+            "object-matrix-granted",
+            [("add", Interface), ("change", Interface)],
+        )
+        partial = make_user_with_perms("object-matrix-partial", [("change", Interface)])
+        requirements = {"POST": [("add", Interface), ("change", Interface)]}
 
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("add", mock_model), ("change", mock_model)],
-        }
-
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            mock_get.side_effect = ["dcim.add_interface", "dcim.change_interface"]
-            has_all, missing = mixin.check_object_permissions("POST")
-
-        assert has_all is True
-        assert missing == []
-
-    def test_check_object_permissions_some_missing(self):
-        """Returns False with missing permission strings."""
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        mixin = NetBoxObjectPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.side_effect = lambda p: p != "dcim.add_interface"
-
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("add", mock_model)],
-        }
-
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            mock_get.return_value = "dcim.add_interface"
-            has_all, missing = mixin.check_object_permissions("POST")
-
-        assert has_all is False
-        assert "dcim.add_interface" in missing
-
-    def test_check_object_permissions_no_requirements(self):
-        """Returns True when no permissions required for method."""
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        mixin = NetBoxObjectPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.required_object_permissions = {}  # No requirements
-
-        has_all, missing = mixin.check_object_permissions("POST")
-
-        assert has_all is True
-        assert missing == []
-
-    def test_require_object_permissions_returns_none_when_granted(self):
-        """Returns None when all permissions are granted."""
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        mixin = NetBoxObjectPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = True
-
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("add", mock_model)],
-        }
-
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            mock_get.return_value = "dcim.add_cable"
-            response = mixin.require_object_permissions("POST")
-
-        assert response is None
-
-    def test_require_object_permissions_fails_closed_without_request(self):
-        """When the view is invoked outside dispatch() (no self.request), the denial path must return a 403 rather than crash dereferencing self.request."""
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        mixin = NetBoxObjectPermissionMixin()  # no .request assigned
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {"POST": [("add", mock_model)]}
-
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            mock_get.return_value = "dcim.add_interface"
-            response = mixin.require_object_permissions("POST")
-
-        # check_object_permissions returns the perms as "missing" (fail closed),
-        # and the denial handler short-circuits to a 403 instead of raising.
-        assert response is not None
-        assert response.status_code == 403
-
-    def test_require_object_permissions_returns_redirect_response(self):
-        """Returns redirect response with message when permissions missing."""
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        mixin = NetBoxObjectPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-        mixin.request.path = "/original/page/"
-        mixin.request.META = {"HTTP_REFERER": "/original/page/"}
-        mixin.request.get_host.return_value = "testserver"
-        mixin.request.is_secure.return_value = False
-        mixin.request.headers = {}  # Not an HTMX request
-
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("add", mock_model)],
-        }
-
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            with patch("netbox_librenms_plugin.views.mixins.messages") as mock_messages:
-                with patch("netbox_librenms_plugin.views.mixins.redirect") as mock_redirect:
-                    mock_get.return_value = "dcim.add_cable"
-                    response = mixin.require_object_permissions("POST")
-
-        assert response is not None
-        # Verify error message was added
-        mock_messages.error.assert_called_once()
-        error_msg = mock_messages.error.call_args[0][1]
-        assert "dcim.add_cable" in error_msg
-        # Verify redirect was called
-        mock_redirect.assert_called_once_with("/original/page/")
-
-    def test_require_object_permissions_htmx_returns_hx_redirect(self):
-        """HTMX request returns HX-Redirect header when permissions missing."""
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        mixin = NetBoxObjectPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-        mixin.request.path = "/original/page/"
-        mixin.request.META = {"HTTP_REFERER": "/original/page/"}
-        mixin.request.get_host.return_value = "testserver"
-        mixin.request.is_secure.return_value = False
-        mixin.request.headers = {"HX-Request": "true"}
-
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("add", mock_model)],
-        }
-
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            with patch("netbox_librenms_plugin.views.mixins.messages"):
-                mock_get.return_value = "dcim.add_cable"
-                response = mixin.require_object_permissions("POST")
-
-        assert response is not None
-        assert response["HX-Redirect"] == "/original/page/"
-
-    def test_require_object_permissions_json_allowed(self):
-        """Returns None when all object permissions are granted."""
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        mixin = NetBoxObjectPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = True
-
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("delete", mock_model)],
-        }
-
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            mock_get.return_value = "dcim.delete_interface"
-            response = mixin.require_object_permissions_json("POST")
-
-        assert response is None
-
-    def test_require_object_permissions_json_denied(self):
-        """Returns JsonResponse with 403 when object permissions missing."""
-        import json
-
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        mixin = NetBoxObjectPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("delete", mock_model)],
-        }
-
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            mock_get.return_value = "dcim.delete_interface"
-            response = mixin.require_object_permissions_json("POST")
-
-        assert response is not None
-        assert response.status_code == 403
-        content = json.loads(response.content)
-        assert "dcim.delete_interface" in content["error"]
-
-    def test_require_all_permissions_allowed(self):
-        """Returns None when both write and object permissions granted."""
-        from netbox_librenms_plugin.views.mixins import (
-            LibreNMSPermissionMixin,
-            NetBoxObjectPermissionMixin,
+        assert _permission_view(user=granted, requirements=requirements).check_object_permissions("POST") == (
+            True,
+            [],
+        )
+        assert _permission_view(user=partial, requirements=requirements).check_object_permissions("POST") == (
+            False,
+            ["dcim.add_interface"],
         )
 
-        class TestView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin):
-            pass
+    def test_no_requirements_pass_even_without_a_request(self):
+        assert _permission_view().check_object_permissions("POST") == (True, [])
 
-        mixin = TestView()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = True
+    def test_missing_request_fails_closed_with_real_model_permissions(self):
+        from dcim.models import Interface
 
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("change", mock_model)],
-        }
+        view = _permission_view(requirements={"POST": [("add", Interface)]})
 
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            mock_get.return_value = "dcim.change_device"
-            response = mixin.require_all_permissions("POST")
+        assert view.require_object_permissions("POST").status_code == 403
 
-        assert response is None
+    def test_real_grant_passes_html_and_json_object_guards(self):
+        from dcim.models import Interface
 
-    def test_require_all_permissions_denied_write(self):
-        """Returns error when write permission denied (doesn't check object perms)."""
-        from netbox_librenms_plugin.views.mixins import (
-            LibreNMSPermissionMixin,
-            NetBoxObjectPermissionMixin,
+        user = make_user_with_perms("object-guard-writer", [("delete", Interface)])
+        view = _permission_view(user=user, requirements={"POST": [("delete", Interface)]})
+
+        assert view.require_object_permissions("POST") is None
+        assert view.require_object_permissions_json("POST") is None
+
+    def test_denied_object_grant_redirects_and_records_the_missing_permission(self):
+        from dcim.models import Interface
+
+        user = make_user_with_perms("object-guard-reader", [])
+        view = _permission_view(
+            user=user,
+            requirements={"POST": [("add", Interface)]},
+            request_kwargs={"path": "/write-action/", "HTTP_REFERER": "/interfaces/"},
         )
 
-        class TestView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin):
-            pass
+        response = view.require_object_permissions("POST")
 
-        mixin = TestView()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-        mixin.request.path = "/original/page/"
-        mixin.request.META = {"HTTP_REFERER": "/original/page/"}
-        mixin.request.get_host.return_value = "testserver"
-        mixin.request.is_secure.return_value = False
-        mixin.request.headers = {}
+        assert response.status_code == 302
+        assert response.url == "/interfaces/"
+        assert message_texts(view.request, "error") == ["Missing permissions: dcim.add_interface"]
 
-        mixin.required_object_permissions = {"POST": []}
+    def test_denied_object_grant_returns_htmx_and_json_contracts(self):
+        from dcim.models import Interface
 
-        with patch("netbox_librenms_plugin.views.mixins.redirect") as mock_redirect:
-            with patch("netbox_librenms_plugin.views.mixins.messages"):
-                response = mixin.require_all_permissions("POST")
-
-        assert response is not None
-        mock_redirect.assert_called_once_with("/original/page/")
-
-    def test_require_all_permissions_denied_object(self):
-        """Returns error when object permissions denied (write passes)."""
-        from netbox_librenms_plugin.views.mixins import (
-            LibreNMSPermissionMixin,
-            NetBoxObjectPermissionMixin,
+        user = make_user_with_perms("object-guard-htmx-reader", [])
+        requirements = {"POST": [("delete", Interface)]}
+        view = _permission_view(
+            user=user,
+            requirements=requirements,
+            request_kwargs={"HTTP_REFERER": "/interfaces/", "HTTP_HX_REQUEST": "true"},
         )
 
-        class TestView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin):
-            pass
+        html = view.require_object_permissions("POST")
+        json_response = view.require_object_permissions_json("POST")
 
-        mixin = TestView()
-        mixin.request = MagicMock()
-        # has_write_permission passes, but object perms fail
-        mixin.request.user.has_perm.side_effect = lambda p: p == "netbox_librenms_plugin.change_librenmssettings"
-        mixin.request.path = "/original/page/"
-        mixin.request.META = {"HTTP_REFERER": "/original/page/"}
-        mixin.request.get_host.return_value = "testserver"
-        mixin.request.is_secure.return_value = False
-        mixin.request.headers = {}
+        assert html["HX-Redirect"] == "/interfaces/"
+        assert json.loads(json_response.content) == {"error": "Missing permissions: dcim.delete_interface"}
 
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("add", mock_model)],
-        }
+    def test_combined_guard_distinguishes_plugin_and_object_permissions(self):
+        from dcim.models import Device
 
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            with patch("netbox_librenms_plugin.views.mixins.messages"):
-                with patch("netbox_librenms_plugin.views.mixins.redirect") as mock_redirect:
-                    mock_get.return_value = "dcim.add_device"
-                    response = mixin.require_all_permissions("POST")
+        allowed = make_user_with_perms("combined-allowed", [("change", Device)])
+        plugin_denied = _user("combined-plugin-denied", [("change", Device)])
+        object_denied = make_user_with_perms("combined-object-denied", [])
+        requirements = {"POST": [("change", Device)]}
 
-        assert response is not None
-        mock_redirect.assert_called_once()
+        assert _permission_view(user=allowed, requirements=requirements).require_all_permissions("POST") is None
 
-    def test_require_all_permissions_json_allowed(self):
-        """Returns None when both write and object permissions granted (JSON variant)."""
-        from netbox_librenms_plugin.views.mixins import (
-            LibreNMSPermissionMixin,
-            NetBoxObjectPermissionMixin,
+        plugin_response = _permission_view(
+            user=plugin_denied,
+            requirements=requirements,
+            request_kwargs={"HTTP_REFERER": "/devices/"},
+        ).require_all_permissions("POST")
+        object_view = _permission_view(
+            user=object_denied,
+            requirements=requirements,
+            request_kwargs={"HTTP_REFERER": "/devices/"},
         )
+        object_response = object_view.require_all_permissions("POST")
 
-        class TestView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin):
-            pass
+        assert plugin_response.status_code == 302
+        assert object_response.status_code == 302
+        assert message_texts(object_view.request, "error") == ["Missing permissions: dcim.change_device"]
 
-        mixin = TestView()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = True
+    def test_combined_json_guard_returns_the_first_denial(self):
+        from dcim.models import Device
 
-        mock_model = MagicMock()
-        mixin.required_object_permissions = {
-            "POST": [("delete", mock_model)],
-        }
+        plugin_denied = _user("combined-json-plugin-denied", [("change", Device)])
+        object_denied = make_user_with_perms("combined-json-object-denied", [])
+        requirements = {"POST": [("change", Device)]}
 
-        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
-            mock_get.return_value = "dcim.delete_interface"
-            response = mixin.require_all_permissions_json("POST")
+        plugin_response = _permission_view(
+            user=plugin_denied,
+            requirements=requirements,
+        ).require_all_permissions_json("POST")
+        object_response = _permission_view(
+            user=object_denied,
+            requirements=requirements,
+        ).require_all_permissions_json("POST")
 
-        assert response is None
-
-    def test_require_all_permissions_json_denied_write(self):
-        """Returns JSON 403 when write permission denied (JSON variant)."""
-        import json
-
-        from netbox_librenms_plugin.views.mixins import (
-            LibreNMSPermissionMixin,
-            NetBoxObjectPermissionMixin,
-        )
-
-        class TestView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin):
-            pass
-
-        mixin = TestView()
-        mixin.request = MagicMock()
-        mixin.request.user.has_perm.return_value = False
-
-        response = mixin.require_all_permissions_json("POST")
-
-        assert response is not None
-        assert response.status_code == 403
-        content = json.loads(response.content)
-        assert "error" in content
+        assert json.loads(plugin_response.content) == {"error": "You do not have permission to perform this action."}
+        assert json.loads(object_response.content) == {"error": "Missing permissions: dcim.change_device"}
 
 
 class TestBulkImportPermissions:
-    """Tests for permission checks in bulk import functions."""
+    def test_loopback_server_bypasses_environment_proxy(self, librenms_server):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-    def setup_method(self):
-        # bulk_import_devices_shared preloads device_type NormalizationRule once (issue #90);
-        # these are mock-based (no DB), so stub the preload to avoid real DB access.
-        self._norm_patcher = patch(
-            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
-            return_value={},
-        )
-        self._norm_patcher.start()
-
-    def teardown_method(self):
-        self._norm_patcher.stop()
-
-    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
-    def test_bulk_import_devices_checks_permissions(self, mock_api_class, mock_require):
-        """bulk_import_devices_shared calls require_permissions."""
-        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
-
-        user = MagicMock()
-        mock_api = MagicMock()
-        mock_api_class.return_value = mock_api
-
-        # Set up API to return empty device so loop completes quickly
-        mock_api.get_device_info.return_value = (False, None)
-
-        bulk_import_devices_shared(
-            device_ids=[1],
-            user=user,
-            server_key="default",
+        device = {"device_id": 7099, "hostname": "proxy-bypass.example.test"}
+        librenms_server.register(
+            "/api/v0/devices/7099",
+            {"status": "ok", "devices": [device]},
         )
 
-        mock_require.assert_called_once()
-        call_args = mock_require.call_args
-        assert user == call_args[0][0]
-        assert "dcim.add_device" in call_args[0][1]
-        assert "dcim.change_device" in call_args[0][1]
-        assert "dcim.add_interface" not in call_args[0][1]
+        success, result = LibreNMSAPI(SERVER_KEY).get_device_info(7099, use_cache=False)
 
-    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
-    def test_bulk_import_devices_extracts_user_from_job(self, mock_api_class, mock_require):
-        """bulk_import_devices_shared extracts user from job if not provided."""
-        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
+        assert success is True
+        assert result == device
 
-        job_user = MagicMock()
-        job = MagicMock()
-        job.job.user = job_user
-
-        mock_api = MagicMock()
-        mock_api_class.return_value = mock_api
-        mock_api.get_device_info.return_value = (False, None)
-
-        bulk_import_devices_shared(
-            device_ids=[1],
-            job=job,
-            server_key="default",
-        )
-
-        mock_require.assert_called_once()
-        call_args = mock_require.call_args
-        assert job_user == call_args[0][0]
-
-    @patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions")
-    def test_bulk_import_vms_checks_permissions(self, mock_require):
-        """bulk_import_vms calls require_permissions."""
-        from netbox_librenms_plugin.import_utils import bulk_import_vms
-
-        user = MagicMock()
-        api = MagicMock()
-        api.server_key = "default"
-
-        # Empty vm_imports to complete quickly
-        bulk_import_vms(
-            vm_imports={},
-            api=api,
-            user=user,
-        )
-
-        mock_require.assert_called_once()
-        call_args = mock_require.call_args
-        assert user == call_args[0][0]
-        assert "virtualization.add_virtualmachine" in call_args[0][1]
-
-    @patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions")
-    def test_bulk_import_vms_extracts_user_from_job(self, mock_require):
-        """bulk_import_vms extracts user from job if not provided."""
-        from netbox_librenms_plugin.import_utils import bulk_import_vms
-
-        job_user = MagicMock()
-        job = MagicMock()
-        job.job.user = job_user
-
-        api = MagicMock()
-        api.server_key = "default"
-
-        bulk_import_vms(
-            vm_imports={},
-            api=api,
-            job=job,
-        )
-
-        mock_require.assert_called_once()
-        call_args = mock_require.call_args
-        assert job_user == call_args[0][0]
-
-
-class TestBulkImportPermissionDenied:
-    """Tests for permission denied behavior in bulk import."""
-
-    @patch("netbox_librenms_plugin.import_utils.permissions.check_user_permissions")
-    def test_bulk_import_devices_raises_on_missing_permissions(self, mock_check):
-        """bulk_import_devices_shared raises PermissionDenied when permissions missing."""
-        import pytest
-        from django.core.exceptions import PermissionDenied
+    def test_device_import_requires_add_and_change_but_not_virtual_chassis(self, librenms_server):
+        from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
 
-        mock_check.return_value = (False, ["dcim.add_device"])
+        user = _user("device-import-writer", [("add", Device), ("change", Device)])
+        librenms_server.register("/api/v0/devices/7001", {"status": "error"}, status=404)
 
-        user = MagicMock()
+        result = bulk_import_devices_shared([7001], server_key=SERVER_KEY, user=user)
 
-        with pytest.raises(PermissionDenied):
-            bulk_import_devices_shared(
-                device_ids=[1],
-                user=user,
-                server_key="default",
-            )
+        assert result["total"] == 1
+        assert result["success"] == []
+        assert result["failed"][0]["device_id"] == 7001
 
-    @patch("netbox_librenms_plugin.import_utils.permissions.check_user_permissions")
-    def test_bulk_import_vms_raises_on_missing_permissions(self, mock_check):
-        """bulk_import_vms raises PermissionDenied when permissions missing."""
-        import pytest
-        from django.core.exceptions import PermissionDenied
+    def test_device_import_reports_the_exact_missing_grant_before_api_work(self, librenms_server):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
+
+        user = _user("device-import-partial", [("add", Device)])
+
+        with pytest.raises(PermissionDenied, match="dcim.change_device"):
+            bulk_import_devices_shared([7002], server_key=SERVER_KEY, user=user)
+
+    def test_device_import_uses_the_real_job_user(self, librenms_server):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
+
+        user = _user("device-import-job-user", [("add", Device), ("change", Device)])
+        job = SimpleNamespace(job=SimpleNamespace(user=user), logger=None)
+
+        result = bulk_import_devices_shared([], server_key=SERVER_KEY, job=job)
+
+        assert result == {
+            "total": 0,
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "virtual_chassis_created": 0,
+            "cancelled": False,
+        }
+
+    def test_vm_import_requires_the_real_add_grant(self, librenms_server):
+        from virtualization.models import VirtualMachine
 
         from netbox_librenms_plugin.import_utils import bulk_import_vms
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        mock_check.return_value = (False, ["virtualization.add_virtualmachine"])
+        user = _user("vm-import-writer", [("add", VirtualMachine)])
 
-        user = MagicMock()
-        api = MagicMock()
+        assert bulk_import_vms({}, LibreNMSAPI(SERVER_KEY), user=user) == {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+        }
 
-        with pytest.raises(PermissionDenied):
-            bulk_import_vms(
-                vm_imports={1: {"cluster_id": 1}},
-                api=api,
-                user=user,
-            )
+    def test_vm_import_rejects_a_user_without_the_add_grant(self, librenms_server):
+        from netbox_librenms_plugin.import_utils import bulk_import_vms
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(PermissionDenied, match="virtualization.add_virtualmachine"):
+            bulk_import_vms({}, LibreNMSAPI(SERVER_KEY), user=_user("vm-import-denied"))
+
+    def test_vm_import_uses_the_real_job_user(self, librenms_server):
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils import bulk_import_vms
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        user = _user("vm-import-job-user", [("add", VirtualMachine)])
+        job = SimpleNamespace(job=SimpleNamespace(user=user), logger=None)
+
+        assert bulk_import_vms({}, LibreNMSAPI(SERVER_KEY), job=job)["success"] == []
 
 
 class TestSafeRedirectUrl:
-    """Tests for the _get_safe_redirect_url helper."""
-
-    def test_internal_referrer_is_accepted(self):
-        """Internal referrer URL is returned when host matches."""
+    def test_internal_and_relative_referrers_are_accepted(self):
         from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
 
-        request = MagicMock()
-        request.META = {"HTTP_REFERER": "http://testserver/some/page/"}
-        request.get_host.return_value = "testserver"
-        request.is_secure.return_value = False
-        request.path = "/fallback/"
-
-        result = _get_safe_redirect_url(request)
-        assert result == "http://testserver/some/page/"
-
-    def test_external_referrer_is_rejected(self):
-        """External referrer URL is rejected; a GET request falls back to request.path."""
-        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
-
-        request = MagicMock()
-        request.method = "GET"
-        request.META = {"HTTP_REFERER": "http://evil.com/attack"}
-        request.get_host.return_value = "testserver"
-        request.is_secure.return_value = False
-        request.path = "/safe/fallback/"
-
-        result = _get_safe_redirect_url(request)
-        assert result == "/safe/fallback/"
-
-    def test_no_referrer_falls_back_to_path(self):
-        """Missing referrer on a GET request falls back to request.path."""
-        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
-
-        request = MagicMock()
-        request.method = "GET"
-        request.META = {}
-        request.path = "/current/page/"
-
-        result = _get_safe_redirect_url(request)
-        assert result == "/current/page/"
-
-    def test_non_get_with_no_referrer_falls_back_to_slash(self):
-        """On a non-GET request (request.path is likely POST-only), a missing/rejected referrer falls back to a GET-safe "/" rather than the POST-only path."""
-        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
-
-        request = MagicMock()
-        request.method = "POST"
-        request.META = {}
-        request.path = "/post/only/action/"
-
-        with patch("netbox_librenms_plugin.views.mixins.get_script_prefix", return_value="/netbox/"):
-            result = _get_safe_redirect_url(request)
-        assert result == "/netbox/"
-
-    def test_no_referrer_no_path_falls_back_to_slash(self):
-        """Missing referrer and no path attribute falls back to the deployment root."""
-        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
-
-        request = MagicMock(spec=[])  # No attributes at all
-        request.META = {}
-
-        with patch("netbox_librenms_plugin.views.mixins.get_script_prefix", return_value="/netbox/"):
-            result = _get_safe_redirect_url(request)
-        assert result == "/netbox/"
-
-    def test_relative_referrer_is_accepted(self):
-        """Relative referrer path is accepted (no host to mismatch)."""
-        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
-
-        request = MagicMock()
-        request.META = {"HTTP_REFERER": "/original/page/"}
-        request.get_host.return_value = "testserver"
-        request.is_secure.return_value = False
-        request.path = "/fallback/"
-
-        result = _get_safe_redirect_url(request)
-        assert result == "/original/page/"
-
-    def test_write_permission_denied_rejects_external_referrer(self):
-        """Write permission denial with external referrer falls back to a GET-safe "/" (request is a non-GET MagicMock, so request.path — often POST-only — is avoided)."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
-
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.method = "POST"  # explicit: exercise the non-GET fallback path on purpose
-        mixin.request.user.has_perm.return_value = False
-        mixin.request.path = "/safe/page/"
-        mixin.request.META = {"HTTP_REFERER": "http://evil.com/steal"}
-        mixin.request.get_host.return_value = "testserver"
-        mixin.request.is_secure.return_value = False
-        mixin.request.headers = {}
-
-        with patch("netbox_librenms_plugin.views.mixins.redirect") as mock_redirect:
-            with patch("netbox_librenms_plugin.views.mixins.messages"):
-                with patch("netbox_librenms_plugin.views.mixins.get_script_prefix", return_value="/netbox/"):
-                    mixin.require_write_permission()
-
-        mock_redirect.assert_called_once_with("/netbox/")
-
-    def test_htmx_rejects_external_referrer(self):
-        """HTMX request with external referrer uses a GET-safe "/" fallback in HX-Redirect (non-GET MagicMock request, so the POST-only request.path is avoided)."""
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
-
-        mixin = LibreNMSPermissionMixin()
-        mixin.request = MagicMock()
-        mixin.request.method = "POST"  # explicit: exercise the non-GET fallback path on purpose
-        mixin.request.user.has_perm.return_value = False
-        mixin.request.path = "/safe/page/"
-        mixin.request.META = {"HTTP_REFERER": "http://evil.com/steal"}
-        mixin.request.get_host.return_value = "testserver"
-        mixin.request.is_secure.return_value = False
-        mixin.request.headers = {"HX-Request": "true"}
-
-        with patch("netbox_librenms_plugin.views.mixins.messages"):
-            with patch("netbox_librenms_plugin.views.mixins.get_script_prefix", return_value="/netbox/"):
-                result = mixin.require_write_permission()
-
-        assert result["HX-Redirect"] == "/netbox/"
-
-
-class TestBulkImportVCPermission:
-    """Tests that bulk import checks virtualchassis permission."""
-
-    def setup_method(self):
-        self._norm_patcher = patch(
-            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
-            return_value={},
+        absolute = make_request(
+            "get",
+            path="/fallback/",
+            HTTP_REFERER="http://testserver/some/page/",
         )
-        self._norm_patcher.start()
+        relative = make_request("get", path="/fallback/", HTTP_REFERER="/original/page/")
 
-    def teardown_method(self):
-        self._norm_patcher.stop()
+        assert _get_safe_redirect_url(absolute) == "http://testserver/some/page/"
+        assert _get_safe_redirect_url(relative) == "/original/page/"
 
-    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
-    def test_bulk_import_devices_checks_vc_permission(self, mock_api_class, mock_require):
-        """bulk_import_devices_shared includes dcim.add_virtualchassis in required perms."""
-        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
+    def test_external_referrer_is_rejected_for_get_and_post(self):
+        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
 
-        user = MagicMock()
-        mock_api = MagicMock()
-        mock_api_class.return_value = mock_api
-        mock_api.get_device_info.return_value = (False, None)
-
-        bulk_import_devices_shared(
-            device_ids=[1],
-            user=user,
-            server_key="default",
+        get_request = make_request(
+            "get",
+            path="/safe/fallback/",
+            HTTP_REFERER="http://malicious.example.test/attack",
+        )
+        post_request = make_request(
+            "post",
+            path="/post-only/",
+            HTTP_REFERER="http://malicious.example.test/attack",
         )
 
-        mock_require.assert_called_once()
-        call_args = mock_require.call_args
-        # After Fix 6: interface/VC permissions removed from initial check
-        assert "dcim.add_virtualchassis" not in call_args[0][1]
-        assert "dcim.add_device" in call_args[0][1]
+        with override_script_prefix("/netbox/"):
+            assert _get_safe_redirect_url(get_request) == "/safe/fallback/"
+            assert _get_safe_redirect_url(post_request) == "/netbox/"
+
+    def test_missing_referrer_uses_get_path_or_deployment_root(self):
+        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
+
+        get_request = make_request("get", path="/current/page/")
+        post_request = make_request("post", path="/post-only/")
+        request_without_path = SimpleNamespace(META={})
+
+        with override_script_prefix("/netbox/"):
+            assert _get_safe_redirect_url(get_request) == "/current/page/"
+            assert _get_safe_redirect_url(post_request) == "/netbox/"
+            assert _get_safe_redirect_url(request_without_path) == "/netbox/"
+
+    def test_permission_denials_reject_external_referrers_for_html_and_htmx(self):
+        reader = _plugin_user("redirect-reader", write=False)
+        common = {
+            "path": "/post-only/",
+            "HTTP_REFERER": "http://malicious.example.test/attack",
+        }
+        html_view = _permission_view(user=reader, request_kwargs=common)
+        htmx_view = _permission_view(
+            user=reader,
+            request_kwargs={**common, "HTTP_HX_REQUEST": "true"},
+        )
+
+        with override_script_prefix("/netbox/"):
+            html_response = html_view.require_write_permission()
+            htmx_response = htmx_view.require_write_permission()
+
+        assert html_response.url == "/netbox/"
+        assert htmx_response["HX-Redirect"] == "/netbox/"
 
 
 class TestObjectTypeValidation:
-    """Tests that get_required_permissions_for_object_type validates object_type."""
-
-    def test_sync_interfaces_device_type(self):
-        """SyncInterfacesView returns correct perms for device type."""
-        from dcim.models import Device, Interface
-
+    @pytest.mark.parametrize(
+        ("object_type", "expected"),
+        [
+            ("device", ("dcim.Device", "dcim.Interface")),
+            ("virtualmachine", ("virtualization.VirtualMachine", "virtualization.VMInterface")),
+        ],
+    )
+    def test_sync_interfaces_declares_owner_read_and_interface_writes(self, object_type, expected):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        view = SyncInterfacesView()
-        perms = view.get_required_permissions_for_object_type("device")
-        # The owner read is declared alongside the writes: the device is resolved through a
-        # restricted queryset, so a missing view grant is a stated 403, not a 404 at the lookup.
-        assert perms == [("view", Device), ("add", Interface), ("change", Interface)]
+        permissions = SyncInterfacesView().get_required_permissions_for_object_type(object_type)
 
-    def test_sync_interfaces_vm_type(self):
-        """SyncInterfacesView returns correct perms for virtualmachine type."""
-        from virtualization.models import VirtualMachine, VMInterface
+        assert [(model._meta.label, action) for action, model in permissions] == [
+            (expected[0], "view"),
+            (expected[1], "add"),
+            (expected[1], "change"),
+        ]
 
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+    @pytest.mark.parametrize(
+        ("object_type", "expected"),
+        [
+            ("device", ("dcim.Device", "dcim.Interface")),
+            ("virtualmachine", ("virtualization.VirtualMachine", "virtualization.VMInterface")),
+        ],
+    )
+    def test_delete_interfaces_declares_owner_read_and_interface_delete(self, object_type, expected):
+        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
 
-        view = SyncInterfacesView()
-        perms = view.get_required_permissions_for_object_type("virtualmachine")
-        assert perms == [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)]
+        permissions = DeleteNetBoxInterfacesView().get_required_permissions_for_object_type(object_type)
 
-    def test_sync_interfaces_invalid_type_raises_404(self):
-        """SyncInterfacesView raises Http404 for invalid object type."""
-        import pytest
+        assert [(model._meta.label, action) for action, model in permissions] == [
+            (expected[0], "view"),
+            (expected[1], "delete"),
+        ]
+
+    @pytest.mark.parametrize("view_class_name", ["SyncInterfacesView", "DeleteNetBoxInterfacesView"])
+    def test_invalid_object_type_is_a_404(self, view_class_name):
         from django.http import Http404
 
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from netbox_librenms_plugin.views.sync import interfaces
 
-        view = SyncInterfacesView()
+        view = getattr(interfaces, view_class_name)()
+
         with pytest.raises(Http404):
             view.get_required_permissions_for_object_type("invalid")
-
-    def test_delete_interfaces_device_type(self):
-        """DeleteNetBoxInterfacesView returns correct perms for device type."""
-        from dcim.models import Device, Interface
-
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-
-        view = DeleteNetBoxInterfacesView()
-        perms = view.get_required_permissions_for_object_type("device")
-        assert perms == [("view", Device), ("delete", Interface)]
-
-    def test_delete_interfaces_vm_type(self):
-        """DeleteNetBoxInterfacesView returns correct perms for virtualmachine type."""
-        from virtualization.models import VirtualMachine, VMInterface
-
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-
-        view = DeleteNetBoxInterfacesView()
-        perms = view.get_required_permissions_for_object_type("virtualmachine")
-        assert perms == [("view", VirtualMachine), ("delete", VMInterface)]
-
-    def test_delete_interfaces_invalid_type_raises_404(self):
-        """DeleteNetBoxInterfacesView raises Http404 for invalid object type."""
-        import pytest
-        from django.http import Http404
-
-        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-
-        view = DeleteNetBoxInterfacesView()
-        with pytest.raises(Http404):
-            view.get_required_permissions_for_object_type("invalid")
-
-
-# ---------------------------------------------------------------------------
-# Tests for RemoveServerMappingView error handling (device_fields.py)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-class TestRemoveServerMappingViewErrorHandling:
-    """Test RemoveServerMappingView handles full_clean/save failures gracefully."""
-
-    def _make_view(self, server_key, post_extra=None):
-        """Return a (view, request) pair with permissions satisfied."""
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-
-        request = make_request("post", {"server_key": server_key, "object_type": "device", **(post_extra or {})})
-        return make_view(RemoveServerMappingView, request), request
-
-    @staticmethod
-    def _plugins_config(servers):
-        from django.test import override_settings
-
-        return override_settings(PLUGINS_CONFIG={"netbox_librenms_plugin": {"servers": servers}})
-
-    def test_validation_error_returns_error_message(self):
-        """ValidationError from full_clean leads to error message, not 500."""
-        from dcim.models import Device
-        from django.core.exceptions import ValidationError
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
-
-        dev = make_device("perm-rm-validation", librenms_cf={"orphan-server": 99})
-        view, request = self._make_view("orphan-server")
-
-        # The custom field accepts any dict, so the rejection has to be injected; the manager,
-        # the lock and the transaction all stay real.
-        with (
-            self._plugins_config({}),  # orphan-server NOT configured
-            patch.object(Device, "full_clean", side_effect=ValidationError("CF validation failed")),
-        ):
-            _post(view, request, pk=dev.pk)
-
-        errors = message_texts(request, "error")
-        assert len(errors) == 1
-        assert "Validation error" in errors[0] or "CF validation failed" in errors[0]
-        # Rolled back: the mapping the user tried to remove is still there.
-        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"orphan-server": 99}
-
-    def test_configured_server_refused(self):
-        """Configured server mapping cannot be removed — error message shown."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
-
-        dev = make_device("perm-rm-configured", librenms_cf={"active-server": 5})
-        view, request = self._make_view("active-server")
-
-        with self._plugins_config({"active-server": {"librenms_url": "http://x"}}):
-            _post(view, request, pk=dev.pk)
-
-        errors = message_texts(request, "error")
-        assert len(errors) == 1
-        assert "Cannot remove" in errors[0]
-        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"active-server": 5}
-
-    def test_successful_removal_mutates_and_saves(self):
-        """Successful removal deletes the key from custom_field_data and saves the device."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, post as _post
-
-        dev = make_device("perm-rm-ok", librenms_cf={"orphan-server": 42, "other-server": 7})
-        view, request = self._make_view("orphan-server")
-
-        with self._plugins_config({}):  # orphan-server NOT configured
-            _post(view, request, pk=dev.pk)
-
-        # Assert the exact shape of the persisted value so a misspelled key is caught.
-        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"other-server": 7}
-        assert len(message_texts(request, "success")) == 1

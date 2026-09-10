@@ -344,6 +344,48 @@ def enrich_port_relationships(
     port["parent_sync_status"] = parent_status
 
 
+def _row_relationship_source_is_actionable(
+    context,
+    owner,
+    port_id,
+    resolved_interface,
+    *,
+    unique_host_port_ids,
+    name_fallback_allowed,
+    name_hint,
+    expected_owner,
+):
+    """Return whether this row can write a LAG or parent relationship."""
+    if not (
+        context.can_write
+        and owner.pk in context.actionable_owner_ids
+        and port_id in unique_host_port_ids
+        and resolved_interface is not None
+    ):
+        return False
+
+    catalog_matches = context.catalog_index["by_lnms_id"].get(port_id, [])
+    if catalog_matches:
+        return (
+            len(catalog_matches) == 1
+            and catalog_matches[0].pk == resolved_interface.pk
+            and resolved_interface.pk in context.changeable_interface_ids
+        )
+
+    if not name_fallback_allowed:
+        return False
+
+    source_interface, error = resolve_interface_by_port_id(
+        context.obj,
+        str(port_id),
+        context.server_key,
+        name_hint=name_hint,
+        expected_owner=expected_owner,
+        index=context.source_index,
+    )
+    return error is None and getattr(source_interface, "pk", None) == resolved_interface.pk
+
+
 def resolve_relationship_row(
     context,
     port,
@@ -383,31 +425,16 @@ def resolve_relationship_row(
     port["exists_in_netbox"] = resolved_interface is not None
     port["name_fallback_allowed"] = name_fallback_allowed and resolved_interface is not None
 
-    source_is_resolvable = False
-    if (
-        context.can_write
-        and owner.pk in context.actionable_owner_ids
-        and port_id in unique_host_port_ids
-        and resolved_interface is not None
-    ):
-        catalog_matches = context.catalog_index["by_lnms_id"].get(port_id, [])
-        if catalog_matches:
-            source_is_resolvable = (
-                len(catalog_matches) == 1
-                and catalog_matches[0].pk == resolved_interface.pk
-                and resolved_interface.pk in context.changeable_interface_ids
-            )
-        elif name_fallback_allowed:
-            source_interface, error = resolve_interface_by_port_id(
-                context.obj,
-                str(port_id),
-                context.server_key,
-                name_hint=name_hint,
-                expected_owner=expected_owner,
-                index=context.source_index,
-            )
-            source_is_resolvable = error is None and getattr(source_interface, "pk", None) == resolved_interface.pk
-    port["relationship_source_resolvable"] = source_is_resolvable
+    port["relationship_source_resolvable"] = _row_relationship_source_is_actionable(
+        context,
+        owner,
+        port_id,
+        resolved_interface,
+        unique_host_port_ids=unique_host_port_ids,
+        name_fallback_allowed=name_fallback_allowed,
+        name_hint=name_hint,
+        expected_owner=expected_owner,
+    )
 
     enrich_port_relationships(port, relationship_maps, interface_name_field, context.server_key)
     for relation in ("lag", "parent"):

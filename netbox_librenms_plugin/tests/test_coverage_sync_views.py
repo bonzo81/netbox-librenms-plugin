@@ -453,6 +453,7 @@ class TestSyncCablesViewDisplaySyncResults:
         mock_msg.success.assert_not_called()
 
 
+@pytest.mark.django_db
 class TestSyncCablesViewPost:
     def test_permission_denied_returns_early(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -505,13 +506,28 @@ class TestSyncCablesViewPost:
         mock_r.assert_called_once()
 
     def test_server_key_stored_from_post(self):
+        import copy
+
+        from django.conf import settings
+        from django.test import override_settings
+
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        # A second real server, derived from the active configured server. The posted key must be
+        # stored unchanged, and only a non-default key distinguishes that from fallback behavior.
+        plugins_config = copy.deepcopy(settings.PLUGINS_CONFIG)
+        servers = plugins_config["netbox_librenms_plugin"]["servers"]
+        servers["secondary"] = dict(servers[next(iter(servers))])
 
         view = _make_view(SyncCablesView)
         view.request = _make_request({"server_key": "secondary"})
-        mock_device = MagicMock()
-        mock_device.pk = 1
-        with patch.object(view, "require_all_permissions", return_value=None):
+        mock_device = make_device("sync-server-key-post")
+        with (
+            override_settings(PLUGINS_CONFIG=plugins_config),
+            patch.object(view, "require_all_permissions", return_value=None),
+        ):
             with patch(
                 "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
                 return_value=mock_device,

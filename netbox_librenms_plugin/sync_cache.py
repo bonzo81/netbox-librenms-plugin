@@ -17,6 +17,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
+from netbox_librenms_plugin.server_mappings import is_server_key, iter_server_mapping_entries
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -310,7 +311,7 @@ def _explicit_server_keys(obj):
         return set()
     return {
         str(server_key)
-        for server_key, entry in raw_mapping.items()
+        for server_key, entry in iter_server_mapping_entries(raw_mapping)
         if isinstance(server_key, str)
         and server_key
         and (
@@ -331,7 +332,9 @@ def mapped_server_keys(subject, active_server_key=None):
     for obj in objects:
         server_keys.update(_explicit_server_keys(obj))
 
-    if active_server_key and active_server_key not in server_keys:
+    # Two cache-only endpoints pass a raw ``?server_key`` here, and get_librenms_sync_device()
+    # below raises on a key the validator rejects instead of leaving it out of the mapped set.
+    if active_server_key and is_server_key(active_server_key) and active_server_key not in server_keys:
         sync_owner = get_librenms_sync_device(subject, server_key=active_server_key) or subject
         raw_mapping = getattr(sync_owner, "custom_field_data", {}).get("librenms_id")
         if not isinstance(raw_mapping, dict) and coerce_librenms_id(raw_mapping) is not None:

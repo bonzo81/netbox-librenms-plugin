@@ -48,6 +48,14 @@ The plugin checks for existing devices using:
 
 If both a VM and Device with the same hostname exist, the plugin cannot determine which to match and allows import. Set the `librenms_id` custom field on the correct existing object to clarify the match.
 
+## Replacing a LibreNMS Identity
+
+**Link to LibreNMS**, **Update & Link**, and **Update Serial & Link** store the LibreNMS host ID for the active server. When the object already holds a *different* host ID for that same server, the action is blocked and nothing is written.
+
+The plugin then shows a separate confirmation that names the active server, the stored host ID, and the proposed host ID. Confirming replaces only that server's host ID. The server's out-of-band link, every other server mapping, and the preferred server are kept.
+
+The confirmation applies to that one object, server, action, and pair of host IDs, and it expires after 10 minutes. If the stored mapping changes before you confirm, the plugin refuses the replacement and asks you to run the action again. This also blocks a confirmation that is submitted twice.
+
 ## Out-of-Band (OOB) Detection
 
 When an incoming LibreNMS device looks like an out-of-band controller (iDRAC, iLO, BMC, …) and matches an existing NetBox device, the validation details show an **OOB Detected** panel instead of a plain import button. Rather than creating a duplicate device, the plugin offers the appropriate reconciliation action — **Add as OOB**, **Promote to host**, or **Merge NetBox devices**. See [Out-of-Band (OOB) Management](../usage_tips/oob_management.md) for the full flow.

@@ -20,11 +20,17 @@ from ..utils import (
     cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
+    find_devices_by_serial,
     normalize_serial,
     preload_normalization_rules,
     row_identity_matches,
 )
-from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
+from .cache import (
+    get_cache_index_key,
+    get_cache_metadata_key,
+    get_import_device_cache_key,
+    get_validated_device_cache_key,
+)
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
     VALIDATION_ERROR_ISSUE_PREFIX,
@@ -73,6 +79,12 @@ def _is_job_cancelled(job) -> bool:
     Checks RQ/Redis state only (reflects stop API calls immediately).
     On Redis connectivity issues or a missing RQ job, returns False to avoid
     false cancellation. Unexpected exceptions are logged and also return False.
+
+    Args:
+        job (object): The background job context that contains the RQ job identifier.
+
+    Returns:
+        bool: True if the RQ job has failed or stopped, otherwise False.
     """
     from django_rq import get_queue
     from redis.exceptions import RedisError
@@ -815,6 +827,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
     When existing_device is None (wasn't found at cache time), re-check if the device
     was imported since caching by looking up librenms_id or hostname.
+
+    Args:
+        validation (dict): The cached validation state, mutated in place.
+        libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
+        server_key (str): The active LibreNMS server key.
     """
     existing = validation.get("existing_device")
     if existing and hasattr(existing, "pk"):
@@ -983,6 +1000,14 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validate_device_for_import() path): when a value matches >1 object, return
             ``(None, True)`` so the caller blocks the row instead of binding ``.first()`` to an
             arbitrary one.
+
+            Args:
+                m (type): The Device or VirtualMachine model to search.
+                value (str): The device name to match.
+
+            Returns:
+                tuple[object | None, bool]: The single matching object, if any, and whether the name
+                    is ambiguous.
             """
             matches = list(m.objects.filter(name__iexact=value)[:2])
             if len(matches) > 1:
@@ -1090,28 +1115,27 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # duplicate-resolution blocker, not stale new-import ones.
             return
 
-        if not new_device and not name_ambiguous and not import_as_vm:
+        if not new_device and not name_ambiguous:
             # Serial- and IP-based matches: validate_device_for_import() catches these, so the
             # refresh re-check must have the same breadth. Without them a row whose
             # librenms_id/name link disappeared (or that never matched) can flip to importable
-            # and re-import a device that already exists in NetBox under a different name —
-            # matched only by hardware serial or management IP. Device-only (VMs have no serial
-            # or primary-IP identity here). The richer serial_action/OOB-candidate heuristics
-            # stay in the full validation path; here the contract is simply: block the import.
-            from dcim.models import Device as _Device
-
+            # and re-import an object that already exists in NetBox under a different name.
+            # Serial applies only to Devices. Management IP applies to Devices and VMs.
+            # The richer action heuristics stay in the full validation path; here the contract
+            # is simply to block the duplicate import and bind the current object type.
             # This fallback fails closed on ambiguity exactly like validate_device_for_import():
-            # if the serial OR the management IP resolves to more than one distinct NetBox device,
-            # binding to whichever row sorts first would render the wrong device as the existing
+            # if the serial OR the management IP resolves to more than one distinct NetBox object,
+            # binding to whichever row sorts first would render the wrong object as the existing
             # match, so flag the row ambiguous and block instead of picking arbitrarily.
             ambiguous_fallback = False
-            serial = normalize_serial(libre_device.get("serial"))
-            if serial and serial != "-":
-                serial_matches = list(_Device.objects.filter(serial=serial)[:2])
-                if len(serial_matches) > 1:
-                    ambiguous_fallback = True
-                elif serial_matches:
-                    new_device, match_type = serial_matches[0], "serial"
+            if not import_as_vm:
+                serial = normalize_serial(libre_device.get("serial"))
+                if serial and serial != "-":
+                    serial_matches = find_devices_by_serial(serial)
+                    if len(serial_matches) > 1:
+                        ambiguous_fallback = True
+                    elif serial_matches:
+                        new_device, match_type = serial_matches[0], "serial"
 
             if not new_device and not ambiguous_fallback:
                 primary_ip = libre_device.get("ip")
@@ -1119,11 +1143,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     # Shared resolver (scans interface-assignment + oob_ip-FK across all duplicate
                     # net_host rows, fails closed on >1 distinct device) — same helper
                     # validate_device_for_import() uses, so the two paths can't drift.
-                    device, ip_ambiguous, _matching_ips = resolve_device_by_host_ip(primary_ip)
+                    matched_object, ip_ambiguous, _matching_ips = resolve_device_by_host_ip(primary_ip)
                     if ip_ambiguous:
                         ambiguous_fallback = True
-                    elif device:
-                        new_device, match_type = device, "primary_ip"
+                    elif matched_object:
+                        new_device, match_type = matched_object, "primary_ip"
+                        found_as_cross_model = isinstance(matched_object, CrossModel)
 
             if ambiguous_fallback:
                 # Block without binding to an arbitrary device: append a blocking issue (the
@@ -1287,6 +1312,26 @@ def process_device_filters(
     else:
         logger.info(f"Fetching devices with filters: {filters}")
 
+    cache_metadata_key = get_cache_metadata_key(
+        server_key=api.server_key,
+        filters=filters,
+        vc_enabled=vc_detection_enabled,
+        use_sysname=use_sysname,
+        strip_domain=strip_domain,
+    )
+    cache_index_key = get_cache_index_key(api.server_key)
+    if clear_cache:
+        cache.delete(cache_metadata_key)
+        cache_index = cache.get(cache_index_key, [])
+        if isinstance(cache_index, list):
+            remaining_cache_keys = [key for key in cache_index if key != cache_metadata_key]
+            if remaining_cache_keys:
+                cache.set(cache_index_key, remaining_cache_keys, timeout=api.cache_timeout)
+            else:
+                cache.delete(cache_index_key)
+        else:
+            cache.delete(cache_index_key)
+
     # Always get cache status internally, even if not returning it
     # We need it to determine if metadata should be updated
     libre_devices, from_cache = get_librenms_devices_for_import(
@@ -1422,14 +1467,6 @@ def process_device_filters(
     if validated_devices:
         from datetime import datetime, timezone
 
-        cache_metadata_key = get_cache_metadata_key(
-            server_key=api.server_key,
-            filters=filters,
-            vc_enabled=vc_detection_enabled,
-            use_sysname=use_sysname,
-            strip_domain=strip_domain,
-        )
-
         # Check if metadata already exists to preserve original timestamp
         # BUT: if clear_cache was requested or data came fresh from LibreNMS, update it
         existing_metadata = cache.get(cache_metadata_key)
@@ -1441,16 +1478,18 @@ def process_device_filters(
         else:
             # No metadata exists, OR cache was cleared, OR fresh data - create/update it now
             cache_metadata = {
+                "server_key": api.server_key,
                 "cached_at": datetime.now(timezone.utc).isoformat(),
                 "cache_timeout": api.cache_timeout,
                 "filters": filters,
                 "vc_enabled": vc_detection_enabled,
+                "use_sysname": use_sysname,
+                "strip_domain": strip_domain,
                 "device_count": len(validated_devices),
             }
             cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
 
             # Maintain cache index for this server to enable listing active searches
-            cache_index_key = f"librenms_cache_index_{api.server_key}"
             cache_index = cache.get(cache_index_key, [])
             # Add this cache key if not already in index
             if cache_metadata_key not in cache_index:

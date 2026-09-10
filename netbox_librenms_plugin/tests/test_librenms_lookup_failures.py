@@ -5,13 +5,27 @@ reached are three different problems with three different fixes. Reporting all o
 "device not found" sends the user to remove a custom field that is correct.
 """
 
-import pytest
-from django.urls import reverse
+from html import unescape
 
-from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
+import pytest
+from django.contrib.messages import get_messages
+from django.core.cache import cache
+from django.urls import reverse
+from ipam.models import IPAddress
+
+from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
+from netbox_librenms_plugin.tests.conftest import (
+    configure_librenms_servers,
+    make_device,
+    make_interface,
+    make_superuser,
+    make_vm,
+)
 
 ABSENT_DEVICE_ID = 4041
 ERRORING_DEVICE_ID = 1255
+CONFLICTING_DEVICE_ID = 1266
+AMBIGUOUS_DEVICE_ID = 1277
 
 
 def _point_plugin_at(settings, url):
@@ -122,3 +136,311 @@ def test_the_sync_page_still_reports_a_genuinely_missing_device(client, librenms
     assert response.status_code == 200
     assert "Device not found" in body
     assert "Remove the custom field value" in body
+
+
+@pytest.mark.django_db
+def test_the_sync_page_reports_a_discovered_id_conflict(client, librenms_server, settings):
+    """A discovery conflict must render its owner instead of raising a server error."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-conflict-page-user"))
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]))
+    body = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in body
+
+
+@pytest.mark.django_db
+def test_a_conflict_owner_outside_the_view_scope_is_not_named(client, librenms_server, settings):
+    """The conflict search is unrestricted, so naming its owner would disclose an unviewable object."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-hidden-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-hidden-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    # Device view is constrained to the target, so this user cannot see the owner at all.
+    viewer = make_user_with_perms("librenms-hidden-conflict-viewer", [("view", Device)], constraints={"pk": target.pk})
+    client.force_login(viewer)
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]))
+    body = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert owner.name not in body, "the conflict named an object this user may not view"
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned" in body
+
+
+@pytest.mark.django_db
+def test_the_sync_page_reports_an_ambiguous_id_claim(client, librenms_server, settings):
+    """Two NetBox owners of one LibreNMS ID must read as a conflict, not a server error."""
+    # lock_librenms_id_assignment raises AmbiguousLibreNMSIdError for this state, and
+    # resolve_librenms_id converts only LibreNMSIDConflictError, so the page used to 500.
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner_a = make_device("librenms-ambiguous-owner-a", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
+    owner_b = make_device("librenms-ambiguous-owner-b", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
+    target = make_device("librenms-ambiguous-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": AMBIGUOUS_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-ambiguous-page-user"))
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]))
+    body = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert f"LibreNMS ID {AMBIGUOUS_DEVICE_ID} is claimed by more than one NetBox object." in body
+    # The ambiguity text names the competing owners by pk and the search that produced them is
+    # unrestricted, so it belongs in the log, never in the response.
+    assert "matches multiple Device host records" not in body
+    for owner in (owner_a, owner_b):
+        assert f"pk={owner.pk}" not in body
+
+
+@pytest.mark.django_db
+def test_ip_refresh_reports_a_discovered_id_conflict(client, librenms_server, settings):
+    """An IP refresh must render the discovered LibreNMS ID conflict."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-ip-refresh-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-ip-refresh-target.example.test", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-ip-refresh-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[target.pk]),
+        {"server_key": server_key},
+        headers={"HX-Request": "true"},
+    )
+    body = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in body
+
+
+@pytest.mark.django_db
+def test_location_update_reports_a_discovered_id_conflict(client, librenms_server, settings):
+    """A POST action must redirect with the discovery conflict and make no LibreNMS write."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-action-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-action-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-conflict-action-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:update_device_location", args=[target.pk]),
+        {"server_key": server_key},
+    )
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+
+    assert response.status_code == 302
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages
+    # The docstring's no-write claim: the conflict must abort before any LibreNMS mutation, so
+    # only the identity lookup may reach the server. A GET-only route would answer an unexpected
+    # PATCH with 404 and leave this test green without it.
+    assert {request["method"] for request in librenms_server.requests} == {"GET"}, librenms_server.requests
+
+
+@pytest.mark.django_db
+def test_device_status_reports_a_discovered_id_conflict(client, librenms_server, settings):
+    """A status lookup must identify the conflicting owner instead of only showing unlinked."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-status-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-status-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-conflict-status-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_status_list"),
+        {"device": target.pk},
+    )
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+
+    assert response.status_code == 200
+    # The conflict lookup is unrestricted, so the list view must not name the other object.
+    assert any("already assigned to another NetBox object" in message for message in rendered_messages), (
+        rendered_messages
+    )
+    assert not [message for message in rendered_messages if owner.name in message], rendered_messages
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("object_type", "object_label", "url_name"),
+    [("device", "device", "device_status_list"), ("virtualmachine", "VM", "vm_status_list")],
+)
+def test_status_lists_report_each_discovery_conflict_once(
+    client,
+    librenms_server,
+    settings,
+    object_type,
+    object_label,
+    url_name,
+):
+    """Two rows with the same conflict must produce one actionable alert."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    prefix = f"duplicate-{object_type}-conflict"
+    if object_type == "device":
+        owner = make_device("duplicate-device-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+        targets = [make_device(f"{prefix}-{suffix}", librenms_cf={server_key: None}) for suffix in ("a", "b")]
+    else:
+        owner = make_vm("duplicate-vm-owner")
+        owner.custom_field_data["librenms_id"] = {server_key: CONFLICTING_DEVICE_ID}
+        owner.save()
+        targets = [make_vm(f"{prefix}-{suffix}") for suffix in ("a", "b")]
+        for target in targets:
+            target.custom_field_data["librenms_id"] = {server_key: None}
+            target.save()
+
+    for target in targets:
+        librenms_server.register(
+            f"/api/v0/devices/{target.name}",
+            {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+            method="GET",
+        )
+    client.force_login(make_superuser(f"{prefix}-user"))
+
+    response = client.get(reverse(f"plugins:netbox_librenms_plugin:{url_name}"), {"q": prefix})
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+    expected = "A discovered LibreNMS ID is already assigned to another NetBox object. Open the object to resolve the conflict."
+
+    assert response.status_code == 200
+    assert rendered_messages.count(expected) == 1
+    assert not [message for message in rendered_messages if owner.name in message], rendered_messages
+
+
+@pytest.mark.django_db
+def test_cable_refresh_fails_closed_when_host_discovery_conflicts(
+    client,
+    librenms_server,
+    settings,
+):
+    """Valid OOB rows must not hide an unresolved host identity."""
+    oob_id = 1277
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    make_device("cable-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device(
+        "cable-conflict-target.example.test",
+        librenms_cf={server_key: {"oob": {"id": oob_id, "type": "bmc"}}},
+    )
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    librenms_server.register(
+        f"/api/v0/devices/{oob_id}/links",
+        {
+            "status": "ok",
+            "links": [
+                {
+                    "local_port_id": 71,
+                    "local_port": "console0",
+                    "remote_port": "console1",
+                    "remote_hostname": "peer.example.test",
+                    "remote_port_id": 72,
+                    "remote_device_id": 1278,
+                }
+            ],
+        },
+        method="GET",
+    )
+    librenms_server.register(
+        f"/api/v0/devices/{oob_id}/ports",
+        {"status": "ok", "ports": [{"port_id": 71, "ifName": "console0", "ifDescr": "console0"}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("cable-conflict-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[target.pk]),
+        {"server_key": server_key},
+        headers={"HX-Request": "true"},
+    )
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+
+    assert response.status_code == 200
+    assert "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again." in rendered_messages
+    assert "Cable data refreshed successfully." not in rendered_messages
+    assert cache.get(sync_snapshot_key(target, TAB_SPECS[SyncTab.CABLES].data_type, server_key)) is None
+
+
+@pytest.mark.django_db
+def test_primary_ip_sync_reports_a_discovered_id_conflict_without_writes(client, librenms_server, settings):
+    """A management-ID conflict must abort the real IP sync transaction before its first write."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-ip-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-ip-conflict-target.example.com", librenms_cf={server_key: None})
+    make_interface(target, "Ethernet1", iface_type="1000base-t")
+    row_id = "198.18.20.10/24"
+    port_id = 7020
+    cache_key = sync_snapshot_key(target, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, server_key)
+    cache.set(
+        cache_key,
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.20.10",
+                    "prefix_length": 24,
+                    "ip_with_mask": row_id,
+                    "port_id": port_id,
+                    "interface_name": "Ethernet1",
+                }
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {port_id: {"port_id": port_id, "ifName": "Ethernet1", "ifDescr": "Ethernet1"}},
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-conflict-ip-user"))
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": target.pk},
+        ),
+        {
+            "server_key": server_key,
+            "set-primary-ip-toggle": "on",
+            "select": row_id,
+            f"vrf_{row_id}": "",
+        },
+    )
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+
+    assert response.status_code == 302
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages
+    assert not IPAddress.objects.filter(address=row_id).exists()

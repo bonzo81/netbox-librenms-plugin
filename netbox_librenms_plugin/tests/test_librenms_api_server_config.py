@@ -27,6 +27,16 @@ def _plugins_config_with_servers(servers):
 class TestGetAvailableServersUsableConfig:
     """get_available_servers must only offer servers that __init__ can actually bind."""
 
+    def test_skips_unusable_legacy_default(self):
+        """Legacy mode does not offer a default server without both URL and token."""
+        config = copy.deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config = dict(config.get("netbox_librenms_plugin", {}))
+        plugin_config.update({"servers": {}, "librenms_url": "", "api_token": ""})
+        config["netbox_librenms_plugin"] = plugin_config
+
+        with override_settings(PLUGINS_CONFIG=config):
+            assert LibreNMSAPI.get_available_servers() == {}
+
     def test_skips_incomplete_and_malformed_entries(self):
         """Non-mapping entries and dicts missing url/token are excluded from the picker."""
         servers = {

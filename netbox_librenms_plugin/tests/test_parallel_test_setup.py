@@ -108,6 +108,23 @@ NETBOX_REF_DJANGO_PINS = {
 }
 
 
+def calls_get_librenms_id(tree: ast.AST) -> bool:
+    """Return whether an AST calls get_librenms_id directly, under an alias, or through an object."""
+    # An `import ... as` binding would otherwise call the helper under a name the scan never sees.
+    direct_names = {"get_librenms_id"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            direct_names.update(alias.asname or alias.name for alias in node.names if alias.name == "get_librenms_id")
+    return any(
+        isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id in direct_names)
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "get_librenms_id")
+        )
+        for node in ast.walk(tree)
+    )
+
+
 def _third_party_roots_the_test_suite_imports():
     """Return the third-party import roots the test modules use directly, at any indent."""
     pattern = re.compile(r"^[ \t]*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
@@ -210,6 +227,34 @@ def test_local_and_ci_commands_request_isolated_workers():
 
     assert 'parallel_args=(-n "$workers" --maxschedchunk=1)' in aliases
     assert "pytest -n auto --maxschedchunk=1" in workflow
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "get_librenms_id(obj)",
+        "utils.get_librenms_id(obj)",
+        "from netbox_librenms_plugin.utils import get_librenms_id as resolve\nresolve(obj)",
+    ],
+    ids=["direct", "qualified", "aliased"],
+)
+def test_shared_boundary_guard_recognizes_direct_and_qualified_calls(source):
+    """Detect every supported Python call form for the guarded helper."""
+    assert calls_get_librenms_id(ast.parse(source))
+
+
+def test_views_resolve_librenms_ids_through_the_shared_boundary():
+    """Keep assignment conflicts inside the view-layer error boundary."""
+    direct_callers = []
+    views_root = REPOSITORY_ROOT / "netbox_librenms_plugin" / "views"
+    for module in views_root.rglob("*.py"):
+        if module == views_root / "mixins.py":
+            continue
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        if calls_get_librenms_id(tree):
+            direct_callers.append(str(module.relative_to(REPOSITORY_ROOT)))
+
+    assert not direct_callers, f"views bypass the shared LibreNMS ID boundary: {direct_callers}"
 
 
 def test_lint_workflow_python_meets_the_project_minimum():

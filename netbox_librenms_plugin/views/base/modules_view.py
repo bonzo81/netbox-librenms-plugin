@@ -84,7 +84,9 @@ def _inventory_item_offsettable(item: dict) -> bool:
     """
     Return True if an inventory item's index fields support offset arithmetic.
 
-    Both fields must be integers or absent. The parent can also use zero for the root.
+    Both fields must be non-negative integers or absent. The parent can also use zero for
+    the root. RFC 2737 defines entPhysicalIndex as 1..2147483647, so a negative value is
+    out of spec, and admitting one would let the OOB offset land on a main index.
 
     Args:
         item (dict): The inventory item to check.
@@ -94,8 +96,8 @@ def _inventory_item_offsettable(item: dict) -> bool:
     """
     idx = item.get("entPhysicalIndex")
     parent = item.get("entPhysicalContainedIn")
-    idx_ok = idx is None or (isinstance(idx, int) and not isinstance(idx, bool))
-    parent_ok = parent is None or (isinstance(parent, int) and not isinstance(parent, bool))
+    idx_ok = idx is None or (isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0)
+    parent_ok = parent is None or (isinstance(parent, int) and not isinstance(parent, bool) and parent >= 0)
     return idx_ok and parent_ok
 
 
@@ -398,7 +400,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/negative/garbage):
         # get_librenms_id's device-id cache path returns its value verbatim, so a stray True would
         # otherwise int() to 1 and fetch a stranger's inventory. Mirrors the cables/IP views.
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
+        self.librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
         if self.librenms_id is None:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             SyncCacheConsistency(obj).mark_refresh_failure(
@@ -406,7 +408,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 server_key,
                 actor_id=request_actor_id(request),
             )
-            messages.error(request, "Device not found in LibreNMS.")
+            messages.error(
+                request,
+                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
+            )
             return self.render_sync_partial(
                 request,
                 obj,
@@ -421,7 +426,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if success and not all(_inventory_item_offsettable(item) for item in inventory_data):
             success, inventory_data = (
                 False,
-                "inventory payload has a non-integer entPhysicalIndex or entPhysicalContainedIn",
+                "inventory payload has a negative or non-integer entPhysicalIndex or entPhysicalContainedIn",
             )
 
         # Treat transport errors, invalid containers, and invalid index types as fetch failures.
@@ -508,7 +513,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
                     default=0,
                 )
-                # Round up to the next 1000-boundary for a clean namespace.
+                # Round up to the next 1000-boundary for a clean namespace. Both ranges are
+                # non-negative, so the offset clears every main index.
                 _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
                 for item in oob_inventory:
                     item["_source"] = "oob"
@@ -646,7 +652,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 self.librenms_api.get_stored_librenms_id(sync_device, server_key=scoped_server)
             )
         else:
-            current_librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(sync_device))
+            current_librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
+            if lookup_error is not None:
+                messages.error(request, self.scoped_lookup_message(lookup_error))
         if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}

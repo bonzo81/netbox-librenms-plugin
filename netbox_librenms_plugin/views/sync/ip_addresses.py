@@ -16,6 +16,7 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.constants import is_supported_interface_name_field
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
+from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -252,16 +253,20 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.error(request, "No IP addresses selected for synchronization.")
             return self.redirect_to_ip_tab(request, obj)
 
-        results = self.process_ip_sync(
-            request,
-            selected_ips,
-            cached_ips,
-            obj,
-            object_type,
-            force_intents=force_intents,
-            cached_ports_by_id=cached_snapshot.get("ports_by_id") or {},
-            interface_name_field=cached_snapshot.get("interface_name_field"),
-        )
+        try:
+            results = self.process_ip_sync(
+                request,
+                selected_ips,
+                cached_ips,
+                obj,
+                object_type,
+                force_intents=force_intents,
+                cached_ports_by_id=cached_snapshot.get("ports_by_id") or {},
+                interface_name_field=cached_snapshot.get("interface_name_field"),
+            )
+        except LibreNMSIDConflictError as exc:
+            messages.error(request, self.scoped_lookup_message(exc))
+            return self.redirect_to_ip_tab(request, obj)
         self.display_sync_results(request, results)
         for error in dict.fromkeys(intent_errors.values()):
             messages.error(request, error)
@@ -346,17 +351,28 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         Return the LibreNMS management/polling IP for *obj*, or None.
 
         Used to decide which synced IP (if any) should become the object's
-        Primary IP. Best-effort: any lookup failure yields None so the sync
-        itself is never blocked.
+        Primary IP. Transport and response failures yield None. An assignment
+        conflict stops the sync so the caller can report its conflicting owner.
 
         Args:
             obj (Device | VirtualMachine): The object whose management IP to read.
 
         Returns:
             str | None: The management/polling IP, or None if the lookup fails or has no result.
+
+        Raises:
+            LibreNMSIDConflictError: If discovery finds an ID owned by another object.
         """
         try:
-            librenms_id = self.librenms_api.get_librenms_id(obj)
+            librenms_id, lookup_error = self.resolve_librenms_id(obj)
+            if lookup_error is not None:
+                # Carry the conflicting object across the re-raise, or the render site below can
+                # no longer tell a permitted viewer which object holds the ID.
+                raise LibreNMSIDConflictError(
+                    lookup_error.message,
+                    conflict=lookup_error.conflict,
+                    named_message=lookup_error.named_message,
+                )
             if not librenms_id:
                 return None
             # get_live_device_info reads live (uncached): this feeds the Primary-IP write decision,
@@ -373,6 +389,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             if not isinstance(ip, str):
                 return None
             return ip.strip() or None
+        except LibreNMSIDConflictError:
+            raise
         except Exception:  # pragma: no cover - defensive
             return None
 

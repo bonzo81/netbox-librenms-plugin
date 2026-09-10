@@ -1,6 +1,7 @@
 import logging
 
 from dcim.models import Device
+from django.contrib import messages
 from django.db.models import BooleanField, Case, Value, When
 from netbox.views import generic
 from virtualization.models import VirtualMachine
@@ -15,6 +16,14 @@ from netbox_librenms_plugin.tables.VM_status import VMStatusTable
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGenericPermissionMixin
 
 logger = logging.getLogger(__name__)
+
+
+# The conflict lookup behind LibreNMSIDConflictError uses an unrestricted queryset, so its
+# message names an object the viewer may not be allowed to see. These list views report the
+# conflict generically; the object page resolves it through the scope-checked path.
+DISCOVERY_CONFLICT_MESSAGE = (
+    "A discovered LibreNMS ID is already assigned to another NetBox object. Open the object to resolve the conflict."
+)
 
 
 class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
@@ -55,6 +64,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
 
             # Create a list to store device IDs and their status
             device_status_map = {}
+            lookup_errors = set()
 
             # Apply filters
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
@@ -62,10 +72,15 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             # Check LibreNMS status for each device
             for device in queryset:
                 try:
-                    librenms_id = self.librenms_api.get_librenms_id(device)
+                    librenms_id, lookup_error = self.resolve_librenms_id(device)
+                    if lookup_error is not None:
+                        lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
                     device_status_map[device.pk] = bool(librenms_id)
                 except Exception:
                     device_status_map[device.pk] = False
+
+            for error in sorted(lookup_errors):
+                messages.error(self.request, error)
 
             # Annotate the queryset with the status values
             case_when = []
@@ -107,6 +122,7 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
 
             # Create a list to store VM IDs and their status
             vm_status_map = {}
+            lookup_errors = set()
 
             # Apply filters
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
@@ -114,10 +130,15 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
             # Check LibreNMS status for each VM
             for vm in queryset:
                 try:
-                    librenms_id = self.librenms_api.get_librenms_id(vm)
+                    librenms_id, lookup_error = self.resolve_librenms_id(vm)
+                    if lookup_error is not None:
+                        lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
                     vm_status_map[vm.pk] = bool(librenms_id)
                 except Exception:
                     vm_status_map[vm.pk] = False
+
+            for error in sorted(lookup_errors):
+                messages.error(self.request, error)
 
             # Annotate the queryset with the status values
             case_when = []

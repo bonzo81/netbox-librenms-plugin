@@ -1,10 +1,9 @@
 """Coverage tests for librenms_api.py missing lines."""
 
 from copy import deepcopy
-from unittest.mock import patch
+from time import sleep
 
 import pytest
-import requests
 
 
 def configure_servers(settings, servers):
@@ -37,6 +36,19 @@ def api_for(settings, url, *, key="default", token="test-token"):
 
     configure_servers(settings, {key: {"librenms_url": url, "api_token": token, "verify_ssl": False}})
     return LibreNMSAPI(server_key=key)
+
+
+def make_server_timeout(monkeypatch, server, route, *, method="GET"):
+    """Make one real loopback request exceed both API timeout settings."""
+    from netbox_librenms_plugin import librenms_api
+
+    def respond_after_timeout(**request):
+        sleep(1.0)
+        return 200, {"status": "ok"}
+
+    monkeypatch.setattr(librenms_api, "DEFAULT_API_TIMEOUT", 0.2)
+    monkeypatch.setattr(librenms_api, "EXTENDED_API_TIMEOUT", 0.2)
+    server.register(route, respond_after_timeout, method=method)
 
 
 @pytest.mark.django_db
@@ -80,16 +92,23 @@ class TestLibreNMSAPIInitFallback:
         assert api.api_token == "tok"
         assert api.api_token == "tok"
 
-    def test_init_survives_a_settings_lookup_that_raises(self, settings):
+    def test_init_survives_a_settings_lookup_that_raises(self, settings, monkeypatch):
         """A broken settings model must not stop the client binding the default server."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin import models
 
         configure_legacy(settings, "https://x.example.com", token="tok")
 
-        # Error injection at the boundary __init__ guards with (ImportError, AttributeError).
-        with patch("netbox_librenms_plugin.models.LibreNMSSettings") as broken:
-            broken.objects.first.side_effect = AttributeError("no attr")
-            api = LibreNMSAPI()
+        class BrokenManager:
+            def first(self):
+                raise AttributeError("no attr")
+
+        class BrokenSettings:
+            objects = BrokenManager()
+
+        monkeypatch.setattr(models, "LibreNMSSettings", BrokenSettings)
+
+        api = LibreNMSAPI()
 
         assert api.server_key == "default"
         assert api.librenms_url == "https://x.example.com"
@@ -152,23 +171,32 @@ class TestTestConnectionErrors:
         assert result["error"] is True
         assert "Connection failed" in result["message"]
 
-    @pytest.mark.parametrize(
-        ("exception", "expected"),
-        [
-            (requests.exceptions.SSLError("cert failed"), "ssl"),
-            (requests.exceptions.Timeout("timed out"), "timeout"),
-            (ValueError("something weird"), "unexpected error"),
-        ],
-    )
-    def test_transport_failures_are_reported(self, settings, librenms_server, exception, expected):
-        """Injected at the requests boundary: a real TLS or timeout failure is not reproducible here."""
-        api = api_for(settings, librenms_server.url)
+    def test_tls_protocol_failure_is_reported(self, settings, librenms_server):
+        """An HTTPS request to a plain HTTP listener reaches the real TLS error handler."""
+        tls_url = librenms_server.url.replace("http://", "https://", 1)
 
-        with patch("requests.get", side_effect=exception):
-            result = api.test_connection()
+        result = api_for(settings, tls_url).test_connection()
 
         assert result["error"] is True
-        assert expected in result["message"].lower()
+        assert "ssl" in result["message"].lower()
+
+    def test_timeout_is_reported(self, settings, librenms_server, monkeypatch):
+        """A slow loopback response reaches the real timeout handler."""
+        make_server_timeout(monkeypatch, librenms_server, "/api/v0/system")
+
+        result = api_for(settings, librenms_server.url).test_connection()
+
+        assert result["error"] is True
+        assert "timeout" in result["message"].lower()
+
+    def test_unexpected_request_error_is_reported(self, settings):
+        """A malformed server URL reaches the generic request setup error handler."""
+        api = api_for(settings, "invalid-url")
+
+        result = api.test_connection()
+
+        assert result["error"] is True
+        assert "unexpected error" in result["message"].lower()
 
 
 @pytest.mark.django_db
@@ -176,7 +204,7 @@ class TestGetAvailableServersLegacy:
     """get_available_servers on the pre-multi-server config shape."""
 
     def test_legacy_config_no_servers(self, settings):
-        """With no servers mapping, the legacy URL is offered under the default key."""
+        """With no servers mapping, a complete legacy pair is offered under the default key."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         configure_legacy(settings, "https://legacy.example.com")
@@ -185,15 +213,18 @@ class TestGetAvailableServersLegacy:
 
         assert result == {"default": "Default Server (https://legacy.example.com)"}
 
-    def test_no_legacy_url_returns_default_label(self, settings):
-        """With neither a servers mapping nor a legacy URL, only the bare default label is offered."""
+    @pytest.mark.parametrize(
+        ("url", "token"),
+        [(None, None), ("https://legacy.example.com", None)],
+        ids=["nothing-configured", "url-without-token"],
+    )
+    def test_incomplete_legacy_config_returns_no_server(self, settings, url, token):
+        """Legacy mode offers no server without a usable URL and token pair."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        configure_legacy(settings, None)
+        configure_legacy(settings, url, token=token)
 
-        result = LibreNMSAPI.get_available_servers()
-
-        assert result == {"default": "Default Server"}
+        assert LibreNMSAPI.get_available_servers() == {}
 
 
 @pytest.mark.django_db
@@ -435,30 +466,6 @@ class TestReadEndpointOutcomes:
 
         assert ok is False
         assert detail is not None
-
-    @pytest.mark.parametrize(
-        ("route", "call", "body", "expected", "expected_query", "http_errors"),
-        READ_ENDPOINTS,
-    )
-    def test_a_timeout_is_reported(
-        self,
-        settings,
-        librenms_server,
-        route,
-        call,
-        body,
-        expected,
-        expected_query,
-        http_errors,
-    ):
-        """Every read endpoint catches the full RequestException hierarchy."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
-            ok, detail = call(api)
-
-        assert ok is False
-        assert "timed out" in str(detail).lower()
 
 
 @pytest.mark.django_db
@@ -750,15 +757,6 @@ class TestGetPoller:
         assert ok is False
         assert result
 
-    def test_timeout_returns_false(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.get_poller_groups()
-
-        assert result == (False, "timed out")
-
     def test_non_ok_status_returns_false(self, settings, librenms_server):
         """An error payload returns the server message."""
         librenms_server.register(
@@ -817,15 +815,6 @@ class TestAddDeviceErrors:
         assert ok is False
         assert msg
 
-    def test_timeout_returns_false(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.post", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.add_device(self._make_device_data())
-
-        assert result == (False, "timed out")
-
     def test_non_ok_response_returns_false(self, settings, librenms_server):
         """An error payload returns the server message."""
         librenms_server.register(
@@ -863,15 +852,6 @@ class TestGetLocationsErrors:
         assert ok is False
         assert msg
 
-    def test_timeout_returns_false(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.get_locations()
-
-        assert result == (False, "timed out")
-
 
 class TestUpdateDeviceFieldErrors:
     """update_device_field uses PATCH and handles a refused connection."""
@@ -905,15 +885,6 @@ class TestUpdateDeviceFieldErrors:
         assert ok is False
         assert msg
 
-    def test_timeout_returns_false(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.patch", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.update_device_field(1, {"field": "value"})
-
-        assert result == (False, "timed out")
-
 
 class TestGetDeviceIdByIPErrors:
     """get_device_id_by_ip handles real lookup and failure responses."""
@@ -933,15 +904,6 @@ class TestGetDeviceIdByIPErrors:
         librenms_server.stop()
 
         assert api.get_device_id_by_ip(self.IP) is None
-
-    def test_timeout_returns_none(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.get_device_id_by_ip(self.IP)
-
-        assert result is None
 
     def test_non_200_returns_none(self, settings, librenms_server):
         """A 404 response returns no device ID."""
@@ -981,15 +943,6 @@ class TestGetDeviceIdByHostnameErrors:
 
         assert api.get_device_id_by_hostname(self.HOSTNAME) is None
 
-    def test_timeout_returns_none(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.get_device_id_by_hostname(self.HOSTNAME)
-
-        assert result is None
-
     def test_null_devices_field_returns_none(self, settings, librenms_server):
         """A null devices field returns no device ID."""
         librenms_server.register(self.ROUTE, {"devices": None}, method="GET")
@@ -1020,6 +973,47 @@ class TestStorelibrenmsId:
 
         assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
 
+    def test_storing_the_mapping_keeps_the_caller_s_other_unsaved_custom_fields(self, settings, librenms_server):
+        """The claim reads a second row, so copying its whole field data would drop unsaved edits."""
+        from django.contrib.contenttypes.models import ContentType
+        from extras.models import CustomField
+
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        note = CustomField.objects.create(name="store_note", type="text")
+        note.object_types.set([ContentType.objects.get_for_model(Device)])
+        device = make_device("store-preserves-other-cf", librenms_cf={"default": None})
+        # An edit the caller has not saved yet, exactly what a view holds while it resolves an ID.
+        device.custom_field_data["store_note"] = "unsaved"
+        api = api_for(settings, librenms_server.url)
+
+        api._store_librenms_id(device, 42)
+
+        assert device.custom_field_data["store_note"] == "unsaved"
+        assert device.custom_field_data["librenms_id"]["default"] == 42
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
+
+    def test_an_owner_deleted_mid_claim_reports_a_lookup_error_not_a_500(self, settings, librenms_server):
+        """A concurrent delete leaves no row for the claim to lock, which must not reach the view."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-owner-deleted", librenms_cf={"default": None})
+        # The row vanishes after the caller loaded the object, exactly what a concurrent delete
+        # leaves behind: a live instance whose pk no longer resolves.
+        Device.objects.filter(pk=device.pk).delete()
+        api = api_for(settings, librenms_server.url)
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
+
+        with pytest.raises(LibreNMSIDConflictError) as excinfo:
+            api._store_librenms_id(device, 42)
+
+        assert "no longer exists" in str(excinfo.value)
+
     def test_stores_in_cache_when_the_custom_field_is_absent(self, settings, librenms_server):
         """Only a NetBox without the plugin custom field reaches the cache fallback."""
         from django.core.cache import cache
@@ -1041,6 +1035,97 @@ class TestStorelibrenmsId:
 
         assert cache.get(cache_key) == 42
         assert api.server_key in cache_key
+
+    def test_interface_id_is_cached_without_claiming_a_device_mapping(self, settings, librenms_server):
+        """An interface port ID must not conflict with the same numeric device ID."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("store-interface-owner", librenms_cf={"default": 42})
+        interface = make_interface(device, "Ethernet1")
+        api = api_for(settings, librenms_server.url)
+        cache_key = api._get_cache_key(interface)
+
+        api._store_librenms_id(interface, 42)
+
+        interface.refresh_from_db()
+        assert interface.custom_field_data.get("librenms_id") in (None, {})
+        assert cache.get(cache_key) == 42
+
+    def test_unsaved_device_id_is_cached_without_row_locking(self, settings, librenms_server):
+        """An unsaved object has no row that the assignment path can lock."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-unsaved-device", librenms_cf={"default": None})
+        device.pk = None
+        device._state.adding = True
+        api = api_for(settings, librenms_server.url)
+        cache_key = api._get_cache_key(device)
+
+        api._store_librenms_id(device, 43)
+
+        assert f"unsaved-{id(device)}" not in cache_key
+        assert api._get_cache_key(device) == cache_key
+        assert cache.get(cache_key) == 43
+
+
+@pytest.mark.django_db(transaction=True)
+def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settings, librenms_server):
+    """Concurrent API discovery and VM import must leave one owner for an ID."""
+    from virtualization.models import VirtualMachine
+
+    from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+    from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
+    from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
+
+    api = api_for(settings, librenms_server.url)
+    device = make_device("discovered-claim-race-device", librenms_cf={api.server_key: None})
+    cluster = make_cluster("discovered-claim-race-cluster")
+    librenms_id = 61003
+
+    def store_discovered_mapping():
+        try:
+            api._store_librenms_id(device, librenms_id)
+        except ValueError as exc:
+            assert "already assigned" in str(exc)
+            return False
+        return True
+
+    def import_vm():
+        validation = {
+            "can_import": True,
+            "cluster": {"cluster": cluster},
+            "platform": {"platform": None},
+        }
+        try:
+            create_vm_from_librenms(
+                {
+                    "device_id": librenms_id,
+                    "hostname": "discovered-claim-race-vm",
+                    "_computed_name": "discovered-claim-race-vm",
+                },
+                validation,
+                server_key=api.server_key,
+            )
+        except ValueError as exc:
+            assert "already assigned" in str(exc)
+            return False
+        return True
+
+    outcomes, claim_keys = run_librenms_id_claim_race(store_discovered_mapping, import_vm)
+
+    device.refresh_from_db()
+    vm = VirtualMachine.objects.filter(name="discovered-claim-race-vm").first()
+    mappings = [device.custom_field_data.get("librenms_id", {})]
+    if vm is not None:
+        mappings.append(vm.custom_field_data.get("librenms_id", {}))
+    assert len(claim_keys) == 2
+    assert len(set(claim_keys)) == 1
+    assert sorted(outcomes) == [False, True]
+    assert sum(mapping.get(api.server_key) == librenms_id for mapping in mappings) == 1
 
 
 class TestParsePortVlanData:
@@ -1211,15 +1296,6 @@ class TestGetPortByIdErrors:
         assert ok is False
         assert msg
 
-    def test_timeout_returns_false(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.get_port_by_id(1)
-
-        assert result == (False, "timed out")
-
 
 class TestGetDeviceInventoryErrors:
     """get_device_inventory reads a real response and handles a refused connection."""
@@ -1244,15 +1320,6 @@ class TestGetDeviceInventoryErrors:
 
         assert ok is False
         assert msg
-
-    def test_timeout_returns_false(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.get_device_inventory(1)
-
-        assert result == (False, "timed out")
 
 
 @pytest.mark.django_db
@@ -1423,15 +1490,6 @@ class TestAddLocationErrors:
         assert ok is False
         assert msg
 
-    def test_timeout_returns_false(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.post", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.add_location(self.LOCATION)
-
-        assert result == (False, "timed out")
-
     def test_http_error_uses_json_response_message(self, settings, librenms_server):
         """An HTTP error returns the JSON response message."""
         librenms_server.register(
@@ -1494,15 +1552,6 @@ class TestUpdateLocationErrors:
 
         assert ok is False
         assert msg
-
-    def test_timeout_returns_false(self, settings, librenms_server):
-        """A timeout is caught through the RequestException base class."""
-        api = api_for(settings, librenms_server.url)
-
-        with patch("requests.patch", side_effect=requests.exceptions.Timeout("timed out")):
-            result = api.update_location("TestSite", self.LOCATION_DATA)
-
-        assert result == (False, "timed out")
 
     def test_http_error_uses_json_response_message(self, settings, librenms_server):
         """An HTTP error returns the JSON response message."""

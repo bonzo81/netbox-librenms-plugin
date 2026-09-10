@@ -1029,6 +1029,34 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
 
 
 class TestUpdateDeviceLocationView:
+    def test_repeated_server_keys_refuse_location_write(self, client, settings):
+        """An ambiguous server selection must stop before the LibreNMS write."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+        configure_librenms_servers(
+            settings,
+            {
+                key: {"librenms_url": f"https://{key}.example", "api_token": "test-token"}
+                for key in ("primary", "secondary")
+            },
+        )
+        device = make_device("location-ambiguous-server", librenms_cf={"primary": 777, "secondary": 888})
+        original_site = device.site_id
+        client.force_login(make_superuser("location-ambiguous-user"))
+        with patch.object(LibreNMSAPI, "update_device_field", return_value=(True, "ok")) as update:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk]),
+                {"server_key": ["primary", "secondary"]},
+            )
+        assert response.status_code == 302
+        update.assert_not_called()
+        assert message_texts(response.wsgi_request, "error") == ["Selected LibreNMS server is no longer configured."]
+        device.refresh_from_db()
+        assert device.site_id == original_site
+
     def test_permission_denied_returns_early(self):
         from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
 
@@ -1094,10 +1122,11 @@ class TestUpdateDeviceLocationView:
         mock_msgs.error.assert_called_once()
 
     def test_device_no_site_shows_warning(self):
-        view, _mock_api = self._view_with_api()
+        view, mock_api = self._view_with_api()
 
         mock_device = MagicMock()
         mock_device.site = None
+        mock_api.get_librenms_id.return_value = 42
 
         with (
             patch(
@@ -2923,3 +2952,128 @@ class TestSyncSiteLocationViewGetQuerysetFilterset:
 
         assert response.status_code == 200
         assert [row.netbox_site.pk for row in response.context_data["table"].data] == [mine.pk]
+
+
+@pytest.mark.parametrize(
+    "prefix,version,credentials",
+    [
+        ("v1v2", "v2c", {"community": "test-community"}),
+        ("v3", "v3", {"authlevel": "noAuthNoPriv", "authname": "test-user"}),
+    ],
+)
+def test_add_device_posts_to_the_submitted_server(client, settings, prefix, version, credentials):
+    """Poller validation and the add request must use the server shown in the form."""
+    import json
+
+    from django.urls import reverse
+    from requests import Response
+
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+    configure_librenms_servers(
+        settings,
+        {
+            "primary": {"librenms_url": "https://primary.example", "api_token": "test-token"},
+            "secondary": {"librenms_url": "https://secondary.example", "api_token": "test-token"},
+        },
+    )
+    device = make_device("snmp-server-device")
+    client.force_login(make_superuser("snmp-server-user"))
+
+    def pollers(url, **kwargs):
+        response = Response()
+        response.status_code = 200
+        group = 22 if url.startswith("https://secondary.example/") else 11
+        response._content = json.dumps(
+            {
+                "status": "ok",
+                "get_poller_group": [
+                    {"id": group, "group_name": "Test pollers"},
+                ],
+            }
+        ).encode()
+        return response
+
+    added = Response()
+    added.status_code = 200
+    added._content = b'{"status": "ok"}'
+    data = _snmp_post(prefix, snmp_version=version, hostname="router.example", poller_group="22", **credentials)
+    data["server_key"] = "secondary"
+    with (
+        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=pollers),
+        patch(
+            "netbox_librenms_plugin.librenms_api.requests.post",
+            return_value=added,
+        ) as post,
+    ):
+        response = client.post(reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[device.pk]), data)
+    assert response.status_code == 302
+    post.assert_called_once()
+    assert post.call_args.args[0] == "https://secondary.example/api/v0/devices"
+    assert post.call_args.kwargs["json"]["poller_group"] == 22
+
+
+@pytest.mark.parametrize("server_keys", [["primary", "secondary"], ["retired"]])
+def test_add_device_rejects_ambiguous_or_removed_server_before_api_calls(client, settings, server_keys):
+    """A stale or ambiguous server selector must never send device credentials."""
+    from django.urls import reverse
+    from requests import Response
+
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+    configure_librenms_servers(
+        settings,
+        {
+            "primary": {"librenms_url": "https://primary.example", "api_token": "test-token"},
+            "secondary": {"librenms_url": "https://secondary.example", "api_token": "test-token"},
+        },
+    )
+    device = make_device("snmp-invalid-server")
+    client.force_login(make_superuser("snmp-invalid-server-user"))
+    external_response = Response()
+    external_response.status_code = 200
+    external_response._content = b'{"status": "ok", "get_poller_group": []}'
+    data = _snmp_post("v1v2", hostname="router.example", community="test-community")
+    data["server_key"] = server_keys
+    with (
+        patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=external_response) as get,
+        patch(
+            "netbox_librenms_plugin.librenms_api.requests.post",
+            return_value=external_response,
+        ) as post,
+    ):
+        response = client.post(reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[device.pk]), data)
+    assert response.status_code == 302
+    get.assert_not_called()
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("form_id", ["snmpv1v2-form", "snmpv3-form"])
+def test_rendered_snmp_form_carries_one_server_selection(client, settings, librenms_server, form_id):
+    """The browser must submit one server value to the strict device-add endpoint."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+    configure_librenms_servers(
+        settings,
+        {"primary": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
+    )
+    device = make_device("unmapped-snmp-form.example")
+    librenms_server.register(
+        f"/api/v0/devices/{device.name}", {"status": "error", "message": "Device not found"}, status=404
+    )
+    librenms_server.register("/api/v0/poller_group", {"status": "ok", "get_poller_group": []})
+    client.force_login(make_superuser("rendered-snmp-form-user"))
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]))
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    marker = html.index(f'id="{form_id}"')
+    form_start = html.rindex("<form", 0, marker)
+    form_end = html.index("</form>", marker)
+    inputs = open_tags(html[form_start:form_end], "input")
+    server_values = [field.get("value") for field in inputs if field.get("name") == "server_key"]
+    assert server_values == ["primary"]

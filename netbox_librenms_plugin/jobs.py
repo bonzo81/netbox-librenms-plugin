@@ -12,6 +12,17 @@ from netbox.jobs import JobRunner
 logger = logging.getLogger(__name__)
 
 
+def _build_job_api(server_key):
+    """Build a client for one exact configured server key."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.server_selection import parse_configured_server_key
+
+    parsed_server = parse_configured_server_key({"server_key": server_key})
+    if parsed_server.server_key is None:
+        raise ValueError("The job does not reference one configured LibreNMS server.")
+    return LibreNMSAPI(server_key=parsed_server.server_key)
+
+
 class FilterDevicesJob(JobRunner):
     """
     Background job for processing LibreNMS device filters with VC detection.
@@ -44,8 +55,8 @@ class FilterDevicesJob(JobRunner):
         vc_detection_enabled,
         clear_cache,
         show_disabled,
-        exclude_existing=False,
         server_key=None,
+        exclude_existing=False,
         use_sysname=True,
         strip_domain=False,
         **kwargs,
@@ -61,13 +72,12 @@ class FilterDevicesJob(JobRunner):
             clear_cache: Whether to force cache refresh
             show_disabled: Whether to include disabled devices
             exclude_existing: Whether to exclude devices that already exist in NetBox
-            server_key: Optional LibreNMS server key for multi-server setups
+            server_key: Exact configured LibreNMS server key, or None for a legacy queued job
             use_sysname: If True, prefer sysName over hostname for device name resolution
             strip_domain: If True, strip domain suffix from device names
             **kwargs: Additional job parameters
         """
         from netbox_librenms_plugin.import_utils import process_device_filters
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         self.logger.info("Starting LibreNMS device filter job")
         self.logger.info(f"Filters: {filters}")
@@ -80,7 +90,7 @@ class FilterDevicesJob(JobRunner):
             self.logger.info(f"Using LibreNMS server: {server_key}")
 
         # Initialize API client
-        api = LibreNMSAPI(server_key=server_key)
+        api = _build_job_api(server_key)
         self.logger.info(f"LibreNMS API initialized (cache timeout: {api.cache_timeout}s)")
 
         # Process filters using shared function
@@ -176,7 +186,7 @@ class ImportDevicesJob(JobRunner):
         Args:
             device_ids: List of LibreNMS device IDs to import as Devices
             vm_imports: Dict mapping device_id to cluster/role info for VM imports
-            server_key: Optional LibreNMS server key for multi-server setups
+            server_key: Exact configured LibreNMS server key, or None for a legacy queued job
             sync_options: Dict with sync_interfaces, sync_cables,
                 use_sysname, strip_domain, and vc_detection_enabled
             manual_mappings_per_device: Dict mapping device_id to manual_mappings dict
@@ -192,7 +202,6 @@ class ImportDevicesJob(JobRunner):
             required_import_permissions,
         )
         from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         total_count = len(device_ids) + len(vm_imports)
         self.logger.info(f"Starting LibreNMS import job for {total_count} devices/VMs")
@@ -211,7 +220,7 @@ class ImportDevicesJob(JobRunner):
             require_permissions(self.job.user, required_permissions, "import devices and VMs")
 
         # Initialize API client
-        api = LibreNMSAPI(server_key=server_key)
+        api = _build_job_api(server_key)
 
         # Import devices using shared function with job context
         device_result = {

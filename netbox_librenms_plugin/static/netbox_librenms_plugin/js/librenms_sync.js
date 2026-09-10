@@ -350,6 +350,7 @@ function syncCacheController() {
         invalidatedLocally: new Set(),
         failClosedTabs: new Set(),
         ownRevisions: new Set(),
+        pendingRestores: new Set(),
         requiredSourceFragments: new Set(),
         notifiedRevisions: new Set(),
         checking: null,
@@ -581,42 +582,149 @@ function renderedSyncCacheStatus() {
     }
 }
 
+const SYNC_CACHE_GENERATION_HEADER = 'X-Sync-Cache-Generation';
+const SYNC_CACHE_FRAGMENT_FAILED = 'Cache state could not be restored. Reload this tab before continuing.';
+
+/**
+ * Read the status generation a fragment load sent with its request.
+ *
+ * @param {CustomEvent} event - An htmx request lifecycle event.
+ * @returns {?number} The generation the loader sent, or null for any other request.
+ */
+function syncCacheFragmentGeneration(event) {
+    const header = event.detail?.requestConfig?.headers?.[SYNC_CACHE_GENERATION_HEADER];
+    return header === undefined ? null : Number(header);
+}
+
+/**
+ * Find the tab whose cached content an element holds.
+ *
+ * @param {?Element} element - Candidate cache content element.
+ * @returns {string|undefined} The tab id, or undefined when the element holds no cached content.
+ */
+function syncCacheTabForContent(element) {
+    const controller = syncCacheController();
+    if (!element || !controller) return undefined;
+    return Object.entries(controller.contract || {}).find(([, spec]) => spec.content_id === element.id)?.[0];
+}
+
+// NetBox imports htmx as a module, so there is no htmx global and HTML written with innerHTML keeps
+// no hx- bindings. The pane's hidden [data-fragment-loader] lets htmx request and swap the fragment,
+// which binds the restored forms like every other swap.
+/**
+ * Reload a tab's cached content through the pane's htmx loader, so the fragment gets a full swap lifecycle.
+ *
+ * @param {string} tab - Tab id to reload.
+ * @param {?number} statusGeneration - Status generation this load belongs to.
+ * @param {?AbortSignal} signal - Signal that cancels the load.
+ * @returns {Promise<void>} Rejects only when the signal aborts the load.
+ */
 function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
     const pane = document.getElementById(tab);
     const content = syncCacheContent(tab);
     const controller = syncCacheController();
-    if (!pane || !content || !controller || !pane.dataset.fragmentUrl) return Promise.resolve();
+    const loader = pane?.querySelector('[data-fragment-loader]');
+    if (!pane || !content || !controller || !loader) return Promise.resolve();
+    if (signal?.aborted) return Promise.reject(new Error('Cache fragment request aborted'));
     const requestGeneration = statusGeneration ?? controller.statusGeneration;
-    const url = new URL(pane.dataset.fragmentUrl, window.location.href);
-    url.searchParams.set('server_key', controller.root.dataset.serverKey);
-    // The fragment carries return_url links built from HX-Current-URL (tables/modules.py); fetch() sends no HTMX headers.
-    const fragmentHeaders = { 'X-Requested-With': 'XMLHttpRequest', 'HX-Current-URL': window.location.href };
+    loader.setAttribute('hx-vals', JSON.stringify({ server_key: controller.root.dataset.serverKey }));
+    // The fragment carries return_url links built from HX-Current-URL (tables/modules.py), which htmx sends itself.
+    // The generation header tells the body's htmx:afterSwap handler this swap answers a status check.
+    const fragmentHeaders = {
+        'X-Requested-With': 'XMLHttpRequest',
+        [SYNC_CACHE_GENERATION_HEADER]: String(requestGeneration),
+    };
     const fragmentCsrf = getCsrfToken();
     if (fragmentCsrf) fragmentHeaders['X-CSRFToken'] = fragmentCsrf;
-    return fetch(url, {
-        credentials: 'same-origin',
-        headers: fragmentHeaders,
-        signal,
-    })
-        .then(response => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return response.text();
-        })
-        .then(html => {
-            if (controller.statusGeneration !== requestGeneration) return;
-            content.innerHTML = html;
-            delete content.dataset.cacheEmpty;
-            controller.invalidatedLocally.delete(tab);
+    loader.setAttribute('hx-headers', JSON.stringify(fragmentHeaders));
+    return new Promise((resolve, reject) => {
+        let requestXhr = null;
+        let confirmFired = false;
+        const captureConfirm = () => { confirmFired = true; };
+        const captureRequest = event => { requestXhr = event.detail.xhr; };
+        const holdStaleResponse = event => {
+            if (event.detail.xhr === requestXhr && controller.statusGeneration !== requestGeneration) {
+                event.detail.shouldSwap = false;
+            }
+        };
+        const abortRequest = () => requestXhr?.abort();
+        const release = () => {
+            loader.removeEventListener('htmx:confirm', captureConfirm);
+            loader.removeEventListener('htmx:beforeRequest', captureRequest);
+            loader.removeEventListener('htmx:afterRequest', settleRequest);
+            loader.removeEventListener('htmx:sendAbort', settleAbort);
+            loader.removeEventListener('htmx:sendError', settleFailure);
+            loader.removeEventListener('htmx:timeout', settleFailure);
+            content.removeEventListener('htmx:beforeSwap', holdStaleResponse);
+            signal?.removeEventListener('abort', abortRequest);
+        };
+        const failClosed = message => {
+            console.error(message);
+            // Leaving the tab owed a restore lets the next status check re-issue the same failing
+            // request forever, so retire every claim on a retry. failClosedTabs is a separate
+            // disjunct in the recovery condition, so clearing invalidatedLocally alone still loops.
+            controller.pendingRestores.delete(tab);
             controller.failClosedTabs.delete(tab);
-            if (typeof htmx !== 'undefined') htmx.process(content);
-            initializeScripts();
-        })
-        .catch(error => {
-            if (signal?.aborted) throw error;
-            if (controller.statusGeneration !== requestGeneration) return;
-            console.error(error.message);
-            clearSyncTabContent(tab, 'Cache state could not be restored. Reload this tab before continuing.');
-        });
+            controller.invalidatedLocally.add(tab);
+            clearSyncTabContent(tab, SYNC_CACHE_FRAGMENT_FAILED);
+        };
+        function settleRequest(event) {
+            if (event.detail.xhr !== requestXhr) return;
+            if (event.detail.xhr.status === 0) return;
+            release();
+            if (signal?.aborted) {
+                reject(new Error('Cache fragment request aborted'));
+                return;
+            }
+            if (controller.statusGeneration === requestGeneration) {
+                if (event.detail.successful) {
+                    delete content.dataset.cacheEmpty;
+                    controller.invalidatedLocally.delete(tab);
+                    controller.failClosedTabs.delete(tab);
+                    controller.pendingRestores.delete(tab);
+                } else {
+                    failClosed(`HTTP ${event.detail.xhr.status}`);
+                }
+            }
+            resolve();
+        }
+        function settleAbort(event) {
+            if (event.detail.xhr !== requestXhr) return;
+            release();
+            if (signal?.aborted) {
+                reject(new Error('Cache fragment request aborted'));
+                return;
+            }
+            controller.pendingRestores.add(tab);
+            resolve();
+        }
+        function settleFailure(event) {
+            if (event.detail.xhr !== requestXhr) return;
+            release();
+            if (controller.statusGeneration === requestGeneration) failClosed('Cache fragment failed');
+            resolve();
+        }
+        loader.addEventListener('htmx:confirm', captureConfirm);
+        loader.addEventListener('htmx:beforeRequest', captureRequest);
+        loader.addEventListener('htmx:afterRequest', settleRequest);
+        loader.addEventListener('htmx:sendAbort', settleAbort);
+        loader.addEventListener('htmx:sendError', settleFailure);
+        loader.addEventListener('htmx:timeout', settleFailure);
+        content.addEventListener('htmx:beforeSwap', holdStaleResponse);
+        signal?.addEventListener('abort', abortRequest);
+        loader.dispatchEvent(new CustomEvent('librenms:load-fragment'));
+        if (requestXhr) return;
+        release();
+        // htmx fires htmx:confirm after the target check and before hx-sync, so a confirm with no request is a drop.
+        if (confirmFired) {
+            controller.pendingRestores.add(tab);
+            resolve();
+            return;
+        }
+        // htmx never processed the loader, so the tab cannot be restored.
+        if (controller.statusGeneration === requestGeneration) failClosed('Cache fragment loader is not bound');
+        resolve();
+    });
 }
 
 function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = null) {
@@ -631,7 +739,8 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = 
 
     Object.entries(nextStatus || {}).forEach(([tab, state]) => {
         const prior = previous[tab] || {};
-        const revisionChanged = Boolean(state.revision && state.revision !== prior.revision);
+        const restoreOwed = controller.pendingRestores.has(tab);
+        const revisionChanged = restoreOwed || Boolean(state.revision && state.revision !== prior.revision);
         const refreshChanged = Boolean(
             state.refresh_error_timestamp &&
             state.refresh_error_timestamp !== prior.refresh_error_timestamp
@@ -667,6 +776,7 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = 
             state.snapshot_available &&
             revisionChanged &&
             (
+                restoreOwed ||
                 !controller.ownRevisions.has(state.revision) ||
                 controller.requiredSourceFragments.has(tab)
             )
@@ -2578,7 +2688,6 @@ function handleModuleChange(select, value) {
 
             // Re-bind listeners because row controls (select/buttons/forms) were replaced.
             initializeVCMemberSelect();
-            initializeModuleReplaceButtons();
             initializeVCReportButtons();
         })
         .catch(error => {
@@ -3111,101 +3220,6 @@ function initializeInstallSelectedForm() {
 }
 
 /**
- * Tracks the in-flight AbortController for the module replace preview fetch.
- * Cancelled when a new Replace button is clicked before the previous fetch completes.
- */
-let _activeReplaceController = null;
-
-/**
- * Initialize Replace buttons on the module sync table.
- * Each button carries module/ent_index/server_key as data attributes and opens
- * the mismatch comparison modal by fetching the preview fragment from the server.
- */
-function initializeModuleReplaceButtons() {
-    document.querySelectorAll('.module-replace-btn').forEach(btn => {
-        if (btn.dataset.replaceInitialized) return;
-        btn.dataset.replaceInitialized = 'true';
-
-        btn.addEventListener('click', function () {
-            // Cancel any in-flight preview request before starting a new one
-            if (_activeReplaceController) {
-                _activeReplaceController.abort();
-            }
-            _activeReplaceController = new AbortController();
-            const signal = _activeReplaceController.signal;
-
-            const previewUrl = this.dataset.previewUrl;
-            const moduleId = this.dataset.moduleId;
-            const entIndex = this.dataset.entIndex;
-            const serverKey = this.dataset.serverKey;
-            const selectedDeviceId = this.dataset.selectedDeviceId;
-
-            const params = new URLSearchParams({
-                module_id: moduleId,
-                ent_index: entIndex,
-                server_key: serverKey,
-                selected_device_id: selectedDeviceId,
-            });
-
-            // Show shared HTMX modal with loading state
-            const modalContent = document.getElementById('htmx-modal-content');
-            if (modalContent) {
-                modalContent.innerHTML =
-                    '<div class="modal-header">' +
-                    '<h5 id="htmx-modal-label" class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
-                    '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
-                    '</div>' +
-                    '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
-                    '<i class="mdi mdi-loading mdi-spin mdi-36px"></i>' +
-                    '<p class="mt-2">Loading\u2026</p>' +
-                    '</div>';
-            }
-
-            showModal(document.getElementById('htmx-modal'));
-
-            // Fetch preview content and inject into modal body
-            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
-            const fetchHeaders = {};
-            if (csrfToken) {
-                fetchHeaders['X-CSRFToken'] = csrfToken;
-            }
-            fetch(`${previewUrl}?${params.toString()}`, {
-                signal,
-                headers: fetchHeaders,
-            })
-                .then(response => {
-                    if (!response.ok) return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
-                    return response.text();
-                })
-                .then(html => {
-                    const modalBody = document.getElementById('htmx-modal-body');
-                    if (modalBody) {
-                        modalBody.innerHTML = html;
-                        if (typeof htmx !== 'undefined') {
-                            htmx.process(modalBody);
-                        }
-                        updateHtmxModalLabel();
-                    }
-                })
-                .catch(err => {
-                    if (err.name === 'AbortError') return; // Superseded by a newer click — ignore
-                    const modalBody = document.getElementById('htmx-modal-body');
-                    if (modalBody) {
-                        const alert = document.createElement('div');
-                        alert.className = 'alert alert-danger';
-                        const icon = document.createElement('i');
-                        icon.className = 'mdi mdi-alert me-1';
-                        alert.appendChild(icon);
-                        alert.appendChild(document.createTextNode(err.message || 'Failed to load preview.'));
-                        modalBody.textContent = '';
-                        modalBody.appendChild(alert);
-                    }
-                });
-        });
-    });
-}
-
-/**
  * Tracks the in-flight AbortController for the VC report fetch.
  * Cancelled when a new VC report button is clicked before the previous fetch completes,
  * so spam-clicks don't race.
@@ -3332,11 +3346,6 @@ function initializeVCReportButtons() {
 }
 
 function closeHtmxModal() {
-    // Abort any in-flight module-replace preview request
-    if (typeof _activeReplaceController !== 'undefined' && _activeReplaceController) {
-        _activeReplaceController.abort();
-        _activeReplaceController = null;
-    }
     // Abort any in-flight VC report fetch
     if (typeof _activeVCReportController !== 'undefined' && _activeVCReportController) {
         _activeVCReportController.abort();
@@ -3374,7 +3383,6 @@ function initializeScripts() {
     initializeSyncFormSpinners();
     initializeVlanSyncGroupSelects();
     initializeInstallSelectedForm();
-    initializeModuleReplaceButtons();
     initializeVCReportButtons();
     initializeSyncCacheConsistency();
 }
@@ -3439,18 +3447,30 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
             controller.status = renderedStatus;
             controller.invalidatedLocally.clear();
             controller.requiredSourceFragments.clear();
+            controller.pendingRestores.clear();
         }
     }
-    const swappedTab = Object.entries(controller?.contract || {})
-        .find(([, spec]) => spec.content_id === event.target.id)?.[0];
+    const swappedTab = syncCacheTabForContent(event.target);
     if (swappedTab) {
-        if (controller) {
-            controller.invalidatedLocally.delete(swappedTab);
-            delete event.target.dataset.cacheEmpty;
-            checkSyncCacheStatus();
-        }
+        controller.invalidatedLocally.delete(swappedTab);
+        controller.failClosedTabs.delete(swappedTab);
+        controller.pendingRestores.delete(swappedTab);
+        delete event.target.dataset.cacheEmpty;
+        // A fragment load is the outcome of a status check, so its swap must not start another one.
+        if (syncCacheFragmentGeneration(event) === null) checkSyncCacheStatus();
     }
     initializeScripts();
+});
+
+document.body.addEventListener('htmx:afterRequest', function (event) {
+    const controller = syncCacheController();
+    const requestedTab = syncCacheTabForContent(event.detail?.target);
+    if (
+        controller &&
+        requestedTab &&
+        syncCacheFragmentGeneration(event) === null &&
+        controller.pendingRestores.has(requestedTab)
+    ) checkSyncCacheStatus();
 });
 
 // Update HTMX modal accessible label after content loads so screen readers
@@ -3481,6 +3501,83 @@ document.addEventListener('htmx:afterSettle', function (event) {
             showModal(htmxModal);
         }
     }
+});
+
+/**
+ * Extract a human-readable error message from a failed HTMX request, like fetchErrorMessage does.
+ * @param {XMLHttpRequest} xhr
+ * @returns {string}
+ */
+function xhrErrorMessage(xhr) {
+    const ct = (xhr.getResponseHeader('Content-Type') || '').toLowerCase();
+    let msg = xhr.responseText || `HTTP ${xhr.status}`;
+    if (ct.includes('application/json')) {
+        try { const d = JSON.parse(xhr.responseText); msg = d.error || d.message || d.detail || msg; } catch (_) {}
+    }
+    if (msg.length > 300) msg = msg.slice(0, 300) + '...';
+    return msg;
+}
+
+// HTMX never swaps a 4xx/5xx answer, so a failed modal fetch would leave the modal closed and silent.
+function showHtmxModalError(message) {
+    const modalContent = document.getElementById('htmx-modal-content');
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    const title = document.createElement('h5');
+    title.className = 'modal-title';
+    title.textContent = 'Request failed';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'btn-close';
+    close.setAttribute('aria-label', 'Close');
+    close.addEventListener('click', closeHtmxModal);
+    header.appendChild(title);
+    header.appendChild(close);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+    const alert = document.createElement('div');
+    alert.className = 'alert alert-danger';
+    // Announce the failure: the modal opens without focus moving into it, so assistive
+    // technology would otherwise report nothing at all.
+    alert.setAttribute('role', 'alert');
+    const icon = document.createElement('i');
+    icon.className = 'mdi mdi-alert me-1';
+    alert.appendChild(icon);
+    alert.appendChild(document.createTextNode(message));
+    body.appendChild(alert);
+
+    modalContent.textContent = '';
+    modalContent.appendChild(header);
+    modalContent.appendChild(body);
+    // #htmx-modal is labelled by #htmx-modal-label, which lives outside the replaced content.
+    // Copy this header into it or the dialog loses its accessible name after an error swap.
+    updateHtmxModalLabel();
+    showModal(document.getElementById('htmx-modal'));
+}
+
+function htmxModalErrorTarget(event) {
+    const modalContent = document.getElementById('htmx-modal-content');
+    return modalContent && event.detail.target === modalContent ? modalContent : null;
+}
+
+document.body.addEventListener('htmx:responseError', function (event) {
+    if (!htmxModalErrorTarget(event)) return;
+    showHtmxModalError(xhrErrorMessage(event.detail.xhr));
+});
+
+// A request that never reaches the server (DNS, TLS, a redirect loop, a dropped connection) raises
+// sendError or timeout instead of responseError. Without these the click leaves no modal and no
+// message, so the button reads as dead.
+document.body.addEventListener('htmx:sendError', function (event) {
+    if (!htmxModalErrorTarget(event)) return;
+    showHtmxModalError('Could not reach the server. The request failed before any response arrived.');
+});
+
+document.body.addEventListener('htmx:timeout', function (event) {
+    if (!htmxModalErrorTarget(event)) return;
+    showHtmxModalError('The request timed out before the server answered.');
 });
 
 // Event delegation for LAG and parent interface sync buttons.

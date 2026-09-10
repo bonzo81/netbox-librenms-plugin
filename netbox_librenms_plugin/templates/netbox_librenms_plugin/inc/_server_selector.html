@@ -1,0 +1,32 @@
+<div class="dropdown" id="librenms-server-selector" data-active-server-key="{{ server_key|default:'' }}">
+    <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown"
+            aria-expanded="false">
+        <i class="mdi mdi-server-network me-1"></i>
+        {% if server_selection_active_name %}
+            {{ server_selection_active_name }}
+        {% elif librenms_server_info %}
+            {{ librenms_server_info.display_name }}
+        {% else %}
+            Select server
+        {% endif %}
+    </button>
+    <ul class="dropdown-menu dropdown-menu-end">
+        {% for mapping in all_server_mappings %}
+        <li>
+            {% if mapping.is_active and mapping.is_selectable %}
+            <span class="dropdown-item active" aria-current="true">
+                <i class="mdi mdi-check me-1"></i>{{ mapping.display_name }}
+            </span>
+            {% elif mapping.is_selectable %}
+            <a class="dropdown-item" href="{{ request.path }}?{% if active_sync_tab %}tab={{ active_sync_tab|urlencode }}&amp;{% endif %}server_key={{ mapping.server_key|urlencode }}">
+                {{ mapping.display_name }}
+            </a>
+            {% else %}
+            <span class="dropdown-item disabled" aria-disabled="true">
+                <i class="mdi mdi-server-off me-1"></i>{{ mapping.display_name }}
+            </span>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</div>

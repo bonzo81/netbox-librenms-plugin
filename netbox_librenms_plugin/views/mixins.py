@@ -12,8 +12,8 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.utils import coerce_model_pk, is_list_of_dicts
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
+from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, is_list_of_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -516,6 +516,33 @@ class LibreNMSAPIMixin:
             self._librenms_api = LibreNMSAPI()
         return self._librenms_api
 
+    def resolve_librenms_id(self, obj):
+        """Return a normalized LibreNMS ID or a user-facing assignment error."""
+        try:
+            return coerce_librenms_id(self.librenms_api.get_librenms_id(obj)), None
+        except LibreNMSIDConflictError as exc:
+            return None, LibreNMSLookupError(
+                str(exc),
+                conflict=getattr(exc, "conflict", None),
+                named_message=getattr(exc, "named_message", None),
+            )
+
+    def scoped_lookup_message(self, error):
+        """Return a lookup message, naming a conflicting object only when this user may view it."""
+        message = getattr(error, "message", None) or str(error)
+        conflict = getattr(error, "conflict", None)
+        named = getattr(error, "named_message", None)
+        scope = getattr(self, "restricted_queryset", None)
+        if conflict is None or not named or scope is None:
+            return message
+        # Fail closed: without a readable row the generic message stands, so a view that cannot
+        # scope never discloses the owner.
+        try:
+            visible = scope(type(conflict), "view").filter(pk=conflict.pk).exists()
+        except (AttributeError, TypeError, ValueError):
+            return message
+        return named if visible else message
+
     def _render_server_key(self):
         """
         Resolve the LibreNMS ``server_key`` for cache/query scoping, degrading to ``None``.
@@ -673,6 +700,27 @@ class LibreNMSAPIMixin:
         # ever does set it explicitly, that value still wins (defensive — no caller relies on it).
         merged = {"has_write_permission": self.has_write_permission(), **context}
         return render(request, self.partial_template_name, {**merged, **build_migrated_context(obj, server_key)})
+
+    def rebind_api_for_posted_server(self, data):
+        """
+        Rebind ``self.librenms_api`` to a strictly parsed posted ``server_key``.
+
+        ``QueryDict.get()`` keeps only the last of repeated values, so a payload carrying two
+        configured keys would silently bind one server and its cache namespace. An ambiguous
+        selection has no correct answer, so this reports it instead of choosing.
+
+        Args:
+            data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an
+                optional ``server_key``.
+
+        Returns:
+            str | None: The resolved server key, or ``None`` when the selection is unusable.
+        """
+        getlist = getattr(data, "getlist", None)
+        values = getlist("server_key") if callable(getlist) else None
+        if isinstance(values, (list, tuple)) and len(values) > 1:
+            return None
+        return self.rebind_api_for_server(data.get("server_key"))
 
     def rebind_api_for_server(self, server_key):
         """

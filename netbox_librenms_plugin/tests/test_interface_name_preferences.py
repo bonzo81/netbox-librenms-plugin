@@ -6,9 +6,11 @@ from copy import deepcopy
 import pytest
 from dcim.models import Platform
 from django.test import RequestFactory
+from django.test.html import parse_html
 from django.urls import reverse
 
 from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.utils import get_interface_name_field, mark_librenms_migrated
 
@@ -162,6 +164,50 @@ def test_the_swapped_tab_region_carries_the_active_tab_marker(client, settings, 
     # The marker sits on the element hx-select/hx-target name, so an innerHTML swap would
     # leave the previous tab's value behind and activeSyncTab() would report the wrong tab.
     assert f'data-active-tab="{tab}"' in region
+
+
+def _pane_fragment_loaders(html):
+    """Map each rendered sync pane to the [data-fragment-loader] elements it contains."""
+    panes = {}
+
+    def walk(node, pane):
+        if not hasattr(node, "children"):
+            return
+        attributes = dict(node.attributes)
+        if "tab-pane" in (attributes.get("class") or "").split() and "data-tab-id" in attributes:
+            pane = attributes["data-tab-id"]
+            panes.setdefault(pane, [])
+        if pane and "data-fragment-loader" in attributes:
+            panes[pane].append(attributes)
+        for child in node.children:
+            walk(child, pane)
+
+    walk(parse_html(html), None)
+    return panes
+
+
+@pytest.mark.django_db
+def test_every_sync_pane_carries_one_htmx_fragment_loader(client, settings):
+    """Restored cache content is only HTMX-bound when HTMX swaps it, so every pane needs its loader."""
+    device, sync_url = _sync_page(settings, "fragment-loader")
+    client.force_login(make_superuser("fragment-loader-user"))
+
+    response = client.get(sync_url, {"tab": "interfaces", "server_key": "default"})
+
+    assert response.status_code == 200
+    panes = _pane_fragment_loaders(response.content.decode())
+    assert set(panes) == {tab.value for tab in TAB_SPECS}
+    for tab, loaders in panes.items():
+        assert len(loaders) == 1, f"{tab} pane must hold exactly one fragment loader"
+        loader = loaders[0]
+        assert loader["hx-get"] == reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": device.pk, "tab": tab},
+        )
+        assert loader["hx-trigger"] == "librenms:load-fragment"
+        assert loader["hx-target"] == f"#{TAB_SPECS[SyncTab(tab)].content_id}"
+        assert loader["hx-sync"] == f"#{TAB_SPECS[SyncTab(tab)].content_id}:abort"
+        assert loader["hx-swap"] == "innerHTML"
 
 
 def _post_preference(client, value, platform_id=None):

@@ -5,9 +5,10 @@ import django_tables2 as tables
 from dcim.models import Device
 from dcim.tables import DeviceTable
 from django.urls import reverse
-from django.utils.html import escape
+from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django_tables2 import Column
+from netbox.tables.columns import ToggleColumn
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_sync_device
@@ -118,8 +119,11 @@ class DeviceImportTable(tables.Table):
 
         The role/cluster/rack selects hx-post to DeviceRole/Cluster/RackUpdateView, which
         rebind to the POSTed server_key before re-fetching/re-validating the row. Without
-        this value the rebind falls back to the global selected server — with overlapping
+        this value the rebind falls back to the global selected server. With overlapping
         device_ids across servers that live-fetches and caches the WRONG server's device.
+
+        Returns:
+            str: The escaped hx-vals attribute, or an empty string when no server key is set.
         """
         server_key = getattr(self, "server_key", None)
         if not server_key:
@@ -162,12 +166,37 @@ class DeviceImportTable(tables.Table):
             if isinstance(self.data, list):
                 self.data.sort(key=sort_key, reverse=reverse)
 
-    # Selection checkbox
-    selection = Column(
+    selection = ToggleColumn(
         verbose_name="",
-        empty_values=(),
+        default="",
+        visible=True,
         orderable=False,
         accessor="device_id",
+        attrs={
+            "th": {"class": "w-1", "aria-label": "Select all"},
+            "td": {"class": "w-1"},
+            "input": {"name": "select"},
+            "td__input": {
+                "name": "select",
+                "class": lambda record: (
+                    "form-check-input device-select"
+                    if record.get("_validation", {}).get("can_import", False)
+                    else "form-check-input"
+                ),
+                "disabled": lambda record: (
+                    None if record.get("_validation", {}).get("can_import", False) else "disabled"
+                ),
+                "title": lambda record: (
+                    None if record.get("_validation", {}).get("can_import", False) else "Cannot import this device"
+                ),
+                "aria-label": lambda record: (
+                    f"Select {record.get('hostname') or record.get('sysName') or record.get('device_id')}"
+                ),
+                "data-device-id": lambda record: record.get("device_id"),
+                "data-hostname": lambda record: record.get("hostname", ""),
+                "data-sysname": lambda record: record.get("sysName", ""),
+            },
+        },
     )
 
     # LibreNMS device fields
@@ -216,38 +245,24 @@ class DeviceImportTable(tables.Table):
         accessor="device_id",
     )
 
-    def render_selection(self, value, record):
-        """
-        Render selection checkbox.
-        Disabled if device can't be imported.
-        """
-        validation = record.get("_validation", {})
-        can_import = validation.get("can_import", False)
-        device_id = record.get("device_id")
-        hostname = record.get("hostname", "")
-        sysname = record.get("sysName", "")
-
-        if can_import:
-            return mark_safe(
-                f'<input type="checkbox" name="select" value="{device_id}" '
-                f'class="form-check-input device-select" data-device-id="{device_id}" '
-                f'data-hostname="{hostname}" data-sysname="{sysname}">'
-            )
-        else:
-            return mark_safe(
-                '<input type="checkbox" disabled class="form-check-input" title="Cannot import this device">'
-            )
-
     def render_hostname(self, value, record):
         """Render hostname with link to LibreNMS if available."""
-        return mark_safe(f"<strong>{value}</strong>")
+        return format_html("<strong>{}</strong>", value)
 
     def render_netbox_cluster(self, value, record):
         """
         Render cluster selection dropdown.
+
         Default is "-- Device (not VM) --" (empty value).
         If a cluster is selected, the device will be imported as a VM.
         If no cluster is selected, the device will be imported as a Device.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered cluster selection HTML.
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -313,8 +328,16 @@ class DeviceImportTable(tables.Table):
     def render_netbox_role(self, value, record):
         """
         Render role selection dropdown.
+
         For Devices: Role is required
         For VMs: Role is optional
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered role selection HTML.
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -381,8 +404,16 @@ class DeviceImportTable(tables.Table):
     def render_netbox_rack(self, value, record):
         """
         Render rack selection dropdown (optional).
+
         Shows racks for the matched site in "Location - Rack" format.
         Only shown for devices (not VMs) and when site is matched.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered rack selection HTML.
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -456,8 +487,16 @@ class DeviceImportTable(tables.Table):
     def render_actions(self, value, record):
         """
         Render action buttons for import using HTMX.
+
         Shows Import button if can import, otherwise shows Preview/Configure.
         Permission checks are handled by backend require_write_permission() which shows toast.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered import action HTML.
         """
         validation = record.get("_validation", {})
         device_id = record.get("device_id")
@@ -677,6 +716,9 @@ class DeviceImportTable(tables.Table):
             "plugins:netbox_librenms_plugin:device_vc_details",
             kwargs={"device_id": device_id},
         )
+        server_key = getattr(self, "server_key", None)
+        if server_key:
+            vc_url += f"?server_key={quote_plus(str(server_key))}"
 
         # Show error button if detection failed
         if vc_data.get("detection_error"):
@@ -792,6 +834,9 @@ class DeviceImportTable(tables.Table):
         # Add row attributes to give each row a unique ID for HTMX targeting
         row_attrs = {
             "id": lambda record: f"device-row-{record.get('device_id')}",
+            "data-device-id": lambda record: record.get("device_id"),
+            "data-hostname": lambda record: record.get("hostname", ""),
+            "data-sysname": lambda record: record.get("sysName", ""),
         }
 
         fields = (
