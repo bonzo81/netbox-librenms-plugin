@@ -68,6 +68,8 @@ class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
   - VLAN modals: `openVlanDetailModal()`, `verifyVlanInGroup()`, `verifyVlanSyncGroup()` — per-interface VLAN detail editing.
   - Bulk operations: `initializeBulkEditApply()`, `deleteSelectedInterfaces()`.
   - Table filtering: `initializeTableFilters()`, `filterTable()` — client-side row filtering.
-  - URL/tab state: `initializeTabs()`, `getDeviceIdFromUrl()`, `setInterfaceNameFieldFromURL()`.
+  - URL/tab state: `activeSyncTab()`, `getDeviceIdFromUrl()`, `setInterfaceNameFieldFromURL()`.
+    Tab activation is server-rendered: the swapped container carries `data-active-tab`, and
+    `activeSyncTab()` reads it. There is no client-side tab initializer.
   - Cache countdowns: `initializeCountdown()`, `initializeCountdowns()`.
 - CSRF token extracted via `document.querySelector('[name=csrfmiddlewaretoken]').value`.
