@@ -12,6 +12,11 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.exceptions import PermissionsViolation
 
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -64,6 +69,17 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         - action: 'create_vlans'
         - select: List of VLAN IDs to create
         - vlan_group_{vid}: Per-row VLAN group selection
+
+        Args:
+            request (HttpRequest): The request that contains the VLAN synchronization data.
+            object_type (str): The type of the target object.
+            object_id (int): The target object's ID.
+
+        Returns:
+            HttpResponse: A permission error response or a redirect after synchronization.
+
+        Raises:
+            Http404: If the object type is invalid or no permitted device matches the object ID.
         """
         self.required_object_permissions = {"POST": self._required_post_permissions(request)}
 
@@ -107,6 +123,15 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         Handle creating selected VLANs in NetBox.
 
         Reads per-row VLAN group selections from form fields named 'vlan_group_{vid}'.
+
+        Args:
+            request (HttpRequest): The request that contains the selected VLAN data.
+            obj (Device): The device that owns the synchronization request.
+            object_type (str): The type of the target object.
+            object_id (int): The target object's ID.
+
+        Returns:
+            HttpResponse: A redirect to the VLAN synchronization page.
         """
         selected_vlans = request.POST.getlist("select")
 
@@ -316,4 +341,11 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         else:
             messages.warning(request, "No VLANs were created or updated.")
 
-        return self._redirect(object_type, object_id)
+        if created_count or updated_count:
+            schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.VLANS,
+                self._post_server_key,
+            )
+        return apply_request_cache_transition(request, self._redirect(object_type, object_id))

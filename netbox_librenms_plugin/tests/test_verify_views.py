@@ -671,18 +671,18 @@ class TestSingleInterfaceVerifyView:
         assert "stale-display-name" not in row["name"]
 
     @pytest.mark.django_db
-    def test_table_and_verify_resolve_the_same_stable_id_row(self, client):
+    def test_table_and_verify_resolve_the_same_stable_id_row(self, client, settings):
         """The table and verify endpoint must prefer the same stable-ID interface."""
         from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        server_key = configure_default_librenms_server(settings)
         device = make_device("verify-table-resolution")
         stable_match = make_interface(device, "NetBoxStable")
         name_candidate = make_interface(device, "Ethernet1")
@@ -831,7 +831,6 @@ class TestSingleInterfaceVerifyView:
 
     @pytest.mark.django_db
     def test_plugin_read_only_user_never_receives_relationship_write_button(self):
-        from django.apps import apps
         from django.core.cache import cache
         from dcim.models import Device, Interface
 
@@ -857,8 +856,9 @@ class TestSingleInterfaceVerifyView:
             [("view", Device), ("view", Interface), ("change", Interface)],
             plugin_write=False,
         )
-        settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
-        user = grant(user, "view", settings_model)
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        user = grant(user, "view", LibreNMSSettings)
         snapshot = {
             "ports": [
                 {
@@ -1079,14 +1079,18 @@ class TestSingleInterfaceVerifyView:
         assert f"/dcim/devices/{hidden_device.pk}/" not in body
 
     @pytest.mark.django_db
-    def test_hidden_related_owner_stays_unavailable_through_verify_and_inline_post(self):
+    def test_hidden_related_owner_stays_unavailable_through_verify_and_inline_post(self, settings):
         from types import SimpleNamespace
 
         from django.core.cache import cache
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_default_librenms_server,
+            make_interface,
+            make_virtual_chassis_members,
+        )
         from netbox_librenms_plugin.tests.view_test_helpers import (
             grant,
             make_request,
@@ -1102,9 +1106,7 @@ class TestSingleInterfaceVerifyView:
         )
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(hidden_parent_device, "Ethernet2")
-        # Use the real configured key. The devcontainer names it ``stub`` while CI names it
-        # ``default``; a hardcoded key makes the request fail before the permission behavior.
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        server_key = configure_default_librenms_server(settings)
         set_librenms_device_id(child, 10, server_key)
         set_librenms_device_id(parent, 20, server_key)
         child.save()
@@ -1237,14 +1239,14 @@ class TestSingleInterfaceVerifyView:
         assert json.loads(response.content)["status"] == "error"
 
     @pytest.mark.django_db
-    def test_view_only_non_lag_target_never_receives_lag_promotion_button(self):
+    def test_view_only_non_lag_target_never_receives_lag_promotion_button(self, settings):
         from types import SimpleNamespace
 
         from django.core.cache import cache
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import (
             grant,
             make_request,
@@ -1255,7 +1257,7 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
-        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        server_key = configure_default_librenms_server(settings)
         device = make_device("verify-view-only-lag-target")
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="other")
@@ -1507,16 +1509,7 @@ def _make_gate_vm(name="ipgate-vm"):
 
 @pytest.mark.django_db
 class TestSingleIPAddressVerifyObjectPermissionGate:
-    """SingleIPAddressVerifyView must gate POST on dcim.view_device.
-
-    The read-only verify endpoint resolves an arbitrary ``device_id`` from the
-    JSON body and returns that object's name/url/cached rows. Without the gate a
-    caller with only plugin-view rights could probe and read back objects they
-    cannot see (mirrors the interface/module/cable verify views' hardening).
-
-    These exercise the REAL gate end-to-end: a real Device, a real (non-super)
-    user, real NetBox ObjectPermission grants and real ``has_perm`` — no mocks.
-    """
+    """SingleIPAddressVerifyView requires dcim.view_device before it reveals a JSON-selected device."""
 
     def _post(self, user, device_id, object_type=None):
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
@@ -1630,11 +1623,7 @@ class TestSingleIPAddressVerifyObjectPermissionGate:
 
 @pytest.mark.django_db
 class TestSingleIPAddressVerifyServerKeyCacheNamespace:
-    """The verify POST must validate server_key before using it as a cache namespace.
-
-    A forged/unconfigured key must not let a caller address an arbitrary server-key cache
-    namespace; it falls back to a configured server (mirrors the sync/cable hardening).
-    """
+    """An unconfigured server key cannot select an arbitrary IP verification cache namespace."""
 
     def test_forged_server_key_falls_back_to_configured_namespace(self):
         from unittest.mock import patch
@@ -1739,12 +1728,7 @@ def _json_post(url, body, user):
 
 @pytest.mark.django_db
 class TestVerifyEndpointsServerKeyGuard:
-    """A forged/non-string server_key must fall back, not 500 (mirrors the cable/IP siblings).
-
-    A JSON array server_key is unhashable: routed into get_librenms_sync_device it reaches
-    cf_dict.get(["a"]) and raises TypeError, turning these endpoints into 500s where the
-    hardened siblings degrade. A forged string key must also never scope cache access.
-    """
+    """Verify endpoints reject forged or non-string server keys without a 500 or arbitrary cache access."""
 
     def test_interface_verify_unhashable_server_key_degrades(self):
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
@@ -1891,12 +1875,7 @@ class TestInterfaceVerifyMalformedPortsCache:
 
 @pytest.mark.django_db
 class TestVerifyViewObjectScope:
-    """A *constrained* view_device grant must not resolve out-of-scope devices in the verify views.
-
-    require_object_permissions_json only checks the model-level view_device perm, so a pk/site-scoped
-    grant clears the gate. The device lookup must then object-scope via restrict() so an out-of-scope
-    pk 404s instead of leaking that device's cached verify payload — even when its cache is warm.
-    """
+    """Verify views restrict device lookup so constrained grants cannot reveal cached data outside their object scope."""
 
     SERVER_KEY = "default"  # the only configured server in the test env
 
@@ -1977,12 +1956,7 @@ class TestVerifyViewObjectScope:
 
 @pytest.mark.django_db
 class TestSaveVlanGroupOverridesObjectScope:
-    """SaveVlanGroupOverridesView WRITES overrides, so it must object-scope the device too.
-
-    require_write_permission_json only checks plugin-wide write access, so a plugin-writer with a
-    *constrained* view_device grant could otherwise persist VLAN overrides for a device they can't
-    see. The lookup must go through restrict() so an out-of-scope pk 404s.
-    """
+    """SaveVlanGroupOverridesView blocks plugin writers from updating devices outside their view scope."""
 
     SERVER_KEY = "default"
 
@@ -1991,11 +1965,10 @@ class TestSaveVlanGroupOverridesObjectScope:
         """A real user with plugin write access AND a pk-constrained view_device grant (no superuser)."""
         from core.models import ObjectType
         from dcim.models import Device
-        from django.apps import apps
         from django.contrib.auth import get_user_model
         from users.models import ObjectPermission
 
-        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+        from netbox_librenms_plugin.models import LibreNMSSettings
 
         user = get_user_model().objects.create_user(username="scoped-writer", password="x")
 

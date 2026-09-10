@@ -15,6 +15,7 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_interface_by_port_id,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
     make_device,
     make_interface,
     make_virtual_chassis_members,
@@ -245,39 +246,15 @@ def test_vlan_apply_all_skips_groups_unavailable_to_a_target_row():
     assert "if (newGroupId && !matchedGroup) return;" in handler
 
 
-def test_reenabling_relationship_autoselect_replays_checked_rows():
-    """Checked children rebuild cross-page parent inputs when auto-select is re-enabled."""
-    import re
-
-    handler = _js_block(
-        _js_source(),
-        "// Keep cross-page parent notices symmetric",
-        "Show a brief inline notice",
-    )
-    assert re.search(r"toggle\.matches\(\s*['\"]#autoSelectLagMembers['\"]\s*\)", handler), (
-        "toggle handler must key on #autoSelectLagMembers"
-    )
-    assert re.search(r"if\s*\(\s*toggle\.checked\s*\)", handler), "re-enable branch must gate on toggle.checked"
-    # Backreference pins the string closing after the disabled-row exclusion. A suffix such as
-    # :not(*) (valid CSS, matches nothing) must fail this instead of slipping past a prefix check.
-    assert re.search(
-        r"querySelectorAll\(\s*(['\"])input\[name=.select.\]:checked:not\(:disabled\)\1\s*\)",
-        handler,
-    ), "re-enable branch must replay exactly the checked, enabled rows"
-    assert re.search(r"dispatchEvent\(\s*new\s+Event\(\s*['\"]change['\"]\s*,\s*\{\s*bubbles:\s*true", handler), (
-        "replay must re-dispatch a bubbling change event"
-    )
-
-
 def test_cross_page_parent_does_not_copy_child_member_target():
     """An off-page parent is resolved independently instead of inheriting the child's owner."""
     handler = _js_block(
         _js_source(),
-        "// --- Sub-interface: select parent when checking ---",
-        "// --- Sub-interface: undo parent auto-selection",
+        "function refreshRequiredSelections()",
+        "function _propagateToLagMembers(",
     )
 
-    assert "_showParentCrossPageNotice" in handler
+    assert "_showRequiredRowCrossPageNotice" in handler
     assert "auto_parent_port_id" not in handler
     assert "device_selection_" not in handler
 
@@ -309,7 +286,7 @@ def test_cross_page_parent_notice_close_button_has_accessible_name():
 
     notice = _js_block(
         _js_source(),
-        "function _showParentCrossPageNotice(parentName)",
+        "function _showRequiredRowCrossPageNotice(relatedName, kind)",
         "// VIRTUAL CHASSIS & VRF HANDLING",
     )
     assert re.search(
@@ -318,24 +295,20 @@ def test_cross_page_parent_notice_close_button_has_accessible_name():
     )
 
 
-def test_relationship_row_selectors_are_css_escaped():
-    import re
+def test_relationship_rows_are_matched_without_interpolated_selectors():
+    """Requirement resolution indexes the rows instead of building a selector per port id.
 
-    handler = _js_block(
-        _js_source(),
-        "// --- Sub-interface: select parent when checking ---",
-        "// Keep cross-page parent notices symmetric",
-    )
+    The behaviour this protects (a port id that carries selector metacharacters still cascades)
+    is exercised for real in tests/browser/test_sync_cache_browser.py; this pins the structure
+    that makes it safe: no port id reaches a selector at all.
+    """
     source = _js_source()
-    assert 'data-member-of-lag="' + "' + CSS.escape(portId)" in source, (
-        "the LAG-member selector must CSS.escape the port id"
-    )
-    assert source.count('data-port-id="' + "' + CSS.escape(parentPortId)") == 2, (
-        "both parent-row selectors must CSS.escape the port id"
-    )
-    assert re.search(r"data-parent-port-id=\"'\s*\+\s*CSS\.escape\(parentPortId\)", handler), (
-        "the sibling-row attribute selector must CSS.escape the port id"
-    )
+    handler = _js_block(source, "function refreshRequiredSelections()", "function _propagateToLagMembers(")
+
+    assert "querySelectorAll(" not in handler, "requirement lookups must go through the row index"
+    assert 'data-member-of-lag="' not in source, "member lookups must go through the member index"
+    # The one CSS.escape left keys the cross-page notice on an interface name, not on a port id.
+    assert source.count("CSS.escape(") == 1, "no port id may be interpolated into a selector"
 
 
 def test_interface_select_all_has_one_change_handler():
@@ -529,7 +502,7 @@ class TestSyncInterfacesViewGetCachedPortsData:
 class TestInterfaceContextOOBRows:
     """get_context_data must not let OOB-controller rows hide / falsely-match main-device interfaces in the netbox-only reconciliation set."""
 
-    def _make_view(self):
+    def _make_view(self, *, real_cache_keys=False):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
@@ -554,9 +527,10 @@ class TestInterfaceContextOOBRows:
         view._add_vlan_group_selection = MagicMock()
         view._add_missing_vlans_info = MagicMock()
         view.get_table = MagicMock(return_value=MagicMock())
-        view.get_cache_key = MagicMock(return_value="ports-key")
-        view.get_last_fetched_key = MagicMock(return_value="lf-key")
-        view.get_vlan_overrides_key = MagicMock(return_value="ov-key")
+        if not real_cache_keys:
+            view.get_cache_key = MagicMock(return_value="ports-key")
+            view.get_last_fetched_key = MagicMock(return_value="lf-key")
+            view.get_vlan_overrides_key = MagicMock(return_value="ov-key")
         return view
 
     @staticmethod
@@ -613,18 +587,23 @@ class TestInterfaceContextOOBRows:
         assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
 
     def test_oob_row_does_not_hide_netbox_only_interface(self):
-        view = self._make_view()
+        from django.core.cache import cache
+        from django.utils import timezone
+
+        view = self._make_view(real_cache_keys=True)
         obj = self._host_with_idrac()
         cached = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
         req = _make_request()
 
-        def cache_get(key):
-            return cached if key == "ports-key" else ({} if key == "ov-key" else None)
-
-        with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-            mock_cache.get.side_effect = cache_get
-            mock_cache.ttl.return_value = None
+        cache_key = view.get_cache_key(obj, "ports", "default")
+        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
+        cache.set(cache_key, cached)
+        cache.set(last_fetched_key, timezone.now())
+        try:
             ctx = view.get_context_data(req, obj, "ifName", "default")
+        finally:
+            cache.delete(cache_key)
+            cache.delete(last_fetched_key)
 
         names = {i["name"] for i in ctx["netbox_only_interfaces"]}
         assert "idrac0" in names  # OOB row must not suppress the main-device interface
@@ -1556,10 +1535,7 @@ class TestInterfaceContextOOBRows:
         assert source.parent_id is None
 
     def test_fresh_data_renders_without_reading_cache(self):
-        """On the OOB-ports-fetch-failure path the (partial) cache is deleted, so
-        get_context_data must render from the in-memory fresh_data snapshot instead of
-        reading the now-empty cache — otherwise the table renders empty under a
-        "showing host interfaces" banner."""
+        """Fresh data renders the partial OOB snapshot after the failed fetch deletes its cache entry."""
         view = self._make_view()
         obj = self._host_with_idrac()
         fresh = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
@@ -1581,37 +1557,55 @@ class TestInterfaceContextOOBRows:
 
     def test_malformed_port_stack_relationships_does_not_crash(self):
         """A cached snapshot whose port_stack_relationships is None / a non-dict (corruption, partial write, format migration) must fail soft, not AttributeError on the .get('lag_members') calls."""
-        view = self._make_view()
+        from django.core.cache import cache
+        from django.utils import timezone
+
+        view = self._make_view(real_cache_keys=True)
         obj = self._host_with_idrac()
         req = _make_request()
 
-        for bad in (None, ["not", "a", "dict"], "garbage"):
-            fresh = {
-                "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
-                "port_stack_relationships": bad,
-            }
-            with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                mock_cache.ttl.return_value = None
-                ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)  # must not raise
-            assert "table" in ctx
+        cache_key = view.get_cache_key(obj, "ports", "default")
+        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
+        try:
+            for bad in (None, ["not", "a", "dict"], "garbage"):
+                cached = {
+                    "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
+                    "port_stack_relationships": bad,
+                }
+                cache.set(cache_key, cached)
+                cache.set(last_fetched_key, timezone.now())
+                assert cache.get(cache_key) == cached
+                ctx = view.get_context_data(req, obj, "ifName", "default")  # must not raise
+                assert ctx["table"] is not None
+        finally:
+            cache.delete(cache_key)
+            cache.delete(last_fetched_key)
 
     def test_malformed_nested_relationship_maps_do_not_crash(self):
         """port_stack_relationships is a dict but its lag_members / sub_interfaces are None / non-dict (the present-but-None key defeats the .get(..., {}) default) — iterating .items() must fail soft, not AttributeError."""
-        view = self._make_view()
+        from django.core.cache import cache
+        from django.utils import timezone
+
+        view = self._make_view(real_cache_keys=True)
         obj = self._host_with_idrac()
         req = _make_request()
 
-        for bad in (None, ["not", "a", "dict"], "garbage", 42):
-            fresh = {
-                "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
-                "port_stack_relationships": {"lag_members": bad, "sub_interfaces": bad},
-            }
-            with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                mock_cache.ttl.return_value = None
-                ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)  # must not raise
-            assert "table" in ctx
+        cache_key = view.get_cache_key(obj, "ports", "default")
+        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
+        try:
+            for bad in (None, ["not", "a", "dict"], "garbage", 42):
+                cached = {
+                    "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
+                    "port_stack_relationships": {"lag_members": bad, "sub_interfaces": bad},
+                }
+                cache.set(cache_key, cached)
+                cache.set(last_fetched_key, timezone.now())
+                assert cache.get(cache_key) == cached
+                ctx = view.get_context_data(req, obj, "ifName", "default")  # must not raise
+                assert ctx["table"] is not None
+        finally:
+            cache.delete(cache_key)
+            cache.delete(last_fetched_key)
 
     def test_malformed_cached_port_snapshot_fails_closed(self):
         """A stale/corrupt cached ports snapshot (non-dict, or ports not a list of dicts) must be dropped and re-rendered empty, not 500 the sync tab — and the bad entry purged so a later render re-fetches."""
@@ -1969,7 +1963,7 @@ class TestInterfaceContextVirtualChassisOwner:
 
         assert clear_response.status_code == 302
         interface.refresh_from_db()
-        assert interface.mode == ""
+        assert interface.mode is None
         assert interface.untagged_vlan_id is None
 
 
@@ -1980,13 +1974,7 @@ class TestInterfaceContextVirtualChassisOwner:
 
 class TestSyncInterfacesViewPost:
     def test_integrity_error_at_the_outer_commit_is_reported_not_a_500(self):
-        """An IntegrityError escaping the outer atomic must redirect with an error, not propagate.
-
-        The relationship pass catches IntegrityError around an inner savepoint. Postgres validates
-        Django's DEFERRABLE INITIALLY DEFERRED foreign keys at the OUTERMOST commit, so a
-        concurrently deleted related row surfaces past that handler. Injected here because a real
-        deferred violation needs a concurrent deletion inside the commit window.
-        """
+        """A deferred foreign-key IntegrityError at the outer atomic commit redirects instead of returning a 500."""
         from types import SimpleNamespace
 
         from django.core.cache import cache
@@ -2217,6 +2205,73 @@ class TestSyncInterfacesViewPost:
         aggregate.refresh_from_db()
         assert aggregate.type == "other"
         assert member.lag_id is None
+
+    def test_bulk_relink_repairs_an_aggregate_edited_back_to_a_non_lag_type(self):
+        """An already-linked member must still repair a stale aggregate type."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("bulk-lag-type-repair")
+        member = make_interface(device, "Ethernet1")
+        aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
+        for interface, port_id in ((member, 10), (aggregate, 20)):
+            set_librenms_device_id(interface, port_id, "default")
+            interface.save()
+        member.lag = aggregate
+        member.save()
+        # NetBox permits this: Interface.clean() validates LAG membership from the member side
+        # only, so an aggregate that already has members can still be edited to a non-LAG type.
+        Interface.objects.filter(pk=aggregate.pk).update(type="1000base-t")
+        user = make_user_with_perms(
+            "bulk-lag-type-repair",
+            [("view", Device), ("add", Interface), ("change", Interface)],
+        )
+        request = _make_request(
+            post_data={
+                "select": ["10"],
+                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed"],
+            },
+            user=user,
+        )
+        view = SyncInterfacesView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 10,
+                        "ifName": member.name,
+                        "ifType": "ethernetCsmacd",
+                        "ifAdminStatus": "up",
+                    },
+                    {
+                        "port_id": 20,
+                        "ifName": aggregate.name,
+                        "ifType": "ieee8023adLag",
+                        "ifAdminStatus": "up",
+                    },
+                ],
+                "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
+            },
+        )
+
+        try:
+            response = _post(view, request, object_type="device", object_id=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        member.refresh_from_db()
+        aggregate.refresh_from_db()
+        assert member.lag_id == aggregate.pk
+        assert aggregate.type == "lag"
 
     def test_bulk_parent_link_resolves_a_unique_unbound_related_name(self):
         from types import SimpleNamespace
@@ -3514,12 +3569,7 @@ class TestSyncInterfacesViewPost:
 
 
 class TestSyncInterfacesViewServerKeyAndRedirect:
-    """Issue #107: interface_name_field must be URL-escaped in the post-sync redirect.
-
-    The POSTed server_key rebind / fail-closed behavior (#108/#109) is covered by
-    test_coverage_sync_views.TestSyncInterfacesViewServerRebind, which exercises the same
-    rebind_api_for_server seam SyncInterfacesView.post actually uses.
-    """
+    """Post-sync redirect URLs escape interface_name_field values."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -4017,12 +4067,7 @@ class TestSyncInterfacesViewSyncInterfaceVlans:
         assert list(interface.tagged_vlans.all()) == [existing_vlan]
 
     def test_non_numeric_cached_vid_is_dropped_instead_of_aborting_the_sync(self):
-        """A non-numeric VLAN id in the cached payload must not raise out of the sync.
-
-        ``get_cached_ports_data`` only checks that each port is a dict, so the value reaches the
-        int() coercions. A ValueError here aborts the enclosing sync transaction after other
-        rows have already applied their changes.
-        """
+        """A nonnumeric cached VLAN ID is dropped without aborting the sync or a valid VLAN update."""
         from ipam.models import VLAN
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -4242,12 +4287,7 @@ class TestSyncLagAndParentRelationships:
         assert hidden_agg.type == "1000base-t"
 
     def test_non_dict_relationships_fails_soft_not_attributeerror(self, db):
-        """
-        A truthy but non-dict ``relationships`` (a list from a corrupt / partial-write cache) must
-        fail soft. The local ``if not relationships`` guard only catches FALSY values, so the
-        unfixed bulk path called ``relationships.get(...)`` on the list and raised AttributeError;
-        the shared ``normalize_relationship_maps`` coerces it to ``{}`` so the sync is skipped.
-        """
+        """A truthy non-dict relationship cache value fails soft instead of raising AttributeError."""
         device = self._make_device()
         member = self._iface(device, "Gi0/2", 11)
         ports_data = [{"ifName": "Gi0/2", "port_id": 11}]
@@ -5087,13 +5127,7 @@ class TestPromoteLagAggregateShared:
 
 @pytest.mark.django_db
 class TestRelationshipSyncObjectScope:
-    """The LAG/parent endpoints write both ends, so their resolution must run through a restricted
-    queryset.
-
-    NetBoxObjectPermissionMixin asks ``has_perm`` without an instance, so a CONSTRAINED
-    ``change_interface`` grant clears the POST gate; an unrestricted interface index would then let
-    it set ``lag``/``parent`` on interfaces it cannot see.
-    """
+    """LAG and parent endpoint resolution restricts both interfaces to the user's object scope."""
 
     @staticmethod
     def _writer(username, specs):
@@ -5447,3 +5481,57 @@ class TestRelationshipSyncObjectScope:
         assert bulk_response.status_code == 302
         child.refresh_from_db()
         assert child.parent_id is None
+
+
+def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
+    """A retry must repair a stale aggregate type instead of reporting success."""
+    from types import SimpleNamespace
+
+    from dcim.models import Interface
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+    server_key = configure_default_librenms_server(settings)
+    device = make_device("lag-type-repair")
+    member = make_interface(device, "Ethernet1")
+    aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
+    set_librenms_device_id(member, 10, server_key)
+    set_librenms_device_id(aggregate, 20, server_key)
+    aggregate.save()
+    member.lag = aggregate
+    member.save()
+    # NetBox permits this: Interface.clean() validates LAG membership from the member side only,
+    # so an aggregate that already has members can still be edited to a non-LAG type.
+    Interface.objects.filter(pk=aggregate.pk).update(type="1000base-t")
+
+    view = SyncInterfaceLagView()
+    view._librenms_api = SimpleNamespace(server_key=server_key)
+    cache_key = view.get_cache_key(device, "ports", server_key)
+    cache.set(
+        cache_key,
+        {
+            "ports": [
+                {"port_id": 10, "ifName": member.name},
+                {"port_id": 20, "ifName": aggregate.name},
+            ],
+            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
+        },
+    )
+    request = make_request(
+        "post",
+        {"port_id": "10", "lag_port_id": "20", "server_key": server_key},
+        user=make_superuser("lag-type-repair-user"),
+    )
+    try:
+        response = _post(view, request, object_type="device", object_id=device.pk)
+    finally:
+        cache.delete(cache_key)
+
+    assert response.status_code == 200, response.content
+    member.refresh_from_db()
+    aggregate.refresh_from_db()
+    assert member.lag_id == aggregate.pk
+    assert aggregate.type == "lag"

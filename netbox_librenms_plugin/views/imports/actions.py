@@ -167,6 +167,12 @@ def _resolve_vc_detection_enabled(request) -> bool:
     2. Explicit GET enable_vc_detection
     3. return_url query param fallback (POST, then GET)
     4. Default False
+
+    Args:
+        request (HttpRequest): The HTTP request that contains the preference values.
+
+    Returns:
+        bool: Whether VC detection is enabled.
     """
     for source in (request.POST, request.GET):
         parsed = _parse_boolish(source.get("enable_vc_detection"))
@@ -197,12 +203,18 @@ def _htmx_error_response(message: str) -> HttpResponse:
 
     Uses an out-of-band swap of NetBox's ``#django-messages`` container so the
     toast renders through the same Bootstrap pipeline NetBox uses for the
-    standard ``messages`` framework — no dependency on ``window.bootstrap``.
+    standard ``messages`` framework. It does not depend on ``window.bootstrap``.
 
     Returns ``200`` (with ``HX-Reswap: none``) so the primary swap target is
     left untouched *and* so ``django-htmx``'s DEBUG-mode handler does not
     replace the page body with the response payload (it only does so for
     4xx/5xx responses).
+
+    Args:
+        message (str): The error message to show in the toast.
+
+    Returns:
+        HttpResponse: The HTMX error response.
     """
     toast_html = format_html(
         '<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">'
@@ -377,7 +389,13 @@ def _platform_device_type_mismatch(device) -> HttpResponse | None:
     unrelated legacy field values), but a device_type/platform write still carries the
     cross-field manufacturer constraint Device.clean() enforces, with no DB backstop. Validate
     only that one rule so an inconsistent platform/device_type pairing can't be persisted
-    silently. Returns an HTMX error response on mismatch, else None.
+    silently.
+
+    Args:
+        device (Device): The device to validate.
+
+    Returns:
+        HttpResponse | None: An HTMX error response on mismatch, otherwise None.
     """
     platform = getattr(device, "platform", None)
     device_type = getattr(device, "device_type", None)
@@ -405,11 +423,16 @@ def _device_type_rack_fit_error(device) -> HttpResponse | None:
     face/position, and the new device_type's ``u_height`` must fit in the free units at the
     device's rack position/face. A LibreNMS-matched device_type violating any of these would
     otherwise persist an invalid rack elevation with a success toast and no DB backstop.
-    Re-validate only those rules (like :func:`_platform_device_type_mismatch`): return an HTMX
-    error response on a violation, else ``None``. A device that isn't rack-mounted (no
-    rack/position/face) is unaffected. Note the 0U/child rules can't be left to the space check:
-    ``get_available_units(u_height=0)`` contains every unit, so it passes trivially for exactly
-    the types these rules reject.
+    Re-validate only those rules (like :func:`_platform_device_type_mismatch`). A device that isn't
+    rack-mounted (no rack/position/face) is unaffected. Note the 0U/child rules can't be left to
+    the space check: ``get_available_units(u_height=0)`` contains every unit, so it passes
+    trivially for exactly the types these rules reject.
+
+    Args:
+        device (Device): The device to validate.
+
+    Returns:
+        HttpResponse | None: An HTMX error response on a violation, otherwise None.
     """
     rack = getattr(device, "rack", None)
     position = getattr(device, "position", None)
@@ -552,6 +575,14 @@ def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> s
     Prefer the cached ``resolved_name`` from validation (already computed with the
     user's naming prefs at validation time). Fall back to computing it fresh from
     the current request's naming preferences.
+
+    Args:
+        request (HttpRequest): The current HTTP request.
+        validation (dict): The validation data that can contain the cached resolved name.
+        libre_device (dict): The LibreNMS device data used to compute a fresh name.
+
+    Returns:
+        str: The resolved hostname.
     """
     resolved = validation.get("resolved_name")
     if resolved:
@@ -1057,25 +1088,43 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
             # If cluster is selected, this is a VM import
             if cluster_value:
-                try:
-                    vm_imports[device_id] = {"cluster_id": int(cluster_value)}
-                    # VMs can also have roles
-                    role_value = request.POST.get(f"role_{device_id}")
-                    if role_value:
-                        vm_imports[device_id]["device_role_id"] = int(role_value)
-                except (TypeError, ValueError):
+                cluster_id = coerce_model_pk(cluster_value)
+                if cluster_id is None:
+                    # Fail closed. Falling through would leave the row out of vm_imports and
+                    # import it as a plain Device with the requested cluster discarded, and it
+                    # would swap the required permission from add_virtualmachine to add_device.
                     logger.warning(
-                        "Ignoring invalid cluster/role id for VM import of device %s",
+                        "Rejecting invalid cluster id '%s' for VM import of device %s",
+                        cluster_value,
                         device_id,
                     )
+                    if is_htmx:
+                        return HttpResponse("Invalid cluster or role selection", status=400)
+                    messages.error(request, "Invalid cluster or role selection supplied")
+                    return redirect("plugins:netbox_librenms_plugin:librenms_import")
+                vm_imports[device_id] = {"cluster_id": cluster_id}
+                # VMs can also have roles. A bad role only drops the role: the VM is still
+                # created under the cluster the user picked, so the object type does not change.
+                role_value = request.POST.get(f"role_{device_id}")
+                if role_value:
+                    role_id = coerce_model_pk(role_value)
+                    if role_id is not None:
+                        vm_imports[device_id]["device_role_id"] = role_id
+                    else:
+                        logger.warning(
+                            "Ignoring invalid role id '%s' for VM import of device %s",
+                            role_value,
+                            device_id,
+                        )
                 continue  # Skip device-specific mappings for VMs
 
             # Device import mappings
             role_value = request.POST.get(f"role_{device_id}")
             if role_value:
-                try:
-                    mappings["device_role_id"] = int(role_value)
-                except (TypeError, ValueError):
+                role_id = coerce_model_pk(role_value)
+                if role_id is not None:
+                    mappings["device_role_id"] = role_id
+                else:
                     logger.warning(
                         "Ignoring invalid role id '%s' for device %s",
                         role_value,
@@ -1084,9 +1133,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
             rack_value = request.POST.get(f"rack_{device_id}")
             if rack_value:
-                try:
-                    mappings["rack_id"] = int(rack_value)
-                except (TypeError, ValueError):
+                rack_id = coerce_model_pk(rack_value)
+                if rack_id is not None:
+                    mappings["rack_id"] = rack_id
+                else:
                     logger.warning(
                         "Ignoring invalid rack id '%s' for device %s",
                         rack_value,
@@ -1202,13 +1252,14 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # successes / failures / skips, so this banner must not claim every selected row
                 # was imported when the synchronous run may have failed or skipped some.
                 sync_fallback_msg = (
-                    "Background job requested but no workers are available. "
-                    f"The request ran synchronously for {total_import_count} selected row(s)."
+                    f"Ran directly instead of in the background: {total_import_count} selected row(s) processed. "
+                    "No background worker was available."
                 )
                 if not is_htmx:
-                    messages.warning(
+                    messages.info(
                         request,
-                        f"Background job requested but no workers available. Importing {total_import_count} devices synchronously...",
+                        f"Running the {total_import_count} selected row(s) directly instead of in the background. "
+                        "No background worker was available.",
                     )
 
         # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
@@ -1323,7 +1374,9 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # only htmx_toasts — without this entry the blocking synchronous run happens
         # with no explanation and the user may re-submit or assume the job system worked.
         if sync_fallback_msg is not None:
-            htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", sync_fallback_msg))
+            # Informational: the fallback did the work, so a warning next to the success toast
+            # reads as a failed import.
+            htmx_toasts.append(("text-bg-info", "mdi-information", "Info", sync_fallback_msg))
 
         if success_count:
             _msg = f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}"
@@ -1650,9 +1703,15 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         """
         Return per-server ID mappings for the existing device's librenms_id custom field.
 
-        Returns a list of dicts with server_key, display_name, and device_id — one entry
+        Returns a list of dicts with server_key, display_name, and device_id, with one entry
         per server the device is linked to. Returns None when the format is legacy (bare int)
         or when the field is absent/invalid.
+
+        Args:
+            existing_device (Device | VirtualMachine): The existing NetBox object.
+
+        Returns:
+            list[dict] | None: The per-server ID mappings, or None for legacy, absent, or invalid data.
         """
         from django.conf import settings
 
@@ -2021,8 +2080,12 @@ class DeviceConflictActionView(
             cf_value = existing_device.custom_field_data.get("librenms_id")
             if not is_legacy_librenms_id(cf_value):
                 return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-            # Normalise string-digit to int for consistent comparison
-            cf_int = int(cf_value) if isinstance(cf_value, str) else cf_value
+            # coerce_librenms_id, not int(): a reader-only form ("4_2") never matches the rival-owner lookup below.
+            cf_int = coerce_librenms_id(cf_value)
+            if cf_int is None:
+                return _htmx_error_response(
+                    f"Legacy librenms_id {cf_value!r} is not a plain positive integer; cannot migrate safely."
+                )
             # Verify the stored legacy ID matches the active LibreNMS device_id so we don't
             # migrate a stale/incorrect association to the wrong server mapping.
             if cf_int != librenms_id:
@@ -2047,29 +2110,28 @@ class DeviceConflictActionView(
                 cf_locked = locked_device.custom_field_data.get("librenms_id")
                 if not is_legacy_librenms_id(cf_locked):
                     return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-                cf_locked_int = int(cf_locked) if isinstance(cf_locked, str) else cf_locked
+                cf_locked_int = coerce_librenms_id(cf_locked)
                 if cf_locked_int != librenms_id:
                     return _htmx_error_response(
                         f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely."
                     )
-                # Check that no other object already owns this ID (server-scoped or legacy)
+                # Fail closed when the ID resolves to more than one object (server-scoped or legacy).
                 server_key = self.librenms_api.server_key
                 from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
 
+                # The locked row still carries the legacy id and every accepted form of it is
+                # matched by build_librenms_id_qs, so it always matches its own lookup. A rival
+                # owner therefore surfaces as an ambiguity, never as a single foreign match.
                 try:
-                    match = find_by_librenms_id(existing_model, cf_locked_int, server_key)
+                    find_by_librenms_id(existing_model, cf_locked_int, server_key)
                 except AmbiguousLibreNMSIdError:
                     return _htmx_error_response(
                         f"librenms_id {cf_locked_int} is ambiguous — it matches more than one device. "
                         "Resolve the duplicate assignment before migrating."
                     )
-                conflict = match is not None and match.pk != locked_device.pk
-                if conflict:
-                    return _htmx_error_response(
-                        f"Another device already has librenms_id {cf_locked_int} for server '{server_key}'; cannot migrate."
-                    )
-                if not migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key):
-                    return _htmx_error_response("Migration failed: librenms_id could not be converted.")
+                # migrate_legacy_librenms_id refuses only the values is_legacy_librenms_id already
+                # rejects, and the locked value passed that gate above, so it cannot fail here.
+                migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key)
                 # Save only the field we actually mutated. Running full_clean() on the
                 # whole object would reject the migration over unrelated pre-existing
                 # validation issues (e.g. legacy rack face/position without a rack),
@@ -3044,10 +3106,8 @@ class AddAsOOBView(
                 # user must not be blocked on change-IPAddress.
                 selected_iface_pk = None
                 if iface_id and iface_id != "__new__":
-                    try:
-                        selected_iface_pk = int(iface_id)
-                    except ValueError:
-                        selected_iface_pk = None
+                    # Read the id exactly as _resolve_oob_interface does, or the two disagree.
+                    selected_iface_pk = coerce_model_pk(iface_id)
                 elif iface_id == "__new__" and new_iface_name and device is not None:
                     selected_iface_pk = (
                         Interface.objects.filter(device=device, name=new_iface_name)
@@ -3155,9 +3215,9 @@ class AddAsOOBView(
                 # same refusal as the pre-create check above.
                 return (existing, None) if existing is not None else (None, "name_out_of_scope")
         if iface_id:
-            try:
-                iface_pk = int(iface_id)
-            except ValueError:
+            # Same pk rule as every other client-supplied id: ASCII digits, positive, in range.
+            iface_pk = coerce_model_pk(iface_id)
+            if iface_pk is None:
                 return None, None
             try:
                 # Lock the reused row too (same orphan-on-concurrent-delete reasoning).
@@ -3820,7 +3880,9 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
         key = data.get("key")
         value = data.get("value")
 
-        if key not in self.ALLOWED_PREFS:
+        # ALLOWED_PREFS is a dict, so an unhashable key from the JSON body raises rather than
+        # missing; the envelope check above stops one level short of this.
+        if not isinstance(key, str) or key not in self.ALLOWED_PREFS:
             return JsonResponse({"error": "Invalid preference key"}, status=400)
 
         if key == "interface_name_field":

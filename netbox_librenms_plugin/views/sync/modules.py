@@ -1,20 +1,28 @@
 """Sync action views for module/inventory installation from LibreNMS."""
 
+import copy
+import json
 import logging
 import re
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
-from django.http import HttpResponse
+from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
+    acquire_advisory_transaction_lock,
     coerce_positive_int as _coerce_positive_int,
     find_by_librenms_id,
     get_librenms_device_id,
@@ -22,6 +30,7 @@ from netbox_librenms_plugin.utils import (
     get_module_template_interface_names,
     get_module_types_indexed,
     get_vc_member_positions,
+    netbox_relocates_module_subtree,
     normalize_inventory_serial,
     normalize_serial,
     rewrite_interface_name_for_vc_member,
@@ -33,19 +42,30 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    SyncSubjectClaimMixin,
 )
+from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
 logger = logging.getLogger(__name__)
+
+# Every module action below scopes its cache reads and its LibreNMS id writes by server key.
+MODULE_MOVE_REQUIRES_NETBOX_MESSAGE = "Moving a module needs NetBox 4.7 or later. Earlier releases move only the module itself and leave its interfaces, its module bays and any modules installed in them on the original device."
+NO_LIBRENMS_SERVER_MESSAGE = (
+    "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
+)
+
+# OOB-controller rows are merged into the cached snapshot for display only. Every entry point that
+# can act on an inventory row rejects them here, so the marker and the reason are declared once.
+OOB_INVENTORY_SOURCE = "oob"
+OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
 
 def _modules_redirect_response(request, sync_url, server_key=None):
     """
-    Return a redirect response that works for both classic and HTMX form posts.
+    Return a redirect back to the modules tab: ``HX-Redirect`` for an HTMX post, else a Django redirect.
 
-    For HTMX requests (those carrying ``HX-Request: true``) we return an empty
-    response with an ``HX-Redirect`` header so the browser performs a full navigation
-    that picks up Django messages and refreshes the modules table. For non-HTMX
-    requests we return a normal Django redirect.
+    The module actions answer their HTMX posts through :func:`_modules_action_response`
+    instead, so only classic posts reach the Django redirect from those views.
 
     These module sync actions are server-scoped, so the follow-up page must stay on
     the server whose cache namespace this request just mutated/read. The active
@@ -71,38 +91,155 @@ def _modules_redirect_response(request, sync_url, server_key=None):
     if request.headers.get("HX-Request") == "true":
         response = HttpResponse(status=204)
         response["HX-Redirect"] = target
-        return response
-    return redirect(target)
+        return apply_request_cache_transition(request, response)
+    return apply_request_cache_transition(request, redirect(target))
+
+
+def _modules_action_response(request, page_device, server_key=None):
+    """
+    Answer a module action with the re-rendered module tab, or a redirect for a classic post.
+
+    An HTMX action re-renders the module tab from its cache and returns that fragment, so the
+    page is not reloaded: the queued messages travel with it in the out-of-band toast container.
+    The table keeps the page and sort of the browser URL (``HX-Current-URL``), because the
+    action URL itself carries no query string.
+    ``HX-Retarget`` and ``HX-Reswap`` name ``#module-sync-content`` and ``innerHTML`` on the
+    server side, so every action lands in the tab whatever the posting form declares, and the
+    ``closeModal`` trigger closes the mismatch modal, which nothing else closes because the swap
+    happens outside it.
+
+    Args:
+        request: The current HTTP request.
+        page_device: The device whose sync page the action was posted from.
+        server_key: The active LibreNMS server key; read from the request when None.
+
+    Returns:
+        HttpResponse: The module tab fragment for an HTMX post, or a Django redirect.
+    """
+    sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": page_device.pk})
+    if request.headers.get("HX-Request") != "true":
+        return _modules_redirect_response(request, sync_url, server_key)
+    # The action URL has no query, so the table's page and sort come from the page the post was sent from.
+    render_request = copy.copy(request)
+    render_request.GET = QueryDict(urlsplit(request.headers.get("HX-Current-URL", "")).query)
+    tab_view = DeviceModuleTableView()
+    tab_view.setup(render_request, pk=page_device.pk)
+    tab_view.cache_only = True
+    context = tab_view.get_context_data(render_request, page_device, server_key=server_key)
+    response = tab_view.render_sync_partial(
+        render_request, page_device, context["server_key"], {"module_sync": context}
+    )
+    response["HX-Retarget"] = "#module-sync-content"
+    response["HX-Reswap"] = "innerHTML"
+    response["HX-Trigger"] = json.dumps({"closeModal": None})
+    return apply_request_cache_transition(request, response)
+
+
+def _modules_cache_missing_response(request, page_device, server_key):
+    """Report the missing inventory snapshot, then answer with the module tab."""
+    messages.error(request, "No cached inventory data. Please refresh modules first.")
+    return _modules_action_response(request, page_device, server_key)
+
+
+def _schedule_module_cache_mutation(request, page_device, server_key):
+    """Publish one module-tab transition after a committed module action."""
+    schedule_request_cache_mutation(request, page_device, SyncTab.MODULES, server_key)
+
+
+def _module_bind_result_changed(bind_result):
+    """Return whether an interface bind or template adoption changed NetBox."""
+    return bool(
+        bind_result
+        and bind_result.get("status") == "bound"
+        and (bind_result.get("changed") or bind_result.get("adopted_count"))
+    )
 
 
 def _extract_inventory_list(cached_payload):
-    """Extract the inventory row list from a cached payload.
-
-    The cache stores ``{"inventory": [...], "librenms_id": ...}``; anything
-    else is treated as a cache miss to match BaseModuleTableView.get_context_data.
     """
-    if isinstance(cached_payload, dict):
-        return cached_payload.get("inventory") or []
-    return []
+    Return the inventory row list from a cached payload, or ``None`` when it is unusable.
+
+    The cache stores ``{"inventory": [...], "librenms_id": ...}``. A refreshed device whose
+    LibreNMS inventory is empty caches ``[]``, which is data rather than a miss, so callers
+    must test ``is None``. The list-of-dicts guard mirrors
+    BaseModuleTableView.get_context_data so both readers of this entry reject the same payloads.
+
+    Args:
+        cached_payload (object): The cached value to validate.
+
+    Returns:
+        list[dict] | None: The inventory rows, or ``None`` when the payload is unusable.
+    """
+    if not isinstance(cached_payload, dict):
+        return None
+    inventory = cached_payload.get("inventory")
+    if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
+        return None
+    return inventory
+
+
+def _lock_page_device_serials(page_device):
+    """Serialise serial checks for one sync page, before any row lock is taken.
+
+    Must be the FIRST lock in the transaction. A bulk install holds one transaction across its
+    whole loop, so acquiring this after a bay lock lets a bulk run holding the advisory lock wait
+    on a bay a single install holds, while that install waits on the advisory lock.
+
+    One key per page device, so a transaction never acquires a second key of this kind and the
+    incremental-acquisition ordering problem cannot arise.
+    """
+    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
+
+
+def _module_already_on_device(device, serial, *, exclude_pk=None):
+    """Return the Module already holding ``serial`` on ``device``, or None.
+
+    Identity is device-scoped on purpose. A serial is evidence about one physical part, and
+    vendors reuse a serial across unrelated parts, so a match on another device must not block a
+    genuine first install here.
+
+    Existence is read WITHOUT permission filtering. Installing needs ``add_module``, not
+    ``change_module``, so a restricted queryset can come back empty for an operator who may still
+    create the duplicate. Callers must report the hit without naming objects the operator cannot
+    see; ``_lock_page_device_serials`` must already be held.
+    """
+    from dcim.models import Module
+
+    if not serial:
+        return None
+    conflicts = Module.objects.select_for_update(of=("self",)).filter(device=device, serial=serial)
+    if exclude_pk:
+        conflicts = conflicts.exclude(pk=exclude_pk)
+    return conflicts.first()
 
 
 def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
-    """Return cached inventory for ``sync_device`` validated against device librenms_id.
+    """
+    Return cached inventory for ``sync_device``, or ``None`` when it is absent or stale.
 
     Cache entries are namespaced by server key and include ``librenms_id``.
     When both current and cached IDs are valid positive integers, they must
     match; otherwise cached data is treated as stale.
+
+    Args:
+        sync_device (object): The NetBox device whose inventory is requested.
+        server_key (str): The LibreNMS server key for the cache namespace.
+        get_cache_key (Callable): The function that builds the inventory cache key.
+
+    Returns:
+        list[dict] | None: The cached inventory, or ``None`` when it is absent or stale.
     """
     cached_payload = cache.get(get_cache_key(sync_device, "inventory", server_key=server_key))
-    if not isinstance(cached_payload, dict):
-        return []
+    inventory = _extract_inventory_list(cached_payload)
+    if inventory is None:
+        return None
 
     current_librenms_id = _coerce_positive_int(get_librenms_device_id(sync_device, server_key, auto_save=False))
     cached_librenms_id = _coerce_positive_int(cached_payload.get("librenms_id"))
-    if current_librenms_id and cached_librenms_id and current_librenms_id != cached_librenms_id:
-        return []
+    if current_librenms_id is None or cached_librenms_id is None or current_librenms_id != cached_librenms_id:
+        return None
 
-    return _extract_inventory_list(cached_payload)
+    return inventory
 
 
 def _report_install_results(request, installed, skipped, failed):
@@ -137,12 +274,6 @@ def _resolve_target_device_with_validation(page_device, selected_device_id, devi
     return member, False
 
 
-def _resolve_target_device(page_device, selected_device_id, devices):
-    """Resolve and validate a target device from row-level VC selection."""
-    target_device, _ = _resolve_target_device_with_validation(page_device, selected_device_id, devices)
-    return target_device
-
-
 def _warn_invalid_selected_device(request):
     """Warn the user that selected device input was invalid and fallback was applied."""
     messages.warning(
@@ -152,9 +283,11 @@ def _warn_invalid_selected_device(request):
 
 
 class _SerialConflictAmbiguous(Exception):
-    """Raised inside ReplaceModuleView's transaction when more than one module
-    holds the incoming serial — used to abort the atomic block and surface a
-    user-friendly error after the rollback."""
+    """
+    Signal that more than one module holds the incoming serial during a replacement transaction.
+
+    ReplaceModuleView uses this exception to abort the atomic block and show a user-friendly error after the rollback.
+    """
 
     def __init__(self, serial):
         super().__init__(serial)
@@ -491,6 +624,15 @@ def _normalize_module_interface_names_for_vc_member(
     vc_position (e.g., Te3/1/1). If a standalone interface with the rewritten
     name already exists, it is adopted into the module and the newly-created
     conflicting interface is removed.
+
+    Args:
+        device (Device): The selected virtual chassis member.
+        module (Module): The installed module whose interfaces are normalized.
+        changeable_interfaces (QuerySet): The interfaces the caller can change.
+        deletable_interfaces (QuerySet): The interfaces the caller can delete.
+
+    Returns:
+        dict[str, int]: The counts of renamed, adopted, removed, and skipped interfaces.
     """
     result = {
         "renamed": 0,
@@ -578,6 +720,16 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     Applies only for inventory items carrying stable port identity metadata.
     The binding is non-destructive: if the port ID already belongs to a different
     interface, no reassignment is performed and a conflict is reported.
+
+    Args:
+        device (Device): The NetBox device that owns the interface.
+        item (dict): The LibreNMS inventory item with port identity metadata.
+        module_pk (int | None): The module primary key for the interface.
+        server_key (str): The LibreNMS server key for the port identity.
+        interfaces (QuerySet): The interfaces available to the caller.
+
+    Returns:
+        dict | None: The binding outcome, or ``None`` when the item has no port ID.
     """
     from dcim.models import Interface
 
@@ -672,7 +824,7 @@ def _resolve_single_install_binding_item(request, target_device, server_key, get
 
     if ent_index and server_key:
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        for item in _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
+        for item in _get_cached_inventory_for_device(sync_device, server_key, get_cache_key) or []:
             item_index = _coerce_positive_int(item.get("entPhysicalIndex"))
             if item_index == ent_index:
                 resolved = dict(item)
@@ -711,6 +863,16 @@ def _should_attempt_bind_for_result(result):
     return False
 
 
+def _record_bind_outcome(bind_result, result, skipped):
+    """Report one bind attempt in the install summary, returning whether it changed NetBox."""
+    if not bind_result:
+        return False
+    if bind_result["status"] != "bound":
+        skipped.append(f"{result['name']}: {bind_result['reason']}")
+        return False
+    return _module_bind_result_changed(bind_result)
+
+
 class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
 
@@ -742,24 +904,21 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
-        # Validate the posted server_key against configured servers, else fall back to the active
-        # client server (resolve_posted_server_key). A blank key (e.g. a fallback render where
-        # module_sync.server_key is empty) OR a forged/unconfigured one must degrade rather than scope
-        # the bind under a bogus namespace — without a usable key `if bind_item and server_key` below is
-        # skipped and the module installs but its interface is never bound to its LibreNMS port_id.
-        server_key = self.resolve_posted_server_key(request.POST)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
         serial = request.POST.get("serial", "").strip()
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         try:
             module_bay_id = int(request.POST.get("module_bay_id"))
             module_type_id = int(request.POST.get("module_type_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module bay/module type ID.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         self.restrict_object_or_404(
             ModuleBay, pk=module_bay_id, device=target_device
@@ -768,6 +927,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         try:
             with transaction.atomic():
+                _lock_page_device_serials(page_device)
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -777,10 +937,18 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 )
                 if not locked_bay:
                     messages.error(request, "Module bay no longer exists.")
-                    return _modules_redirect_response(request, sync_url, server_key)
+                    return _modules_action_response(request, page_device, server_key)
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
-                    return _modules_redirect_response(request, sync_url, server_key)
+                    return _modules_action_response(request, page_device, server_key)
+                if _module_already_on_device(target_device, serial):
+                    # The bay is deliberately not named: the conflicting module may be outside
+                    # this operator's scope, and its existence is what blocks the install.
+                    messages.error(
+                        request,
+                        f"Serial '{serial}' is already installed on this device. Nothing was installed.",
+                    )
+                    return _modules_action_response(request, page_device, server_key)
                 module = Module(
                     device=target_device,
                     module_bay=locked_bay,
@@ -844,12 +1012,13 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     "Installed module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
+            _schedule_module_cache_mutation(request, page_device, server_key)
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to install module: {e}")
 
-        return _modules_redirect_response(request, sync_url, server_key)
+        return _modules_action_response(request, page_device, server_key)
 
 
 class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -885,25 +1054,26 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
         parent_index = request.POST.get("parent_index")
-        server_key = self.resolve_posted_server_key(request.POST)
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
 
         if not parent_index:
             messages.error(request, "Missing parent inventory index.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             parent_index = int(parent_index)
         except ValueError:
             messages.error(request, "Invalid parent inventory index.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         # Get cached inventory data
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if not cached_data:
-            messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return _modules_redirect_response(request, sync_url, server_key)
+        if cached_data is None:
+            return _modules_cache_missing_response(request, page_device, server_key)
 
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
@@ -917,7 +1087,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         if not branch_items:
             messages.warning(request, "No installable items found in this branch.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         # Load module types (with mappings)
         module_types = get_module_types_indexed()
@@ -939,19 +1109,17 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
-        # Same reason for the serial scope: normalize_inventory_serial() reads the rule table
-        # per item otherwise, inside the install transaction.
-        norm_rules_serial = preload_normalization_rules(
-            "serial", manufacturer=getattr(getattr(target_device, "device_type", None), "manufacturer", None)
-        )
+        norm_rules_serial = preload_normalization_rules("serial", target_device.device_type.manufacturer)
 
         # Install top-down: each install may create new child bays
         installed = []
         skipped = []
         failed = []
+        bound_any = False
 
         try:
             with transaction.atomic():
+                _lock_page_device_serials(page_device)
                 for item in branch_items:
                     result = self._install_single(
                         target_device,
@@ -985,14 +1153,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             server_key,
                             changeable_interfaces,
                         )
-                        if bind_result and bind_result["status"] != "bound":
-                            skipped.append(f"{result['name']}: {bind_result['reason']}")
+                        bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Branch install failed: {e}")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         _report_install_results(request, installed, skipped, failed)
-        return _modules_redirect_response(request, sync_url, server_key)
+        if installed or bound_any:
+            _schedule_module_cache_mutation(request, page_device, server_key)
+        return _modules_action_response(request, page_device, server_key)
 
     def _collect_branch(self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None):
         """
@@ -1001,6 +1170,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Returns items in install order (parent before children).
         Optionally filters items matching 'skip' ignore rules; 'transparent' items
         are excluded from installation but their children are still collected.
+
+        Args:
+            parent_index (int): The inventory index at the branch root.
+            inventory_data (list[dict]): The LibreNMS inventory items.
+            ignore_rules (list[dict] | None): The optional inventory ignore rules.
+            device_serial (str): The device serial used to evaluate ignore rules.
+            index_map (dict | None): The inventory items keyed by index.
+
+        Returns:
+            list[dict]: The collected items in parent-first install order.
         """
         items = []
         parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
@@ -1040,11 +1219,21 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
     def _collect_children(
         self, parent_idx, inventory_data, items, visited=None, ignore_rules=None, device_serial="", index_map=None
     ):
-        """Recursively collect children with models, depth-first.
+        """
+        Recursively collect children with models, depth-first.
 
         When ignore_rules are provided, items matching a 'skip' rule (and their
         subtree) are excluded.  Items matching 'transparent' are not installed but
         their children are still collected at the same depth.
+
+        Args:
+            parent_idx (int): The inventory index whose children are collected.
+            inventory_data (list[dict]): The LibreNMS inventory items.
+            items (list[dict]): The output list that receives installable children.
+            visited (set[int] | None): The inventory indexes already visited.
+            ignore_rules (list[dict] | None): The optional inventory ignore rules.
+            device_serial (str): The device serial used to evaluate ignore rules.
+            index_map (dict | None): The inventory items keyed by index.
         """
         if visited is None:
             visited = set()
@@ -1099,6 +1288,25 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         Re-fetches module bays each time since parent installs create new ones.
         Scopes bay lookup to the correct parent module to handle duplicate bay names.
+
+        Args:
+            device (Device): The NetBox device that receives the module.
+            item (dict): The LibreNMS inventory item to install.
+            index_map (dict): The inventory items keyed by index.
+            module_types (dict): The available module types indexed for matching.
+            module_bays (QuerySet): The module bays available to the caller.
+            allowed_module_type_ids (set[int]): The module type IDs available to the caller.
+            changeable_components (dict): The component querysets available for adoption.
+            changeable_interfaces (QuerySet): The interfaces the caller can change.
+            deletable_interfaces (QuerySet): The interfaces the caller can delete.
+            exact_mappings (list | None): The optional exact module bay mappings.
+            regex_mappings (list | None): The optional regular expression module bay mappings.
+            manufacturer_id (int | None): The optional device manufacturer ID.
+            norm_rules_bay (dict | None): The optional module bay normalization rules.
+            norm_rules_serial (dict | None): The optional serial normalization rules.
+
+        Returns:
+            dict: The install status and its result details.
         """
         from dcim.models import Module
 
@@ -1120,8 +1328,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # renders those rows read-only). Never install it onto the host: a crafted POST could
         # otherwise target an OOB row by its (offset) entPhysicalIndex. Reject at this shared
         # chokepoint so both the branch and selected install paths are covered.
-        if item.get("_source") == "oob":
-            return {"status": "skipped", "name": name, "reason": "OOB controller inventory is read-only"}
+        if item.get("_source") == OOB_INVENTORY_SOURCE:
+            return {"status": "skipped", "name": name, "reason": OOB_INVENTORY_READ_ONLY_REASON}
 
         # Match module type (direct, then normalization fallback)
         manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
@@ -1175,6 +1383,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         "name": name,
                         "reason": "bay already occupied",
                         "module_pk": locked_bay.installed_module.pk,
+                    }
+                if _module_already_on_device(device, serial):
+                    return {
+                        "status": "skipped",
+                        "name": name,
+                        "reason": "serial already installed on this device",
                     }
 
                 module = Module(
@@ -1475,33 +1689,34 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
-        server_key = self.resolve_posted_server_key(request.POST)
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
 
         selected_indices = request.POST.getlist("select")
         if not selected_indices:
             messages.warning(request, "No modules selected.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         sync_device = _get_sync_device_for_inventory(page_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if not cached_data:
-            messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return _modules_redirect_response(request, sync_url, server_key)
+        if cached_data is None:
+            return _modules_cache_missing_response(request, page_device, server_key)
 
         try:
             # Use dict.fromkeys to preserve order while deduplicating
             selected_list = list(dict.fromkeys(int(i) for i in selected_indices))
         except ValueError:
             messages.error(request, "Invalid selection.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
         items = [index_map[idx] for idx in selected_list if idx in index_map]
 
         if not items:
             messages.warning(request, "None of the selected indices matched cached inventory.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         # Load ignore rules once; they're evaluated per-row inside the install
         # loop using the *resolved* target device serial, since VC rows may
@@ -1526,15 +1741,25 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
-        # The rows can target different manufacturers, so seed the unscoped scope only;
-        # apply_normalization_rules caches each manufacturer it meets into this same dict.
-        norm_rules_serial = preload_normalization_rules("serial")
+        norm_rules_serial = preload_normalization_rules("serial", page_device.device_type.manufacturer)
+        if page_device.virtual_chassis_id is not None:
+            members = (
+                self.restricted_queryset(Device)
+                .filter(virtual_chassis_id=page_device.virtual_chassis_id)
+                .select_related("device_type__manufacturer")
+            )
+            for member in members:
+                manufacturer = member.device_type.manufacturer
+                if ("serial", manufacturer.pk) not in norm_rules_serial:
+                    norm_rules_serial.update(preload_normalization_rules("serial", manufacturer))
 
         installed, skipped, failed = [], [], []
+        bound_any = False
 
         invalid_selection_seen = False
         try:
             with transaction.atomic():
+                _lock_page_device_serials(page_device)
                 for item in items:
                     ent_index = item.get("entPhysicalIndex")
                     selected_device_id = request.POST.get(f"device_selection_{ent_index}")
@@ -1592,21 +1817,31 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             server_key,
                             changeable_interfaces,
                         )
-                        if bind_result and bind_result["status"] != "bound":
-                            skipped.append(f"{result['name']}: {bind_result['reason']}")
+                        bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Install failed: {e}")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         if invalid_selection_seen:
             _warn_invalid_selected_device(request)
 
         _report_install_results(request, installed, skipped, failed)
-        return _modules_redirect_response(request, sync_url, server_key)
+        if installed or bound_any:
+            _schedule_module_cache_mutation(request, page_device, server_key)
+        return _modules_action_response(request, page_device, server_key)
 
 
-class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class UpdateModuleSerialView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    SyncSubjectClaimMixin,
+    View,
+):
     """Update the serial number of an already-installed module from LibreNMS inventory data."""
+
+    SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
     def post(self, request, pk):
         from dcim.models import Device, Module
@@ -1626,13 +1861,13 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         serial = request.POST.get("serial", "").strip()
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
 
         try:
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module ID.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             with transaction.atomic():
@@ -1645,18 +1880,25 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 )
                 if not module:
                     messages.error(request, "Module no longer exists.")
-                    return _modules_redirect_response(request, sync_url)
-                module.serial = serial
-                module.full_clean()
-                module.save()
-            messages.success(
-                request,
-                f"Updated serial for {module.module_type.model} in {module.module_bay.name} to '{serial}'.",
-            )
+                    return _modules_action_response(request, page_device, server_key)
+                changed = module.serial != serial
+                if changed:
+                    module.serial = serial
+                    module.full_clean()
+                    module.save(update_fields=["serial"])
+            if changed:
+                messages.success(
+                    request,
+                    f"Updated serial for {module.module_type.model} in {module.module_bay.name} to '{serial}'.",
+                )
+                if server_key:
+                    _schedule_module_cache_mutation(request, page_device, server_key)
+            else:
+                messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to update serial: {e}")
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_action_response(request, page_device, server_key)
 
 
 class UpdateModuleInterfaceView(
@@ -1671,16 +1913,18 @@ class UpdateModuleInterfaceView(
         if error := self.require_all_permissions("POST"):
             return error
 
-        # Resolve redirect context and validate the row identifier before any target or cache lookup.
-        server_key = self.resolve_posted_server_key(request.POST)
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        # Resolve the page device first: every early exit below re-renders that device's module tab.
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
         try:
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module ID.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
-        page_device = self.restrict_object_or_404(Device, pk=pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device,
             request.POST.get("selected_device_id"),
@@ -1689,25 +1933,16 @@ class UpdateModuleInterfaceView(
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
         changeable_interfaces = self.restricted_queryset(Interface, "change")
-        # Validate the posted server_key against configured servers, else fall back to the active
-        # client server (mirrors InstallModuleView via resolve_posted_server_key). A blank key (stale
-        # tab / fallback render) OR a forged/unconfigured one degrades to the active server rather than
-        # scoping under a bogus namespace. Without a usable key the port-bind is skipped AND the
-        # adopt/merge runs without a server scope, so the raw twin's LibreNMS binding can't transfer.
+        # A blank or forged key degrades to the active server rather than scoping the bind under a
+        # bogus namespace; see resolve_posted_server_key.
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
 
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
         bind_result = None
-        # A primary interface is bindable only with both a cache-resolved item AND a server
-        # context. Distinguish "there is no primary to bind" (bind_item falsy) from "a primary
-        # exists but we never attempted the bind" (bind_item set, server_key blank): the latter
-        # must not fall through to the adoption-only success path below, or we'd report success
-        # while the row's primary port_id was never associated.
-        primary_bindable = bool(bind_item)
-        primary_bind_attempted = bool(bind_item and server_key)
+        # The missing-server guard above already returned, so a resolved primary is always bound.
         try:
-            if primary_bind_attempted:
+            if bind_item:
                 bind_result = _bind_interface_librenms_id(
                     target_device,
                     bind_item,
@@ -1733,14 +1968,7 @@ class UpdateModuleInterfaceView(
             # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
             # makes the bind a no-op, the adoption is skipped, and the button never clears.
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
-            if primary_bindable and not primary_bind_attempted:
-                # Primary identity exists but there was no server context to bind it; don't
-                # adopt-and-succeed as if the row were fully handled.
-                bind_result = {
-                    "status": "failed",
-                    "reason": "no LibreNMS server context to associate the interface",
-                }
-            elif bind_result is None or bind_result.get("status") == "bound":
+            if bind_result is None or bind_result.get("status") == "bound":
                 try:
                     adopt_result = _adopt_existing_template_interfaces(
                         target_device,
@@ -1779,6 +2007,7 @@ class UpdateModuleInterfaceView(
                             # carries the bound interface's LibreNMS identity, not just the
                             # adoption tally.
                             "port_id": bind_result.get("port_id"),
+                            "changed": bind_result.get("changed", False),
                             "adopted_count": (bind_result.get("adopted_count") or 0)
                             + (adopt_result.get("adopted_count") or 0),
                         }
@@ -1788,13 +2017,15 @@ class UpdateModuleInterfaceView(
         elif bind_result.get("status") == "bound":
             location = f"{module.module_type.model} in {module.module_bay.name}"
             messages.success(request, _module_interface_update_message(bind_result, location))
+            if _module_bind_result_changed(bind_result):
+                _schedule_module_cache_mutation(request, page_device, server_key)
         else:
             messages.warning(
                 request,
                 f"Could not update interface association: {bind_result.get('reason', 'unknown reason')}",
             )
 
-        return _modules_redirect_response(request, sync_url, server_key)
+        return _modules_action_response(request, page_device, server_key)
 
 
 class ModuleMismatchPreviewView(
@@ -1824,7 +2055,9 @@ class ModuleMismatchPreviewView(
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
-        server_key = self.resolve_posted_server_key(request.GET)
+        server_key = self.resolve_posted_server_key_or_none(request.GET)
+        if server_key is None:
+            return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
 
         try:
             module_id = int(request.GET.get("module_id"))
@@ -1840,9 +2073,8 @@ class ModuleMismatchPreviewView(
         )
 
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
-        cached_data = _extract_inventory_list(cached_payload)
-        if not cached_data:
+        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
+        if cached_data is None:
             return HttpResponse("No cached inventory data. Please refresh modules first.", status=400)
 
         librenms_item = next(
@@ -1851,14 +2083,18 @@ class ModuleMismatchPreviewView(
         )
         if not librenms_item:
             return HttpResponse("Inventory item not found in cache.", status=400)
+        if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
+            return HttpResponse(OOB_INVENTORY_READ_ONLY_REASON, status=400)
 
         from netbox_librenms_plugin.utils import resolve_module_type
 
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         librenms_model = normalize_serial(librenms_item.get("entPhysicalModelName")) or "-"
-        # Coerced, not rule-normalized: applying the serial rules here needs the develop-owned
-        # test_module_replace mock narrowed first, and that file is outside this PR's diff.
-        librenms_serial = normalize_serial(librenms_item.get("entPhysicalSerialNum"))
+        # The preview sits beside the stored module serial, which the install path writes through
+        # this same normalization, so the raw inventory value would read as a mismatch.
+        librenms_serial = normalize_inventory_serial(
+            librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer
+        )
         if librenms_serial.lower() in _PLACEHOLDER_VALUES:
             librenms_serial = ""
 
@@ -2013,15 +2249,17 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
-        server_key = self.resolve_posted_server_key(request.POST)
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
 
         try:
             module_id = int(request.POST.get("module_id"))
             ent_index_int = int(request.POST.get("ent_index"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module_id/ent_index.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         installed_module = self.restrict_object_or_404(
             Module,
@@ -2033,11 +2271,9 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         )
 
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
-        cached_data = _extract_inventory_list(cached_payload)
-        if not cached_data:
-            messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return _modules_redirect_response(request, sync_url, server_key)
+        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
+        if cached_data is None:
+            return _modules_cache_missing_response(request, page_device, server_key)
 
         librenms_item = next(
             (item for item in cached_data if item.get("entPhysicalIndex") == ent_index_int),
@@ -2045,13 +2281,18 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         )
         if not librenms_item:
             messages.error(request, "Inventory item not found in cache.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
+        if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
+            messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
+            return _modules_action_response(request, page_device, server_key)
 
         from netbox_librenms_plugin.utils import resolve_module_type
 
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
-        serial = normalize_serial(librenms_item.get("entPhysicalSerialNum"))
+        # The replacement is stored and matched against serials the install path already
+        # normalized, so a raw vendor marker here would never match either.
+        serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
 
@@ -2060,13 +2301,14 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         if not matched_type:
             messages.error(request, f"No matching module type found for '{model_name}'.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
         if not self.restricted_queryset(ModuleType).filter(pk=matched_type.pk).exists():
             messages.error(request, f"No matching module type found for '{model_name}'.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             conflict_removed_msg = None
+            conflict_device = None
             bind_result = None
             adopted_components = 0
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
@@ -2085,7 +2327,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
                 if not installed_module:
                     messages.error(request, "Module no longer exists.")
-                    return _modules_redirect_response(request, sync_url, server_key)
+                    return _modules_action_response(request, page_device, server_key)
 
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
@@ -2132,7 +2374,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 if conflict_module:
                     c_model = conflict_module.module_type.model
                     c_bay = conflict_module.module_bay.name
-                    c_device = conflict_module.device.name
+                    conflict_device = conflict_module.device
+                    c_device = conflict_device.name
                     conflict_module.delete()
                     conflict_removed_msg = f"Removed {c_model} from {c_device}/{c_bay}."
 
@@ -2197,6 +2440,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     "Replaced module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
+            _schedule_module_cache_mutation(request, page_device, server_key)
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except _SerialConflictAmbiguous as exc:
@@ -2221,10 +2465,16 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
             messages.error(request, f"Replace failed: {error_msg}")
 
-        return _modules_redirect_response(request, sync_url, server_key)
+        return _modules_action_response(request, page_device, server_key)
 
 
-class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class MoveModuleView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    SyncSubjectClaimMixin,
+    View,
+):
     """
     Move an existing module from its current location to a target bay.
 
@@ -2233,6 +2483,9 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
     the module_bay (and device when moving cross-device) rather than deleting
     and recreating, preserving the module's history.
     """
+
+    SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
     def post(self, request, pk):
         from dcim.models import Device, Module, ModuleBay
@@ -2256,14 +2509,19 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+
+        # The rendered control is advisory; a scripted POST never reads it.
+        if not netbox_relocates_module_subtree():
+            messages.error(request, MODULE_MOVE_REQUIRES_NETBOX_MESSAGE)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             conflict_module_id = int(request.POST.get("conflict_module_id"))
             target_bay_id = int(request.POST.get("target_bay_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid conflict_module_id/target_bay_id.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_action_response(request, page_device, server_key)
 
         # Optional: current occupant of target bay
         raw_module_id = request.POST.get("module_id")
@@ -2276,6 +2534,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
 
         try:
             occupant_removed_msg = None
+            source_device = None
             with transaction.atomic():
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
@@ -2286,7 +2545,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 )
                 if not target_bay:
                     messages.error(request, "Module bay no longer exists.")
-                    return _modules_redirect_response(request, sync_url)
+                    return _modules_action_response(request, page_device, server_key)
 
                 # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
                 # primary lookup: this module's device and bay are reassigned below, and its pk
@@ -2301,7 +2560,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 )
                 if not conflict_module:
                     messages.error(request, "Module no longer exists.")
-                    return _modules_redirect_response(request, sync_url)
+                    return _modules_action_response(request, page_device, server_key)
 
                 # Remove whatever is currently in the target bay (if provided and different).
                 # Scoped by "delete": the device and bay filters prove where the row sits, not that
@@ -2319,7 +2578,8 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
 
                 # Move the conflict module to the target bay
                 from_bay = conflict_module.module_bay.name
-                from_device = conflict_module.device.name
+                source_device = conflict_module.device
+                from_device = source_device.name
                 conflict_module.module_bay = target_bay
                 conflict_module.device = target_device
                 conflict_module.full_clean()
@@ -2332,20 +2592,31 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 moved_msg += f" from {from_device}"
             moved_msg += f"/{from_bay} to {target_bay.name}."
             messages.success(request, moved_msg)
+            if server_key:
+                _schedule_module_cache_mutation(request, page_device, server_key)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Move failed: {e}")
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_action_response(request, page_device, server_key)
 
 
-class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class AddBayTemplateView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    SyncSubjectClaimMixin,
+    View,
+):
     """
     Create a missing ModuleBayTemplate on a Device Type or Module Type so the
     user can install a sub-component without leaving the modules sync tab.
 
     GET renders a pre-filled modal fragment that targets ``#htmx-modal-content``;
-    POST creates the bay template and redirects back to the modules tab.
+    POST creates the bay template and returns the user to the modules tab.
     """
+
+    SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
     TARGET_KINDS = ("device_type", "module_type")
 
@@ -2372,13 +2643,21 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         device/module of ``target`` so the resolver can match it immediately.
 
         NetBox auto-creates bays from templates only when a Device/Module is
-        first created — a template added later is invisible to existing
+        first created. A template added later is invisible to existing
         instances until manually instantiated. ``target_kind`` selects the
         scope: device-type templates are instantiated on every Device of that
         type; module-type templates are instantiated on every installed Module
         of that type. Pre-existing bays with the resolved name (under the same
         device/module scope) are skipped so re-adding a template after a
         partial manual fix is safe.
+
+        Args:
+            bay_template (ModuleBayTemplate): The saved module bay template to instantiate.
+            target_kind (str): The target type, either ``device_type`` or ``module_type``.
+            target (DeviceType | ModuleType): The device type or module type that owns the template.
+
+        Returns:
+            int: The number of module bays created on existing instances.
         """
         from dcim.models import Device, Module, ModuleBay
 
@@ -2489,11 +2768,20 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
     @staticmethod
     def _existing_regex_mapping_covers(librenms_name, librenms_class, manufacturer):
         """
-        True when an existing regex ModuleBayMapping already matches
-        ``librenms_name`` for the given manufacturer / global scope.
-        Iterates regex rows in Python — the row count is small (one per
-        bay-family) so this is cheap, and Postgres can't compare its
+        Return whether an existing regex ModuleBayMapping already matches the requested scope.
+
+        The function checks ``librenms_name`` for the given manufacturer or global scope.
+        It iterates regex rows in Python. The row count is small (one per
+        bay-family), so this is cheap, and Postgres cannot compare its
         re-flavoured patterns server-side anyway.
+
+        Args:
+            librenms_name (str): The LibreNMS bay name to match.
+            librenms_class (str): The LibreNMS inventory class to match.
+            manufacturer (Manufacturer | None): The optional manufacturer scope.
+
+        Returns:
+            bool: Whether an existing regular expression mapping covers the name and scope.
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
 
@@ -2518,12 +2806,20 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
     @staticmethod
     def _existing_bay_mapping(librenms_name, librenms_class, manufacturer):
         """
-        True when a ModuleBayMapping already covers (librenms_name, librenms_class)
-        for the given manufacturer (vendor-scoped) or globally (manufacturer is null).
+        Return whether a ModuleBayMapping already covers the requested name, class, and scope.
 
-        Only checks exact mappings — regex mappings are intentionally ignored
-        because the per-row suggestion is for one specific name and we don't
+        The scope is the given manufacturer (vendor-scoped) or global (manufacturer is null).
+        This function checks only exact mappings. It intentionally ignores regex mappings
+        because the per-row suggestion is for one specific name and we do not
         want to second-guess broader patterns the operator already wrote.
+
+        Args:
+            librenms_name (str): The LibreNMS bay name to match.
+            librenms_class (str): The LibreNMS inventory class to match.
+            manufacturer (Manufacturer | None): The optional manufacturer scope.
+
+        Returns:
+            bool: Whether an existing exact mapping covers the name, class, and scope.
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
 
@@ -2540,7 +2836,98 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             qs = qs.filter(manufacturer__isnull=True)
         return qs.exists()
 
+    def _map_existing_bay(self, request, pk):
+        """Reuse the mapping proposal with a visible, empty bay on this device."""
+        from dcim.models import Device, ModuleBay
+
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        self.required_object_permissions = {
+            request.method: [("view", Device), ("view", ModuleBay), ("add", ModuleBayMapping)]
+        }
+        if error := self.require_all_permissions(request.method):
+            return error
+        device = self.restrict_object_or_404(Device, pk=pk)
+        available_bay_names = sorted(
+            set(
+                ModuleBay.objects.restrict(request.user, "view")
+                .filter(device=device, module__isnull=True, installed_module__isnull=True)
+                .values_list("name", flat=True)
+            )
+        )
+        inputs = request.POST if request.method == "POST" else request.GET
+        librenms_name = inputs.get("librenms_name", "").strip()
+        librenms_class = inputs.get("librenms_class", "").strip()
+        if not librenms_name:
+            return HttpResponse("LibreNMS inventory name is required.", status=400)
+        manufacturer = self._device_manufacturer(device)
+        if request.method == "POST":
+            name = inputs.get("name", "")
+            if name not in available_bay_names:
+                return HttpResponse("Select a visible, empty bay on this device.", status=400)
+            mapping_kind = inputs.get("mapping_kind", "exact")
+            if mapping_kind not in ("exact", "regex"):
+                return HttpResponse("Invalid mapping kind.", status=400)
+            pattern = self._derive_mapping_pattern(librenms_name, name) if mapping_kind == "regex" else None
+            if mapping_kind == "regex" and pattern is None:
+                return HttpResponse("These names do not support the proposed regex mapping.", status=400)
+            server_key = self.resolve_posted_server_key_or_none(request.POST)
+            mapping = ModuleBayMapping(
+                librenms_name=pattern["librenms_pattern"] if pattern else librenms_name,
+                librenms_class=librenms_class,
+                netbox_bay_name=pattern["netbox_replacement"] if pattern else name,
+                is_regex=pattern is not None,
+                manufacturer=manufacturer,
+            )
+            try:
+                with transaction.atomic():
+                    mapping.full_clean()
+                    mapping.save()
+            except (ValidationError, IntegrityError) as exc:
+                messages.error(request, f"Failed to add bay mapping: {exc}")
+            else:
+                messages.success(request, f"Added bay mapping for '{librenms_name}' to '{name}'.")
+                if server_key:
+                    _schedule_module_cache_mutation(request, device, server_key)
+            return _modules_action_response(request, device, server_key)
+
+        # Step one picks the bay; step two settles the mapping kind for THAT bay. The kind used
+        # to be derived from the alphabetically first offered bay, so an unrelated bay decided
+        # it for every other one: on an MX304 "LCMIC1" derives nothing from "Routing Engine 0",
+        # which forced the exact default onto the whole Routing Engine family.
+        # Not stripped: the POST matches the submitted name against the stored bay names as-is,
+        # so a bay stored with surrounding whitespace must survive step two unchanged.
+        chosen_name = inputs.get("name", "")
+        # A bay filled since the modal opened is no longer offered, so return a fresh chooser
+        # rather than reviewing a mapping onto a bay that can no longer be saved.
+        on_kind_step = inputs.get("step") == "kind" and chosen_name in available_bay_names
+        mapping_pattern = self._derive_mapping_pattern(librenms_name, chosen_name) if on_kind_step else None
+        return render(
+            request,
+            "netbox_librenms_plugin/htmx/add_bay_template_modal.html",
+            {
+                "device_pk": pk,
+                "mapping_only": True,
+                "mapping_step": "kind" if on_kind_step else "bay",
+                "chosen_name": chosen_name if on_kind_step else "",
+                # A single offered bay is not a guess, so preselect it. With several, the
+                # operator picks: choosing for them is what proposed an unrelated bay before.
+                "preselected_name": available_bay_names[0] if len(available_bay_names) == 1 else "",
+                "available_bay_names": available_bay_names,
+                "librenms_name": librenms_name,
+                "librenms_class": librenms_class,
+                "manufacturer_label": str(manufacturer) if manufacturer else "",
+                "offer_mapping_checkbox": bool(available_bay_names),
+                "mapping_pattern": mapping_pattern,
+                "mapping_default_kind": "regex" if mapping_pattern else "exact",
+                "server_key": request.GET.get("server_key", ""),
+            },
+        )
+
     def get(self, request, pk):
+        if request.GET.get("mode") == "map_existing":
+            return self._map_existing_bay(request, pk)
+
         from dcim.models import Device, DeviceType, ModuleBay, ModuleBayTemplate, ModuleType
 
         target_kind = request.GET.get("target_kind", "")
@@ -2608,19 +2995,22 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             "mapping_exists": mapping_exists,
             "mapping_pattern": mapping_pattern,
             "mapping_default_kind": "regex" if mapping_pattern else "exact",
+            "server_key": request.GET.get("server_key", ""),
         }
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
     def post(self, request, pk):
+        if request.POST.get("mode") == "map_existing":
+            return self._map_existing_bay(request, pk)
+
         from dcim.models import Device, DeviceType, ModuleBay, ModuleBayTemplate, ModuleType
 
         from netbox_librenms_plugin.models import ModuleBayMapping
 
         target_kind = request.POST.get("target_kind", "")
         if target_kind not in self.TARGET_KINDS:
-            messages.error(request, "Invalid target_kind for bay template.")
-            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return _modules_redirect_response(request, sync_url)
+            # The modal echoes target_kind from its GET render, so a bad value is a tampered request: refuse it like get().
+            return HttpResponse("Invalid target_kind.", status=400)
         target_model = DeviceType if target_kind == "device_type" else ModuleType
 
         # POST creates the template AND instantiates live ModuleBay rows on
@@ -2638,18 +3028,18 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             return error
 
         device = self.restrict_object_or_404(Device, pk=pk)
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
 
         try:
             target_pk = int(request.POST.get("target_pk", ""))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid target_pk for bay template.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_action_response(request, device, server_key)
 
         name = (request.POST.get("name") or "").strip()
         if not name:
             messages.error(request, "Bay template name is required.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_action_response(request, device, server_key)
         position = (request.POST.get("position") or "").strip()
         label = (request.POST.get("label") or "").strip()
         description = (request.POST.get("description") or "").strip()
@@ -2740,7 +3130,9 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 )
             else:
                 messages.success(request, f"Added bay template '{name}' to {target}.{instantiate_note}")
+            if server_key:
+                _schedule_module_cache_mutation(request, device, server_key)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to add bay template: {e}")
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_action_response(request, device, server_key)

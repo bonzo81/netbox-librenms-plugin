@@ -4,16 +4,30 @@ This guide explains how to run the test suite, write new tests, and debug failur
 
 ## Quick Start
 
+Outside the devcontainer and CI, install the browser the Playwright suite drives:
+
+```bash
+python -m playwright install chromium
+```
+
+The devcontainer setup script and the CI browser job install it for you.
+
 Run all tests with a single command:
+
+```bash
+make test
+```
+
+Run the Django suite without the separate browser suite:
 
 ```bash
 make unittest
 ```
 
-Or run pytest directly:
+Run the Playwright browser suite:
 
 ```bash
-pytest netbox_librenms_plugin/tests/ -v
+make browser
 ```
 
 ## Test Structure
@@ -133,54 +147,76 @@ pytest netbox_librenms_plugin/tests/ -v -x
 
 # Re-run only failed tests from last run
 pytest netbox_librenms_plugin/tests/ -v --lf
+
+# Re-run only failed browser tests from last run
+pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser --lf
 ```
 
 ## Testing Philosophy
 
-The test suite prioritizes speed and isolation so you can run tests frequently during development:
+A test is worth what it actually runs. Rank the options in this order:
 
-- **Mock-based**: Unit tests use `MagicMock` instead of real database objects. No Django database setup required.
-- **Fast execution**: The full suite runs in approximately 15-20 seconds (varies by environment).
-- **Isolated**: Each test is independent with no shared state between tests.
-- **No external network access**: Tests never call external services. Integration tests use a local loopback HTTP server (`mock_librenms_server.py`) to exercise the real API client against realistic HTTP responses without requiring a running LibreNMS instance.
+1. **End to end** — a real request through the real view, the real permission gate, the real ORM, and the real response.
+2. **Integration against real dependencies** — a real test database, real NetBox models, real forms and serializers.
+3. **Narrow unit tests** — only for pure functions with no I/O.
+
+Reserve mocks for boundaries you cannot run locally: the LibreNMS HTTP API, an error a local
+database cannot produce (an `IntegrityError` on save, a lock `DatabaseError`), or a timing seam that
+injects one deterministic concurrent write into an otherwise real flow.
+
+A `MagicMock` answers any attribute and any method, so a test built on mocked models stays green
+while the real query path is broken. It re-asserts the author's assumptions rather than the code.
+
+- **No external network access**: Tests never call external services. The LibreNMS API is exercised through a local loopback HTTP server (`mock_librenms_server.py`), so the real API client runs against realistic HTTP responses without a running LibreNMS instance.
+- **Isolated**: Each test is independent. Database tests run in a transaction that is rolled back.
 - **Coverage exclusions**: Test files themselves are excluded from coverage reports (see `[tool.coverage.run]` omit list in `pyproject.toml`).
 
-This approach means tests work identically in your local development environment, in the devcontainer, and in CI pipelines.
+The database-backed suite needs a test database, so the first run pays a one-off migration cost.
+Pass `--reuse-db` on later runs to skip it.
 
 ## Writing New Tests
 
 ### Basic Test Template
 
+Never set `pytest_plugins` in a test module. pytest registers that plugin for the whole
+session, so any autouse fixture it carries also applies to every test file collected after
+it. Import the fixture, or bind it as a module attribute, in the module that needs it.
+
 New tests should follow this structure:
 
 ```python
-from unittest.mock import MagicMock, patch
-
-from netbox_librenms_plugin.tests import test_librenms_api_helpers
-
-# Bind the helper's autouse fixture into this module when the tests need the
-# LibreNMS configuration mocked. Never use `pytest_plugins`: pytest registers a
-# plugin session-wide, so the fixture would then override PLUGINS_CONFIG for
-# every later test file in the run.
-mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
+import pytest
 
 
+@pytest.mark.django_db
 class TestFeatureName:
     """Tests for [feature description]."""
 
-    @patch("netbox_librenms_plugin.module_name.external_dependency")
-    def test_specific_behavior(self, mock_dependency, mock_librenms_config):
+    def test_specific_behavior(self, settings):
         """Describe what this test verifies."""
-        # Arrange - set up test data and mocks
-        mock_dependency.return_value = {"expected": "response"}
+        from dcim.models import Device
 
-        # Act - call the code being tested
-        from netbox_librenms_plugin.module_name import function_to_test
-        result = function_to_test(input_data)
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request as make_view_request,
+            make_user_with_perms as make_view_user,
+            message_texts as view_message_texts,
+            post as post_view,
+        )
+        from netbox_librenms_plugin.views.imports.actions import SomeActionView
 
-        # Assert - verify the results
-        assert result == expected_value
-        mock_dependency.assert_called_once_with(expected_args)
+        # Arrange - real rows, a real user, real grants
+        device = make_device("r01", serial="SN1")
+        user = make_view_user("feature-user", [("change", Device)])
+        request = make_view_request("post", {"action": "sync_name"}, user=user)
+
+        # Act - drive the real view with the request bound as dispatch() binds it
+        response = post_view(SomeActionView(), request, device_id=device.pk)
+
+        # Assert - on the response and on the persisted state
+        assert response.status_code == 200
+        assert Device.objects.get(pk=device.pk).name == "expected-name"
+        assert view_message_texts(request, "error") == []
 ```
 
 ### Key Testing Conventions
@@ -193,12 +229,29 @@ def test_something(self):
     api = LibreNMSAPI(server_key="default")
 ```
 
-**Mock NetBox models** with `MagicMock()` instead of creating real database objects:
+**Create real NetBox objects** with the `conftest.py` factories instead of mocking models:
 
 ```python
-device = MagicMock()
-device.name = "test-device"
-device.primary_ip.address.ip = "192.168.1.1"
+device = make_device("test-device", serial="SN1")
+ip = make_ip("192.168.1.1/24", assigned_object=make_interface(device, "mgmt0"))
+```
+
+**Deny a permission by withholding it**, not by stubbing the gate. Build a user who genuinely lacks
+the permission, then assert the response the gate actually returns (302 for a normal POST, 200 with
+an `HX-Redirect` header for an HTMX POST) and re-read the object to prove no write landed.
+
+**Drive the LibreNMS API through the loopback stub** rather than mocking the client:
+
+```python
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
+from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
+
+
+key = "default"
+with run_librenms_server() as server:
+    configure_test_servers(settings, {key: {"librenms_url": server.url, "api_token": "t"}})
+    server.device_info_response(device_id=42, hostname="r01", serial="SN1")
+    view._librenms_api = LibreNMSAPI(server_key=key)
 ```
 
 **Patch at the source module**, not where the function is imported:
@@ -211,13 +264,20 @@ device.primary_ip.address.ip = "192.168.1.1"
 @patch("netbox_librenms_plugin.views.imports.list.process_device_filters")
 ```
 
-### Available Fixtures
+### Available Helpers and Fixtures
 
-These fixtures are defined in [conftest.py](../../netbox_librenms_plugin/tests/conftest.py):
+Defined in [conftest.py](../../netbox_librenms_plugin/tests/conftest.py):
 
+- `make_device`, `make_vm`, `make_interface`, `make_ip`, `make_cluster`, `make_superuser`: real rows.
+  These are plain functions, not pytest fixtures: import and call them. Naming one in a test's
+  parameter list raises a fixture-not-found error.
 - `mock_response_factory` — Factory for creating mock HTTP responses
-- `mock_netbox_device` — Pre-configured mock NetBox Device object
-- `mock_netbox_vm` — Pre-configured mock NetBox VM object
+- `mock_netbox_device`, `mock_netbox_vm` — mock NetBox objects, kept for the unconverted legacy
+  tests. Do not use them in new tests.
+
+[view_test_helpers.py](../../netbox_librenms_plugin/tests/view_test_helpers.py) supplies the request
+and permission side: `make_request`, `make_user_with_perms`, `grant`, `post`, `get`,
+`message_texts`, `assert_locked_before_update`.
 
 `mock_librenms_config` is defined in
 [test_librenms_api_helpers.py](../../netbox_librenms_plugin/tests/test_librenms_api_helpers.py).
@@ -240,17 +300,21 @@ assert "error" not in result
 with pytest.raises(ValueError, match="Invalid configuration"):
     api.method_that_should_fail()
 
-# Verifying mock calls
-mock_get.assert_called_once()
-mock_post.assert_called_with(expected_url, headers=expected_headers, json=expected_data)
-mock_delete.assert_not_called()
+# Verifying persisted state after a view action
+assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {"default": 42}
+
+# Verifying the messages a view queued
+assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
 ```
+
+Assert on persisted state and on the response, not on recorded mock calls. A `assert_called_once()`
+passes whenever the call is made, including when the call did the wrong thing.
 
 ## CI/CD Compatibility
 
-The tests run in any environment without external dependencies:
+The tests do not use production services:
 
-- No database connection required
+- Database-backed tests require a test database connection. Other tests do not require one.
 - No external network access needed (integration tests use local loopback only)
 - Fast execution suitable for pre-commit hooks
 - Clear failure messages for debugging

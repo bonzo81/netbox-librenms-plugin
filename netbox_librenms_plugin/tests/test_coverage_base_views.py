@@ -19,6 +19,7 @@ import pytest
 from dcim.models import Device
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 # =============================================================================
@@ -192,7 +193,7 @@ class TestBaseCableTableViewGetLinksData:
             with (
                 patch.object(view, "get_links_data", side_effect=_fake_links),
                 patch.object(view, "get_cache_key", return_value=cache_key),
-                patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d),
+                patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d) as mock_enrich,
                 patch.object(view, "get_table", return_value=MagicMock()),
                 patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
             ):
@@ -200,6 +201,7 @@ class TestBaseCableTableViewGetLinksData:
 
             # The stale full snapshot must be gone so downstream verify/sync can't serve it.
             assert real_cache.get(cache_key) is None
+            mock_enrich.assert_not_called()
         finally:
             real_cache.delete(cache_key)
 
@@ -740,12 +742,7 @@ class TestBaseCableTableViewEnrichLocalPort:
         assert "local_port_url" not in link
 
     def test_oob_row_never_binds_a_host_interface(self):
-        """A merged OOB LLDP row (context-only) must not resolve against the HOST device.
-
-        Its local port lives on the OOB CONTROLLER; a shared name (or colliding stored
-        librenms_id) would otherwise bind a host interface and render a wrong
-        local_port_url + cable state — even though sync and actions already refuse OOB rows.
-        """
+        """A merged OOB context row cannot bind a host interface with a shared name or LibreNMS ID."""
         view = self._make_view()
         obj = make_device("cable-dev-oob-collide")
         make_interface(obj, "eth0")  # host interface sharing the OOB controller's port name
@@ -1242,6 +1239,9 @@ class TestBaseCableTableViewPost:
         with (
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "_prepare_context", return_value=fake_context),
+            # _prepare_context is stubbed, so nothing reaches the cache; report the snapshot as
+            # present, which is the success case this test is about.
+            patch("netbox_librenms_plugin.views.base.cables_view.cache.has_key", return_value=True),
             patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
@@ -1249,6 +1249,7 @@ class TestBaseCableTableViewPost:
             view.post(request, pk=1)
 
         mock_messages.success.assert_called_once()
+        mock_messages.error.assert_not_called()
         mock_render.assert_called_once()
 
     def test_get_ports_data_uses_cache_when_available(self):
@@ -2025,6 +2026,9 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            # The view's cache is mocked, so no snapshot reaches the real one; report it as
+            # present, which is the success case this test is about.
+            patch("netbox_librenms_plugin.sync_cache.cache.has_key", return_value=True),
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
             mock_render.return_value = MagicMock()
@@ -2037,63 +2041,110 @@ class TestBaseInterfaceTableViewPost:
         mock_get_cache_key.assert_called_with(obj, "ports", "default")
         mock_get_last_fetched_key.assert_called_with(obj, "ports", "default")
 
-    def test_post_lag_inference_excludes_oob_ports(self):
+    def test_post_lag_inference_excludes_oob_ports(self, client, settings, monkeypatch):
         """port_stack is scoped to the main device, so its lazy-fetch trigger must ignore OOB rows."""
-        view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        from copy import deepcopy
 
-        view._librenms_api.get_librenms_id.return_value = 42
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+
+        from dcim.models import Interface
+        from django.core.cache import cache as real_cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        # librenms_url is filled in below, once the loopback server has bound its port.
+        plugin_config["netbox_librenms_plugin"]["servers"] = {
+            "default": {
+                "api_token": "test-token",
+                "cache_timeout": 300,
+                "verify_ssl": True,
+            }
+        }
+
+        device = make_device(
+            "lag-inference-host",
+            librenms_cf={"default": {"id": 42, "oob": {"id": 99, "type": "oob"}}},
+        )
+        make_interface(device, "Gi0/0")
+        user = make_user_with_perms(
+            "lag-inference-viewer",
+            [("view", Device), ("view", Interface)],
+        )
+        client.force_login(user)
+
         # Host ports carry no LAG signal; the OOB controller exposes a LAG-typed port.
-        view._librenms_api.get_ports.side_effect = [
-            (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]}),
-            (True, {"ports": [{"port_id": 2, "ifName": "Po1", "ifType": "ieee8023adLag"}]}),
+        requested_paths = []
+
+        def _record(body, status=200):
+            """Register a route that records its path, so the URLs stay observable."""
+
+            def route(*, path, **_kwargs):
+                requested_paths.append(path)
+                return status, body
+
+            return route
+
+        with run_librenms_server() as server:
+            server.register(
+                "/api/v0/devices/42/ports",
+                _record({"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]}),
+            )
+            server.register(
+                "/api/v0/devices/99/ports",
+                _record({"ports": [{"port_id": 2, "ifName": "Po1", "ifType": "ieee8023adLag"}]}),
+            )
+            # Registered so a regression that fetches port_stack is RECORDED rather than 404ing
+            # silently; LibreNMS itself answers 404 for an empty list.
+            for device_id in (42, 99):
+                server.register(
+                    f"/api/v0/devices/{device_id}/port_stack",
+                    _record({"status": "error", "message": "no port_stack"}, status=404),
+                )
+            plugin_config["netbox_librenms_plugin"]["servers"]["default"]["librenms_url"] = server.url
+            settings.PLUGINS_CONFIG = plugin_config
+
+            url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
+            response = client.post(url, {"server_key": "default", "interface_name_field": "ifName"})
+
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
+
+        view_for_keys = DeviceInterfaceTableView()
+        cache_key = view_for_keys.get_cache_key(device, "ports", "default")
+        # post() writes three real entries; the device pk is reused after rollback, so a stale
+        # timestamp or tab state would leak into a later test's object. The cleanup opens here,
+        # before the first assertion, because a rollback does not remove cache entries.
+        written_keys = [
+            cache_key,
+            view_for_keys.get_last_fetched_key(device, "ports", "default"),
+            SyncCacheConsistency(device).state_key(SyncTab.INTERFACES, "default"),
         ]
+        try:
+            assert response.status_code == 200
 
-        with (
-            patch.object(view, "get_object", return_value=obj),
-            patch.object(view, "get_redirect_url", return_value="/device/1/"),
-            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
-            patch.object(view, "get_context_data", return_value={}),
-            patch.object(view, "get_cache_key", return_value="cache-key"),
-            patch.object(view, "get_last_fetched_key", return_value="last-key"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
-        ):
-            mock_render.return_value = MagicMock()
-            view.post(request, pk=1)
+            # Prove the OOB path actually ran end-to-end first — otherwise the assertions below
+            # would also pass if OOB ports were never fetched or merged (the whole point of the
+            # filter being that there *was* an OOB LAG row to exclude).
+            assert "/api/v0/devices/99/ports" in requested_paths
 
-        # Prove the OOB path actually ran end-to-end first — otherwise the assertions below
-        # would also pass if OOB ports were never fetched or merged (the whole point of the
-        # filter being that there *was* an OOB LAG row to exclude).
-        view._librenms_api.get_ports.assert_any_call(99)  # OOB controller ports fetched
-        cached_snapshot = next(
-            call.args[1] for call in mock_cache.set.call_args_list if call.args and call.args[0] == "cache-key"
-        )
-        assert any(p.get("_source") == "oob" for p in cached_snapshot["ports"]), (
-            "OOB row was never merged into the snapshot — the test would pass vacuously"
-        )
+            cached_snapshot = real_cache.get(cache_key)
+            assert cached_snapshot is not None
+            assert any(p.get("_source") == "oob" for p in cached_snapshot["ports"]), (
+                "OOB row was never merged into the snapshot — the test would pass vacuously"
+            )
 
-        # The OOB LAG row does not trigger the main-device port_stack fetch.
-        view._librenms_api.get_port_stack.assert_not_called()
+            # The OOB LAG row does not trigger the main-device port_stack fetch.
+            assert not [path for path in requested_paths if path.endswith("/port_stack")]
+        finally:
+            for written_key in written_keys:
+                real_cache.delete(written_key)
 
 
 @pytest.mark.django_db
 class TestBaseInterfaceTablePostCoercesLibreNMSId:
-    """post() must coerce whatever get_librenms_id() hands back before trusting it.
-
-    get_librenms_id() resolves through three paths — the librenms_id custom field, the
-    device-id cache, and live API discovery. The custom-field and discovery paths already
-    coerce (reject bool/zero/non-numeric), but the *cache* path returns its value verbatim.
-    A poisoned cache holding ``True`` therefore reaches the view as a truthy non-int that
-    ``int(True)`` would silently turn into device id ``1`` — fetching a stranger's ports.
-    The view must fail closed on it BEFORE get_ports().
-    """
+    """post() rejects a cached True device ID before get_ports() can fetch device 1."""
 
     def _real_api(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -2862,7 +2913,7 @@ class TestBaseIPAddressTableViewCreateBaseIpEntry:
         """When no supported IP fields exist, the boundary rejects the row."""
         view = self._make_view()
         ip_entry = {"port_id": 1}  # No IP address fields
-        obj = MagicMock()
+        obj = Device(name="router")
 
         with pytest.raises(ValueError, match="no supported address fields"):
             view._create_base_ip_entry(ip_entry, obj, vrfs=[])
@@ -3421,6 +3472,9 @@ class TestBaseIPAddressTableViewPost:
                 "netbox_librenms_plugin.views.base.ip_addresses_view.get_interface_name_field",
                 return_value="ifName",
             ),
+            # _prepare_context is stubbed, so no snapshot reaches the cache; report it as
+            # present, which is the success case this test is about.
+            patch("netbox_librenms_plugin.sync_cache.cache.has_key", return_value=True),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
@@ -3827,14 +3881,7 @@ class TestSingleCableVerifyViewPermissionGate:
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 class TestCableLinksDataCoercesLibreNMSId:
-    """get_links_data() must coerce whatever get_librenms_id() hands back before fetching links.
-
-    The id-cache path returns its value verbatim (the custom-field/discovery paths already
-    coerce), so a poisoned cache holding ``True`` reaches the cables view as a truthy non-int
-    that ``int(True)`` would silently turn into device id ``1`` — fetching a stranger's links
-    and ports. The view must fail closed on it BEFORE get_device_links()/get_ports(), mirroring
-    the interfaces-POST contract (TestBaseInterfaceTablePostCoercesLibreNMSId).
-    """
+    """get_links_data() rejects a cached True device ID before it fetches device 1 links or ports."""
 
     def _real_api(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -3887,12 +3934,7 @@ class TestCableLinksDataCoercesLibreNMSId:
 
 @pytest.mark.django_db
 class TestIPSyncFetchFailureKeepsMoveCard:
-    """On a LibreNMS fetch failure the IP-sync error re-render still surfaces movable_ips.
-
-    The per-row "Move IP addresses to <winner>" moves are pure NetBox operations, so a migrated
-    donor must keep the move card when LibreNMS is briefly unreachable — the card is gated on
-    ip_sync.movable_ips, which every other exit provides.
-    """
+    """A LibreNMS fetch failure keeps the NetBox-only IP move card for a migrated donor."""
 
     def _view(self):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
@@ -3940,11 +3982,7 @@ class TestIPSyncFetchFailureKeepsMoveCard:
 
 @pytest.mark.django_db
 class TestIPSyncRebindFailureKeepsMoveCard:
-    """On a stale/unconfigured POSTed server_key the IP-sync rebind-failure re-render must still surface movable_ips — the same move card the fetch-failure and success branches keep.
-
-    The card is gated on ip_sync.movable_ips; omitting it (as this branch did) made a migrated
-    donor's "Move IP addresses to <winner>" card vanish whenever the POSTed server_key went stale.
-    """
+    """A stale server key rebind failure keeps the migrated donor's NetBox-only IP move card."""
 
     def _view(self):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
@@ -3997,12 +4035,7 @@ class TestIPSyncRebindFailureKeepsMoveCard:
 
 @pytest.mark.django_db
 class TestRenderSyncPartialInjectsWritePermission:
-    """render_sync_partial injects has_write_permission from the request user at the shared chokepoint, so a migrated donor's 'Move to winner' controls render on every HTMX re-render, not just a full page reload.
-
-    Only modules_view (which renders directly) passed the flag; the interface/IP branches route
-    through render_sync_partial and omitted it, silently collapsing every move button to the
-    disabled read-only branch even for a user with change permission.
-    """
+    """render_sync_partial keeps migrated-donor move controls enabled on each permitted HTMX re-render."""
 
     def _ip_view(self, *, superuser):
         from core.models import ObjectType
@@ -4101,12 +4134,7 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
         return view
 
     def test_render_query_count_invariant_to_port_count(self):
-        """Rendering 2 vs 8 cached ports issues the SAME number of queries (no per-port member lookup).
-
-        get_virtual_chassis_member was the only per-port DB query in the cached-render loop; passing
-        the prebuilt {vc_position: member} map makes it O(1), so the query count no longer scales
-        with the number of ports.
-        """
+        """Rendering two or eight cached ports issues the same query count without per-port member lookups."""
         from dcim.models import Interface
         from django.core.cache import cache as dj_cache
         from django.db import connection
@@ -4155,13 +4183,7 @@ class TestVCInterfaceRenderMemberResolutionNotPerPort:
 
 @pytest.mark.django_db
 class TestEnrichPortLagParentNameFallback:
-    """Relationship name fallback must honor the user-selected name field.
-
-    The displayed LAG/parent name comes from port.get(interface_name_field) and
-    The relationship signal already scans {ifName, ifDescr, interface_name_field}; the
-    match fallback (no stored librenms_id on either side) compared ifName/ifDescr
-    only, so an ifAlias-driven deployment misreported a genuine match as mismatch.
-    """
+    """LAG and parent name fallbacks honor the selected interface name field when they classify matches."""
 
     def test_lag_match_via_interface_name_field_alias(self):
         from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
@@ -4211,10 +4233,7 @@ class TestEnrichPortLagParentStatusSymmetry:
     """LAG and parent must classify sync status identically across all 5 branches (the invariant the shared helper guarantees)."""
 
     def _status(self, kind, *, lnms_has_rel, nb_related, n):
-        """Enrich a fresh port for ONE relationship kind and return its sync status.
-
-        kind: "lag" | "parent". nb_related: None | "matching" | "nonmatching".
-        """
+        """Enrich one LAG or parent relationship and return its sync status."""
         from netbox_librenms_plugin.interface_relationships import RelationshipMaps, enrich_port_relationships
         from netbox_librenms_plugin.utils import set_librenms_device_id
 

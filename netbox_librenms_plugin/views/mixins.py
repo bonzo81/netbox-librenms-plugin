@@ -1,4 +1,5 @@
 import json
+import logging
 from urllib.parse import quote_plus
 
 from django.contrib import messages
@@ -14,15 +15,26 @@ from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGI
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.utils import coerce_model_pk, is_list_of_dicts
 
+logger = logging.getLogger(__name__)
+
 
 def parse_request_json(request):
-    """Parse JSON from request.body, returning (data, error_response).
+    """
+    Parse JSON from request.body, returning (data, error_response).
 
     On success returns (dict, None). On malformed input returns (None, JsonResponse 400).
-    json.loads happily returns a bare list/str/number for a valid-JSON non-object body;
-    every caller immediately does ``data.get(...)``, which would 500 on those — so a
-    non-dict payload is rejected here with a 400, keeping the (dict, None) contract true
-    for every endpoint instead of only the ones that added their own guard.
+    ``json.loads`` accepts a bare list, string, or number for a valid JSON non-object body.
+    Every caller immediately uses ``data.get(...)``, which would cause a 500 response for
+    these values. This function rejects a non-dict payload with a 400 response. This keeps
+    the (dict, None) contract true for every endpoint, not only the endpoints that added
+    their own guard.
+
+    Args:
+        request (HttpRequest): The request whose body contains JSON.
+
+    Returns:
+        tuple[dict | None, JsonResponse | None]: The parsed object and no error response,
+            or no data and a 400 error response.
     """
     try:
         data = json.loads(request.body)
@@ -63,10 +75,17 @@ def validated_referer(request):
     """
     Return the request's ``Referer`` when it passes the open-redirect barrier, else None.
 
-    The single home for the CWE-601 Referer check (``url_has_allowed_host_and_scheme`` against the
-    current host/scheme) so every redirect helper that trusts the Referer — ``_get_safe_redirect_url``
-    here and ``migrate._safe_referer`` — validates it identically and can't drift. Callers own their
-    own fallback when this returns None.
+    This function is the single home for the CWE-601 Referer check. It uses
+    ``url_has_allowed_host_and_scheme`` with the current host and scheme. This ensures that every
+    redirect helper which trusts the Referer validates it identically. These helpers are
+    ``_get_safe_redirect_url`` here and ``migrate._safe_referer``. Their validation cannot drift.
+    Callers provide their own fallback when this function returns None.
+
+    Args:
+        request (HttpRequest): The request that supplies the Referer and validation context.
+
+    Returns:
+        str | None: The validated Referer, or None when validation fails.
     """
     referrer = request.META.get("HTTP_REFERER")
     if referrer and url_has_allowed_host_and_scheme(
@@ -84,6 +103,12 @@ def _get_safe_redirect_url(request):
 
     Validates the Referer against allowed hosts and schemes to prevent
     open-redirect attacks. Falls back to the current request path or "/".
+
+    Args:
+        request (HttpRequest): The request that supplies the Referer and fallback path.
+
+    Returns:
+        str: The validated Referer, current request path, or root fallback.
     """
     if referrer := validated_referer(request):
         return referrer
@@ -109,6 +134,12 @@ def _safe_redirect_response(request):
 
     Returns an HTMX ``HX-Redirect`` response for HTMX requests, otherwise a
     standard redirect.
+
+    Args:
+        request (HttpRequest): The permission-denied request to redirect.
+
+    Returns:
+        HttpResponse: An HTMX ``HX-Redirect`` response or a standard redirect response.
     """
     target = _get_safe_redirect_url(request)
     is_htmx = bool(request.headers.get("HX-Request"))
@@ -551,6 +582,30 @@ class LibreNMSAPIMixin:
             return requested_server_key
         return self.librenms_api.server_key
 
+    def resolve_posted_server_key_or_none(self, data):
+        """
+        Resolve an ACTION path's server key, degrading to ``None`` on an unusable configuration.
+
+        :meth:`resolve_posted_server_key` reaches the lazy ``librenms_api`` property for its
+        fallback, and that property raises KeyError/ValueError when the plugin configuration holds
+        no bindable server. Every action view would then answer a 500. This resolve reports the
+        missing server instead, and the caller decides what that means: a NetBox-only write (module
+        serial/move, bay template, interface delete) continues and lets its write signal invalidate
+        the source snapshot, while an action that reads or writes server-scoped data fails closed.
+
+        Args:
+            data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an
+                optional ``server_key``.
+
+        Returns:
+            str | None: The validated posted key, the active-server key, or ``None``.
+        """
+        try:
+            return self.resolve_posted_server_key(data)
+        except (KeyError, ValueError):
+            logger.warning("%s found no usable LibreNMS server configuration", type(self).__name__)
+            return None
+
     def get_live_device_info(self, librenms_id):
         """
         Fetch LIVE LibreNMS device info for a write path (``use_cache=False``).
@@ -665,7 +720,7 @@ class LibreNMSAPIMixin:
         # so live fetches and cache writes target the same server.
         return api.server_key
 
-    def resolve_get_render_server_key(self, request):
+    def resolve_get_render_server_key(self, request, server_key=None):
         """
         Resolve and rebind ``self.librenms_api`` for a GET-render cache read.
 
@@ -678,6 +733,8 @@ class LibreNMSAPIMixin:
 
         Args:
             request: The current request; ``?server_key`` is read from its GET params.
+            server_key: An already-resolved key used instead of the GET param, for a re-render
+                whose request carries the key outside the query string (the module actions).
 
         Returns:
             tuple[str | None, bool]: ``(scoped_key, unresolved)``. ``scoped_key`` is the key
@@ -686,7 +743,9 @@ class LibreNMSAPIMixin:
                 wants to short-circuit can render an empty table scoped to ``scoped_key`` rather
                 than fall back to the default server's cached data.
         """
-        requested = (request.GET.get("server_key") or "").strip()
+        if server_key is None:
+            server_key = request.GET.get("server_key") or ""
+        requested = server_key.strip()
         resolved = self.rebind_api_for_server(requested)
         if requested and resolved is None:
             return requested, True
@@ -756,10 +815,101 @@ class LibreNMSAPIMixin:
         return context
 
 
-class CacheMixin:
+class SyncSubjectClaimMixin:
+    """
+    Claim the synchronization subject a sync view acts on, so write signals leave it alone.
+
+    Every other object a NetBox write touches is invalidated from the signals in
+    ``cache_signals``, which is what stops a view from forgetting a device it changed. The page
+    being rendered is the one object whose cleanup its view still owns, because only the
+    request knows which tab is the source and only the response can report the result.
+    """
+
+    # The synchronization subject's model, by the object_type its URL carries.
+    SYNC_SUBJECT_LABELS = {"device": "dcim.device", "virtualmachine": "virtualization.virtualmachine"}
+
+    # Set by a view whose bare ``pk`` names the synchronization subject. Left unset no claim is taken
+    # from the URL, because a pk is not self-describing: the move-to-winner endpoints carry an
+    # Interface or IPAddress pk, and guessing "device" there would claim an unrelated device
+    # that happens to share the number while leaving the real pages unprotected.
+    SYNC_SUBJECT_MODEL_LABEL = None
+
+    # Opt in when an unusable server also prevents this view from scheduling its transition.
+    # A view that opts in must also inherit LibreNMSAPIMixin: dispatch() resolves the posted server
+    # through resolve_posted_server_key_or_none(), so opting in without it raises AttributeError on
+    # every POST. Every current opt-in inherits it.
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = False
+
+    def sync_subject_claim(self, request=None, **kwargs):
+        """
+        Return the identity of the object this request's sync page is acting on.
+
+        Args:
+            request: The current request, used by views that cannot schedule without a server.
+            **kwargs: The URL kwargs, carrying ``object_type`` plus ``object_id``, or ``pk``.
+
+        Returns:
+            The key from :func:`sync_subject_key`, or None when the URL names no synchronization subject.
+        """
+        from netbox_librenms_plugin.sync_cache import sync_subject_key
+
+        if (
+            self.DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER
+            and request is not None
+            and request.method == "POST"
+            and self.resolve_posted_server_key_or_none(request.POST) is None
+        ):
+            return None
+        pk = kwargs.get("object_id", kwargs.get("pk"))
+        if pk is None:
+            return None
+        # The view's own model is authoritative. The VM pages carry no object_type in the URL,
+        # so defaulting those to a device would claim whichever device shares the pk.
+        model = getattr(self, "model", None)
+        if model is not None:
+            return sync_subject_key(model._meta.label_lower, pk)
+        if "object_type" in kwargs:
+            # The URL converter accepts any string and the view rejects a bad one inside post(),
+            # so an unrecognised type claims nothing rather than guessing a device.
+            label = self.SYNC_SUBJECT_LABELS.get(kwargs["object_type"])
+            return sync_subject_key(label, pk) if label else None
+        if self.SYNC_SUBJECT_MODEL_LABEL:
+            return sync_subject_key(self.SYNC_SUBJECT_MODEL_LABEL, pk)
+        return None
+
+    def dispatch(self, request, *args, **kwargs):
+        """
+        Claim this request's synchronization subject, so write signals leave its transition alone.
+
+        Every other object a write touches is invalidated from the signals, which is what
+        stops a view from forgetting a device it changed. The page being rendered is the one
+        object whose cleanup the view still owns, because only it knows the source tab.
+
+        The claim is taken here rather than where the transition is scheduled, because NetBox
+        leaves ATOMIC_REQUESTS off: a view's own atomic block commits, and the write-driven
+        cleanup runs, before the view reaches its scheduling call.
+
+        Args:
+            request (HttpRequest): The request whose synchronization subject to claim.
+            *args (Any): Positional arguments for the next dispatch implementation.
+            **kwargs (Any): URL arguments for the claim and the next dispatch implementation.
+
+        Returns:
+            HttpResponse: The response from the next dispatch implementation.
+        """
+        from netbox_librenms_plugin.sync_cache import claim_sync_subjects
+
+        with claim_sync_subjects(self.sync_subject_claim(request=request, **kwargs)):
+            return super().dispatch(request, *args, **kwargs)
+
+
+class CacheMixin(SyncSubjectClaimMixin):
     """
     A mixin class that provides caching functionality.
     """
+
+    # Every routed cache view is a device sync page unless it declares its own model.
+    SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
 
     def get_cache_key(self, obj, data_type="ports", server_key=None):
         """
@@ -770,21 +920,17 @@ class CacheMixin:
             data_type: Type of data being cached ('ports', 'links', 'inventory', etc.)
             server_key: Optional LibreNMS server key for namespacing per-server data
         """
-        model_name = obj._meta.model_name
-        base = f"librenms_{data_type}_{model_name}_{obj.pk}"
-        if server_key:
-            return f"{base}_{server_key}"
-        return base
+        from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+
+        return sync_snapshot_key(obj, data_type, server_key)
 
     def get_last_fetched_key(self, obj, data_type="ports", server_key=None):
         """
         Get the cache key for the last fetched time of the object.
         """
-        model_name = obj._meta.model_name
-        base = f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
-        if server_key:
-            return f"{base}_{server_key}"
-        return base
+        from netbox_librenms_plugin.sync_cache import sync_last_fetched_key
+
+        return sync_last_fetched_key(obj, data_type, server_key)
 
     def get_vlan_overrides_key(self, obj, server_key=None):
         """
@@ -793,11 +939,17 @@ class CacheMixin:
         Stores a {vid_str: group_id_str} map so that "apply to all" VLAN
         group choices persist across table pages. Including server_key scopes
         overrides per-server to avoid leakage when multiple servers are configured.
+
+        Args:
+            obj (Device): The device whose VLAN group override selections are cached.
+            server_key (str | None): The optional LibreNMS server key for the cache namespace.
+
+        Returns:
+            str: The cache key for the device and server.
         """
-        model_name = obj._meta.model_name
-        if server_key:
-            return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}_{server_key}"
-        return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}"
+        from netbox_librenms_plugin.sync_cache import sync_vlan_overrides_key
+
+        return sync_vlan_overrides_key(obj, server_key)
 
 
 class VlanAssignmentMixin:
@@ -897,11 +1049,16 @@ class VlanAssignmentMixin:
         """
         Build lookup dictionaries for VLAN matching.
 
-        Returns a dict with:
-        - vid_to_groups: {vid: [vlan_group, ...]} - VID to groups containing that VID
-        - vid_group_to_vlan: {(vid, group_id): vlan} - unique per group lookup
-        - vid_to_vlans: {vid: [vlan, ...]} - all VLANs with that VID
-        - vid_name_to_vlan: {(vid, name): vlan} - VID + name lookup
+        Args:
+            vlan_groups (list[VLANGroup]): The VLAN groups to include.
+
+        Returns:
+            dict: A dictionary with these lookup maps:
+
+                - vid_to_groups: {vid: [vlan_group, ...]}, VID to groups containing that VID.
+                - vid_group_to_vlan: {(vid, group_id): vlan}, unique per-group lookup.
+                - vid_to_vlans: {vid: [vlan, ...]}, all VLANs with that VID.
+                - vid_name_to_vlan: {(vid, name): vlan}, VID and name lookup.
         """
         from ipam.models import VLAN
 
@@ -971,6 +1128,12 @@ class VlanAssignmentMixin:
           Maps each VID to its auto-selected VLAN group based on scope hierarchy.
           If vlan_group_overrides contains a user selection for a VID, that takes
           precedence over auto-selection.
+
+        Args:
+            port (dict): The port record to update.
+            lookup_maps (dict): The VLAN lookup maps used for group selection.
+            device (Device): The device that supplies the scope hierarchy.
+            vlan_group_overrides (dict | None): User-selected VLAN groups keyed by VID.
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         untagged_vid = port.get("untagged_vlan")
@@ -1059,6 +1222,10 @@ class VlanAssignmentMixin:
 
         Sets:
         - missing_vlans: List of VIDs not found in any NetBox VLAN group
+
+        Args:
+            port (dict): The port record to update.
+            lookup_maps (dict): The VLAN lookup maps used to find missing VIDs.
         """
         vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
         missing_vlans = []
@@ -1170,7 +1337,14 @@ class VlanAssignmentMixin:
     def _get_ancestors(self, obj):
         """
         Get all ancestors of a hierarchical object (location, region, site group).
+
         Returns list including the object itself and all parents up to root.
+
+        Args:
+            obj (Location | Region | SiteGroup | None): The hierarchical object, or None.
+
+        Returns:
+            list: The object and all parents up to the root, or an empty list for None.
         """
         ancestors = []
         current = obj
@@ -1254,6 +1428,7 @@ class VlanAssignmentMixin:
                 - untagged_set: VLAN object or None
                 - tagged_set: list of VLAN objects
                 - missing_vlans: list of VIDs not found in NetBox
+                - changed: bool, True when the mode, the untagged VLAN or the tagged VLANs were written
         """
         # Support both dict (per-VLAN) and string/int/None (single group) for backward compat
         if not isinstance(vlan_group_map, dict):
@@ -1265,6 +1440,9 @@ class VlanAssignmentMixin:
         untagged_vid = vlan_data.get("untagged_vlan")
         tagged_vids = vlan_data.get("tagged_vlans", [])
         missing_vlans = []
+        prior_mode = interface.mode
+        prior_untagged_vlan_id = interface.untagged_vlan_id
+        prior_tagged_vlan_ids = set(interface.tagged_vlans.values_list("pk", flat=True))
 
         def _get_group_id_for_vid(vid):
             """Resolve the VLAN group ID for a specific VID."""
@@ -1278,8 +1456,8 @@ class VlanAssignmentMixin:
         elif untagged_vid:
             interface.mode = "access"
         else:
-            # No VLANs - clear mode
-            interface.mode = ""
+            # NetBox stores "no mode" as NULL, so clearing to "" would report a change every sync.
+            interface.mode = None
 
         # Set untagged VLAN
         untagged_set = None
@@ -1297,7 +1475,9 @@ class VlanAssignmentMixin:
         # Save mode + untagged_vlan before M2M operations.
         # tagged_vlans.set() triggers a DB refresh that wipes unsaved
         # in-memory attributes, so we must persist first.
-        interface.save()
+        fields_changed = prior_mode != interface.mode or prior_untagged_vlan_id != interface.untagged_vlan_id
+        if fields_changed:
+            interface.save()
 
         # Set tagged VLANs (M2M - requires the instance to be saved first)
         tagged_set = []
@@ -1308,13 +1488,18 @@ class VlanAssignmentMixin:
                     tagged_set.append(vlan)
                 else:
                     missing_vlans.append(vid)
-            interface.tagged_vlans.set(tagged_set)
+            tagged_vlan_ids = {vlan.pk for vlan in tagged_set}
+            if tagged_vlan_ids != prior_tagged_vlan_ids:
+                interface.tagged_vlans.set(tagged_set)
         else:
-            interface.tagged_vlans.clear()
+            tagged_vlan_ids = set()
+            if prior_tagged_vlan_ids:
+                interface.tagged_vlans.clear()
 
         return {
             "mode_set": interface.mode,
             "untagged_set": untagged_set,
             "tagged_set": tagged_set,
             "missing_vlans": missing_vlans,
+            "changed": fields_changed or tagged_vlan_ids != prior_tagged_vlan_ids,
         }

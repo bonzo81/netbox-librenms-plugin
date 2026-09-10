@@ -17,3 +17,13 @@ repos:
         exclude: ^mkdocs\.yml$
       - id: check-added-large-files
       - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: unhashable-membership
+        name: unhashable membership check
+        description: A set or dict membership test raises TypeError on an unhashable value.
+        entry: python3 tools/lint_unhashable_membership.py netbox_librenms_plugin
+        language: system
+        pass_filenames: false
+        files: ^netbox_librenms_plugin/.*\.py$

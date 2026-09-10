@@ -134,6 +134,8 @@ from .object_sync import (  # noqa: F401
     SingleInterfaceVerifyView,
     SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
+    SyncCacheFragmentView,
+    SyncCacheStatusView,
     VerifyVlanSyncGroupView,
     VMInterfaceTableView,
     VMIPAddressTableView,

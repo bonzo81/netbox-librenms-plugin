@@ -1,5 +1,7 @@
 import logging
+import math
 import urllib.parse
+from dataclasses import dataclass
 
 import requests
 from django.core.cache import cache
@@ -8,6 +10,7 @@ from netbox.plugins import get_plugin_config
 # HTTP request timeout constants (in seconds)
 DEFAULT_API_TIMEOUT = 10
 EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device listing)
+DEFAULT_CACHE_TIMEOUT = 300
 
 # Short-lived cache for get_device_info(). The device-info header is fetched on every sync-tab
 # render (and again on the post-action redirect), but a device's identity/metadata is stable, so
@@ -15,7 +18,40 @@ EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device li
 # meaningfully staling the displayed values.
 DEVICE_INFO_CACHE_TIMEOUT = 60
 
+# LibreNMS answers 404 for a device it does not have; every other fault is a lookup error.
+HTTP_NOT_FOUND = 404
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LibreNMSLookupError:
+    """
+    Why a LibreNMS lookup failed, when the object being absent is not the reason.
+
+    ``status_code`` is None when nothing answered at all, so a server that reported a fault
+    stays distinguishable from a server that could not be reached.
+    """
+
+    message: str
+    status_code: int | None = None
+
+
+def configured_cache_timeout(server_key):
+    """Return the cache lifetime configured for one LibreNMS server."""
+    servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
+    timeout = None
+    if isinstance(servers_config, dict):
+        server_config = servers_config.get(server_key)
+        if isinstance(server_config, dict):
+            timeout = server_config.get("cache_timeout")
+    if timeout is None:
+        timeout = get_plugin_config("netbox_librenms_plugin", "cache_timeout", DEFAULT_CACHE_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        return DEFAULT_CACHE_TIMEOUT
+    if not math.isfinite(timeout) or timeout <= 0:
+        return DEFAULT_CACHE_TIMEOUT
+    return max(1, int(timeout))
 
 
 def build_librenms_api(server_key):
@@ -61,11 +97,17 @@ class LibreNMSAPI:
         Return True only for a server mapping that ``__init__`` can bind.
 
         A server entry is usable only when it is a dict carrying a non-empty
-        ``librenms_url`` and ``api_token`` — the same fields ``__init__`` requires
+        ``librenms_url`` and ``api_token``, the same fields ``__init__`` requires
         before it will build a client. Sharing this predicate keeps the server
         picker (``get_available_servers``) and the auto-default fallback from
         offering, or silently selecting, a partially configured entry that would
         immediately raise ``ValueError``.
+
+        Args:
+            config (object): The candidate server configuration.
+
+        Returns:
+            bool: True if the configuration is a usable server mapping.
         """
         return isinstance(config, dict) and bool(config.get("librenms_url")) and bool(config.get("api_token"))
 
@@ -159,7 +201,7 @@ class LibreNMSAPI:
             # url/token completeness is enforced by the single guard at the end of __init__.
             self.librenms_url = config.get("librenms_url")
             self.api_token = config.get("api_token")
-            self.cache_timeout = config.get("cache_timeout", 300)
+            self.cache_timeout = configured_cache_timeout(server_key)
             self.verify_ssl = config.get("verify_ssl", True)
         else:
             # Fallback to legacy single-server configuration. Legacy mode has only the implicit
@@ -169,7 +211,7 @@ class LibreNMSAPI:
             self.server_key = "default"
             self.librenms_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
             self.api_token = get_plugin_config("netbox_librenms_plugin", "api_token")
-            self.cache_timeout = get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
+            self.cache_timeout = configured_cache_timeout(self.server_key)
             self.verify_ssl = get_plugin_config("netbox_librenms_plugin", "verify_ssl", True)
 
         if not self.librenms_url or not self.api_token:
@@ -467,7 +509,7 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
-    def get_device_info(self, device_id, use_cache=True):
+    def get_device_info(self, device_id, use_cache=True, cache_only=False):
         """
         Fetch device information from LibreNMS using its primary IP.
 
@@ -481,15 +523,20 @@ class LibreNMSAPI:
             use_cache: When False, bypass the short read cache and fetch live data
                 (still refreshing the cache on success). Import decisions pass False so a
                 value just corrected in LibreNMS isn't read back stale within the cache window.
+            cache_only: When True, return a cached value or a miss without querying LibreNMS.
 
         Returns:
-            tuple: (success: bool, data: dict)
+            tuple: ``(success, data)``. On success, ``data`` is the device dictionary. For an
+                absent device or a cache-only miss, ``data`` is ``None``. For a transport failure
+                or another non-2xx response, ``data`` is a :class:`LibreNMSLookupError`.
         """
         cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
-        if use_cache:
+        if use_cache or cache_only:
             cached = cache.get(cache_key)
             if cached is not None:
                 return cached
+        if cache_only:
+            return False, None
 
         try:
             response = requests.get(
@@ -498,7 +545,25 @@ class LibreNMSAPI:
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
-            response.raise_for_status()
+        except requests.exceptions.RequestException:
+            # Nothing answered, so the device's existence is unknown rather than denied.
+            logger.warning("LibreNMS could not be reached for device %s", device_id, exc_info=True)
+            return False, LibreNMSLookupError("The LibreNMS server could not be reached.")
+
+        if response.status_code == HTTP_NOT_FOUND:
+            # The only answer that means the device is genuinely absent, so an earlier cached
+            # hit is now wrong: drop it rather than serve it until the TTL expires.
+            cache.delete(cache_key)
+            return False, None
+        # Checked explicitly rather than through raise_for_status(), which lets a terminal 3xx
+        # through and would let its body be read as a device.
+        if not 200 <= response.status_code < 300:
+            logger.warning("LibreNMS returned HTTP %s for device %s", response.status_code, device_id)
+            return False, LibreNMSLookupError(
+                f"LibreNMS answered with HTTP {response.status_code} for this device.", response.status_code
+            )
+
+        try:
             device_data = response.json()["devices"][0]
             if not isinstance(device_data, dict):
                 return False, None
@@ -512,7 +577,8 @@ class LibreNMSAPI:
             result = (True, device_data)
             cache.set(cache_key, result, timeout=DEVICE_INFO_CACHE_TIMEOUT)
             return result
-        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
+        except (ValueError, IndexError, KeyError, TypeError):
+            # A 2xx whose body carries no usable device is treated as absent, as before.
             return False, None
 
     def get_ports(self, device_id, with_vlans=True):
@@ -1078,7 +1144,7 @@ class LibreNMSAPI:
             tuple: (success: bool, message: str)
         """
         try:
-            encoded_location_name = urllib.parse.quote(location_name)
+            encoded_location_name = urllib.parse.quote(location_name, safe="")
             response = requests.patch(
                 f"{self.librenms_url}/api/v0/locations/{encoded_location_name}",
                 headers=self.headers,
@@ -1194,7 +1260,9 @@ class LibreNMSAPI:
             device_id: LibreNMS device ID
 
         Returns:
-            tuple: (success: bool, data: list)
+            tuple: (success: bool, data: list). On success ``data`` is always a list of dicts —
+                callers may rely on that and must not re-check the container/element types. The
+                VALUE types inside each dict are not validated.
 
         Example inventory item:
             {
@@ -1237,7 +1305,8 @@ class LibreNMSAPI:
             device_id: LibreNMS device ID
 
         Returns:
-            tuple: (success: bool, data: list)
+            tuple: (success: bool, data: list). On success ``data`` is always a list of dicts —
+                callers may rely on that and must not re-check the container/element types.
 
         Example transceiver item:
             {

@@ -54,6 +54,116 @@ def test_interface_name_selector_visibility_follows_the_active_sync_tab(client, 
     assert f'data-platform-id="{platform.pk}"' in selector
 
 
+SYNC_TAB_PREFERENCE = "plugins.netbox_librenms_plugin.sync_tab"
+
+
+def _sync_page(settings, name):
+    """A device whose sync page renders every applicable tab."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    device = make_device(name)
+    winner = make_device(f"{name}-winner")
+    mark_librenms_migrated(device, winner.pk, "default")
+    device.save(update_fields=["custom_field_data"])
+    return device, reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
+
+
+def _active_tab(html):
+    """Return the tab the server marked active on the rendered page."""
+    marker = 'id="librenms-sync-tabs" data-active-tab="'
+    start = html.index(marker) + len(marker)
+    return html[start : html.index('"', start)]
+
+
+@pytest.mark.django_db
+def test_visiting_a_tab_remembers_it_for_the_next_visit(client, settings):
+    """Leaving the sync page and coming back must return to the tab last worked in."""
+    device, url = _sync_page(settings, "tab-memory")
+    user = make_superuser("tab-memory-user")
+    client.force_login(user)
+
+    assert _active_tab(client.get(url).content.decode()) == "interfaces"  # precondition
+
+    client.get(url, {"tab": "modules"})
+
+    user.config.refresh_from_db()
+    assert user.config.get(SYNC_TAB_PREFERENCE) == "modules"
+    assert _active_tab(client.get(url).content.decode()) == "modules"
+
+
+@pytest.mark.django_db
+def test_an_explicit_tab_still_wins_over_the_remembered_one(client, settings):
+    """A link that names a tab must open that tab, not the remembered one."""
+    _device, url = _sync_page(settings, "tab-memory-explicit")
+    client.force_login(make_superuser("tab-memory-explicit-user"))
+    client.get(url, {"tab": "modules"})
+
+    assert _active_tab(client.get(url, {"tab": "vlans"}).content.decode()) == "vlans"
+
+
+@pytest.mark.django_db
+def test_a_remembered_tab_that_does_not_apply_falls_back(client, settings):
+    """A tab remembered from another object must not select a tab this one does not offer."""
+    _device, url = _sync_page(settings, "tab-memory-stale")
+    user = make_superuser("tab-memory-stale-user")
+    client.force_login(user)
+    user.config.data = deepcopy(user.config.data)
+    user.config.set(SYNC_TAB_PREFERENCE, "not-a-tab", commit=True)
+
+    assert _active_tab(client.get(url).content.decode()) == "interfaces"
+
+
+@pytest.mark.django_db
+def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
+    """Tab links must work normally and enhance the same navigation through HTMX."""
+    _device, url = _sync_page(settings, "htmx-sync-tabs")
+    client.force_login(make_superuser("htmx-sync-tabs-user"))
+
+    response = client.get(
+        url,
+        {"tab": "ipaddresses", "server_key": "default", "interface_name_field": "ifDescr"},
+    )
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    marker = 'id="ipaddresses-tab"'
+    position = html.index(marker)
+    link = html[html.rfind("<a", 0, position) : html.index(">", position) + 1]
+    expected_query = "?tab=ipaddresses&amp;server_key=default&amp;interface_name_field=ifDescr"
+    assert f'href="{response.request["PATH_INFO"]}{expected_query}"' in link
+    assert f'hx-get="{response.request["PATH_INFO"]}{expected_query}"' in link
+    assert 'hx-target="#librenms-sync-tabs"' in link
+    assert 'hx-select="#librenms-sync-tabs"' in link
+    assert 'hx-swap="outerHTML"' in link
+    assert 'hx-push-url="true"' in link
+    assert 'hx-sync="#librenms-sync-tabs:replace"' in link
+    assert 'hx-include="#interface-name-field-selector"' in link
+    assert 'class="nav-link active"' in link
+    assert 'aria-selected="true"' in link
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("tab", ["interfaces", "ipaddresses"])
+def test_the_swapped_tab_region_carries_the_active_tab_marker(client, settings, tab):
+    """activeSyncTab() reads data-active-tab off the swapped container, so the swap must replace it."""
+    _device, url = _sync_page(settings, f"active-tab-marker-{tab}")
+    client.force_login(make_superuser(f"active-tab-marker-user-{tab}"))
+
+    response = client.get(url, {"tab": tab, "server_key": "default"})
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    position = html.index('id="librenms-sync-tabs"')
+    region = html[html.rfind("<div", 0, position) : html.index(">", position) + 1]
+
+    # The marker sits on the element hx-select/hx-target name, so an innerHTML swap would
+    # leave the previous tab's value behind and activeSyncTab() would report the wrong tab.
+    assert f'data-active-tab="{tab}"' in region
+
+
 def _post_preference(client, value, platform_id=None):
     """Save one interface-name preference through the public JSON endpoint."""
     payload = {"key": "interface_name_field", "value": value}
@@ -187,7 +297,7 @@ def test_malformed_stored_interface_name_preferences_fall_back_safely():
     device.platform = platform
     device.save(update_fields=["platform"])
     user = make_superuser("malformed-interface-name-reader")
-    user.config.set(GLOBAL_PREFERENCE, "ifDescr", commit=False)
+    user.config.set(GLOBAL_PREFERENCE, "ifName", commit=False)
     user.config.set(PLATFORM_PREFERENCES, {str(platform.pk): {"field": "ifDescr"}}, commit=True)
 
-    assert get_interface_name_field(_request_for(user), device) == "ifDescr"
+    assert get_interface_name_field(_request_for(user), device) == "ifName"

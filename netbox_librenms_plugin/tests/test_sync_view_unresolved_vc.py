@@ -8,26 +8,32 @@ misconfigured server): the rebind declines, the client stays on the default serv
 guard it reports the member as linked to a valid sync device on the (gone) server, contradicting
 the failed-closed header and inviting a sync against a server that no longer exists.
 
-This drives the real ``get()`` -> ``get_context_data`` flow against a real DB Virtual Chassis and
-real single-server ``settings.PLUGINS_CONFIG`` (via ``override_settings``). Only the orthogonal
-tab-context / device-info / parent-context seams are stubbed; the VC-linkage computation runs for
-real, and the rendered context is captured to assert what the page would show.
+This drives a real authenticated request against a real DB Virtual Chassis and real single-server
+``settings.PLUGINS_CONFIG``. The rendered response context shows whether default-server linkage
+leaked into the unresolved-server page.
 """
 
 import copy
-from unittest.mock import MagicMock, patch
 
 import pytest
 from dcim.models import Device
 
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from django.conf import settings
-from django.test import RequestFactory, override_settings
+from django.core.cache import cache
+from django.test import override_settings
+from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device
 
 
-DEFAULT_ONLY = {"default": {"librenms_url": "https://default.example.com", "api_token": "default-token"}}
+VC_LIBRENMS_ID = 55
+"""The member's LibreNMS device id on the DEFAULT server, shared by the seed, the cache key and the paths."""
+
+
+def _default_only(librenms_url):
+    """Return a single-server ``servers`` mapping pointed at *librenms_url*."""
+    return {"default": {"librenms_url": librenms_url, "api_token": "default-token"}}
 
 
 def _plugins_config_with_servers(servers):
@@ -41,74 +47,72 @@ def _plugins_config_with_servers(servers):
 
 @pytest.mark.django_db
 class TestUnresolvedServerKeyVCLeak:
-    def _make_view(self, request):
-        """Build a DeviceLibreNMSSyncView with the orthogonal (non-VC) context seams stubbed."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+    def _vc_member(self, name):
+        """Build a VC member carrying a real, valid host id on the DEFAULT server.
 
-        view = object.__new__(DeviceLibreNMSSyncView)
-        view.request = request
-        view.kwargs = {}
-        view.get_librenms_device_info = lambda obj, req: {
-            "found_in_librenms": False,
-            "librenms_device_details": {"librenms_device_serial": "-", "vc_inventory_serials": []},
-            "mismatched_device": False,
-        }
-        view.get_interface_context = lambda req, obj: None
-        view.get_cable_context = lambda req, obj: None
-        view.get_ip_context = lambda req, obj: None
-        view.get_vlan_context = lambda req, obj: None
-        view.get_module_context = lambda req, obj: None
-        view._get_platform_info = lambda info, obj: {}
-        view.has_write_permission = lambda: False
-        return view
-
-    def test_unresolved_server_key_does_not_leak_default_vc_linkage(self):
+        On an unresolved ``?server_key`` the client stays bound to "default", so an
+        un-guarded VC block would resolve *this* linkage and leak it.
+        """
         from dcim.models import VirtualChassis
 
-        vc = VirtualChassis.objects.create(name="unresolved-leak-vc")
-        member = make_device("unresolved-leak-m1")
+        vc = VirtualChassis.objects.create(name=f"{name}-vc")
+        member = make_device(f"{name}-m1")
         member.virtual_chassis = vc
         member.vc_position = 1
-        # A real, valid host id on the DEFAULT server. On an unresolved ?server_key the client
-        # stays bound to "default", so the un-guarded VC block would resolve *this* linkage.
-        member.custom_field_data["librenms_id"] = {"default": {"id": 55}}
+        member.custom_field_data["librenms_id"] = {"default": {"id": VC_LIBRENMS_ID}}
         member.save()
+        return member
 
-        request = RequestFactory().get("/x/?server_key=ghost")  # non-blank, not configured -> unresolved
-        # A real permitted user: the scoped lookup would 404 for AnonymousUser, and this
-        # test is about server-key resolution, not authorization.
-        request.user = make_user_with_perms("unresolved-vc-viewer", [("view", Device)])
-        view = self._make_view(request)
+    def _get(self, client, member, server_key, server):
+        """Render the page under ``?server_key=<server_key>``; return it with the stub's paths."""
+        user = make_user_with_perms(f"vc-viewer-{server_key}", [("view", Device)])
+        client.force_login(user)
+        url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[member.pk])
+        # A resolved key reaches get_device_info, so the default server must be the loopback
+        # stub. A hostname would make the test depend on DNS, the proxy and the HTTP timeout.
+        # The shared `librenms_server` fixture owns the stub and the NO_PROXY/no_proxy exports
+        # that keep a loopback request away from a configured proxy.
+        server.device_info_response(device_id=VC_LIBRENMS_ID, hostname=member.name)
+        # get_device_info caches a success under this key, and the cache outlives the DB rollback.
+        # Clear it before the render, or a key warmed earlier serves the device with no HTTP
+        # request; clear it after, because the resolved case writes it back.
+        device_info_key = f"librenms_device_info_default_{VC_LIBRENMS_ID}"
+        cache.delete(device_info_key)
+        try:
+            with override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(_default_only(server.url))):
+                response = client.get(url, {"server_key": server_key})
+        finally:
+            cache.delete(device_info_key)
+        return response, [request["path"] for request in server.requests]
 
-        captured = {}
+    def test_resolved_server_key_reports_the_vc_linkage(self, client, librenms_server):
+        """Positive control: the same page on a RESOLVED key must publish the VC linkage.
 
-        def _capture_render(req, template, context, *args, **kwargs):
-            captured["context"] = context
-            return MagicMock()
+        Without it the unresolved assertion below passes even if the VC block stopped
+        setting the key for every request.
+        """
+        member = self._vc_member("resolved-control")
 
-        with (
-            override_settings(PLUGINS_CONFIG=_plugins_config_with_servers(DEFAULT_ONLY)),
-            patch(
-                "netbox_librenms_plugin.views.base.librenms_sync_view.render",
-                side_effect=_capture_render,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.librenms_sync_view.get_interface_name_field",
-                return_value="ifName",
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
-                return_value={},
-            ),
-        ):
-            view.get(request, pk=member.pk)
+        response, paths = self._get(client, member, "default", librenms_server)
 
-        ctx = captured["context"]
+        assert response.status_code == 200
+        # The header lookup must land on the loopback stub, not on a name the test cannot serve.
+        assert f"/api/v0/devices/{VC_LIBRENMS_ID}" in paths
+        assert response.context["sync_device_has_librenms_id"] is True
+
+    def test_unresolved_server_key_does_not_leak_default_vc_linkage(self, client, librenms_server):
+        member = self._vc_member("unresolved-leak")
+
+        response, paths = self._get(client, member, "ghost", librenms_server)
+
+        assert response.status_code == 200
+        # Failing closed means no lookup at all, so nothing reaches the default server.
+        assert f"/api/v0/devices/{VC_LIBRENMS_ID}" not in paths
+        ctx = response.context
         # Sanity: the header failed closed (unresolved -> librenms_id None).
         assert ctx.get("has_librenms_id") is False
-        assert view.librenms_api.server_key == "default"  # rebind declined, still on default
         # The bug: the VC-status block leaks the default server's linkage on an unresolved key.
-        assert ctx.get("sync_device_has_librenms_id") is not True, (
+        assert "sync_device_has_librenms_id" not in ctx, (
             "Unresolved ?server_key leaked the default server's VC sync-device linkage "
             "(get_context_data VC block ran without the unresolved guard)"
         )

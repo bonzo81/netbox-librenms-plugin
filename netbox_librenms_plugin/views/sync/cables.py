@@ -11,6 +11,11 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -45,6 +50,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Each ``select`` value is a ``local_port_id`` (stable LibreNMS identifier)
         so that matching against cached link data is user-preference agnostic.
+
+        Args:
+            request (HttpRequest): The request that contains the selected interface data.
+            initial_device (Device): The page device to use when no device override is selected.
+
+        Returns:
+            list[dict] | None: The selected interface entries, or None when no interfaces are selected.
         """
         selected_interfaces = []
         selected_data = [x for x in request.POST.getlist("select") if x]
@@ -217,6 +229,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Each interface is processed in its own atomic block so individual
         failures roll back only that cable without affecting others.
+
+        Args:
+            selected_interfaces (list[dict]): The selected interface entries to synchronize.
+            cached_links (list[dict]): The cached LibreNMS link data.
+
+        Returns:
+            dict[str, list[str]]: The interface names grouped by synchronization result.
         """
         results = {
             "valid": [],
@@ -262,7 +281,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         results = self.process_interface_sync(selected_interfaces, cached_links)
         self.display_sync_results(request, results)
 
-        return redirect(redirect_url)
+        if results["valid"]:
+            schedule_request_cache_mutation(
+                request,
+                initial_device,
+                SyncTab.CABLES,
+                server_key,
+            )
+        return apply_request_cache_transition(request, redirect(redirect_url))
 
     def display_sync_results(self, request, results):
         """Display flash messages summarizing the cable sync results."""

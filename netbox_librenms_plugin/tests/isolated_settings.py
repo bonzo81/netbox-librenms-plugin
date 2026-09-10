@@ -1,6 +1,8 @@
 """NetBox test settings that require caller-selected database and Redis targets."""
 
+import importlib
 import os
+from copy import deepcopy
 
 from netbox_librenms_plugin.tests.parallel import isolated_redis_databases
 
@@ -26,6 +28,13 @@ os.environ["REDIS_HOST"] = _test_redis_host
 os.environ["REDIS_CACHE_HOST"] = _test_redis_host
 os.environ["REDIS_DATABASE"] = str(_tasks_redis_database)
 os.environ["REDIS_CACHE_DATABASE"] = str(_cache_redis_database)
+
+_configuration_name = os.environ.get("NETBOX_CONFIGURATION", "netbox.configuration")
+_configuration = importlib.import_module(_configuration_name)
+_plugin_config = deepcopy(getattr(_configuration, "PLUGINS_CONFIG", {}).get("netbox_librenms_plugin", {}))
+_configuration.PLUGINS = ["netbox_librenms_plugin"]
+_configuration.PLUGINS_CONFIG = {"netbox_librenms_plugin": _plugin_config}
+os.environ["NETBOX_CONFIGURATION"] = _configuration.__name__
 
 from netbox.settings import *  # noqa: E402, F403
 

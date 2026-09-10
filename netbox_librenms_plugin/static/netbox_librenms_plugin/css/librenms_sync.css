@@ -1,0 +1,36 @@
+#librenmsSync .nav-link.sync-cache-ready,
+#librenmsSync .nav-link.sync-cache-unavailable {
+    position: relative;
+}
+
+#librenmsSync .nav-link.sync-cache-ready::before,
+#librenmsSync .nav-link.sync-cache-unavailable::before {
+    position: absolute;
+    top: 0;
+    inset-inline: 0;
+    height: 3px;
+    border-radius: var(--tblr-border-radius) var(--tblr-border-radius) 0 0;
+    content: "";
+    pointer-events: none;
+}
+
+#librenmsSync .nav-link.sync-cache-ready::before {
+    background-color: var(--tblr-success);
+}
+
+#librenmsSync .nav-link.sync-cache-unavailable::before {
+    background-color: var(--tblr-warning);
+}
+
+/* NetBox marks the active tab with --tblr-bg-surface-tertiary, which sits close to the inactive
+   tab background and is hard to pick out, especially in the light theme. Mark the whole tab: a
+   tint, a solid underline, and a heavier label. The underline carries the signal (it clears the
+   3:1 non-text contrast bar on its own); the tint supports it. The label keeps the body colour so
+   it stays legible on the tint. All of it is derived from --tblr-primary, so one rule follows both
+   themes. NetBox sets its background with !important, so this needs one too. */
+#librenmsSync .nav-link.active {
+    background-color: color-mix(in oklab, var(--tblr-primary) 32%, transparent) !important;
+    color: var(--tblr-body-color);
+    font-weight: 600;
+    box-shadow: inset 0 -3px 0 0 var(--tblr-primary);
+}

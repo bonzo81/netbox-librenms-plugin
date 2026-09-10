@@ -271,6 +271,65 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
     return None
 
 
+def _name_candidates(libre_device: dict) -> tuple[str | None, str | None]:
+    """Return the sysName and hostname values that can name a device: strings only."""
+    sysname = libre_device.get("sysName")
+    hostname = libre_device.get("hostname")
+    return (sysname if isinstance(sysname, str) else None, hostname if isinstance(hostname, str) else None)
+
+
+def _resolve_device_name(
+    libre_device: dict,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
+    device_id: int | str = None,
+) -> tuple[str, str]:
+    """
+    Resolve the device/VM name from LibreNMS data and report which value it came from.
+
+    Centralized logic for building device names with consistent handling of:
+    - sysName vs hostname preference
+    - Domain stripping (avoiding IP addresses)
+    - Fallback to device_id when no name remains, including after stripping
+
+    Args:
+        libre_device: Device data from LibreNMS
+        use_sysname: If True, prefer sysName; if False, use hostname
+        strip_domain: If True, strip domain suffix (e.g., '.example.com')
+        device_id: LibreNMS device ID for fallback name generation
+
+    Returns:
+        tuple[str, str]: The determined name and its source: ``"sysname"``, ``"hostname"``, or
+            the ``device-<id>`` fallback itself when no usable name remains after stripping.
+    """
+    # LibreNMS sends JSON, so a name field can arrive as any type; only a str can name a device.
+    sysname, hostname = _name_candidates(libre_device)
+
+    # Determine base name based on use_sysname preference
+    if use_sysname:
+        name, source = (sysname, "sysname") if sysname else (hostname, "hostname")
+    else:
+        name, source = (hostname, "hostname") if hostname else (sysname, "sysname")
+
+    # Strip domain if requested (but not for IP addresses)
+    if strip_domain and name and "." in name:
+        try:
+            parse_host_address(name)
+            # It's a valid IP address, don't strip
+        except ValueError:
+            # Not an IP, safe to strip domain
+            name = name.split(".")[0]
+
+    # Fallback to device_id if no name found. This runs AFTER stripping because a sysName whose
+    # first label is empty (".example.com") strips to "", which would otherwise reach NetBox as a
+    # blank device name.
+    if not name:
+        fallback_id = device_id if device_id is not None else libre_device.get("device_id", "unknown")
+        name = source = f"device-{fallback_id}"
+
+    return name, source
+
+
 def _determine_device_name(
     libre_device: dict,
     use_sysname: bool = True,
@@ -280,10 +339,7 @@ def _determine_device_name(
     """
     Determine the device/VM name from LibreNMS data.
 
-    Centralized logic for building device names with consistent handling of:
-    - sysName vs hostname preference
-    - Domain stripping (avoiding IP addresses)
-    - Fallback to device_id when name is missing
+    Thin wrapper over :func:`_resolve_device_name` for callers that need only the name.
 
     Args:
         libre_device: Device data from LibreNMS
@@ -299,30 +355,9 @@ def _determine_device_name(
         ...                        use_sysname=True, strip_domain=True)
         'router'
     """
-    # Determine base name based on use_sysname preference
-    if use_sysname:
-        name = libre_device.get("sysName") or libre_device.get("hostname")
-    else:
-        name = libre_device.get("hostname") or libre_device.get("sysName")
-
-    # Fallback to device_id if no name found
-    if not name:
-        if device_id is not None:
-            name = f"device-{device_id}"
-        else:
-            name = libre_device.get("device_id", "unknown")
-            name = f"device-{name}"
-
-    # Strip domain if requested (but not for IP addresses)
-    if strip_domain and name and "." in name:
-        try:
-            parse_host_address(name)
-            # It's a valid IP address, don't strip
-        except ValueError:
-            # Not an IP, safe to strip domain
-            name = name.split(".")[0]
-
-    return name
+    return _resolve_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain, device_id=device_id)[
+        0
+    ]
 
 
 def _flag_ambiguous_librenms_id(result, librenms_id, exc):
@@ -716,27 +751,20 @@ def validate_device_for_import(
         # 1. Check if device/VM already exists in NetBox
         # Always check both Devices AND VMs to properly detect existing objects
         librenms_id = libre_device.get("device_id")
-        hostname = _determine_device_name(
+        hostname, name_source = _resolve_device_name(
             libre_device,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             device_id=librenms_id,
         )
         result["resolved_name"] = hostname
-        _raw_sysname = libre_device.get("sysName") or ""
-        _raw_hostname = libre_device.get("hostname") or ""
-        if not _raw_sysname and not _raw_hostname:
-            _source = f"device-{librenms_id}"
-        elif use_sysname:
-            _source = "sysname" if _raw_sysname else "hostname"
-        else:
-            _source = "hostname" if _raw_hostname else "sysname"
+        _raw_sysname, _raw_hostname = _name_candidates(libre_device)
         result["naming_criteria"] = {
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
-            "raw_sysname": _raw_sysname,
-            "raw_hostname": _raw_hostname,
-            "source": _source,
+            "raw_sysname": _raw_sysname or "",
+            "raw_hostname": _raw_hostname or "",
+            "source": name_source,
         }
         logger.debug(
             f"Checking for existing device/VM: "

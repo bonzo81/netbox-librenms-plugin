@@ -12,11 +12,10 @@ class TestLoadVcMemberNamePattern:
     DEFAULT = "-M{position}"
 
     @staticmethod
-    def _real_settings_model():
-        """Return the registered LibreNMSSettings model, so real rows persist and read back."""
-        from django.apps import apps
+    def _settings_model():
+        from netbox_librenms_plugin.models import LibreNMSSettings
 
-        return apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
+        return LibreNMSSettings
 
     def _call(self):
         from netbox_librenms_plugin.import_utils.virtual_chassis import _load_vc_member_name_pattern
@@ -25,9 +24,9 @@ class TestLoadVcMemberNamePattern:
 
     def _store_pattern(self, pattern):
         """Persist a single real LibreNMSSettings row carrying the given pattern."""
-        Real = self._real_settings_model()
-        Real.objects.all().delete()
-        Real.objects.create(vc_member_name_pattern=pattern)
+        settings_model = self._settings_model()
+        settings_model.objects.all().delete()
+        settings_model.objects.create(vc_member_name_pattern=pattern)
 
     def _patch_settings(self, settings_obj):
         """Patch the deferred LibreNMSSettings lookup for values the real CharField cannot hold."""
@@ -53,7 +52,7 @@ class TestLoadVcMemberNamePattern:
 
     def test_returns_default_when_no_settings(self):
         """With no settings row persisted, the loader falls back to the default."""
-        self._real_settings_model().objects.all().delete()
+        self._settings_model().objects.all().delete()
         assert self._call() == self.DEFAULT
 
     def test_returns_default_for_none_pattern(self):

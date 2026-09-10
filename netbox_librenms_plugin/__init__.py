@@ -25,7 +25,12 @@ class LibreNMSSyncConfig(PluginConfig):
     def ready(self):
         """
         Perform custom validation for plugin configuration.
+
         Supports both legacy single-server and new multi-server configurations.
+
+        Raises:
+            ImproperlyConfigured: If the server configuration is empty, has an invalid type, or omits a
+                required setting.
         """
         super().ready()
 
@@ -45,6 +50,11 @@ class LibreNMSSyncConfig(PluginConfig):
             _ensure_librenms_id_custom_field,
             dispatch_uid="netbox_librenms_plugin_ensure_cf",
         )
+
+        # Sync-tab caches follow the NetBox writes, so no view has to name the objects it changed.
+        from netbox_librenms_plugin import cache_signals
+
+        cache_signals.connect()
 
     def _validate_multi_server_config(self, servers_config):
         """Validate multi-server configuration."""
@@ -73,12 +83,18 @@ class LibreNMSSyncConfig(PluginConfig):
 def _ensure_librenms_id_custom_field(sender, **kwargs):
     """
     Auto-create (or migrate) the 'librenms_id' custom field.
+
     Runs after migrations via post_migrate signal to ensure tables exist.
     Uses dispatch_uid to avoid duplicate connections.
 
     librenms_id stores a per-server JSON mapping {"server_key": device_id}.
     Legacy installations may have this field typed as 'integer'; we upgrade it
     to 'json' automatically so the UI and API accept the dict format.
+
+    Args:
+        sender (AppConfig): The application configuration that sent the post-migrate signal.
+        **kwargs (dict[str, object]): The post-migrate signal arguments. The ``using`` value selects the
+            database alias.
     """
     # Track per-alias execution so each database alias is bootstrapped exactly once.
     db_alias = kwargs.get("using") or "default"

@@ -45,6 +45,19 @@ netbox_librenms_plugin = ["templates/**"]
 DJANGO_SETTINGS_MODULE = "netbox_librenms_plugin.tests.isolated_settings"
 pythonpath = ["/opt/netbox/netbox"]
 testpaths = ["netbox_librenms_plugin/tests"]
+# Setting this replaces pytest's built-in defaults, so they are re-listed here.
+norecursedirs = [
+    "*.egg",
+    ".*",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "node_modules",
+    "venv",
+    "{arch}",
+    "netbox_librenms_plugin/tests/browser",
+]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"

@@ -8,9 +8,31 @@ hierarchies and attribute presence.
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
+
+class TestSlashlessRouteAliases:
+    """Each slash-tolerant alias must carry its route's defaults, not only its callback."""
+
+    def test_an_alias_keeps_the_routes_default_kwargs(self):
+        """``kwargs`` is the third ``path()`` argument, so a positional slip drops ``model``."""
+        from django.urls import resolve, reverse
+
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
+
+        slashed_url = reverse("plugins:netbox_librenms_plugin:interfacetypemapping_changelog", kwargs={"pk": 1})
+        expected = {"pk": 1, "model": InterfaceTypeMapping}
+
+        assert resolve(slashed_url).kwargs == expected, "the canonical route lost its defaults"
+
+        alias = resolve(slashed_url.rstrip("/"))
+
+        assert alias.func == resolve(slashed_url).func
+        assert alias.kwargs == expected
 
 
 class TestLibreNMSAPIMixinWiring:
@@ -70,6 +92,77 @@ class TestLibreNMSAPIMixinWiring:
         from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
 
         self._assert_has_api_mixin(ConvertLegacyLibreNMSIdView)
+
+
+class TestTrailingSlashResilience:
+    """Every route stays reachable when something in front of NetBox drops the trailing slash.
+
+    NetBox runs with APPEND_SLASH, so a stripped slash is answered with a 301 back to the slashed
+    form. A proxy that strips it again turns that into ERR_TOO_MANY_REDIRECTS, which an XHR shows
+    as a control that does nothing at all.
+    """
+
+    def _concrete_routes(self, patterns):
+        from django.urls import URLPattern
+        from django.urls.resolvers import RoutePattern
+
+        return {
+            str(entry.pattern)
+            for entry in patterns
+            if isinstance(entry, URLPattern) and isinstance(entry.pattern, RoutePattern)
+        }
+
+    def test_every_page_route_is_served_without_its_trailing_slash(self):
+        from netbox_librenms_plugin import urls as plugin_urls
+
+        routes = self._concrete_routes(plugin_urls.urlpatterns)
+        missing = sorted(route for route in routes if route.endswith("/") and route[:-1] not in routes)
+
+        assert missing == []
+
+    def test_the_posted_job_status_api_route_is_served_without_its_trailing_slash(self):
+        """The import page posts here, and a redirected POST arrives without its body."""
+        from netbox_librenms_plugin.api import urls as api_urls
+
+        routes = self._concrete_routes(api_urls.urlpatterns)
+
+        assert "jobs/<int:job_pk>/sync-status" in routes
+
+    def test_the_canonical_reverse_keeps_the_trailing_slash(self):
+        """The aliases must not become the form templates and tables render."""
+        from django.urls import reverse
+
+        url = reverse("plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": 7})
+
+        assert url.endswith("/")
+
+    def test_a_stripped_url_resolves_to_the_same_view(self):
+        """The endpoint whose button died behind a slash-stripping proxy."""
+        from django.urls import resolve
+
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        match = resolve("/plugins/librenms_plugin/devices/7/module-mismatch-preview")
+
+        assert match.func.view_class is ModuleMismatchPreviewView
+        assert match.kwargs == {"pk": 7}
+
+    @pytest.mark.django_db
+    def test_a_stripped_url_is_answered_rather_than_redirected(self):
+        """End to end through the real URL conf: the request is served, not bounced back."""
+        from django.test import Client
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+
+        client = Client()
+        client.force_login(make_superuser())
+        query = "module_id=1&ent_index=2&server_key=default&selected_device_id=7"
+
+        response = client.get(f"/plugins/librenms_plugin/devices/7/module-mismatch-preview?{query}")
+
+        # The fixture creates no Device(pk=7), so the view answers 404 from
+        # restrict_object_or_404. Assert that exact code: "not 301" also accepts a 500.
+        assert response.status_code == 404, response.status_code
 
 
 class TestCacheMixinWiring:
@@ -173,18 +266,10 @@ class TestGenericViewPermissionWiring:
 
 
 class TestRequiredObjectPermissionsWiring:
-    """
-    POST-only sync views that modify NetBox objects must declare required_object_permissions
-    and include the NetBoxObjectPermissionMixin (and LibreNMSPermissionMixin) in their MRO."""
+    """POST-only sync views declare required object permissions and include both permission mixins."""
 
     def _assert_has_mixins(self, view_class):
-        """
-        Assert that *view_class* includes both permission mixins in its MRO.
-
-        Checking the MRO (not just runtime behaviour) guarantees that the permission
-        enforcement is wired at the class level — a missing mixin would silently skip
-        all permission checks even if the tests otherwise pass.
-        """
+        """The view MRO includes both permission mixins so it cannot skip class-level permission enforcement."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
         assert NetBoxObjectPermissionMixin in view_class.__mro__, (
@@ -312,9 +397,7 @@ class TestRequiredObjectPermissionsWiring:
 
 
 class TestViewPropertyLazyInit:
-    """
-    Verify that _librenms_api starts as None (lazy, not eager-init) and that
-    the librenms_api property descriptor exists on the class."""
+    """The LibreNMS API starts as None, and its property descriptor exists on the class."""
 
     def test_librenms_api_mixin_property_is_defined_on_class(self):
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
@@ -334,12 +417,7 @@ class TestViewPropertyLazyInit:
         assert dummy._librenms_api is None
 
     def test_sync_interfaces_has_librenms_api_property_via_class(self):
-        """BaseLibreNMSSyncView must expose librenms_api through its MRO.
-
-        SyncInterfacesView gains LibreNMSAPIMixin in the view-fixes PR; on the
-        current upstream/develop baseline we verify the property via
-        BaseLibreNMSSyncView, which inherits the mixin unconditionally.
-        """
+        """BaseLibreNMSSyncView exposes librenms_api through its MRO on the current upstream baseline."""
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
         assert any("librenms_api" in vars(cls) for cls in BaseLibreNMSSyncView.__mro__)
@@ -375,6 +453,29 @@ class TestTemplateSyntax:
         source = template_path.read_text()
         # Compile the template — raises TemplateSyntaxError on bad tags
         self._engine.from_string(source)
+
+
+class TestHtmxSwapConvention:
+    """The frontend guideline allows one outerHTML swap, so the templates must match it."""
+
+    GUIDELINE = Path(__file__).resolve().parents[2] / ".github" / "instructions" / "frontend.instructions.md"
+    EXCEPTION = _TEMPLATE_DIR / "inc" / "_sync_tab_link.html"
+
+    def test_only_the_recorded_exception_swaps_outerhtml(self):
+        """A second outerHTML swap has to be argued in the guideline, not added quietly."""
+        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap="outerHTML"' in path.read_text()]
+
+        assert swapping == [self.EXCEPTION], (
+            "frontend.instructions.md records one outerHTML swap; update it before adding another"
+        )
+
+    def test_the_guideline_records_the_exception_and_its_reason(self):
+        """The rule and its exception share a file so neither can drift alone."""
+        guideline = self.GUIDELINE.read_text()
+
+        assert "Avoid `outerHTML` swaps" in guideline
+        assert "_sync_tab_link.html" in guideline
+        assert "data-active-tab" in guideline
 
 
 class TestSingleCableVerifyServerKey:
@@ -475,45 +576,7 @@ class TestSingleCableVerifyServerKey:
 
 
 class TestGatedViewsResolveThroughRestrictedQuerysets:
-    """A gated view must not resolve an object by raw pk.
-
-    NetBoxObjectPermissionMixin asks ``has_perm`` WITHOUT an instance, so a CONSTRAINED grant (a
-    site-scoped change_device, say) clears the gate; a plain ``get_object_or_404`` behind it then
-    reads or writes an object outside that grant. This is a RECURRING defect class — the same
-    finding has landed on the cable remote picker, the LAG/parent relationship sync, the
-    move-to-winner endpoints and the LibreNMS location push — so it is enforced mechanically here
-    instead of case by case.
-
-    "Gated" means the class declares ``required_object_permissions`` (by assignment or annotation,
-    statically or per-request) OR calls one of the ``require_*_permission(s)`` gates: a view gated
-    only by the plugin write permission reaches objects by raw pk just as easily.
-
-    Two forms are flagged: the PRIMARY lookup (``get_object_or_404(Model, pk=...)``) and the
-    SECONDARY one (``Model.objects.get(pk=...)`` / ``.filter(pk=...)``), which is where the same
-    defect kept reappearing after the primary lookups were scoped — on the module move/serial
-    endpoints, the interface delete targets and the OOB interface reuse.
-
-    What counts is where the id came from, and a deliberate re-lock must SAY so: call
-    ``relock_scoped_row(Model, pk=donor.oob_ip_id)``. That is not a ``<Model>.objects`` chain, so it
-    never reaches this rule, and every call is greppable. Scoping happened where the source object
-    was resolved, and restricting the re-read would instead demand a permission the view's gate
-    never required: ``restrict()`` returns ``none()`` for a user who lacks the model-level grant, so
-    a change-only caller would silently lose rows out of a lock set and be told the object "no
-    longer exists".
-
-    Until 2026-08 the rule instead exempted any ``pk=<expr>.<name>_id``. That read a SPELLING as
-    provenance: it silenced a legitimate re-lock keyed by a local, while waving through
-    ``Device.objects.get(pk=payload.device_id)`` on a request-derived object. Both directions were
-    wrong, so the heuristic is gone.
-
-    Scope and limits, stated because this rule is a lint and not a proof: a class gated only
-    through an INHERITED base is not seen (that is how the routed sync pages resolved any device by
-    pk; :class:`TestRoutedSyncPagesScopeTheirObject` now covers them behaviourally); module-level
-    helpers are not seen at all; a manager reached through an alias or ``_default_manager``, a
-    ``**kwargs``/``Q()`` lookup, or a natural-key lookup all pass; bulk ``pk__in=<collection>``
-    locks are not covered; and a ``.filter(pk=...).exists()`` probe is exempt because it reads no
-    object data and is how ``_required_perms_for_object`` decides WHICH permission to demand.
-    """
+    """Gated views use restricted querysets because a constrained grant does not grant access to every object."""
 
     GATE_CALLS = frozenset(
         {
@@ -653,12 +716,7 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         return offenders
 
     def test_no_lexically_gated_view_resolves_an_object_by_raw_pk(self):
-        """No class declaring a gate in its own body resolves an object by raw pk.
-
-        This is a lint over one spelling, NOT proof that every view is scoped: a class gated only
-        through an inherited base is invisible here (see TestRoutedSyncPagesScopeTheirObject, which
-        covers the routed pages behaviourally), and so are module-level helpers.
-        """
+        """The lexical scan flags raw primary-key lookups in directly gated classes but does not cover inherited gates."""
         offenders = sorted(self._scan())
         assert not offenders, (
             "view(s) resolving an object by raw pk — a constrained grant clears the gate and then "
@@ -679,11 +737,7 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
         assert self._scan_tree(ast.parse(source), "<fixture>"), "the scan no longer flags a raw pk lookup"
 
     def test_the_scan_flags_a_tainted_attribute(self):
-        """Guard the guard: an `*_id` ATTRIBUTE is not proof of provenance.
-
-        The retired exemption accepted any ``pk=<expr>.<name>_id``, so a request-derived attribute
-        passed silently. Only relock_scoped_row marks a lookup as a deliberate re-lock now.
-        """
+        """The scan treats request-derived `*_id` attributes as tainted unless relock_scoped_row marks a re-lock."""
         import ast
 
         source = (
@@ -866,11 +920,7 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
 
 
 class TestPostedSelectionsFailClosed:
-    """Prevent an explicit object selection from degrading to an absent selection.
-
-    The scanner recognizes assignments from ``request.POST.get()`` and attribute-based local
-    helper calls. It does not model subscription reads, ``request.data``, or module-level callers.
-    """
+    """Explicit selections fail closed for request.POST.get assignments and local attribute helper calls."""
 
     LOOKUP_ERRORS = frozenset({"DoesNotExist", "ObjectDoesNotExist", "TypeError", "ValueError"})
 
@@ -1310,6 +1360,530 @@ class TestImportMappingPermissionOrder:
         assert declaration_line < gate_line < target_lookup_line
 
 
+@pytest.mark.django_db
+class TestModuleMoveRequiresNetBoxRelocation:
+    """NetBox relocates a module's whole subtree only from 4.7.
+
+    Measured on 4.4.0 and 4.6.10: the same assignment is accepted with no error, the module row
+    moves, and its interfaces, its nested module bay and the child module installed in that bay
+    all stay on the source device. 4.7 moves the entire subtree. The plugin therefore offers the
+    move only where NetBox can carry it out.
+    """
+
+    @staticmethod
+    def _fixture(prefix):
+        """A module on one device, and an empty bay of the same name on another."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+
+        source = make_device(f"{prefix}-src")
+        target = make_device(f"{prefix}-dst")
+        module_type = make_module_type(f"MT-{prefix}")
+        module = Module.objects.create(
+            device=source,
+            module_bay=make_module_bay(source, "Slot 1"),
+            module_type=module_type,
+            serial=f"{prefix}-SN",
+        )
+        return source, target, module, make_module_bay(target, "Slot 1")
+
+    @staticmethod
+    def _post_move(module, target_bay, target_device, version):
+        """Drive a real MoveModuleView POST with the running NetBox version pinned."""
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
+        from netbox_librenms_plugin.views.sync.modules import MoveModuleView
+
+        view = MoveModuleView()
+        view._librenms_api = MagicMock(server_key="default")
+        request = make_request(
+            "post",
+            {
+                "server_key": "default",
+                "conflict_module_id": str(module.pk),
+                "target_bay_id": str(target_bay.pk),
+            },
+            user=make_superuser(f"move-gate-{module.pk}"),
+            path="/x/",
+        )
+        view.setup(request)
+        with patch("netbox_librenms_plugin.utils._get_netbox_version_tuple", return_value=version):
+            view.post(request, pk=target_device.pk)
+
+    def test_move_is_refused_below_netbox_4_7(self):
+        """Below 4.7 the move would strand the module's components and nested modules."""
+        source, target, module, target_bay = self._fixture("movegate-old")
+
+        self._post_move(module, target_bay, target, (4, 6, 10))
+
+        module.refresh_from_db()
+        assert module.device_id == source.pk, "the module moved on a NetBox that cannot relocate its subtree"
+        assert module.module_bay_id != target_bay.pk
+
+    def test_move_is_performed_on_netbox_4_7(self):
+        """Positive control: the same POST must still work where NetBox supports relocation."""
+        source, target, module, target_bay = self._fixture("movegate-new")
+
+        self._post_move(module, target_bay, target, (4, 7, 0))
+
+        module.refresh_from_db()
+        assert module.device_id == target.pk
+        assert module.module_bay_id == target_bay.pk
+
+    @staticmethod
+    def _render_move_actions(device, conflict_module, version):
+        """Render the action column for a row that otherwise qualifies for the Move control."""
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = LibreNMSModuleTable(
+            [],
+            device=device,
+            server_key="default",
+            has_write_permission=True,
+            can_add_module=True,
+            can_change_module=True,
+            can_delete_module=True,
+        )
+        record = {
+            "can_move_from": True,
+            "serial_conflict_module": conflict_module,
+            "module_bay_id": conflict_module.module_bay_id,
+            "ent_physical_index": 100,
+        }
+        with patch("netbox_librenms_plugin.utils._get_netbox_version_tuple", return_value=version):
+            return str(table.render_actions(None, record))
+
+    def test_move_control_is_hidden_below_netbox_4_7(self):
+        """A control the POST refuses must not be offered."""
+        _source, target, module, _bay = self._fixture("movegate-render-old")
+
+        assert "/move-module/" not in self._render_move_actions(target, module, (4, 6, 10))
+
+    def test_move_control_is_offered_on_netbox_4_7(self):
+        """Positive control: the hidden-below-4.7 assertion must not pass vacuously."""
+        _source, target, module, _bay = self._fixture("movegate-render-new")
+
+        assert "/move-module/" in self._render_move_actions(target, module, (4, 7, 0))
+
+
+@pytest.mark.django_db
+class TestInstallRefusesADuplicateSerial:
+    """A serial already installed on the target device must not be installed a second time.
+
+    The rendered row is advisory: it comes from a cache and a scripted POST never reads it. The
+    refusal therefore lives on the write path, not in the table.
+    """
+
+    @staticmethod
+    def _device_with_installed_serial(prefix, serial):
+        """A device holding `serial` in one bay, plus a second empty bay and the matching type."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+
+        device = make_device(prefix)
+        module_type = make_module_type(f"MT-{prefix}")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 1"),
+            module_type=module_type,
+            serial=serial,
+        )
+        return device, module_type, installed, make_module_bay(device, "Slot 2")
+
+    @staticmethod
+    def _post_install(device, module_type, empty_bay, serial, user=None):
+        """Drive a real InstallModuleView POST for a cached row carrying `serial`.
+
+        Both the posted field and the cached row carry the serial: this branch reads it from the
+        POST, and branches above take it from the selected cached inventory row.
+        """
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        view = InstallModuleView()
+        view._librenms_api = MagicMock(server_key="default")
+        request = make_request(
+            "post",
+            {
+                "server_key": "default",
+                "ent_index": "100",
+                "serial": serial,
+                "module_bay_id": str(empty_bay.pk),
+                "module_type_id": str(module_type.pk),
+            },
+            user=user or make_superuser(f"dupserial-{empty_bay.pk}"),
+            path="/x/",
+        )
+        view.setup(request)
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": module_type.model,
+                        "entPhysicalSerialNum": serial,
+                    }
+                ],
+            ),
+        )
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+    def test_install_is_refused_when_the_serial_is_already_on_the_device(self):
+        """Installing a part NetBox already holds would create a second record of one object."""
+        from dcim.models import Module
+
+        device, module_type, installed, empty_bay = self._device_with_installed_serial("dupserial", "DUP-SN")
+
+        self._post_install(device, module_type, empty_bay, "DUP-SN")
+
+        assert Module.objects.filter(device=device).count() == 1, "a second Module was created for one serial"
+        assert not Module.objects.filter(module_bay=empty_bay).exists()
+        installed.refresh_from_db()
+        assert installed.serial == "DUP-SN"
+
+    def test_install_still_works_for_a_serial_not_yet_on_the_device(self):
+        """Positive control: the guard must not block an ordinary first install."""
+        from dcim.models import Module
+
+        device, module_type, _installed, empty_bay = self._device_with_installed_serial("dupserial-ok", "FIRST-SN")
+
+        self._post_install(device, module_type, empty_bay, "SECOND-SN")
+
+        assert Module.objects.filter(module_bay=empty_bay).exists(), "an unrelated serial was refused"
+        assert Module.objects.filter(device=device).count() == 2
+
+    def test_an_add_only_operator_is_refused_too(self):
+        """Installing needs add_module, not change_module, so existence must be read unrestricted.
+
+        A guard that searched only modules this operator may CHANGE would come back empty here and
+        let the duplicate through.
+        """
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        device, module_type, _installed, empty_bay = self._device_with_installed_serial("dupserial-addonly", "ADD-SN")
+
+        user = make_user_with_perms("dupserial-addonly-user", [])
+        for i, (model, action) in enumerate(
+            [
+                (Device, "view"),
+                (ModuleBay, "view"),
+                (ModuleType, "view"),
+                (Module, "add"),
+                (Interface, "add"),
+                (Interface, "change"),
+                (Interface, "delete"),
+            ]
+        ):
+            user = grant(user, action, model, constraints=None, name=f"addonly-{i}")
+        assert not user.has_perm("dcim.change_module"), "precondition: this operator cannot change modules"
+
+        self._post_install(device, module_type, empty_bay, "ADD-SN", user=user)
+
+        assert Module.objects.filter(device=device).count() == 1, "an add-only operator created a duplicate"
+
+    def test_bulk_install_is_refused_when_the_serial_is_already_on_the_device(self):
+        """InstallSelectedView builds its work list from the cache, so the row's flags cannot guard it."""
+        from types import SimpleNamespace
+
+        from django.core.cache import cache
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+
+        device = make_device("bulkdup", librenms_cf={"default": 77})
+        module_type = make_module_type("MT-bulkdup")
+        Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 1"),
+            module_type=module_type,
+            serial="BULK-DUP",
+        )
+        make_module_bay(device, "Slot 2")
+
+        request = make_request(
+            "post",
+            {"server_key": "default", "select": ["200"]},
+            user=make_superuser("bulkdup-user"),
+            path="/x/",
+        )
+        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        key = seed_inventory(
+            view,
+            device,
+            [
+                {
+                    "entPhysicalIndex": 200,
+                    "entPhysicalName": "Slot 2",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalSerialNum": "BULK-DUP",
+                }
+            ],
+            librenms_id=77,
+        )
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(key)
+
+        assert Module.objects.filter(device=device).count() == 1, "the bulk path created a duplicate serial"
+
+    def test_a_blank_inventory_serial_still_installs(self):
+        """Blank and placeholder serials carry no identity, so they must not collide with each other."""
+        from dcim.models import Module
+
+        device, module_type, _installed, empty_bay = self._device_with_installed_serial("dupserial-blank", "")
+
+        self._post_install(device, module_type, empty_bay, "")
+
+        assert Module.objects.filter(module_bay=empty_bay).exists(), "a blank serial was treated as identity"
+
+
+@pytest.mark.django_db
+class TestIdentityIsNotGatedOnBayMapping:
+    """A module already installed must be reported even when bay matching fails.
+
+    Bay matching runs on operator-configured name mappings and is expected to be wrong sometimes.
+    Serial is evidence about the hardware. Deriving "is this already in NetBox" from the mapping
+    means one mapping mistake hides real NetBox state.
+    """
+
+    @staticmethod
+    def _rows_for(prefix, inventory, extra_bay=None):
+        """Build real table rows for `inventory` against a device holding one installed module."""
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device(prefix, librenms_cf={"default": 91})
+        module_type = make_module_type(f"MT-{prefix}")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 1"),
+            module_type=module_type,
+            serial=f"{prefix}-SN",
+        )
+        if extra_bay:
+            make_module_bay(device, extra_bay)
+
+        request = make_request("get", {}, user=make_superuser(f"{prefix}-user"), path="/x/")
+        view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key="default"))
+        context = view._build_context(request, device, inventory, server_key="default")
+        return device, module_type, installed, list(context["table"].data)
+
+    def test_a_row_with_no_matching_bay_still_reports_the_installed_module(self):
+        """The reported symptom: a PSU installed in NetBox renders as if it were absent."""
+        prefix = "identity-nobay"
+        inventory = [
+            {
+                "entPhysicalIndex": 300,
+                "entPhysicalName": "No Such Bay",
+                "entPhysicalClass": "powerSupply",
+                "entPhysicalModelName": f"MT-{prefix}",
+                "entPhysicalSerialNum": f"{prefix}-SN",
+            }
+        ]
+        _device, _module_type, installed, rows = self._rows_for(prefix, inventory)
+
+        row = next(r for r in rows if r.get("ent_physical_index") == 300)
+        assert row["status"] == "No Bay"  # precondition: bay matching really did fail
+        assert row.get("serial_conflict_module") is not None, "an installed module was not reported"
+        assert row["serial_conflict_module"].pk == installed.pk
+
+    @staticmethod
+    def _render_bay_cell(device, record):
+        """Render the Module Bay cell for one row through the real table."""
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = LibreNMSModuleTable([], device=device, server_key="default", has_write_permission=True)
+        return str(table.render_module_bay(record.get("module_bay", "-"), record))
+
+    def test_an_unmatched_bay_reports_where_the_module_actually_is(self):
+        """ "No matching bay" alone hides the fact that NetBox already holds the part."""
+        prefix = "identity-render"
+        inventory = [
+            {
+                "entPhysicalIndex": 500,
+                "entPhysicalName": "No Such Bay",
+                "entPhysicalClass": "powerSupply",
+                "entPhysicalModelName": f"MT-{prefix}",
+                "entPhysicalSerialNum": f"{prefix}-SN",
+            }
+        ]
+        device, _mt, installed, rows = self._rows_for(prefix, inventory)
+        row = next(r for r in rows if r.get("ent_physical_index") == 500)
+        assert row["status"] == "No Bay"  # precondition
+
+        html = self._render_bay_cell(device, row)
+
+        assert installed.module_bay.name in html, "the actual bay is not named"
+        assert installed.get_absolute_url() in html, "the installed module is not linked"
+
+    def test_an_ambiguous_serial_says_so_rather_than_naming_one_module(self):
+        """Two modules share the serial, so the row must not imply a single location."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+
+        device = make_device("identity-ambig")
+        module_type = make_module_type("MT-identity-ambig")
+        for bay in ("Slot 1", "Slot 2"):
+            Module.objects.create(
+                device=device,
+                module_bay=make_module_bay(device, bay),
+                module_type=module_type,
+                serial="AMBIG-SN",
+            )
+
+        row = {"status": "No Bay", "module_bay": "-", "serial_conflict_ambiguous": True}
+        html = self._render_bay_cell(device, row)
+
+        assert "more than one" in html.lower()
+
+    def test_a_row_sharing_its_parents_serial_is_not_a_conflict(self):
+        """A fan tray and its fans repeat one serial; each child must not conflict with its parent."""
+        prefix = "identity-ancestor"
+        inventory = [
+            {
+                "entPhysicalIndex": 400,
+                "entPhysicalName": "Fan Tray",
+                "entPhysicalClass": "fan",
+                "entPhysicalModelName": f"MT-{prefix}",
+                "entPhysicalSerialNum": f"{prefix}-SN",
+            },
+            {
+                "entPhysicalIndex": 401,
+                "entPhysicalName": "Fan 0",
+                "entPhysicalClass": "fan",
+                "entPhysicalContainedIn": 400,
+                "entPhysicalModelName": f"MT-{prefix}",
+                "entPhysicalSerialNum": f"{prefix}-SN",
+            },
+        ]
+        _device, _mt, _installed, rows = self._rows_for(prefix, inventory)
+
+        child = next(r for r in rows if r.get("ent_physical_index") == 401)
+        assert child.get("serial_conflict_module") is None, "a child was flagged against its own parent's serial"
+        assert not child.get("can_move_from")
+
+
+class TestModuleCreationIsGuarded:
+    """Only guarded code may construct a Module in the module-sync views.
+
+    The device-scoped duplicate check is easy to forget when a fourth creation path is added, and
+    the failure is silent: a second NetBox record for one physical part. This asserts where the
+    authority to create a Module lives. It is a structural check, so it is paired with the
+    end-to-end refusals in TestInstallRefusesADuplicateSerial rather than standing alone.
+
+    It cannot see Module.objects.create(), bulk_create(), an aliased import, or a creation moved
+    outside views/sync/. Those would need their own rule.
+    """
+
+    GUARD = "_module_already_on_device"
+
+    # qualified function -> why it may create a Module without the device-scoped guard
+    EXEMPT = {
+        "ReplaceModuleView.post": (
+            "runs its own global serial-conflict resolution under select_for_update, including the "
+            "permission-masked count refusal; deliberately not narrowed to the device"
+        ),
+    }
+
+    @classmethod
+    def _definitions(cls, tree):
+        """Yield (qualified_name, node) for module-level functions and methods."""
+        import ast
+
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield node.name, node
+            elif isinstance(node, ast.ClassDef):
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        yield f"{node.name}.{child.name}", child
+
+    @classmethod
+    def _scan_tree(cls, tree, label):
+        """Return ["<label>:<line> <qualified name>"] for unguarded Module constructions."""
+        import ast
+
+        def calls(node, name):
+            return any(isinstance(n, ast.Call) and getattr(n.func, "id", "") == name for n in ast.walk(node))
+
+        offenders = []
+        for qualified, node in cls._definitions(tree):
+            if not calls(node, "Module"):
+                continue
+            if calls(node, cls.GUARD) or qualified in cls.EXEMPT:
+                continue
+            offenders.append(f"{label}:{node.lineno} {qualified}")
+        return offenders
+
+    def test_every_module_creation_is_guarded(self):
+        """A creation path that forgets the guard writes a duplicate record for one physical part."""
+        import ast
+        import pathlib
+
+        import netbox_librenms_plugin
+
+        sync_views = pathlib.Path(netbox_librenms_plugin.__file__).parent / "views" / "sync"
+        offenders = []
+        for path in sorted(sync_views.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            offenders.extend(self._scan_tree(tree, path.name))
+
+        assert not offenders, (
+            f"Module(...) built without calling {self.GUARD}() in the same function. Either call the "
+            f"guard, or add the function to EXEMPT with the reason it is safe: {offenders}"
+        )
+
+    def test_the_scan_reports_an_unguarded_creation(self):
+        """Positive control: without this the assertion above passes even if the scan sees nothing."""
+        import ast
+
+        source = (
+            "class NewInstallView:\n"
+            "    def post(self, request):\n"
+            "        module = Module(device=d, module_bay=b)\n"
+            "        module.save()\n"
+        )
+        offenders = self._scan_tree(ast.parse(source), "synthetic.py")
+
+        assert offenders == ["synthetic.py:2 NewInstallView.post"]
+
+    def test_the_scan_accepts_a_guarded_creation(self):
+        """A guarded path must not be reported, or the rule would be unusable."""
+        import ast
+
+        source = (
+            "class NewInstallView:\n"
+            "    def post(self, request):\n"
+            "        if _module_already_on_device(d, s, qs):\n"
+            "            return None\n"
+            "        module = Module(device=d, module_bay=b)\n"
+        )
+
+        assert self._scan_tree(ast.parse(source), "synthetic.py") == []
+
+
 class TestScopedRowLocks:
     def test_restricted_queryset_locks_only_the_target_table(self):
         """Permission joins must not become PostgreSQL row-lock targets."""
@@ -1346,12 +1920,7 @@ class TestScopedRowLocks:
 
 @pytest.mark.django_db
 class TestGatedViewsRefuseOutOfScopeObjects:
-    """The behavioural half of the guard above: a CONSTRAINED grant must not reach another object.
-
-    One representative view per family (device-field write, owner-scoped sync, module install) is
-    driven through the REAL gate and the REAL restrict(), so the structural scan cannot pass while
-    the runtime behaviour is broken.
-    """
+    """Real gates and restricted querysets keep representative view families within constrained grants."""
 
     @staticmethod
     def _user(username, model_grants):
@@ -1592,16 +2161,16 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": module_type.model,
                         "entPhysicalSerialNum": "NEW-TARGET",
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             with pytest.raises(Http404):
@@ -1657,16 +2226,16 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": module_type.model,
                         "entPhysicalSerialNum": hidden.serial,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             view.post(request, pk=device.pk)
@@ -1721,16 +2290,16 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": module_type.model,
                         "entPhysicalSerialNum": hidden.serial,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             response = view.get(request, pk=device.pk)
@@ -1933,21 +2502,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
 
 class TestCacheKeysAreServerScoped:
-    """Every production cache key is namespaced by the LibreNMS server it belongs to.
-
-    Multi-server scoping is the most repeated finding class in this stack's review history: a
-    reader or writer that drops ``server_key`` silently addresses the DEFAULT server's namespace,
-    so a refresh on server B renders an empty table, or one server's snapshot lands where another
-    server's readers look. Every site was fixed one at a time; this keeps the class from returning.
-
-    The helpers take ``server_key`` last, so a call is scoped when it passes the keyword or enough
-    positional arguments to reach it.
-
-    Scope and limits: only direct attribute calls are matched, so a helper passed as a callable and
-    invoked under a local name (``modules.py`` hands ``self.get_cache_key`` to
-    ``_resolve_single_install_binding_item``) escapes the scan, and a call forwarding ``**kwargs``
-    is taken on trust — its contents are not inspected. Both remain a review matter.
-    """
+    """Production cache-key calls include server_key so every LibreNMS server uses its own namespace."""
 
     # helper name -> number of positional args needed to reach server_key
     HELPERS = {"get_cache_key": 3, "get_last_fetched_key": 3, "get_vlan_overrides_key": 2}
@@ -2002,16 +2557,7 @@ class TestCacheKeysAreServerScoped:
 
 
 class TestRoutedSyncPagesScopeTheirObject:
-    """A routed sync page must not resolve an object the caller's grant excludes.
-
-    ``LibreNMSPermissionMixin`` extends Django's ``PermissionRequiredMixin``, which only checks the
-    model-level plugin permission and never evaluates NetBox object-permission constraints. The base
-    table views then resolve the URL pk with a raw ``get_object_or_404``, so a CONSTRAINED
-    ``dcim.view_device`` grant never narrows the lookup and the page renders any device by pk.
-
-    The static scan in :class:`TestGatedViewsResolveThroughRestrictedQuerysets` cannot see this: it
-    only considers classes that declare a gate lexically, and these classes declare none.
-    """
+    """Routed sync pages restrict URL lookups because plugin permissions do not enforce object constraints."""
 
     ROUTED_DEVICE_PAGES = (
         ("object_sync.devices", "DeviceInterfaceTableView"),

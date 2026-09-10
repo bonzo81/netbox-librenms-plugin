@@ -1,5 +1,6 @@
 from django.urls import include, path
 
+from .utils import slashless_route_aliases
 from .models import (
     CarrierAutoInstallRule,
     DeviceTypeMapping,
@@ -148,6 +149,8 @@ from .views import (
     SingleIPAddressVerifyView,
     SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
+    SyncCacheFragmentView,
+    SyncCacheStatusView,
     SyncCablesView,
     SyncInterfaceLagView,
     SyncInterfaceParentView,
@@ -178,6 +181,16 @@ urlpatterns = [
         "device/<int:pk>/librenms-sync/",
         DeviceLibreNMSSyncView.as_view(),
         name="device_librenms_sync",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/sync-cache-status/",
+        SyncCacheStatusView.as_view(),
+        name="sync_cache_status",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/sync-cache-fragment/<str:tab>/",
+        SyncCacheFragmentView.as_view(),
+        name="sync_cache_fragment",
     ),
     path(
         "devices/<int:pk>/interface-sync/",
@@ -1011,3 +1024,5 @@ urlpatterns = [
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]
+
+urlpatterns += slashless_route_aliases(urlpatterns)

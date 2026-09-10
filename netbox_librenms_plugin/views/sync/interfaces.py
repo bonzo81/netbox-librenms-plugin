@@ -26,6 +26,12 @@ from netbox_librenms_plugin.interface_sync import (
     get_netbox_interface_type,
     update_interface_from_port,
 )
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    apply_transition_to_response,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     build_migrated_context,
@@ -171,6 +177,7 @@ class SyncInterfacesView(
         # below so the skip isn't silent — otherwise the user only sees it in the logs.
         self._skipped_conflicts = []
         self._synced_count = 0
+        self._mutated = False
         try:
             with transaction.atomic():
                 try:
@@ -218,7 +225,16 @@ class SyncInterfacesView(
         # source of truth for the success banner.
         if self._synced_count > 0:
             messages.success(request, "Selected interfaces synced successfully.")
-        return redirect(redirect_url)
+        if self._mutated:
+            cache_transition = schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.INTERFACES,
+                server_key,
+            )
+        else:
+            cache_transition = None
+        return apply_transition_to_response(request, redirect(redirect_url), cache_transition)
 
     def get_object(self, object_type, object_id):
         """Return the Device or VirtualMachine for the given type and ID (object-scoped)."""
@@ -508,7 +524,9 @@ class SyncInterfacesView(
                             "LAG",
                             require_interface_source=True,  # VMInterface has no lag field
                         )
-                        if member_iface and member_iface.lag_id != agg_iface.pk:
+                        if member_iface and (
+                            member_iface.lag_id != agg_iface.pk or _lag_aggregate_needs_promotion(agg_iface)
+                        ):
                             if agg_iface.type != "lag" and "type" in excluded_columns:
                                 logger.warning(
                                     "Bulk sync: skipping LAG link %s -> %s because interface type is excluded",
@@ -526,9 +544,10 @@ class SyncInterfacesView(
                                     agg_iface.name,
                                 )
                             else:
-                                self._apply_relationship_edge(
+                                if self._apply_relationship_edge(
                                     member_iface, "lag", agg_iface, self._prepare_bulk_lag_aggregate, "LAG"
-                                )
+                                ):
+                                    self._mutated = True
 
                     # Sub-interface parent: this interface is a child of a parent interface.
                     raw_parent = sub_interfaces.get(normalize_librenms_port_id(port_id))
@@ -548,7 +567,8 @@ class SyncInterfacesView(
                             "parent",
                         )
                         if child_iface and child_iface.parent_id != parent_iface.pk:
-                            self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent")
+                            if self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent"):
+                                self._mutated = True
         except IntegrityError:
             # Immediate conflicts (a unique violation, a row already gone at write time) surface
             # here and roll the relationship pass back as a unit. Deferred FK violations do NOT:
@@ -566,14 +586,21 @@ class SyncInterfacesView(
     @staticmethod
     def _prepare_bulk_lag_aggregate(agg_iface):
         """
-        LAG-pass hook: promote the aggregate to type=lag, returning ``(persist, restore)`` or None.
+        LAG-pass hook: promote the aggregate to type=lag and return ``(persist, restore)`` or None.
 
         member_iface.clean() only accepts the link when the aggregate is type=lag, so it
         is bumped in memory before validation. The aggregate object is reused across rows via
         the shared interface index, so a member whose link later fails validation must restore
-        the in-memory type — otherwise a subsequent valid member sharing this aggregate would
+        the in-memory type. Otherwise, a subsequent valid member sharing this aggregate would
         skip the save() and leave the aggregate's type stale in the DB. The restore path is why
         this passes ``with_restore=True`` to the shared promotion helper.
+
+        Args:
+            agg_iface (Interface): The LAG aggregate to promote.
+
+        Returns:
+            tuple[callable, callable] | None: The persist and restore callables, or None when no
+                promotion is needed.
         """
         return _promote_lag_aggregate(agg_iface, with_restore=True)
 
@@ -600,9 +627,28 @@ class SyncInterfacesView(
         Both ends are resolved by stable LibreNMS port_id. The source is pinned to the row target.
         A selected related row is pinned to its own target, which can be another member of the same
         Virtual Chassis.
-        Returns ``(None, None)`` — skip the row — on any lookup failure (logged at debug) or,
-        when *require_interface_source* is set, when the source isn't an Interface (a
-        VMInterface has no lag field).
+        Returns ``(None, None)`` and skips the row on any lookup failure (logged at debug). It also
+        skips the row when *require_interface_source* is set and the source is not an Interface
+        (a VMInterface has no lag field).
+
+        Args:
+            obj (Device | VirtualMachine): The object whose relationship scope contains the interfaces.
+            port_id (str): The stable LibreNMS port ID for the source interface.
+            related_raw (int | str): The raw LibreNMS port ID for the related interface.
+            port_by_id (dict): The cached port rows keyed by normalized LibreNMS port ID.
+            catalog_index (dict): The ambiguity-preserving index for all candidate interfaces.
+            source_index (dict): The index of candidate source interfaces that can be changed.
+            related_index (dict): The index of candidate related interfaces that can be viewed or changed.
+            server_key (str): The LibreNMS server key that scopes stored IDs.
+            source_expected_owner (tuple): The expected device or virtual machine owner for the source.
+            interface_name_field (str): The cached port field used for interface names.
+            unambiguous_name_port_ids (set): The port IDs that permit a safe name fallback.
+            log_kind (str): The relationship label used in debug messages.
+            require_interface_source (bool): Whether the source must be an Interface instead of a VMInterface.
+
+        Returns:
+            tuple[Interface | VMInterface | None, Interface | VMInterface | None]: The resolved interface pair,
+                or ``(None, None)`` when the row must be skipped.
         """
         related_port_id = str(related_raw)
         normalized_related_port_id = normalize_librenms_port_id(related_raw)
@@ -676,6 +722,16 @@ class SyncInterfacesView(
         validation failure is logged and skipped so the batch continues, never raised.
         ``prepare_related`` is the LAG pass's aggregate type=lag hook (returns
         ``(persist, restore)``); the parent pass passes None.
+
+        Args:
+            source_iface (Interface | VMInterface): The interface whose relationship field is updated.
+            relation_field (str): The relationship field to update.
+            related_iface (Interface | VMInterface): The interface assigned to the relationship field.
+            prepare_related (callable | None): The hook that prepares the related interface before validation.
+            log_kind (str): The relationship label used in log messages.
+
+        Returns:
+            bool: True when the relationship is saved, or False when validation or persistence fails.
         """
         try:
             # Own savepoint: an IntegrityError from the persist poisons the enclosing batch
@@ -693,7 +749,7 @@ class SyncInterfacesView(
                 related_iface.name,
                 validation_error_detail(exc),
             )
-            return
+            return False
         except IntegrityError as exc:
             # Concurrent DB conflict (e.g. the related interface deleted between clean() and
             # existence check and the FK write): skip this row and keep the batch alive,
@@ -705,8 +761,9 @@ class SyncInterfacesView(
                 related_iface.name,
                 exc,
             )
-            return
+            return False
         logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
+        return True
 
     def sync_selected_interfaces(
         self,
@@ -947,17 +1004,23 @@ class SyncInterfacesView(
         if isinstance(obj, Device):
             netbox_type = self.get_netbox_interface_type(librenms_interface)
 
-        self.update_interface_attributes(
-            interface,
-            librenms_interface,
-            netbox_type,
-            exclude_columns,
-            interface_name_field,
+        changed = bool(getattr(interface, "_librenms_sync_created", False))
+        changed = (
+            self.update_interface_attributes(
+                interface,
+                librenms_interface,
+                netbox_type,
+                exclude_columns,
+                interface_name_field,
+            )
+            or changed
         )
 
         # Sync VLANs if not excluded
         if "vlans" not in exclude_columns:
-            self._sync_interface_vlans(interface, librenms_interface)
+            changed = self._sync_interface_vlans(interface, librenms_interface) or changed
+        if changed and getattr(self, "_mutated", None) is not None:
+            self._mutated = True
 
     def _record_skipped_conflict(self, interface_name, reason):
         """Record a row that cannot be synced to its requested target."""
@@ -1001,6 +1064,8 @@ class SyncInterfacesView(
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
         if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
             return None
+        if created:
+            interface._librenms_sync_created = True
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
     def _resolve_vm_interface(self, vm, interface_name, port_id, server_key):
@@ -1035,6 +1100,8 @@ class SyncInterfacesView(
         interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
         if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
             return None
+        if created:
+            interface._librenms_sync_created = True
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
     def get_netbox_interface_type(self, librenms_interface):
@@ -1055,7 +1122,7 @@ class SyncInterfacesView(
     ):
         """Update interface fields from LibreNMS data, respecting excluded columns."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        update_interface_from_port(
+        return update_interface_from_port(
             interface,
             librenms_interface,
             server_key=server_key,
@@ -1102,7 +1169,7 @@ class SyncInterfacesView(
             lookup_maps = lookup_maps_by_owner.get(owner_id)
             if lookup_maps is None:
                 logger.warning("Skipping VLAN sync for %s because its locked owner has no VLAN scope map", interface)
-                return
+                return False
         else:
             lookup_maps = self._lookup_maps
         owner = getattr(self, "_vlan_owners_by_id", {}).get(owner_id)
@@ -1128,11 +1195,20 @@ class SyncInterfacesView(
                 vlan_group_map.pop(vid, None)
             else:
                 vlan_group_map[vid] = str(selected_group.pk)
-        self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, lookup_maps)
+        result = self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, lookup_maps)
+        return bool(result and result.get("changed"))
 
 
-class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class DeleteNetBoxInterfacesView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    CacheMixin,
+    View,
+):
     """Delete interfaces that exist only in NetBox."""
+
+    DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
     def get_required_permissions_for_object_type(self, object_type):
         """Return the required permissions based on object type."""
@@ -1162,6 +1238,8 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
             obj = self.restrict_object_or_404(VirtualMachine, pk=object_id)
         else:
             return JsonResponse({"error": "Invalid object type"}, status=400)
+
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
 
         interface_ids = request.POST.getlist("interface_ids")
 
@@ -1227,7 +1305,15 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
             response_data["errors"] = errors
             response_data["message"] += f" with {len(errors)} error(s)"
 
-        return JsonResponse(response_data)
+        if deleted_count and server_key:
+            schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.INTERFACES,
+                server_key,
+                source_fragment_required=True,
+            )
+        return apply_request_cache_transition(request, JsonResponse(response_data))
 
 
 def _lock_relationship_scope(obj, owner_queryset=None):
@@ -1320,6 +1406,11 @@ def _build_locked_relationship_indexes(
     return catalog_index, source_index, related_index, changeable_ids
 
 
+def _lag_aggregate_needs_promotion(agg):
+    """Return whether *agg* is an Interface that is not yet ``type=lag``."""
+    return isinstance(agg, Interface) and agg.type != "lag"
+
+
 def _promote_lag_aggregate(agg, *, with_restore):
     """
     Bump a LAG aggregate to ``type=lag`` in memory so a member's ``clean()`` accepts the link.
@@ -1343,7 +1434,7 @@ def _promote_lag_aggregate(agg, *, with_restore):
     Returns:
         callable | tuple | None: ``persist`` (or ``(persist, restore)``), or None when nothing to do.
     """
-    if not (isinstance(agg, Interface) and agg.type != "lag"):
+    if not _lag_aggregate_needs_promotion(agg):
         return None
     original_type = agg.type
     agg.type = "lag"
@@ -1530,8 +1621,15 @@ class _BaseRelationshipSyncView(
         Returns a no-arg callable that persists that mutation (invoked only after the source
         interface validates) or None when there's nothing to do. SyncInterfaceLagView
         overrides this to bump the aggregate's type to 'lag'; parent has no equivalent.
+
+        Args:
+            related_iface (Interface | VMInterface): The related interface that a subclass can prepare.
         """
         return None
+
+    def _related_needs_preparation(self, related_iface):
+        """Hook: whether _prepare_related still has work to do on an already-linked pair."""
+        return False
 
     def _get_current_edge(self, obj, server_key, request, port_id, related_port_id):
         """Return the current cached edge rows and safe name hints, or ``None`` when stale."""
@@ -1617,6 +1715,7 @@ class _BaseRelationshipSyncView(
         # bulk pass (_apply_relationship_edge).
         source_iface = None
         related_iface = None
+        relationship_changed = False
         try:
             with transaction.atomic():
                 obj, locked_device_ids = _lock_relationship_scope(
@@ -1699,9 +1798,13 @@ class _BaseRelationshipSyncView(
                 # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
                 # saves with update_fields.
                 try:
-                    _apply_interface_relationship(
-                        source_iface, self.relation_field, related_iface, self._prepare_related
-                    )
+                    if getattr(
+                        source_iface, f"{self.relation_field}_id"
+                    ) != related_iface.pk or self._related_needs_preparation(related_iface):
+                        _apply_interface_relationship(
+                            source_iface, self.relation_field, related_iface, self._prepare_related
+                        )
+                        relationship_changed = True
                 except ValidationError as exc:
                     # Log the validation detail server-side and return a fixed message — don't echo
                     # exception text to the client (CodeQL py/stack-trace-exposure). The
@@ -1723,7 +1826,8 @@ class _BaseRelationshipSyncView(
                         },
                         status=409,
                     )
-                logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+                if relationship_changed:
+                    logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
         except IntegrityError as exc:
             source_name = getattr(source_iface, "name", self.source_label.lower())
             related_name = getattr(related_iface, "name", self.related_label.lower())
@@ -1744,12 +1848,21 @@ class _BaseRelationshipSyncView(
                 status=409,
             )
 
-        return JsonResponse(
+        if relationship_changed:
+            schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.INTERFACES,
+                server_key,
+                source_fragment_required=True,
+            )
+        response = JsonResponse(
             {
                 "status": "success",
                 "message": f"Linked {source_iface.name} to {self.relation_label} {related_iface.name}",
             }
         )
+        return apply_request_cache_transition(request, response)
 
 
 class SyncInterfaceLagView(_BaseRelationshipSyncView):
@@ -1767,6 +1880,10 @@ class SyncInterfaceLagView(_BaseRelationshipSyncView):
         """Promote the aggregate to type=lag so member_iface.clean() accepts the link."""
         # Single-row endpoint: no aggregate reuse across rows, so no restore needed.
         return _promote_lag_aggregate(related_iface, with_restore=False)
+
+    def _related_needs_preparation(self, related_iface):
+        """The aggregate can be edited back to a non-LAG type after linking, so a retry repairs it."""
+        return _lag_aggregate_needs_promotion(related_iface)
 
 
 class SyncInterfaceParentView(_BaseRelationshipSyncView):

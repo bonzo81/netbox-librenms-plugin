@@ -12,6 +12,7 @@ from netbox_librenms_plugin.interface_relationships import (
     filter_interface_index,
     resolve_relationship_row,
 )
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
@@ -63,14 +64,28 @@ class BaseInterfaceTableView(
     def get_interfaces(self, obj):
         """
         Get interfaces related to the object.
+
         Should be implemented in subclasses.
+
+        Args:
+            obj (Device | VirtualMachine): Object whose interfaces to retrieve.
+
+        Raises:
+            NotImplementedError: Always, because subclasses must implement this method.
         """
         raise NotImplementedError
 
     def get_redirect_url(self, obj):
         """
         Get the redirect URL for the object.
+
         Should be implemented in subclasses.
+
+        Args:
+            obj (Device | VirtualMachine): Object whose redirect URL to retrieve.
+
+        Raises:
+            NotImplementedError: Always, because subclasses must implement this method.
         """
         raise NotImplementedError
 
@@ -94,6 +109,11 @@ class BaseInterfaceTableView(
         Returns:
             HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
         """
+        SyncCacheConsistency(obj).mark_refresh_failure(
+            SyncTab.INTERFACES,
+            server_key,
+            actor_id=request_actor_id(request),
+        )
         url = self.get_redirect_url(obj)
         return redirect_with_server_key(request, url, server_key)
 
@@ -382,13 +402,23 @@ class BaseInterfaceTableView(
             timezone.now(),
             timeout=self.librenms_api.cache_timeout,
         )
-
-        # On an OOB-fetch failure the warning above already conveys the partial outcome;
-        # use an accurate success banner ("host" only) rather than a blanket "successfully".
-        if oob_ports_failed:
-            messages.success(request, "Host interface data refreshed successfully.")
+        if SyncCacheConsistency(obj).mark_refresh_outcome(
+            SyncTab.INTERFACES,
+            _server_key,
+            actor_id=request_actor_id(request),
+        ):
+            # On an OOB-fetch failure the warning above already conveys the partial outcome;
+            # use an accurate success banner ("host" only) rather than a blanket "successfully".
+            if oob_ports_failed:
+                messages.success(request, "Host interface data refreshed successfully.")
+            else:
+                messages.success(request, "Interface data refreshed successfully.")
         else:
-            messages.success(request, "Interface data refreshed successfully.")
+            messages.error(
+                request,
+                "Interface data could not be cached, so the tab has no snapshot to show. "
+                "Refresh again; see server logs for details.",
+            )
 
         context = self.get_context_data(
             request,

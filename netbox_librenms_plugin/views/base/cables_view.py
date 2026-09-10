@@ -24,6 +24,7 @@ from netbox_librenms_plugin.utils import (
     get_virtual_chassis_member,
     oob_badge_html,
 )
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -258,6 +259,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         Shared by the host and OOB cable branches so they name local ports identically. A
         malformed payload (non-dict, non-list ports, non-dict rows) yields empty maps rather
         than crashing.
+
+        Args:
+            ports_data (dict): A get_ports payload.
+            interface_name_field (str): The field that supplies each displayed port name.
+            alt_name_field (str): The field that supplies alternate port names.
+
+        Returns:
+            tuple[dict, dict]: Maps from port IDs to displayed names and alternate names.
         """
         name_map = {}
         alt_map = {}
@@ -288,6 +297,15 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         Shared by the host (``source='main'``) and OOB (``source='oob'``) branches. Non-dict
         rows are skipped; an unmapped local_port_id falls back to the LibreNMS-reported name.
+
+        Args:
+            links (list): LibreNMS LLDP link rows.
+            name_map (dict): A map from local port IDs to displayed names.
+            alt_map (dict): A map from local port IDs to alternate names.
+            source (str): The source tag for each table row.
+
+        Returns:
+            list[dict]: Table rows tagged with the source.
         """
         rows = []
         for link in links:
@@ -333,6 +351,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         classification can tell an OOB-only mapping from a truly unmapped device. Sets
         ``self._oob_links_fetch_failed`` on a failed/malformed OOB fetch so post() can warn
         rather than silently dropping OOB rows.
+
+        Args:
+            links_data (list): The table rows to extend with OOB links.
+            lookup_device (Device): The device that can have a linked OOB controller.
+            server_key (str): The LibreNMS server key for the OOB lookup.
+            interface_name_field (str): The field that supplies each displayed port name.
+            alt_name_field (str): The field that supplies alternate port names.
+
+        Returns:
+            bool: True when an OOB controller is linked, otherwise False.
         """
         oob = get_librenms_oob(lookup_device, server_key=server_key)
         if not oob:
@@ -731,41 +759,45 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             # deleted and cause DoesNotExist in check_cable_status().
             links_data = [{k: v for k, v in link.items() if k in _RAW_LINK_KEYS} for link in links_data]
 
-        # Enrich data in both cases to ensure current NetBox state
-        links_data = self.enrich_links_data(links_data, obj, server_key=server_key)
-
-        # Cache after enrichment so verify/sync views read current NetBox state
         cache_key = self.get_cache_key(cache_device, "links", server_key)
-        # Don't persist a PARTIAL fresh snapshot: a host fetch failure on a device that has a host
-        # id, or any OOB fetch failure, drops one side's cable rows — caching it would make later
-        # cached renders / verify actions silently serve the incomplete set. An OOB-only mapping
+        # Don't persist or enrich a PARTIAL fresh snapshot: a host fetch failure on a device that
+        # has a host id, or any OOB fetch failure, drops one side's cable rows. An OOB-only mapping
         # (no host id) legitimately records _links_fetch_error for the absent host, so keep caching
         # that successful OOB refresh (mirrors the host_mapping_absent_but_oob_scoped guard above).
         partial_fetch_failed = fetch_fresh and (
             bool(getattr(self, "_oob_links_fetch_failed", False))
             or (bool(getattr(self, "_links_fetch_error", None)) and getattr(self, "librenms_id", None) is not None)
         )
+        if partial_fetch_failed:
+            # Drop any prior full snapshot so verify and sync actions cannot use data that this
+            # incomplete refresh superseded.
+            cache.delete(cache_key)
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": server_key,
+                "refresh_incomplete": True,
+            }
+
+        # Enrich data in both cases to ensure current NetBox state
+        links_data = self.enrich_links_data(links_data, obj, server_key=server_key)
+
+        # Cache after enrichment so verify/sync views read current NetBox state
         if fetch_fresh:
-            if partial_fetch_failed:
-                # Don't just skip writing the partial snapshot — also drop any prior FULL snapshot.
-                # The rendered table is built from the new partial links_data, but verify/sync
-                # actions resolve rows from this cache key, so a leftover full snapshot would let a
-                # user act on cable data the partial refresh just superseded.
-                cache.delete(cache_key)
-            else:
-                cache.set(
-                    cache_key,
-                    {"links": links_data},
-                    timeout=self.librenms_api.cache_timeout,
-                )
-        else:
+            cache.set(
+                cache_key,
+                {"links": links_data},
+                timeout=self.librenms_api.cache_timeout,
+            )
+        elif not getattr(self, "cache_only", False):
             # Write enriched data back, preserving original TTL
             remaining_ttl = cache_remaining_ttl(cache, cache_key)
             if remaining_ttl and remaining_ttl > 0:
                 cache.set(cache_key, {"links": links_data}, timeout=remaining_ttl)
 
         # Calculate cache expiry
-        cache_ttl = None if partial_fetch_failed else cache_remaining_ttl(cache, cache_key)
+        cache_ttl = cache_remaining_ttl(cache, cache_key)
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         # Generate the table
@@ -810,7 +842,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         obj = self.get_object(pk)
         posted_server_key = request.POST.get("server_key")
         # Rebind the API to the POSTed server so live link/port fetches hit the same
-        # LibreNMS instance the cached rows are namespaced under (multi-server tabs).
+        # Active server whose source snapshot supplies this multi-server tab.
         server_key = self.rebind_api_for_server(posted_server_key)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
@@ -836,6 +868,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 messages.error(request, f"Failed to fetch links from LibreNMS: {self._links_fetch_error}")
             else:
                 messages.error(request, "No links found in LibreNMS")
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.CABLES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             return self.render_sync_partial(
                 request,
                 obj,
@@ -843,7 +880,34 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 {"cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
-        messages.success(request, "Cable data refreshed successfully.")
+        if context.get("refresh_incomplete"):
+            messages.warning(
+                request,
+                "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again.",
+            )
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.CABLES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
+            return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
+
+        # Decide the outcome before announcing it. cache.set() does not confirm that the
+        # snapshot exists, and an eviction can remove it before this check.
+        coordinator = SyncCacheConsistency(obj)
+        snapshot_cached = coordinator.mark_refresh_outcome(
+            SyncTab.CABLES,
+            server_key,
+            actor_id=request_actor_id(request),
+        )
+        if snapshot_cached:
+            messages.success(request, "Cable data refreshed successfully.")
+        else:
+            messages.error(
+                request,
+                "Cable data could not be cached. The rows shown come from this refresh only "
+                "and will not survive a reload. Refresh again before syncing; see server logs for details.",
+            )
         # A host LLDP failure no longer aborts the refresh (OOB/serial rows can still surface it
         # as "successful"), so warn when the host fetch failed but we had a host id to query —
         # otherwise host-side cables are silently omitted under a success banner. Skip for an

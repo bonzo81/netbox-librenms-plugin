@@ -7,7 +7,12 @@ from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count, oob_badge_html, render_vc_member_options
+from netbox_librenms_plugin.utils import (
+    get_table_paginate_count,
+    netbox_relocates_module_subtree,
+    oob_badge_html,
+    render_vc_member_options,
+)
 
 
 class LibreNMSModuleTable(tables.Table):
@@ -234,6 +239,36 @@ class LibreNMSModuleTable(tables.Table):
         icon = icons.get(value, "mdi-card-outline")
         return format_html('<i class="mdi {} me-1"></i> {}', icon, value)
 
+    @staticmethod
+    def _unmatched_bay_html(record):
+        """Report where this row's serial already sits in NetBox, when bay matching found nothing.
+
+        A failed bay match does not mean the part is absent. The serial may already name an
+        installed module, and saying only "No matching bay" hides that from the operator who
+        then cannot tell a mapping mistake from missing hardware.
+        """
+        if record.get("serial_conflict_ambiguous"):
+            return format_html(
+                '<span class="text-warning">{}</span>',
+                "No matching bay; this serial matches more than one module",
+            )
+        conflict = record.get("serial_conflict_module")
+        if conflict is None:
+            return format_html('<span class="text-danger">{}</span>', "No matching bay")
+        if not record.get("serial_conflict_visible"):
+            # The module holding this serial is outside the operator's scope. Its existence is
+            # what matters here; naming its device or bay would disclose an object they cannot view.
+            return format_html(
+                '<span class="text-warning">{}</span>',
+                "No matching bay; this serial is already installed elsewhere in NetBox",
+            )
+        return format_html(
+            '<span class="text-warning">No matching bay; installed at <a href="{}">{} / {}</a></span>',
+            conflict.get_absolute_url(),
+            conflict.device.name,
+            conflict.module_bay.name,
+        )
+
     def render_module_bay(self, value, record):
         """Render module bay with link if found in NetBox."""
         if record.get("status") == "Integrated":
@@ -242,7 +277,7 @@ class LibreNMSModuleTable(tables.Table):
             # to match the muted status badge and absent actions on these rows.
             rendered_value = "-"
         elif not value or value == "-":
-            rendered_value = format_html('<span class="text-danger">{}</span>', "No matching bay")
+            rendered_value = self._unmatched_bay_html(record)
         elif url := record.get("module_bay_url"):
             rendered_value = format_html('<a href="{}">{}</a>', url, value)
         else:
@@ -269,12 +304,19 @@ class LibreNMSModuleTable(tables.Table):
         Render the sync-status badge alongside a hidden in-flight spinner badge.
 
         The live badge is wrapped so CSS (see ``_module_sync.html``) can swap it
-        for the spinner badge while a row-action POST is in flight — the row forms
+        for the spinner badge while a row-action POST is in flight. The row forms
         set ``hx-indicator="closest tr"``, so HTMX marks the row with ``htmx-request``
         for the duration. The spinner label tracks the row's action: "Updating…" on an
         installed-module row offering Update Serial / Update Interface, "Installing…"
         on an install / install-branch / carrier-install row. It stays hidden in every
         other state, including the inline verify-endpoint cell updates.
+
+        Args:
+            value (str): The sync status to render.
+            record (dict): The table row with the action and status details.
+
+        Returns:
+            SafeString: The live status badge and hidden in-flight spinner badge.
         """
         # An update action (Update Serial / Update Interface) acts on an already-installed module
         # and a row never offers it alongside an install-flavoured action, so a row with an update
@@ -427,11 +469,23 @@ class LibreNMSModuleTable(tables.Table):
         trigger that opens the Add Bay Template modal pre-filled with the
         LibreNMS-derived suggestion.
 
-        When the viewer can't add bay templates, the badge is hidden so it
-        doesn't act as a dead-end control (the modal would only return a 403
-        for them).  The ``<a href>`` and ``<span>`` fallbacks below are kept
-        for callers that don't have a bound device (e.g. unit tests built via
+        When the viewer cannot add bay templates, the badge is hidden so it
+        does not act as a dead-end control (the modal would only return a 403
+        for them). The ``<a href>`` and ``<span>`` fallbacks below are kept
+        for callers that do not have a bound device (e.g. unit tests built via
         ``object.__new__``) or have no ``target_pk`` / URL available.
+
+        Args:
+            title (str): The badge tooltip text.
+            target_kind (str): The target model kind sent to the modal.
+            target_pk (int | None): The target object's primary key, or ``None`` when it is unavailable.
+            target_label (str): The target label. This function does not use it.
+            suggestion (dict): The LibreNMS-derived bay template fields.
+            fallback_url (str): The URL for the linked fallback, or an empty string when it is unavailable.
+            label (str): The text shown on the badge.
+
+        Returns:
+            SafeString: The HTMX button, empty safe string, linked fallback, or non-interactive fallback markup.
         """
         device = getattr(self, "device", None)
         can_add_template = getattr(self, "can_add_module_bay_template", False)
@@ -449,6 +503,7 @@ class LibreNMSModuleTable(tables.Table):
                     "suggested_label": suggestion.get("label", ""),
                     "librenms_name": suggestion.get("librenms_name", ""),
                     "librenms_class": suggestion.get("librenms_class", ""),
+                    "server_key": getattr(self, "server_key", "") or "",
                 }
             )
             return format_html(
@@ -503,8 +558,8 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    # hx-post swaps just the module table in place (the view returns the
-                    # table partial for HTMX); method/action keep it working without JS.
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -545,8 +600,8 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    # hx-post swaps just the module table in place (the view returns the
-                    # table partial for HTMX); method/action keep it working without JS.
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -572,8 +627,8 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    # hx-post swaps just the module table in place (the view returns the
-                    # table partial for HTMX); method/action keep it working without JS.
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -604,8 +659,8 @@ class LibreNMSModuleTable(tables.Table):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
-                    # hx-post swaps just the module table in place (the view returns the
-                    # table partial for HTMX); method/action keep it working without JS.
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -645,6 +700,8 @@ class LibreNMSModuleTable(tables.Table):
             and self.can_delete_module
             and record.get("can_replace")
             and record.get("installed_module_id")
+            and record.get("ent_physical_index") is not None
+            and record.get("ent_physical_index") != ""
         ):
             preview_url = reverse(
                 "plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": self.device.pk}
@@ -666,9 +723,11 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        # Move button for can_install rows where a single serial conflict exists (requires change+delete)
+        # Move button for can_install rows where a single serial conflict exists (requires change+delete).
+        # Below NetBox 4.7 a move strands the module's components and nested modules, so it is not offered.
         if (
-            self.can_change_module
+            netbox_relocates_module_subtree()
+            and self.can_change_module
             and self.can_delete_module
             and record.get("can_move_from")
             and record.get("serial_conflict_module")
@@ -707,8 +766,8 @@ class LibreNMSModuleTable(tables.Table):
             for opt in record["carrier_install_options"]:
                 buttons.append(
                     format_html(
-                        # hx-post swaps just the module table in place (install_module returns the
-                        # table partial for HTMX); method/action keep it working without JS.
+                        # hx-post: install_module answers with the module tab fragment, swapped
+                        # into #module-sync-content; method/action keep it working without JS.
                         '<form method="post" action="{}" hx-post="{}"'
                         ' hx-target="#module-sync-content" hx-swap="innerHTML"'
                         ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
@@ -816,6 +875,40 @@ class LibreNMSModuleTable(tables.Table):
                     "</a>",
                     base_url,
                     qs,
+                )
+            )
+
+        if (
+            record.get("status") == "No Bay"
+            and not record.get("model_suggestion")
+            and record.get("device_empty_bay_names")
+            and not record.get("depth")
+            and not record.get("no_bay_reason")
+            and record.get("item_class") != "port"
+            and record.get("mapping_source_name")
+            and getattr(self, "can_add_module_bay_mapping", False)
+        ):
+            mapping_url = reverse(
+                "plugins:netbox_librenms_plugin:add_bay_template",
+                kwargs={"pk": record.get("selected_device_id") or self.device.pk},
+            )
+            mapping_params = urlencode(
+                {
+                    "mode": "map_existing",
+                    "librenms_name": record["mapping_source_name"],
+                    "librenms_class": record.get("item_class") or "",
+                    "server_key": self.server_key or "",
+                }
+            )
+            buttons.append(
+                format_html(
+                    '<button type="button" class="btn btn-sm btn-outline-primary ms-1"'
+                    ' hx-get="{}?{}" hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"'
+                    ' title="Choose an existing bay and review the proposed mapping">'
+                    '<i class="mdi mdi-link-variant"></i> Map Existing Bay</button>',
+                    mapping_url,
+                    mapping_params,
                 )
             )
 

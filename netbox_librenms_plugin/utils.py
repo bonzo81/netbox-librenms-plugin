@@ -1926,9 +1926,11 @@ def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -
     serial = normalize_serial(value)
     if not serial:
         return serial
+    # Strip again: a rule that drops a prefix without its trailing space leaves the stored
+    # serial padded, which reads as a mismatch against the same serial normalized elsewhere.
     return apply_normalization_rules(
         serial, NormalizationRule.SCOPE_SERIAL, manufacturer=manufacturer, preloaded_rules=preloaded_rules
-    )
+    ).strip()
 
 
 def coerce_librenms_id(value) -> int | None:
@@ -2640,8 +2642,11 @@ def is_legacy_librenms_id(value) -> bool:
     Legacy = a bare integer (created before the multi-server JSON refactor) or a string that
     parses as an integer, i.e. NOT the per-server dict form and not absent. Uses ``int()``
     coercion (so a whitespace-padded ``" 42 "`` is legacy too), matching
-    :func:`coerce_librenms_id` / :func:`get_librenms_device_id` rather than a stricter
-    ``str.isdigit()`` check that would hide a valid legacy link.
+    :func:`get_librenms_device_id`, which resolves a top-level string with the same bare
+    ``int()``. NOTE: this is deliberately WIDER than :func:`coerce_librenms_id` and the
+    ``build_librenms_id_qs`` lookup predicates, which require ASCII digits. Narrowing it to
+    match them would make ``set_librenms_device_id`` treat a reader-resolvable value as
+    corrupt and reset the field to ``{}``, destroying the legacy link.
 
     Args:
         value: The raw ``custom_field_data["librenms_id"]`` value.
@@ -2716,6 +2721,7 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
 
 _MODULE_TOKEN_LEAF_FIX_VERSION = (4, 5, 6)
 _PARENT_CHASSIS_CLEAN_BUG_VERSION = (4, 4, 0)
+_MODULE_RELOCATION_VERSION = (4, 7, 0)
 _NETBOX_VERSION_PREFIX_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 
@@ -2751,6 +2757,23 @@ def netbox_clean_reads_parent_virtual_chassis():
     if version is None:
         return True
     return version == _PARENT_CHASSIS_CLEAN_BUG_VERSION
+
+
+def netbox_relocates_module_subtree():
+    """Return True when the running NetBox moves a module's whole subtree with it.
+
+    NetBox 4.7 (issue #15289) relocates the module's components, its own module bays and any
+    child modules installed in them, and re-resolves template-derived names for the destination
+    bay. Below 4.7 the same assignment is accepted with no error but moves only the module row,
+    leaving its interfaces, its nested bays and its child modules on the source device.
+
+    Unlike the other version predicates here, an undetectable version returns False. The two
+    above tolerate a wrong guess; this one would write a half-moved subtree.
+    """
+    version = _get_netbox_version_tuple()
+    if version is None:
+        return False
+    return version >= _MODULE_RELOCATION_VERSION
 
 
 def netbox_resolves_module_token_per_leaf():
@@ -3810,6 +3833,34 @@ def resolve_module_type(
             if normalized != model_name:
                 matched = generic_fallback.get(normalized)
     return matched
+
+
+def slashless_route_aliases(patterns):
+    """Return an alias for each ``path()`` route in *patterns*, without its trailing slash.
+
+    NetBox runs with ``APPEND_SLASH``, so a request that reaches Django with its trailing slash
+    already removed is answered with a 301 back to the slashed form. Anything in front of NetBox
+    that normalises the slash away strips it again on the retry, and the browser stops at
+    ERR_TOO_MANY_REDIRECTS. An XHR shows that as a control that does nothing, with no error to
+    read, and a redirected POST loses its body.
+
+    Serving both forms answers such a request instead of bouncing it. Aliases carry no name, so
+    ``reverse()`` keeps returning the canonical slashed URL that templates and tables render.
+    Regex routes are skipped: a DRF router builds those, and its clients follow redirects.
+    """
+    from django.urls import URLPattern, path
+    from django.urls.resolvers import RoutePattern
+
+    routes = {str(entry.pattern) for entry in patterns if isinstance(entry, URLPattern)}
+    aliases = []
+    for entry in patterns:
+        if not isinstance(entry, URLPattern) or not isinstance(entry.pattern, RoutePattern):
+            continue
+        route = str(entry.pattern)
+        if not route.endswith("/") or route[:-1] in routes:
+            continue
+        aliases.append(path(route[:-1], entry.callback, kwargs=entry.default_args))
+    return aliases
 
 
 def get_enabled_ignore_rules() -> list:
