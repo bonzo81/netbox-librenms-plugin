@@ -232,6 +232,10 @@ def compress_recording(recording):
 
     new_body = dict(ports_body)
     new_body["ports"] = kept
+    # LibreNMS sends "count" alongside "ports"; leaving the original would describe a port set
+    # the recording no longer holds, and a reader that trusts it would look for missing rows.
+    if "count" in new_body:
+        new_body["count"] = len(kept)
     new_responses = dict(recording["responses"])
     new_responses[ports_key] = _rewrap(recording["responses"][ports_key], new_body)
 

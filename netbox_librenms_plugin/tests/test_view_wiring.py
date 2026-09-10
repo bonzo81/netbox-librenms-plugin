@@ -229,9 +229,17 @@ class TestSourceMarkerConvention:
 
         hits = []
         for node in ast.walk(tree):
-            if isinstance(node, ast.Compare) and self._is_source_access(node.left):
-                for comparator in node.comparators:
-                    if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
+            if isinstance(node, ast.Compare):
+                # Either operand may hold the access: `row["_source"] == "serial"` and
+                # `"serial" == row["_source"]` spell the marker inline just the same.
+                operands = [node.left, *node.comparators]
+                for first, second in zip(operands, operands[1:]):
+                    if any(
+                        self._is_source_access(access)
+                        and isinstance(literal, ast.Constant)
+                        and isinstance(literal.value, str)
+                        for access, literal in ((first, second), (second, first))
+                    ):
                         hits.append(node.lineno)
             elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
                 if isinstance(node.value.value, str) and any(self._is_source_access(t) for t in node.targets):
@@ -257,6 +265,25 @@ class TestSourceMarkerConvention:
                 ):
                     hits.append(node.lineno)
         return hits
+
+    def test_the_scan_reads_both_sides_of_a_comparison(self):
+        """A reversed comparison spells the marker just as inline as the usual order."""
+        import ast
+
+        usual = self._bare_marker_lines(ast.parse('if row["_source"] == "serial":\n    pass\n'))
+        reversed_order = self._bare_marker_lines(ast.parse('if "serial" == row["_source"]:\n    pass\n'))
+        via_get = self._bare_marker_lines(ast.parse('if "serial" == row.get("_source"):\n    pass\n'))
+
+        assert usual == [1], usual
+        assert reversed_order == [1], "a reversed comparison slipped past the scan"
+        assert via_get == [1], "a reversed .get() comparison slipped past the scan"
+
+    def test_the_scan_ignores_a_comparison_against_a_constant(self):
+        """Comparing against the named constant is the point, so it must not be reported."""
+        import ast
+
+        assert self._bare_marker_lines(ast.parse('if row["_source"] == SERIAL_INVENTORY_SOURCE:\n    pass\n')) == []
+        assert self._bare_marker_lines(ast.parse('if SERIAL_INVENTORY_SOURCE == row["_source"]:\n    pass\n')) == []
 
     def test_no_production_module_spells_the_source_marker_inline(self):
         import ast

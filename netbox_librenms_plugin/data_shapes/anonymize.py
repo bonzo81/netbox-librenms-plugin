@@ -110,7 +110,9 @@ MODEL_KEYS = frozenset({"hardware"})
 # entPhysicalMfgName is the ENTITY-MIB manufacturer name (e.g. "Cisco Systems Inc."). It names the
 # vendor the os-hash deliberately masks and is read by no sync logic, so it's pseudonymized to a
 # deterministic MFG-<hash> — the field shape (present, non-empty) survives without the vendor.
-MFG_KEYS = frozenset({"entPhysicalMfgName"})
+# "vendor" is the transceiver vendor LibreNMS reports on /transceivers. Same shape and same
+# reasoning: it names the vendor the os-hash masks, and no sync logic reads it.
+MFG_KEYS = frozenset({"entPhysicalMfgName", "vendor"})
 # Firmware / software version strings. Identifying (pin an exact build → deployment fingerprint /
 # CVE surface) and read by no sync logic, so pseudonymized to a deterministic fw-<hash>. (Device
 # chassis HARDWARE revision is left alone — it's not a firmware version.)

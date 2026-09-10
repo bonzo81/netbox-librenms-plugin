@@ -61,6 +61,31 @@ def _resolve(recording, recording_server):
     )
 
 
+def test_compression_rewrites_the_port_count():
+    """LibreNMS sends count beside ports, so a stale count describes a set that is gone."""
+    recording = _large_recording()
+    ports_key = "GET /api/v0/devices/4242/ports"
+    original = recording["responses"][ports_key]["ports"]
+    recording["responses"][ports_key]["count"] = len(original)
+
+    compressed = compress_recording(recording)
+
+    kept = compressed["responses"][ports_key]["ports"]
+    # Precondition: compression really dropped rows, or the count could not drift.
+    assert len(kept) < len(original)
+    assert compressed["responses"][ports_key]["count"] == len(kept)
+
+
+def test_compression_leaves_a_recording_without_a_count_alone():
+    """Not every capture carries count, and inventing one would change the recorded shape."""
+    recording = _large_recording()
+    ports_key = "GET /api/v0/devices/4242/ports"
+
+    compressed = compress_recording(recording)
+
+    assert "count" not in compressed["responses"][ports_key]
+
+
 def test_compression_preserves_relationship_outcome(recording_server):
     """resolve_port_relationships yields the same LAG/sub maps before and after compression."""
     rec = _large_recording()

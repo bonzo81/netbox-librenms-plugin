@@ -59,6 +59,30 @@ class TestApiTokenStaysOnItsHost:
 
         assert redirected.headers["X-Auth-Token"] == "secret-token"
 
+    def test_a_downgrade_to_http_drops_the_token(self):
+        """Same host, weaker scheme: the token would cross the network in cleartext."""
+        from netbox_librenms_plugin.librenms_api import _TokenScopedSession
+
+        redirected, response = self._redirect(
+            "https://librenms.example/api/v0/devices", "http://librenms.example/api/v0/devices"
+        )
+
+        _TokenScopedSession().rebuild_auth(redirected, response)
+
+        assert "X-Auth-Token" not in redirected.headers
+
+    def test_an_upgrade_to_https_keeps_the_token(self):
+        """The guard is about losing confidentiality, so gaining it must not break the client."""
+        from netbox_librenms_plugin.librenms_api import _TokenScopedSession
+
+        redirected, response = self._redirect(
+            "http://librenms.example/api/v0/devices", "https://librenms.example/api/v0/devices"
+        )
+
+        _TokenScopedSession().rebuild_auth(redirected, response)
+
+        assert redirected.headers["X-Auth-Token"] == "secret-token"
+
     def test_the_client_issues_its_requests_through_that_session(self):
         """The guard is only worth anything if the shared session is what the client calls."""
         from netbox_librenms_plugin import librenms_api
