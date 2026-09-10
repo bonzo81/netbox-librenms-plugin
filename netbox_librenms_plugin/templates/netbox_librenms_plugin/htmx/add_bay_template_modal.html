@@ -19,15 +19,74 @@
 
     <div class="modal-body">
         {% if mapping_only %}
-        <p>Select an existing bay. Review the proposed mapping before saving.</p>
+        {% if mapping_step == "kind" %}
+        <p class="mb-2">
+            Mapping LibreNMS <code>{{ librenms_name }}</code>{% if librenms_class %}
+            (class <code>{{ librenms_class }}</code>){% endif %} to NetBox bay
+            <strong>{{ chosen_name }}</strong>.
+        </p>
+        {# The reviewed bay travels to the POST here, so it cannot drift from what was shown. #}
+        <input type="hidden" name="name" value="{{ chosen_name }}">
+        <input type="hidden" name="also_create_mapping" value="1">
+        <div class="form-text mb-3">
+            Bay matching is exact and case-sensitive, so a mapping is needed whenever the NetBox
+            bay name differs from the LibreNMS name.
+            {% if manufacturer_label %}
+            The mapping will be scoped to manufacturer <strong>{{ manufacturer_label }}</strong>.
+            {% else %}
+            The mapping will be created globally (the device has no manufacturer set).
+            {% endif %}
+        </div>
+        <div class="ps-1">
+            {% if mapping_pattern %}
+            <div class="form-check mb-2">
+                <input class="form-check-input" type="radio" name="mapping_kind"
+                       id="add-bay-mapping-kind-regex" value="regex" checked>
+                <label class="form-check-label small" for="add-bay-mapping-kind-regex">
+                    All bays of this kind <span class="text-muted">(regex)</span>
+                    <span class="form-text small d-block">
+                        Will store <code>{{ mapping_pattern.librenms_pattern }}</code> &rarr;
+                        <code>{{ mapping_pattern.netbox_replacement }}</code>, covering every bay
+                        sharing this skeleton.
+                    </span>
+                </label>
+            </div>
+            {% endif %}
+            <div class="form-check">
+                <input class="form-check-input" type="radio" name="mapping_kind"
+                       id="add-bay-mapping-kind-exact" value="exact"{% if not mapping_pattern %} checked{% endif %}>
+                <label class="form-check-label small" for="add-bay-mapping-kind-exact">
+                    This bay only <span class="text-muted">(exact)</span>
+                    <span class="form-text small d-block">
+                        Will store <code>{{ librenms_name }}</code> &rarr; <code>{{ chosen_name }}</code>.
+                    </span>
+                </label>
+            </div>
+        </div>
+        {% else %}
+        <p>Select an existing bay. The proposed mapping is reviewed on the next step.</p>
         <div class="mb-3">
             <label for="add-bay-name" class="form-label">Existing bay</label>
             <select class="form-select" id="add-bay-name" name="name" required>
+                <option value=""{% if not preselected_name %} selected{% endif %}>&mdash; Choose a bay &mdash;</option>
                 {% for bay_name in available_bay_names %}
-                <option value="{{ bay_name }}"{% if bay_name == suggested_name %} selected{% endif %}>{{ bay_name }}</option>
+                <option value="{{ bay_name }}"{% if bay_name == preselected_name %} selected{% endif %}>{{ bay_name }}</option>
                 {% empty %}<option value="">No visible, empty bays available</option>{% endfor %}
             </select>
         </div>
+        <script>
+        // Keeps "Next" from opening step two with no bay chosen. Derives nothing: the mapping
+        // pattern and its default kind are rendered by the server once the bay is known.
+        (function () {
+            var select = document.getElementById("add-bay-name");
+            var next = document.getElementById("add-bay-next");
+            if (!select || !next) return;
+            function sync() { next.disabled = !select.value; }
+            select.addEventListener("change", sync);
+            sync();
+        })();
+        </script>
+        {% endif %}
         {% else %}
         <p class="text-muted small mb-3">
             Add a new bay template to
@@ -68,7 +127,7 @@
 
         {% endif %}
 
-        {% if offer_mapping_checkbox %}
+        {% if offer_mapping_checkbox and not mapping_only %}
         <hr>
         <div class="form-check mb-2" id="add-bay-mapping-block">
             <input class="form-check-input" type="{% if mapping_only %}hidden{% else %}checkbox{% endif %}" value="1"
@@ -252,8 +311,28 @@
 
     <div class="modal-footer">
         <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
-        <button type="submit" class="btn btn-primary"{% if mapping_only and not available_bay_names %} disabled{% endif %}>
-            <i class="mdi mdi-plus me-1"></i>{% if mapping_only %}Save Mapping{% else %}Add Bay Template{% endif %}
+        {% if mapping_only %}{% url 'plugins:netbox_librenms_plugin:add_bay_template' pk=device_pk as bay_modal_url %}
+        {% endif %}
+        {% if mapping_only and mapping_step == "kind" %}
+        <button type="button" class="btn btn-outline-secondary"
+                hx-get="{{ bay_modal_url }}?mode=map_existing&amp;librenms_name={{ librenms_name|urlencode }}&amp;librenms_class={{ librenms_class|urlencode }}&amp;server_key={{ server_key|urlencode }}"
+                hx-target="#htmx-modal-content" hx-swap="innerHTML" hx-disabled-elt="this">
+            <i class="mdi mdi-arrow-left me-1"></i>Back
         </button>
+        <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-plus me-1"></i>Save Mapping
+        </button>
+        {% elif mapping_only %}
+        <button type="button" class="btn btn-primary" id="add-bay-next" disabled
+                hx-get="{{ bay_modal_url }}?mode=map_existing&amp;step=kind&amp;librenms_name={{ librenms_name|urlencode }}&amp;librenms_class={{ librenms_class|urlencode }}&amp;server_key={{ server_key|urlencode }}"
+                hx-include="#add-bay-name" hx-target="#htmx-modal-content" hx-swap="innerHTML"
+                hx-disabled-elt="this">
+            Next<i class="mdi mdi-arrow-right ms-1"></i>
+        </button>
+        {% else %}
+        <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-plus me-1"></i>Add Bay Template
+        </button>
+        {% endif %}
     </div>
 </form>

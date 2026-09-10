@@ -2891,16 +2891,29 @@ class AddBayTemplateView(
                     _schedule_module_cache_mutation(request, device, server_key)
             return _modules_action_response(request, device, server_key)
 
-        suggested_name = available_bay_names[0] if available_bay_names else ""
-        mapping_pattern = self._derive_mapping_pattern(librenms_name, suggested_name)
+        # Step one picks the bay; step two settles the mapping kind for THAT bay. The kind used
+        # to be derived from the alphabetically first offered bay, so an unrelated bay decided
+        # it for every other one: on an MX304 "LCMIC1" derives nothing from "Routing Engine 0",
+        # which forced the exact default onto the whole Routing Engine family.
+        # Not stripped: the POST matches the submitted name against the stored bay names as-is,
+        # so a bay stored with surrounding whitespace must survive step two unchanged.
+        chosen_name = inputs.get("name", "")
+        # A bay filled since the modal opened is no longer offered, so return a fresh chooser
+        # rather than reviewing a mapping onto a bay that can no longer be saved.
+        on_kind_step = inputs.get("step") == "kind" and chosen_name in available_bay_names
+        mapping_pattern = self._derive_mapping_pattern(librenms_name, chosen_name) if on_kind_step else None
         return render(
             request,
             "netbox_librenms_plugin/htmx/add_bay_template_modal.html",
             {
                 "device_pk": pk,
                 "mapping_only": True,
+                "mapping_step": "kind" if on_kind_step else "bay",
+                "chosen_name": chosen_name if on_kind_step else "",
+                # A single offered bay is not a guess, so preselect it. With several, the
+                # operator picks: choosing for them is what proposed an unrelated bay before.
+                "preselected_name": available_bay_names[0] if len(available_bay_names) == 1 else "",
                 "available_bay_names": available_bay_names,
-                "suggested_name": suggested_name,
                 "librenms_name": librenms_name,
                 "librenms_class": librenms_class,
                 "manufacturer_label": str(manufacturer) if manufacturer else "",

@@ -6895,8 +6895,11 @@ def test_existing_bay_mapping_reuses_pattern_proposal_without_creating_bays(clie
     response = client.get(url, inputs)
     assert response.status_code == 200
     assert response.context["available_bay_names"] == ["RE0", "RE1"]
-    assert response.context["mapping_pattern"]["netbox_replacement"] == r"RE\1"
     assert b"Map Existing Bay" in response.content
+    # The family rule is previewed on step two, once the operator has chosen the bay.
+    review = client.get(url, {**inputs, "step": "kind", "name": "RE0"})
+    assert review.status_code == 200
+    assert review.context["mapping_pattern"]["netbox_replacement"] == r"RE\1"
     before_bays = list(ModuleBay.objects.values())
     before_templates = list(ModuleBayTemplate.objects.values())
     response = client.post(url, {**inputs, "name": "RE0", "mapping_kind": mapping_kind})
@@ -6986,6 +6989,160 @@ def test_unmatched_inventory_offers_existing_bay_mapping_on_the_sync_page(client
     ]
     assert mapping_rows == [inventory_name or "-"]
     assert "librenms_name=Routing+Engine+0" in str(response.context["module_sync"]["table"].rows[0].get_cell("actions"))
+
+
+def _map_existing_modal(client, device, **params):
+    """GET the map-existing modal for *device*, returning the response."""
+    from django.urls import reverse
+
+    query = {"mode": "map_existing", "librenms_name": "Routing Engine 0", "librenms_class": "other"}
+    query.update(params)
+    return client.get(reverse("plugins:netbox_librenms_plugin:add_bay_template", args=[device.pk]), query)
+
+
+def _checked_mapping_kind(html):
+    """Return the mapping_kind value the rendered form has checked, or None."""
+    import re as _re
+
+    checked = [
+        _re.search(r'value="(\w+)"', tag).group(1)
+        for tag in _re.findall(r"<input[^>]*name=\"mapping_kind\"[^>]*>", html)
+        if "checked" in tag
+    ]
+    assert len(checked) <= 1, f"more than one mapping_kind is checked: {checked}"
+    return checked[0] if checked else None
+
+
+def _mapping_user(name):
+    from dcim.models import Device, ModuleBay
+
+    from netbox_librenms_plugin.models import ModuleBayMapping
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    return make_user_with_perms(name, [("view", Device), ("view", ModuleBay), ("add", ModuleBayMapping)])
+
+
+@pytest.mark.django_db
+def test_the_map_existing_modal_chooses_the_bay_before_the_mapping_kind(client):
+    """Step one only picks a bay: nothing is preselected and no kind is offered yet.
+
+    The kind used to be decided against the alphabetically first bay, so an unrelated bay could
+    force the exact default onto a whole slot family. Deferring it removes that guess.
+    """
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device = make_device_with_module_bays("map-existing-step-one", ["LCMIC1", "RE0", "RE1"])
+    client.force_login(_mapping_user("map-existing-step-one-user"))
+
+    response = _map_existing_modal(client, device)
+
+    assert response.status_code == 200
+    assert response.context["mapping_step"] == "bay"
+    html = response.content.decode()
+    # No bay is preselected: the operator has to choose one.
+    assert 'value="" selected' in html
+    assert 'value="LCMIC1" selected' not in html
+    # The kind belongs to step two, so it must not be decidable here.
+    assert 'name="mapping_kind"' not in html
+    # The rendered fragment must actually be able to reach step two with the chosen bay.
+    assert 'id="add-bay-next"' in html
+    assert "step=kind" in html
+    assert 'hx-include="#add-bay-name"' in html
+
+
+@pytest.mark.django_db
+def test_the_map_existing_modal_derives_the_kind_from_the_chosen_bay(client):
+    """The reported MX304 case: RE0 derives a family pattern, so regex is the honest default.
+
+    LCMIC1 sorts first and derives nothing from "Routing Engine 0", which is exactly what used
+    to force the exact default and leave the operator with a one-bay rule.
+    """
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device = make_device_with_module_bays("map-existing-step-two", ["LCMIC1", "RE0", "RE1"])
+    client.force_login(_mapping_user("map-existing-step-two-user"))
+
+    response = _map_existing_modal(client, device, step="kind", name="RE0")
+
+    assert response.status_code == 200
+    assert response.context["mapping_step"] == "kind"
+    assert response.context["chosen_name"] == "RE0"
+    assert response.context["mapping_default_kind"] == "regex"
+    assert response.context["mapping_pattern"]["netbox_replacement"] == r"RE\1"
+    html = response.content.decode()
+    # The regex radio must be the checked one; "checked" appearing anywhere would also pass if
+    # the server had preselected exact.
+    assert _checked_mapping_kind(html) == "regex"
+    # The bay travels to the POST as a hidden field, so it cannot drift from what was reviewed.
+    assert '<input type="hidden" name="name" value="RE0">' in html
+
+
+@pytest.mark.django_db
+def test_the_map_existing_modal_offers_exact_only_when_no_pattern_derives(client):
+    """A bay carrying a digit the LibreNMS name lacks supports no family rule."""
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device = make_device_with_module_bays("map-existing-exact-only", ["LCMIC1", "RE0"])
+    client.force_login(_mapping_user("map-existing-exact-only-user"))
+
+    response = _map_existing_modal(client, device, step="kind", name="LCMIC1")
+
+    assert response.status_code == 200
+    assert response.context["mapping_pattern"] is None
+    assert response.context["mapping_default_kind"] == "exact"
+    html = response.content.decode()
+    assert 'id="add-bay-mapping-kind-regex"' not in html
+    assert _checked_mapping_kind(html) == "exact"
+
+
+@pytest.mark.django_db
+def test_the_map_existing_modal_falls_back_to_the_chooser_for_an_unavailable_bay(client):
+    """A bay filled since the modal opened returns the operator to a fresh chooser."""
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device = make_device_with_module_bays("map-existing-stale-bay", ["RE0"])
+    client.force_login(_mapping_user("map-existing-stale-bay-user"))
+
+    response = _map_existing_modal(client, device, step="kind", name="Gone")
+
+    assert response.status_code == 200
+    assert response.context["mapping_step"] == "bay"
+    assert response.context["chosen_name"] == ""
+
+
+@pytest.mark.django_db
+def test_saving_the_reviewed_regex_mapping_stores_the_family_rule(client):
+    """End to end: the kind reviewed in step two is the rule that gets written."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import ModuleBayMapping
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device = make_device_with_module_bays("map-existing-save", ["LCMIC1", "RE0", "RE1"])
+    client.force_login(_mapping_user("map-existing-save-user"))
+
+    # Submit the kind the modal itself checked, so a wrong server default fails this test too
+    # rather than being papered over by a hardcoded "regex".
+    review = _map_existing_modal(client, device, step="kind", name="RE0")
+    reviewed_kind = _checked_mapping_kind(review.content.decode())
+    assert reviewed_kind == "regex"
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:add_bay_template", args=[device.pk]),
+        {
+            "mode": "map_existing",
+            "librenms_name": "Routing Engine 0",
+            "librenms_class": "other",
+            "name": "RE0",
+            "mapping_kind": reviewed_kind,
+        },
+    )
+
+    assert response.status_code in (200, 302)
+    mapping = ModuleBayMapping.objects.get(librenms_class="other")
+    assert mapping.is_regex is True
+    assert mapping.librenms_name == r"^Routing\ Engine\ (\d+)$"
+    assert mapping.netbox_bay_name == r"RE\1"
 
 
 @pytest.mark.django_db

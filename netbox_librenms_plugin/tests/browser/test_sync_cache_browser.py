@@ -1879,77 +1879,42 @@ def test_invalidation_reason_includes_relative_time(page):
     assert "ago" in page.locator("#ipaddress-sync-content").inner_text()
 
 
-def test_existing_bay_selection_keeps_the_server_default_exact_kind(page):
-    """A bay change before any radio click must keep the server-supplied exact default.
+def _modal_script(marker):
+    """Return the modal's inline script containing *marker*, rendered as Django renders it."""
+    from django.template import Context, Engine
 
-    The server sends ``mapping_default_kind="exact"`` when no pattern derives for the first
-    offered bay. Selecting a bay that does derive one must not silently broaden the rule to a
-    family regex: only an explicit radio choice may change the kind.
+    template = (TEMPLATE_DIR / "htmx" / "add_bay_template_modal.html").read_text()
+    blocks = [block.split("</script>", 1)[0] for block in template.split("<script>")[1:]]
+    matching = [block for block in blocks if marker in block]
+    assert len(matching) == 1, f"expected one script containing {marker!r}, found {len(matching)}"
+    return Engine().from_string(matching[0]).render(Context({}))
+
+
+def test_the_bay_chooser_blocks_next_until_a_bay_is_selected(page):
+    """Step one must not open the review step with no bay chosen.
+
+    The mapping kind is derived by the server from the bay picked here, so an empty selection
+    would review a mapping onto nothing. The kind itself is no longer decided client-side: the
+    modal asks for the bay first, then renders the proposal for that bay.
     """
-    from django.template import Context, Engine
-
-    template = (TEMPLATE_DIR / "htmx" / "add_bay_template_modal.html").read_text()
-    script = template.split("<script>", 1)[1].split("</script>", 1)[0]
-    script = (
-        Engine()
-        .from_string(script)
-        .render(
-            Context(
-                {
-                    "librenms_name": "Routing Engine 0",
-                    "mapping_only": True,
-                    "mapping_default_kind": "exact",
-                }
-            )
-        )
-    )
-    # "RE1" derives no pattern (its digit is absent from the LibreNMS name), which is why the
-    # server defaulted to exact; "RE0" does derive one, so the kind block appears on the change.
     page.set_content("""<select id="add-bay-name">
-        <option value="RE1">RE1</option><option value="RE0">RE0</option></select>
-        <input type="hidden" id="add-bay-also-create-mapping" value="1">
-        <span id="add-bay-mapping-summary"></span><div id="add-bay-mapping-kind-block">
-        <input type="radio" name="mapping_kind" id="add-bay-mapping-kind-regex" value="regex">
-        <input type="radio" name="mapping_kind" id="add-bay-mapping-kind-exact" value="exact"></div>
-        <div id="add-bay-mapping-preview"></div>""")
-    page.add_script_tag(content=script)
-    assert page.locator("#add-bay-mapping-kind-exact").is_checked()
+        <option value="" selected>Choose a bay</option>
+        <option value="RE0">RE0</option></select>
+        <button id="add-bay-next" disabled>Next</button>""")
+    page.add_script_tag(content=_modal_script("add-bay-next"))
+
+    assert page.locator("#add-bay-next").is_disabled()
     page.locator("#add-bay-name").select_option("RE0")
-    assert page.locator("#add-bay-mapping-kind-exact").is_checked()
-    assert not page.locator("#add-bay-mapping-kind-regex").is_checked()
-    assert "Will store exact:" in page.locator("#add-bay-mapping-preview").inner_text()
+    assert page.locator("#add-bay-next").is_enabled()
+    page.locator("#add-bay-name").select_option("")
+    assert page.locator("#add-bay-next").is_disabled(), "an empty selection must close the step again"
 
 
-def test_existing_bay_selection_preserves_an_explicit_exact_mapping_choice(page):
-    """Changing the target bay must not broaden an exact rule to a family regex."""
-    from django.template import Context, Engine
-
-    template = (TEMPLATE_DIR / "htmx" / "add_bay_template_modal.html").read_text()
-    script = template.split("<script>", 1)[1].split("</script>", 1)[0]
-    script = (
-        Engine()
-        .from_string(script)
-        .render(
-            Context(
-                {
-                    "librenms_name": "Routing Engine 0",
-                    "mapping_only": True,
-                    "mapping_default_kind": "regex",
-                }
-            )
-        )
-    )
+def test_a_single_offered_bay_leaves_next_enabled(page):
+    """One offered bay is preselected, so it must not need a pointless re-selection."""
     page.set_content("""<select id="add-bay-name">
-        <option value="RE0">RE0</option><option value="Backup RE0">Backup RE0</option>
-        <option value="RE1">RE1</option></select>
-        <input type="hidden" id="add-bay-also-create-mapping" value="1">
-        <span id="add-bay-mapping-summary"></span><div id="add-bay-mapping-kind-block">
-        <input type="radio" name="mapping_kind" id="add-bay-mapping-kind-regex" value="regex">
-        <input type="radio" name="mapping_kind" id="add-bay-mapping-kind-exact" value="exact"></div>
-        <div id="add-bay-mapping-preview"></div>""")
-    page.add_script_tag(content=script)
-    assert page.locator("#add-bay-mapping-kind-regex").is_checked()
-    page.locator("#add-bay-mapping-kind-exact").check()
-    page.locator("#add-bay-name").select_option("Backup RE0")
-    assert page.locator("#add-bay-mapping-kind-exact").is_checked()
-    assert "Will store exact:" in page.locator("#add-bay-mapping-preview").inner_text()
+        <option value="RE0" selected>RE0</option></select>
+        <button id="add-bay-next" disabled>Next</button>""")
+    page.add_script_tag(content=_modal_script("add-bay-next"))
+
+    assert page.locator("#add-bay-next").is_enabled()
