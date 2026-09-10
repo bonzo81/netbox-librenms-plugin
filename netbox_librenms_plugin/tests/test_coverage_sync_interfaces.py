@@ -80,6 +80,41 @@ def test_an_unreadable_vlan_scope_skips_the_vlan_write_instead_of_clearing_it(se
     assert interface.untagged_vlan_id == vlan.pk, "the hidden VLAN assignment was cleared"
 
 
+def test_a_constrained_vlan_grant_also_skips_the_vlan_write(settings):
+    """A constrained grant passes the model-level permission check while still hiding VLANs."""
+    from dcim.models import Interface
+    from ipam.models import VLAN
+
+    configure_default_librenms_server(settings)
+    device = make_device("vlan-constrained-device")
+    visible = VLAN.objects.create(vid=901, name="constrained-visible-vlan")
+    hidden = VLAN.objects.create(vid=902, name="constrained-hidden-vlan")
+    interface = make_interface(device, "GigabitEthernet0/2")
+    interface.mode = "access"
+    interface.untagged_vlan = hidden
+    interface.save()
+    # VLAN view IS granted, so hidden_vlan_permissions() reports nothing missing, but the
+    # constraint still hides the VLAN this interface actually uses.
+    user = make_user_with_perms("vlan-constrained-user", [("view", type(device)), ("change", Interface)])
+    user = grant(user, "view", VLAN, constraints={"pk": visible.pk}, name="vlan-constrained-visible-only")
+    view = _sync_view(_make_request(user=user))
+
+    view._prepare_vlan_lookup_maps([device])
+    assert not view.hidden_vlan_permissions([device], user), (
+        "precondition: the model-level permission check must pass, or this repeats the other test"
+    )
+    assert view._vlan_scope_incomplete, "a constrained grant still hides VLANs, so the scope is incomplete"
+    view.sync_interface(
+        device,
+        {"ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []},
+        exclude_columns=set(),
+        interface_name_field="ifName",
+    )
+
+    interface.refresh_from_db()
+    assert interface.untagged_vlan_id == hidden.pk, "the constrained-hidden VLAN assignment was cleared"
+
+
 def _sync_view(request=None):
     """The real SyncInterfacesView; only the LibreNMS client is stubbed."""
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView

@@ -1137,6 +1137,40 @@ class VlanAssignmentMixin:
         """Get all VLAN groups relevant to one device."""
         return self.get_vlan_groups_for_devices([device], user=user)
 
+    def vlan_scope_is_incomplete(self, devices, user):
+        """
+        Return whether *user* sees fewer VLAN groups or VLANs than the unscoped scope holds.
+
+        ``hidden_vlan_permissions`` only compares permission NAMES, and a constrained grant
+        satisfies ``has_perm`` at the model level while still hiding individual rows. Writing
+        VLANs from a partial read deletes what the caller cannot see, so compare the scoped read
+        against the unscoped one instead of trusting the name check.
+
+        Args:
+            devices: The devices whose VLAN scope the caller reads.
+            user: The requesting user, or None when no request is bound.
+
+        Returns:
+            bool: True when any group or VLAN in the unscoped scope is hidden from *user*.
+        """
+        from ipam.models import VLAN
+
+        if user is None:
+            return False
+        unscoped_groups = self.get_vlan_groups_for_devices(devices)
+        scoped_groups = self.get_vlan_groups_for_devices(devices, user=user)
+        if len(scoped_groups) != len(unscoped_groups):
+            return True
+        group_pks = [group.pk for group in unscoped_groups]
+
+        def visible_count(scope_user):
+            queryset = self._vlan_visible_queryset(VLAN, scope_user)
+            in_groups = queryset.filter(group__pk__in=group_pks).count()
+            # The lookup maps read global VLANs too, so a hidden global VLAN is just as partial.
+            return in_groups + queryset.filter(group__isnull=True).count()
+
+        return visible_count(user) != visible_count(None)
+
     def get_vlan_groups_for_devices(self, devices, user=None):
         """
         Get all VLAN groups relevant to a set of devices.

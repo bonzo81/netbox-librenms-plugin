@@ -962,8 +962,9 @@ class SyncInterfacesView(
         hidden = self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user)
         # A hidden VLAN reads as absent, so syncing would clear an existing untagged assignment and
         # drop hidden tagged VLANs. Skip the VLAN write entirely rather than destroy what we
-        # cannot see.
-        self._vlan_scope_incomplete = bool(hidden)
+        # cannot see. A constrained grant hides rows while passing the permission-name check, so
+        # the row comparison below is what catches it.
+        self._vlan_scope_incomplete = bool(hidden) or self.vlan_scope_is_incomplete(vlan_scope_devices, vlan_scope_user)
         if hidden:
             messages.warning(
                 self.request,
