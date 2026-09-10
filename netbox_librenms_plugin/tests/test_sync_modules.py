@@ -952,6 +952,9 @@ class TestInstallAndUpdateViews:
         view_post(view, request, pk=page.pk)
 
         assert not Module.objects.filter(device__in=[page, member]).exists()
+        # Without this, a regression in bay matching or module-type resolution also installs
+        # nothing and keeps the test green for a reason the rule never caused.
+        assert any("matched ignore rule" in text for text in message_texts(request)), message_texts(request)
 
     def test_install_selected_uses_real_cache_mapping_and_models(self, live_librenms):
         from dcim.models import Module
