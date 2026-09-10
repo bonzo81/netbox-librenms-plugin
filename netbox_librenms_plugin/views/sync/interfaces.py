@@ -959,10 +959,16 @@ class SyncInterfacesView(
             for owner in vlan_scope_devices
         }
         self._vlan_owners_by_id = {owner.pk: owner for owner in vlan_scope_devices}
-        if hidden := self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user):
+        hidden = self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user)
+        # A hidden VLAN reads as absent, so syncing would clear an existing untagged assignment and
+        # drop hidden tagged VLANs. Skip the VLAN write entirely rather than destroy what we
+        # cannot see.
+        self._vlan_scope_incomplete = bool(hidden)
+        if hidden:
             messages.warning(
                 self.request,
-                f"VLANs were not matched for the selected interfaces: your account is missing {', '.join(hidden)}.",
+                f"VLANs were not synced for the selected interfaces: your account is missing "
+                f"{', '.join(hidden)}. Existing VLAN assignments were left unchanged.",
             )
 
     def _lock_selected_device_targets(self, obj):
@@ -1113,8 +1119,8 @@ class SyncInterfacesView(
             or changed
         )
 
-        # Sync VLANs if not excluded
-        if "vlans" not in exclude_columns:
+        # Sync VLANs if not excluded, and never when the caller cannot read the whole VLAN scope.
+        if "vlans" not in exclude_columns and not getattr(self, "_vlan_scope_incomplete", False):
             changed = self._sync_interface_vlans(interface, librenms_interface) or changed
         if changed and getattr(self, "_mutated", None) is not None:
             self._mutated = True

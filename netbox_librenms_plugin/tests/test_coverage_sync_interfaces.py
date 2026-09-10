@@ -51,6 +51,35 @@ def _make_request(post_data=None, get_data=None, user=None):
     return request
 
 
+def test_an_unreadable_vlan_scope_skips_the_vlan_write_instead_of_clearing_it(settings):
+    """A hidden VLAN reads as absent, so syncing it would destroy an assignment we cannot see."""
+    from dcim.models import Interface
+    from ipam.models import VLAN
+
+    configure_default_librenms_server(settings)
+    device = make_device("vlan-scope-hidden-device")
+    vlan = VLAN.objects.create(vid=812, name="hidden-scope-vlan")
+    interface = make_interface(device, "GigabitEthernet0/1")
+    interface.mode = "access"
+    interface.untagged_vlan = vlan
+    interface.save()
+    # Interface change without any IPAM view grant: exactly the caller the guard is for.
+    user = make_user_with_perms("vlan-scope-hidden-user", [("view", type(device)), ("change", Interface)])
+    view = _sync_view(_make_request(user=user))
+
+    view._prepare_vlan_lookup_maps([device])
+    assert view._vlan_scope_incomplete, "precondition: the VLAN scope must read as incomplete"
+    view.sync_interface(
+        device,
+        {"ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []},
+        exclude_columns=set(),
+        interface_name_field="ifName",
+    )
+
+    interface.refresh_from_db()
+    assert interface.untagged_vlan_id == vlan.pk, "the hidden VLAN assignment was cleared"
+
+
 def _sync_view(request=None):
     """The real SyncInterfacesView; only the LibreNMS client is stubbed."""
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
