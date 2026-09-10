@@ -492,15 +492,15 @@ class TestRefreshStateHelpers:
         assert validation["device_type_mismatch"] is False
 
     def test_role_and_cluster_resets_preserve_available_choices(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _reset_cluster, _reset_device_role
+        from netbox_librenms_plugin.import_validation_helpers import reset_cluster, reset_device_role
 
         validation = {
             "device_role": {"found": True, "role": object(), "available_roles": ["role"]},
             "cluster": {"found": True, "cluster": object(), "available_clusters": ["cluster"]},
         }
 
-        _reset_device_role(validation)
-        _reset_cluster(validation)
+        reset_device_role(validation)
+        reset_cluster(validation)
 
         assert validation["device_role"] == {
             "found": False,
