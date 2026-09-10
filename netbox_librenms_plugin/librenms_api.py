@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import requests
 from django.core.cache import cache
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from netbox.plugins import get_plugin_config
 
@@ -29,6 +30,14 @@ logger = logging.getLogger(__name__)
 class LibreNMSIDConflictError(ValueError):
     """A LibreNMS device ID is already assigned to another NetBox object."""
 
+    def __init__(self, message, *, conflict=None, named_message=None):
+        super().__init__(message)
+        # The claim searches unrestricted Device and VirtualMachine rows, so naming the owner
+        # would disclose an object the viewer may not see. The plain message stays generic and
+        # only a permission-checked caller upgrades it through named_message.
+        self.conflict = conflict
+        self.named_message = named_message or message
+
 
 @dataclass(frozen=True)
 class LibreNMSLookupError:
@@ -41,6 +50,8 @@ class LibreNMSLookupError:
 
     message: str
     status_code: int | None = None
+    conflict: object | None = None
+    named_message: str | None = None
 
 
 def configured_cache_timeout(server_key):
@@ -494,10 +505,20 @@ class LibreNMSAPI:
                     # resolve_librenms_id turns only LibreNMSIDConflictError into a user-facing
                     # message, so an ambiguous claim would otherwise reach the view as a 500.
                     raise LibreNMSIDConflictError(str(exc)) from None
+                except ObjectDoesNotExist:
+                    # A concurrent delete removes the row this claim locks, and the bare
+                    # DoesNotExist would reach the view as a 500 for the same reason.
+                    raise LibreNMSIDConflictError(
+                        f"The object claiming LibreNMS ID {librenms_id} no longer exists."
+                    ) from None
                 if conflict is not None:
                     object_label = "VM" if conflict._meta.model_name == "virtualmachine" else "device"
                     raise LibreNMSIDConflictError(
-                        f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
+                        f"LibreNMS ID {librenms_id} is already assigned to another {object_label}.",
+                        conflict=conflict,
+                        named_message=(
+                            f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
+                        ),
                     )
                 set_librenms_device_id(locked_obj, librenms_id, self.server_key)
                 locked_obj.save(update_fields=["custom_field_data"])

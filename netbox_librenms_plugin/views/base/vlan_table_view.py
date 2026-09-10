@@ -87,7 +87,9 @@ class BaseVLANTableView(
                 server_key,
                 actor_id=request_actor_id(request),
             )
-            error_message = lookup_error.message if lookup_error else "Device not found in LibreNMS."
+            error_message = (
+                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
+            )
             messages.error(request, error_message)
             return self.render_sync_partial(
                 request,

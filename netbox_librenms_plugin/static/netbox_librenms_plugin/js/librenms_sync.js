@@ -660,6 +660,10 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
         };
         const failClosed = message => {
             console.error(message);
+            // Leaving the tab owed a restore lets the next status check re-issue the same failing
+            // request forever, so retire the debt and mark the cleared tab invalidated.
+            controller.pendingRestores.delete(tab);
+            controller.invalidatedLocally.add(tab);
             clearSyncTabContent(tab, SYNC_CACHE_FRAGMENT_FAILED);
         };
         function settleRequest(event) {

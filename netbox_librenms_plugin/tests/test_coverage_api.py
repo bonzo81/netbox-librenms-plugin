@@ -995,6 +995,25 @@ class TestStorelibrenmsId:
         assert device.custom_field_data["librenms_id"]["default"] == 42
         assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
 
+    def test_an_owner_deleted_mid_claim_reports_a_lookup_error_not_a_500(self, settings, librenms_server):
+        """A concurrent delete leaves no row for the claim to lock, which must not reach the view."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-owner-deleted", librenms_cf={"default": None})
+        # The row vanishes after the caller loaded the object, exactly what a concurrent delete
+        # leaves behind: a live instance whose pk no longer resolves.
+        Device.objects.filter(pk=device.pk).delete()
+        api = api_for(settings, librenms_server.url)
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
+
+        with pytest.raises(LibreNMSIDConflictError) as excinfo:
+            api._store_librenms_id(device, 42)
+
+        assert "no longer exists" in str(excinfo.value)
+
     def test_stores_in_cache_when_the_custom_field_is_absent(self, settings, librenms_server):
         """Only a NetBox without the plugin custom field reaches the cache fallback."""
         from django.core.cache import cache

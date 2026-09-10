@@ -1,3 +1,4 @@
+import dataclasses
 import re
 from dataclasses import asdict
 
@@ -667,6 +668,11 @@ class BaseLibreNMSSyncView(
 
         if lookup_error is not None:
             device_info_unavailable = True
+
+        if lookup_error is not None:
+            # The template renders .message directly, so scope the conflict owner's name in here
+            # rather than leaving every render site to remember it.
+            lookup_error = dataclasses.replace(lookup_error, message=self.scoped_lookup_message(lookup_error))
 
         return {
             "found_in_librenms": found_in_librenms,

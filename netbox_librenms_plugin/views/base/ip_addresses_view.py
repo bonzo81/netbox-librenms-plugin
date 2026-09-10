@@ -59,7 +59,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         # LibreNMS device-ip endpoint, where it would build a malformed URL.
         self.librenms_id, lookup_error = self.resolve_librenms_id(obj)
         if self.librenms_id is None:
-            return False, lookup_error.message if lookup_error else "Device not found in LibreNMS"
+            if lookup_error is None:
+                return False, "Device not found in LibreNMS"
+            return False, self.scoped_lookup_message(lookup_error)
         return self.librenms_api.get_device_ips(self.librenms_id)
 
     def enrich_ip_data(self, ip_data, obj, interface_name_field, mgmt_ip="", server_key=None, port_data_cache=None):

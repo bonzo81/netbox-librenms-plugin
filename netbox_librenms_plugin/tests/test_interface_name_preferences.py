@@ -189,21 +189,10 @@ def _pane_fragment_loaders(html):
 @pytest.mark.django_db
 def test_every_sync_pane_carries_one_htmx_fragment_loader(client, settings):
     """Restored cache content is only HTMX-bound when HTMX swaps it, so every pane needs its loader."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}
-    }
-    settings.PLUGINS_CONFIG = plugin_config
-    device = make_device("fragment-loader-device")
-    winner = make_device("fragment-loader-winner")
-    mark_librenms_migrated(device, winner.pk, "default")
-    device.save(update_fields=["custom_field_data"])
+    device, sync_url = _sync_page(settings, "fragment-loader")
     client.force_login(make_superuser("fragment-loader-user"))
 
-    response = client.get(
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
-        {"tab": "interfaces", "server_key": "default"},
-    )
+    response = client.get(sync_url, {"tab": "interfaces", "server_key": "default"})
 
     assert response.status_code == 200
     panes = _pane_fragment_loaders(response.content.decode())

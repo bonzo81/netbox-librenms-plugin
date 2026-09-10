@@ -265,7 +265,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 interface_name_field=cached_snapshot.get("interface_name_field"),
             )
         except LibreNMSIDConflictError as exc:
-            messages.error(request, str(exc))
+            messages.error(request, self.scoped_lookup_message(exc))
             return self.redirect_to_ip_tab(request, obj)
         self.display_sync_results(request, results)
         for error in dict.fromkeys(intent_errors.values()):
@@ -366,7 +366,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             librenms_id, lookup_error = self.resolve_librenms_id(obj)
             if lookup_error is not None:
-                raise LibreNMSIDConflictError(lookup_error.message)
+                # Carry the conflicting object across the re-raise, or the render site below can
+                # no longer tell a permitted viewer which object holds the ID.
+                raise LibreNMSIDConflictError(
+                    lookup_error.message,
+                    conflict=lookup_error.conflict,
+                    named_message=lookup_error.named_message,
+                )
             if not librenms_id:
                 return None
             # get_live_device_info reads live (uncached): this feeds the Primary-IP write decision,

@@ -521,7 +521,27 @@ class LibreNMSAPIMixin:
         try:
             return coerce_librenms_id(self.librenms_api.get_librenms_id(obj)), None
         except LibreNMSIDConflictError as exc:
-            return None, LibreNMSLookupError(str(exc))
+            return None, LibreNMSLookupError(
+                str(exc),
+                conflict=getattr(exc, "conflict", None),
+                named_message=getattr(exc, "named_message", None),
+            )
+
+    def scoped_lookup_message(self, error):
+        """Return a lookup message, naming a conflicting object only when this user may view it."""
+        message = getattr(error, "message", None) or str(error)
+        conflict = getattr(error, "conflict", None)
+        named = getattr(error, "named_message", None)
+        scope = getattr(self, "restricted_queryset", None)
+        if conflict is None or not named or scope is None:
+            return message
+        # Fail closed: without a readable row the generic message stands, so a view that cannot
+        # scope never discloses the owner.
+        try:
+            visible = scope(type(conflict), "view").filter(pk=conflict.pk).exists()
+        except (AttributeError, TypeError, ValueError):
+            return message
+        return named if visible else message
 
     def _render_server_key(self):
         """

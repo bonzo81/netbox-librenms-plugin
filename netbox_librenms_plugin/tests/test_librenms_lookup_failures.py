@@ -159,6 +159,33 @@ def test_the_sync_page_reports_a_discovered_id_conflict(client, librenms_server,
 
 
 @pytest.mark.django_db
+def test_a_conflict_owner_outside_the_view_scope_is_not_named(client, librenms_server, settings):
+    """The conflict search is unrestricted, so naming its owner would disclose an unviewable object."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-hidden-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-hidden-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    # Device view is constrained to the target, so this user cannot see the owner at all.
+    viewer = make_user_with_perms("librenms-hidden-conflict-viewer", [("view", Device)], constraints={"pk": target.pk})
+    client.force_login(viewer)
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]))
+    body = unescape(response.content.decode())
+
+    assert response.status_code == 200
+    assert owner.name not in body, "the conflict named an object this user may not view"
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned" in body
+
+
+@pytest.mark.django_db
 def test_the_sync_page_reports_an_ambiguous_id_claim(client, librenms_server, settings):
     """Two NetBox owners of one LibreNMS ID must read as a conflict, not a server error."""
     # lock_librenms_id_assignment raises AmbiguousLibreNMSIdError for this state, and
