@@ -15,6 +15,8 @@ classification because an empty fallback would label every otherwise-covered sha
 import json
 from pathlib import Path
 
+from netbox_librenms_plugin.data_shapes.envelope import STATUS_KEY, is_malformed_status_envelope
+
 # data_shapes/recordings/ (a data directory inside the data_shapes package, so it ships).
 RECORDINGS_DIR = Path(__file__).resolve().parent / "recordings"
 MANIFEST_PATH = RECORDINGS_DIR / "manifest.json"
@@ -115,6 +117,12 @@ def recording_schema_errors(recording):
     responses = recording.get("responses")
     if not isinstance(responses, dict) or not responses:
         errors.append("responses must be a non-empty object")
+    else:
+        # A value carrying the reserved status key must be a complete envelope. The key has no
+        # other legitimate use, so a half-written one is a broken recording, not a body.
+        malformed = sorted(key for key, value in responses.items() if is_malformed_status_envelope(value))
+        if malformed:
+            errors.append(f"responses carry {STATUS_KEY} without a body: {malformed}")
     expected = recording.get("expected")
     if "expected" in recording:
         if not isinstance(expected, dict) or not expected:

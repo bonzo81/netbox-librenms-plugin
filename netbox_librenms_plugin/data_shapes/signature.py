@@ -10,6 +10,7 @@ match and a reason, never an authoritative decision.
 
 import re
 
+from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
 from netbox_librenms_plugin.data_shapes.ports import (
     compile_lag_patterns,
@@ -70,9 +71,9 @@ def _body(recording, predicate):
     """
     Return the first response body whose route key satisfies *predicate*.
 
-    A recorded ``[status, body]`` frame is unwrapped, but a NON-2xx frame yields ``None``: replay's
-    real client drops a non-2xx response and sees no usable data, so the signature must not count a
-    failed frame (e.g. a captured ``[500, {"transceivers": [...]}]``) as present data.
+    A tagged status envelope is unwrapped, but a NON-2xx one yields ``None``: replay's real client
+    drops a non-2xx response and sees no usable data, so the signature must not count a failed
+    response (e.g. a captured 500 carrying ``{"transceivers": [...]}``) as present data.
 
     Args:
         recording (dict): A recording that contains response route keys and bodies.
@@ -83,10 +84,8 @@ def _body(recording, predicate):
     """
     for key, value in recording.get("responses", {}).items():
         if predicate(key):
-            if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
-                status, body = value
-                return body if 200 <= status < 300 else None
-            return value
+            status, body = unwrap_response(value)
+            return body if 200 <= status < 300 else None
     return None
 
 

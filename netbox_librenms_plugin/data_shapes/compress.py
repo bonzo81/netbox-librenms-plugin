@@ -23,6 +23,7 @@ lockstep if that signature grows.
 
 import re
 
+from netbox_librenms_plugin.data_shapes.envelope import unwrap_response, wrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, port_has_vlan, port_is_lag, port_names
 
 _SUB_RE = re.compile(r"\.\d+$")
@@ -37,17 +38,15 @@ def _route_key(recording, suffix):
 
 
 def _unwrap(value):
-    """Return the body from a recording response value, unwrapping a ``[status, body]`` pair."""
-    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
-        return value[1]
-    return value
+    """Return the body from a recording response value."""
+    _status, body = unwrap_response(value)
+    return body
 
 
 def _rewrap(original, new_body):
-    """Re-apply the original ``[status, body]`` framing (if any) around *new_body*."""
-    if isinstance(original, list) and len(original) == 2 and isinstance(original[0], int):
-        return [original[0], new_body]
-    return new_body
+    """Re-apply the original response's status framing (if any) around *new_body*."""
+    status, _body = unwrap_response(original)
+    return wrap_response(status, new_body)
 
 
 def _port_stack_referenced(recording):

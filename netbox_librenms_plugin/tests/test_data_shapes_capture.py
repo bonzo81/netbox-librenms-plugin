@@ -741,3 +741,108 @@ def test_capture_no_os_at_all_keeps_legacy_unscoped_lag_patterns():
 
     # `in`, not `==`: default patterns for real OSes may already be seeded by other tests.
     assert "captest-noneos" in recording["lag_patterns"]
+
+
+class TestRecordedResponseEnvelope:
+    """The stored status framing must not collide with a body LibreNMS can actually send."""
+
+    def test_a_list_body_replays_whole(self):
+        """`[1, {...}]` is a body, not a status and a body.
+
+        The old framing read any two-item list whose head was an int as [status, body], so this
+        body registered HTTP status 1 and lost its first item.
+        """
+        from netbox_librenms_plugin.data_shapes.envelope import unwrap_response, wrap_response
+
+        body = [1, {"value": "x"}]
+
+        status, replayed = unwrap_response(wrap_response(200, body))
+
+        assert status == 200
+        assert replayed == body
+
+    def test_a_non_2xx_keeps_its_status(self):
+        """The status still has to survive a round trip, or a 404 recording replays as 200."""
+        from netbox_librenms_plugin.data_shapes.envelope import unwrap_response, wrap_response
+
+        stored = wrap_response(404, {"status": "error"})
+
+        assert unwrap_response(stored) == (404, {"status": "error"})
+        assert not isinstance(stored, list), "a list frame is what made the format ambiguous"
+
+    def test_a_2xx_body_is_stored_bare(self):
+        """A successful body stays exactly as LibreNMS sent it, with no wrapper to strip."""
+        from netbox_librenms_plugin.data_shapes.envelope import wrap_response
+
+        assert wrap_response(200, {"ports": []}) == {"ports": []}
+
+    def test_a_half_written_envelope_is_refused_rather_than_read_as_a_body(self):
+        """The reserved status key has no other use, so a value carrying it must be complete.
+
+        Otherwise it unwraps as a successful body that merely contains the key, turning a
+        recorded error into a recorded success.
+        """
+        from netbox_librenms_plugin.data_shapes.envelope import STATUS_KEY
+        from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+        recording = {
+            "schema_version": 1,
+            "name": "half",
+            "description": "",
+            "device_id": 1,
+            "responses": {"GET /api/v0/devices/1": {STATUS_KEY: 404}},
+        }
+
+        errors = recording_schema_errors(recording)
+
+        assert any(STATUS_KEY in error for error in errors), errors
+
+    def test_a_recorded_list_body_passes_validation(self):
+        """capture stores a 2xx list body bare, so validation must not refuse it as a framing."""
+        from netbox_librenms_plugin.data_shapes.envelope import wrap_response
+        from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+        recording = {
+            "schema_version": 1,
+            "name": "list-body",
+            "description": "",
+            "device_id": 1,
+            "responses": {"GET /api/v0/devices/1/ports": wrap_response(200, [1, {"value": "x"}])},
+        }
+
+        assert recording_schema_errors(recording) == []
+
+
+def test_a_list_body_survives_a_real_replay(recording_server):
+    """End to end: a recorded list body replays whole, through the real loader and HTTP.
+
+    `[1, {...}]` is exactly the shape the removed framing mistook for [status, body]: the loader
+    registered HTTP status 1 and served only the second item.
+    """
+    recording = {
+        "schema_version": 1,
+        "name": "list-body",
+        "description": "",
+        "meta": {},
+        "device_id": 77,
+        "responses": {
+            "GET /api/v0/devices/77": {"status": "ok", "devices": [{"device_id": 77, "os": "linux"}]},
+            "GET /api/v0/devices/77/ports": [1, {"value": "x"}],
+        },
+    }
+
+    _server, api = recording_server(recording)
+    # _raw_get takes a path relative to /api/v0/.
+    status, body = api._raw_get("devices/77/ports", None)
+
+    assert status == 200, "the first list item was read as an HTTP status"
+    assert body == [1, {"value": "x"}]
+
+
+def test_an_envelope_shaped_body_is_not_mistaken_for_a_status():
+    """Both keys are required, so a body carrying only the reserved key stays a body."""
+    from netbox_librenms_plugin.data_shapes.envelope import STATUS_KEY, unwrap_response
+
+    body = {STATUS_KEY: 404, "status": "ok", "ports": []}
+
+    assert unwrap_response(body) == (200, body)

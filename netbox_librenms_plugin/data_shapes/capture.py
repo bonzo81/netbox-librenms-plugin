@@ -8,6 +8,8 @@ assembles them into a recording dict that
 can replay. See ``data_shapes/recordings/`` and issue #95.
 """
 
+from netbox_librenms_plugin.data_shapes.envelope import wrap_response
+
 SCHEMA_VERSION = 1
 
 # Columns get_ports() requests; mirror them so a captured ports payload carries the same fields
@@ -59,8 +61,9 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     Returns:
         dict: A recording with ``schema_version``, ``name``, ``description``, ``meta``,
             ``device_id``, and a ``responses`` map keyed by request string. Each response is the
-            JSON body verbatim for a 2xx, or ``[status, body]`` otherwise so non-OK responses
-            replay faithfully.
+            JSON body verbatim for a 2xx, or a tagged status envelope
+            (:func:`~netbox_librenms_plugin.data_shapes.envelope.wrap_response`) otherwise so
+            non-OK responses replay faithfully.
     """
     responses = {}
 
@@ -133,7 +136,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             raise RuntimeError(f"Capture failed for {path!r}: HTTP {status} (is the LibreNMS device id stale?)")
         if 200 <= status < 300 and row_field is not None:
             require_row_list(path, body, row_field, allow_empty=allow_empty)
-        responses[_route_key(path, key_params)] = body if 200 <= status < 300 else [status, body]
+        responses[_route_key(path, key_params)] = wrap_response(status, body)
         return status, body
 
     _all_inventory = []  # memoized /inventory/{id}/all body, fetched lazily at most once

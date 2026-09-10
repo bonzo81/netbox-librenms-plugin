@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
+
 
 class _RawResponse:
     """One response body that the test server must not JSON-encode."""
@@ -248,10 +250,7 @@ class MockLibreNMSServer:
             # Keep the FULL value set per key (sorted) so a repeated param like ?a=1&a=2 is a
             # distinct shape from ?a=1 — collapsing to v[0] would let them false-match.
             qdict = {k: tuple(sorted(v)) for k, v in parse_qs(query, keep_blank_values=True).items()} if query else {}
-            if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
-                status, body = value
-            else:
-                status, body = 200, value
+            status, body = unwrap_response(value)
             by_route.setdefault((method, path), []).append((qdict, status, body))
 
         for (method, path), variants in by_route.items():

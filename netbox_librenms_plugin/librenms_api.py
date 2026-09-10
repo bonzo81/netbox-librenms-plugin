@@ -113,20 +113,12 @@ class _TokenScopedSession(requests.Session):
     answered. Redirects still follow, which a reverse proxy in front of LibreNMS may rely on.
     """
 
-    @staticmethod
-    def _token_scope(url):
-        """Return what the token is bound to: the scheme as well as the host."""
-        parsed = urllib.parse.urlparse(url)
-        return parsed.scheme, parsed.hostname
-
     def rebuild_auth(self, prepared_request, response):
         super().rebuild_auth(prepared_request, response)
-        # The scheme counts too: a same-host redirect from https to http would otherwise put the
-        # token on the wire in cleartext. An upgrade to https keeps it, since nothing is lost.
-        previous_scheme, previous_host = self._token_scope(response.request.url)
-        next_scheme, next_host = self._token_scope(prepared_request.url)
-        downgraded = previous_scheme == "https" and next_scheme != "https"
-        if previous_host != next_host or downgraded:
+        # requests already decides this for Authorization: it strips on a host, scheme or port
+        # change, allowing only the http:80 -> https:443 upgrade. Reuse that instead of keeping a
+        # second, weaker copy of the rule for our own header.
+        if self.should_strip_auth(response.request.url, prepared_request.url):
             prepared_request.headers.pop("X-Auth-Token", None)
 
 

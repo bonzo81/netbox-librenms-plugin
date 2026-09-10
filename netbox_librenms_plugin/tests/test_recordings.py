@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_sap_patterns
 
 from netbox_librenms_plugin.tests.recordings import iter_recording_paths, iter_recordings
@@ -234,9 +235,20 @@ def test_bundled_recording_has_no_public_asn(recording):
     _walk(recording.get("responses", {}))
 
 
+# OUIs that shipped verbatim in the corpus before the anonymizer masked them. 36965 is 0x009065
+# (Finisar); re-introducing any of them means a capture bypassed the rule.
+_LEAKED_OUIS = frozenset({"36965", "713", "21327", "8172124", "9098", "2589"})
+
+
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_recording_has_anonymized_vendor_metadata(recording):
-    """A committed recording must carry the anonymizer's normalized icon (generic.svg) and a pseudonymized entPhysicalMfgName (MFG-<hash>) — a raw value means the fixture predates an anonymizer rule and re-leaks vendor metadata."""
+    """A committed recording must carry the anonymizer's normalized icon (generic.svg) and
+    pseudonymized manufacturer names (MFG-<hash>) — a raw value means the fixture predates an
+    anonymizer rule and re-leaks vendor metadata.
+
+    Only response bodies are checked: ``meta.vendor`` is corpus metadata the anonymizer keeps on
+    purpose, exactly like ``meta.os``, so it names the platform rather than leaking a device's.
+    """
     import re
 
     mfg_re = re.compile(r"^MFG-[0-9a-f]{6}$")
@@ -247,14 +259,19 @@ def test_bundled_recording_has_anonymized_vendor_metadata(recording):
             for k, v in obj.items():
                 if k == "icon" and isinstance(v, str) and v and v != "images/os/generic.svg":
                     leaked.append((k, v))
-                if k == "entPhysicalMfgName" and isinstance(v, str) and v and not mfg_re.match(v):
+                if k in ("entPhysicalMfgName", "vendor") and isinstance(v, str) and v and not mfg_re.match(v):
+                    leaked.append((k, v))
+                # The OUI is the IEEE manufacturer prefix; a registered one names the vendor even
+                # when the vendor field is null. Masked values are < 2**24 like real ones, so this
+                # cannot check the value itself: it checks the ones known to have shipped raw.
+                if k == "oui" and str(v) in _LEAKED_OUIS:
                     leaked.append((k, v))
                 _walk(v)
         elif isinstance(obj, list):
             for item in obj:
                 _walk(item)
 
-    _walk(recording)
+    _walk(recording.get("responses", {}))
     assert not leaked, f"{recording.get('name')}: un-anonymized vendor metadata: {leaked}"
 
 
@@ -265,7 +282,7 @@ def test_bundled_recording_transceivers_reference_present_ports(recording):
     def _body(suffix):
         for k, v in recording.get("responses", {}).items():
             if k.split("?", 1)[0].endswith(suffix):
-                return v[1] if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int) else v
+                return unwrap_response(v)[1]
         return None
 
     device_id = recording.get("device_id")

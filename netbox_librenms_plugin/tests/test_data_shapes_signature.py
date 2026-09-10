@@ -3,6 +3,7 @@
 import pytest
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, pseudonymize_os
+from netbox_librenms_plugin.data_shapes.envelope import wrap_response
 from netbox_librenms_plugin.data_shapes.signature import (
     build_manifest,
     classify_novelty,
@@ -477,8 +478,10 @@ def test_signature_ignores_failed_response_frames():
         "device_id": 1,
         "responses": {
             "GET /api/v0/devices/1/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
-            "GET /api/v0/devices/1/transceivers": [500, {"transceivers": [{"port_id": 1, "type": "sfp"}]}],
-            "GET /api/v0/devices/1/port_stack": [503, {"mappings": [{"high_port_id": 1, "low_port_id": 2}]}],
+            "GET /api/v0/devices/1/transceivers": wrap_response(500, {"transceivers": [{"port_id": 1, "type": "sfp"}]}),
+            "GET /api/v0/devices/1/port_stack": wrap_response(
+                503, {"mappings": [{"high_port_id": 1, "low_port_id": 2}]}
+            ),
         },
     }
     sig = compute_shape_signature(rec)

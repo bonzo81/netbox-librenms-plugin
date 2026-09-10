@@ -113,6 +113,12 @@ MODEL_KEYS = frozenset({"hardware"})
 # "vendor" is the transceiver vendor LibreNMS reports on /transceivers. Same shape and same
 # reasoning: it names the vendor the os-hash masks, and no sync logic reads it.
 MFG_KEYS = frozenset({"entPhysicalMfgName", "vendor"})
+# The transceiver OUI is the IEEE-registered manufacturer prefix as an integer: 36965 is 0x009065,
+# Finisar. Where "vendor" is null it is the only vendor identifier on the row, so masking the name
+# alone would leave the vendor readable. Mapped to a deterministic 24-bit value, which keeps the
+# integer type and the row-to-row cardinality the recording exists to preserve. Read by no sync
+# logic. 0 means "no OUI" in LibreNMS and is left alone so it stays distinguishable from a mask.
+OUI_KEYS = frozenset({"oui"})
 # Firmware / software version strings. Identifying (pin an exact build → deployment fingerprint /
 # CVE surface) and read by no sync logic, so pseudonymized to a deterministic fw-<hash>. (Device
 # chassis HARDWARE revision is left alone — it's not a firmware version.)
@@ -274,11 +280,27 @@ _LINUX_PREDICTABLE_IF_RE = r"(?:eno\d+|ens\d+(?:f\d+)?|enp\d+s\d+(?:f\d+)?)(?:np
 # first letter or '_' that begins a free-text annotation (e.g. "eth0_customerA" -> "eth0"). Any
 # letters that are legitimately part of a port name live in the prefix or in a '/'-delimited slot
 # component (matched above), never in the bare trailing run.
+# Linux tunnel devices. Some start with a prefix that is itself in _IF_PREFIXES ("ip", "gre"), so
+# the generic "prefix + digit" shape below matches only the leading "ip6" and the trailing run
+# stops at the first letter: ip6tnl0 and ip6tnl1 both reduced to "ip6", and _build_name_index then
+# dropped the ambiguous token. The rest (sit0, tunl0, erspan0) matched no rule at all and were
+# hashed, losing the pairing a tunnel name carries. Matched first so the full name survives.
+_LINUX_TUNNEL_IF_RE = r"(?:ip6gretap|ip6gre|ip6tnl|gretap|erspan|tunl|sit|ipip|gre)\d+"
+
 _PORT_TOKEN_RE = re.compile(
     rf"^(?:(?:{_DIGITLESS_IF_NAMES})(?:\.\d+)?(?![\w/.:-])"
+    rf"|(?:{_LINUX_TUNNEL_IF_RE})[\d/.:-]*"
     rf"|(?:{_LINUX_PREDICTABLE_IF_RE})[\d/.:-]*"
     rf"|(?:[A-Za-z]?\d+(?:/[A-Za-z]*\d+)+|[A-Za-z]/\d+|(?:{_IF_PREFIXES})-?\d)[\d/.:-]*)"
 )
+
+
+def _anon_oui(value, salt):
+    """Return a deterministic 24-bit stand-in for an IEEE OUI, keeping the original's type."""
+    if value in (None, "", 0, "0"):
+        return value  # LibreNMS reports no OUI; masking it would invent one
+    masked = int(_hash(str(value), salt, length=6), 16) & 0xFFFFFF
+    return str(masked) if isinstance(value, str) else masked
 
 
 def _hash(value, salt, length=6):
@@ -430,6 +452,9 @@ def _anon_value(key, value, rules):
     if key in BGP_KEYS:
         # Handled before the str-guard below since ASNs arrive as ints.
         return _anon_asn(value, salt)
+    if key in OUI_KEYS:
+        # Same reason: LibreNMS reports the OUI as an integer.
+        return _anon_oui(value, salt)
     if not isinstance(value, str) or not value or value == "-":
         # Pseudonym/scrub rules below operate on real string values; leave empties/sentinels
         # and non-strings (ints, bools, null) untouched so logic-bearing numerics survive.

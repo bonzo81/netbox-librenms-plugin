@@ -555,6 +555,14 @@ _PORT_PATTERNS = [
     "rbeb",
     "vtep",
     "demux0",
+    # Linux tunnel devices: the "ip" prefix matches first and the trailing run stops at "t", so
+    # without a dedicated rule ip6tnl0 truncates to "ip6" and siblings collapse onto each other.
+    "ip6tnl0",
+    "ip6gre0",
+    "sit0",
+    "tunl0",
+    "gretap0",
+    "erspan0",
 ]
 
 
@@ -564,6 +572,22 @@ def test_port_pattern_ifname_preserved_verbatim(name):
     rec = _ports({"port_id": 1, "ifName": name, "ifType": "ethernetCsmacd"})
     port = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
     assert port["ifName"] == name
+
+
+def test_linux_tunnel_sibling_ports_stay_distinct():
+    """ip6tnl0 and ip6tnl1 must not both collapse to the truncated ip6 token.
+
+    A collapse makes _build_name_index mark the token ambiguous and drop it, which loses
+    name-based retention and pairing for every tunnel on the device.
+    """
+    rec = _ports(
+        {"port_id": 1, "ifName": "ip6tnl0", "ifType": "tunnel"},
+        {"port_id": 2, "ifName": "ip6tnl1", "ifType": "tunnel"},
+    )
+    ports = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"]
+    assert ports[0]["ifName"] == "ip6tnl0"
+    assert ports[1]["ifName"] == "ip6tnl1"
+    assert ports[0]["ifName"] != ports[1]["ifName"]
 
 
 def test_linux_predictable_sibling_ports_stay_distinct():
@@ -985,3 +1009,46 @@ def test_serial_custom_label_still_pseudonymized_under_a_captured_pattern():
 
     assert descr.startswith("device-")
     assert "core-rtr01" not in descr
+
+
+def test_transceiver_vendor_is_pseudonymized():
+    """The /transceivers vendor names the manufacturer the os hash masks, and nothing reads it."""
+    rec = _ports()
+    key = "GET /api/v0/devices/1/transceivers"
+    rec["responses"][key] = {
+        "status": "ok",
+        "transceivers": [{"port_id": 1, "vendor": "Finisar", "oui": 36965, "model": "FTLX8574D3BCL"}],
+    }
+
+    item = anonymize_recording(rec)["responses"][key]["transceivers"][0]
+
+    assert item["vendor"] != "Finisar"
+    assert item["vendor"].startswith("MFG-")
+
+
+def test_transceiver_oui_is_masked():
+    """36965 is 0x009065, Finisar's registered OUI, and it identifies the vendor on its own.
+
+    Where the row's vendor is null the OUI is the only vendor field, so masking the name alone
+    would leave the manufacturer readable.
+    """
+    rec = _ports()
+    key = "GET /api/v0/devices/1/transceivers"
+    rec["responses"][key] = {
+        "status": "ok",
+        "transceivers": [
+            {"port_id": 1, "vendor": None, "oui": 36965},
+            {"port_id": 2, "vendor": None, "oui": 9098},
+            {"port_id": 3, "vendor": None, "oui": 0},
+        ],
+    }
+
+    rows = anonymize_recording(rec)["responses"][key]["transceivers"]
+
+    assert rows[0]["oui"] != 36965
+    assert isinstance(rows[0]["oui"], int), "the recorded shape must keep its integer type"
+    assert 0 <= rows[0]["oui"] <= 0xFFFFFF
+    # Distinct vendors stay distinct: the recording exists to preserve that cardinality.
+    assert rows[0]["oui"] != rows[1]["oui"]
+    # 0 means "no OUI" in LibreNMS, so masking it would invent a vendor where there was none.
+    assert rows[2]["oui"] == 0
