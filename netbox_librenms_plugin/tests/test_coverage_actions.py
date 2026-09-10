@@ -2630,7 +2630,7 @@ class TestDeviceConflictActionBranches:
         )
         self.librenms_server.vc_inventory_callable(device_id, [], {})
 
-    def _request(self, action, device, username, **extra_post):
+    def _request(self, action, device, username, perms=None, **extra_post):
         from dcim.models import Device
 
         return make_view_request(
@@ -2641,7 +2641,7 @@ class TestDeviceConflictActionBranches:
                 "existing_device_id": str(device.pk),
                 **extra_post,
             },
-            user=make_view_user(username, [("change", Device)]),
+            user=make_view_user(username, perms if perms is not None else [("change", Device)]),
             HTTP_HX_REQUEST="true",
         )
 
@@ -2734,10 +2734,13 @@ class TestDeviceConflictActionBranches:
             status="active",
         )
         self._register_device(42, validated_target.name)
+        # The VM is in the caller's view scope, so the disclosure gate keeps it bound and the
+        # cross-model pk check below is the thing that refuses.
         request = self._request(
             "sync_name",
             target,
             "branches-type-mismatch-user",
+            perms=[("change", Device), ("view", VirtualMachine)],
         )
 
         response = post_view(view, request, device_id=42)
@@ -7300,7 +7303,7 @@ class TestPromoteAndMergeObjectScope:
         assert Device.objects.get(pk=target.pk).platform_id is None
 
     def test_merge_cannot_absorb_an_out_of_scope_donor(self):
-        """The donor is derived server-side but still resolved by pk, so an out-of-scope donor must not be merged away."""
+        """An out-of-scope donor must not be merged away, and is not offered as a candidate either."""
         from dcim.models import Device
 
         winner = make_device("merge-scope-winner", librenms_cf={"default": {"id": 20}})
@@ -7309,7 +7312,9 @@ class TestPromoteAndMergeObjectScope:
 
         response = self._post_merge(user, winner, donor)
 
-        assert b"Winner or donor device not found" in response.content
+        # The disclosure gate withdraws the whole suggestion when either candidate is out of
+        # scope, so the refusal now happens before the winner/donor pks are resolved.
+        assert b"does not match the validation result" in response.content
         assert "_migrated_to" not in Device.objects.get(pk=donor.pk).custom_field_data["librenms_id"]["default"]
         assert "oob" not in Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]
 

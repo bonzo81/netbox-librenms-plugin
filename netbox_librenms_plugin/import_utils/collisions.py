@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from netbox_librenms_plugin.import_validation_helpers import MERGE_CANDIDATE_SLOTS
 
+from .disclosure import RESTRICTED_OBJECT_LABEL, models_by_name, visible_pks
+
 # Terminal match types where ``existing_device`` is an ARBITRARY duplicate the validator already
 # failed closed (can_import=False, actions cleared). Such a row will never write, so it must not
 # contend for a NetBox pk and block an otherwise-valid sibling import on that same pk.
@@ -27,33 +29,32 @@ _MERGE_SLOT_ROLES = {"host_named": "merge_host_named", "oob_named": "merge_oob_n
 
 
 def scope_bulk_collisions(collisions: list[dict], user) -> list[dict]:
-    """Redact collision targets the requesting user cannot view."""
-    from dcim.models import Device
-    from virtualization.models import VirtualMachine
+    """Redact collision targets the requesting user cannot see.
 
-    models = {"device": Device, "virtualmachine": VirtualMachine}
-    visible_pks: dict[str, set[int]] = {}
+    Scope comes from :func:`visible_pks`, so this and the import-preview gate share one rule for
+    what counts as "may see" (see ``DISCLOSURE_ACTIONS`` in :mod:`disclosure`).
+    """
+    models = models_by_name()
+    visible_pks_by_model: dict[str, set[int]] = {}
     for model_name, model in models.items():
         candidate_pks = {
             group.get("nb_device_pk")
             for group in collisions
             if group.get("nb_model_name") == model_name and group.get("nb_device_pk") is not None
         }
-        visible_pks[model_name] = set(
-            model.objects.restrict(user, "view").filter(pk__in=candidate_pks).values_list("pk", flat=True)
-        )
+        visible_pks_by_model[model_name] = visible_pks(model, candidate_pks, user)
 
     scoped = []
     for group in collisions:
         model_name = group.get("nb_model_name")
-        if group.get("nb_device_pk") in visible_pks.get(model_name, set()):
+        if group.get("nb_device_pk") in visible_pks_by_model.get(model_name, set()):
             scoped.append({**group, "target_visible": True})
             continue
         scoped.append(
             {
                 **group,
                 "nb_device_pk": None,
-                "nb_device_name": "restricted NetBox object",
+                "nb_device_name": RESTRICTED_OBJECT_LABEL,
                 "nb_model_name": None,
                 "nb_kind": "object",
                 "target_visible": False,

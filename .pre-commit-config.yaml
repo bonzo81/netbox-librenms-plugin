@@ -30,3 +30,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^netbox_librenms_plugin/.*\.py$
+      - id: import-disclosure
+        name: import disclosure check
+        description: A warning names a NetBox object that no permission scope filtered.
+        entry: python3 tools/lint_import_disclosure.py netbox_librenms_plugin
+        language: system
+        pass_filenames: false
+        files: ^netbox_librenms_plugin/.*\.py$

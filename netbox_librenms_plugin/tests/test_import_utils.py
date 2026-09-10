@@ -788,7 +788,7 @@ class TestSerialNumberMatching:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         make_device("switch-01", serial="OLD_SERIAL")
-        make_device("other-device", serial="CONFLICTING_SERIAL")
+        owner = make_device("other-device", serial="CONFLICTING_SERIAL")
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -797,7 +797,10 @@ class TestSerialNumberMatching:
 
         assert result["serial_action"] == "conflict"
         assert result["existing_match_type"] == "hostname"
-        assert "Serial conflict" in result["warnings"][0]
+        # The owner's identity travels as structured data, never in a warning: only the display
+        # gate may name it, and only to a viewer who may see it.
+        assert result["serial_conflict"] == {"pk": owner.pk, "serial": "CONFLICTING_SERIAL", "phase": "importing"}
+        assert not any("Serial conflict" in warning for warning in result["warnings"])
 
     def test_librenms_id_match_shows_serial_confirmed(self):
         """librenms_id match with matching serial shows confirmation."""

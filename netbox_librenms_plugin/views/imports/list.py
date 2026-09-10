@@ -462,6 +462,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             data,
             order_by=request.GET.get("sort"),
             server_key=getattr(self, "_active_server_key", self.active_server_key),
+            user=request.user,
         )
         return table
 

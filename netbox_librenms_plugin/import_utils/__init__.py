@@ -39,6 +39,11 @@ from .device_operations import (  # noqa: F401
     validate_device_for_import,
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions  # noqa: F401
+from .disclosure import (  # noqa: F401
+    scope_validation_disclosure,
+    scope_validation_disclosures,
+    visible_object_label,
+)
 from .filters import (  # noqa: F401
     _apply_client_filters,
     get_device_count_for_filters,

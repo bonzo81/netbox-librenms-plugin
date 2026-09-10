@@ -11,6 +11,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_cluster,
     make_device,
     make_interface,
+    make_superuser,
     make_virtual_chassis,
     make_vm,
 )
@@ -116,6 +117,7 @@ class TestDeviceImportTable:
     def _table(self, data=None, **kwargs):
         from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 
+        kwargs.setdefault("user", make_superuser())
         return DeviceImportTable(data=data or [], **kwargs)
 
     @pytest.mark.parametrize(
@@ -489,7 +491,7 @@ class TestDeviceImportTable:
         from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 
         record = _import_record(can_import=True, is_ready=True)
-        table = DeviceImportTable([record], server_key="secondary")
+        table = DeviceImportTable([record], server_key="secondary", user=make_superuser())
         html = table.as_html(RequestFactory().get("/"))
 
         assert 'id="device-row-4101"' in html

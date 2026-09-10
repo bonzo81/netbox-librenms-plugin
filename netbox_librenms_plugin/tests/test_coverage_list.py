@@ -9,6 +9,7 @@ from django.http import QueryDict
 from django.test import RequestFactory
 from django.urls import reverse
 
+from netbox_librenms_plugin.tests.conftest import make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -181,6 +182,7 @@ class TestImportListContract:
         view._import_data = import_data
         view._active_server_key = SERVER_KEY
         request = RequestFactory().get(_import_url(), {"sort": "hostname"})
+        request.user = make_superuser()
 
         queryset = view.get_queryset(request)
         table = view.get_table(queryset, request)

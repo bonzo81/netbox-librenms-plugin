@@ -11,6 +11,7 @@ from django_tables2 import Column
 from netbox.tables.columns import ToggleColumn
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_sync_device
 
 
@@ -92,13 +93,25 @@ class DeviceImportTable(tables.Table):
 
     name = "DeviceImportTable"  # Required by NetBox table utilities
 
-    def __init__(self, *args, **kwargs):
-        """Initialize table with cached querysets and apply sorting."""
+    def __init__(self, *args, user, **kwargs):
+        """Initialize table with cached querysets, scope each row's matches, and apply sorting.
+
+        ``user`` is keyword-only and required: every row renders the identity of NetBox objects
+        found by unrestricted conflict searches, so the table cannot be built without knowing whose
+        view scope decides what may be shown.
+        """
         # The server the import page was rendered against. Threaded onto the validation-details
         # modal URL so the modal-open HTMX GET fetches from this server rather than whatever
         # LibreNMSSettings.selected_server happens to be when the modal is opened.
         self.server_key = kwargs.pop("server_key", None)
         super().__init__(*args, **kwargs)
+
+        # Redact in place, after any caller has finished reading the unrestricted matches (bulk
+        # collision detection keys on them) and written them to cache. One batch call: a per-row
+        # call would add a permission query per matched row to every table render.
+        scope_validation_disclosures(
+            [record.get("_validation") for record in self.data if isinstance(record, dict)], user
+        )
 
         # Cache querysets to avoid N queries per render
         from dcim.models import DeviceRole

@@ -40,6 +40,9 @@ from netbox_librenms_plugin.import_utils import (
     get_virtual_chassis_data,
     required_import_permissions,
     scope_bulk_collisions,
+    scope_validation_disclosure,
+    scope_validation_disclosures,
+    visible_object_label,
     update_vc_member_suggested_names,
     validate_device_for_import,
 )
@@ -388,18 +391,6 @@ def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
     return locked, None
 
 
-def _visible_conflict_label(view, id_conflict):
-    """
-    Return ``(object_label, name)`` when the viewer may see *id_conflict*, else ``None``.
-
-    The scope check is a disclosure control, so it lives in one place: a second copy could drift
-    and let a caller name an object outside the viewer's scope.
-    """
-    if not view.restricted_queryset(type(id_conflict), "view").filter(pk=id_conflict.pk).exists():
-        return None
-    return ("VM" if id_conflict._meta.model_name == "virtualmachine" else "device", id_conflict.name)
-
-
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
     """Lock one server/ID claim and its target, then reject ownership across Devices and VMs."""
     from virtualization.models import VirtualMachine as NetBoxVM
@@ -421,7 +412,7 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
             f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before changing the mapping."
         )
     if id_conflict is not None:
-        visible = _visible_conflict_label(view, id_conflict)
+        visible = visible_object_label(id_conflict, view.request.user)
         if visible is None:
             return None, _htmx_error_response(
                 "LibreNMS ID is already assigned to another object outside your view scope."
@@ -485,7 +476,7 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
     acquire_advisory_transaction_lock(f"netbox-librenms-plugin:device-serial:{serial}")
 
 
-def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse | None:
+def _apply_conflict_checked_serial(device, incoming_serial: str, user) -> HttpResponse | None:
     """
     Assign *incoming_serial* to *device* under the serial advisory lock, or report the conflict.
 
@@ -501,6 +492,8 @@ def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse
     Args:
         device: The Device to mutate. ``serial`` is set in memory only; the caller persists it.
         incoming_serial: The already-trimmed serial from LibreNMS.
+        user: The requesting user. The conflict lookup is unrestricted (a duplicate the user cannot
+            see still blocks the write), so only their view scope decides whether it is named.
 
     Returns:
         HttpResponse | None: An HTMX error toast when another device owns the serial, else None.
@@ -514,6 +507,11 @@ def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse
             f"Serial assignment blocked: '{incoming_serial}' already assigned to "
             f"'{conflict_device.name}' (pk={conflict_device.pk})"
         )
+        visible = visible_object_label(conflict_device, user)
+        if visible is None:
+            return _htmx_error_response(
+                f"Serial conflict: '{incoming_serial}' is already assigned to a device outside your view scope."
+            )
         return _htmx_error_response(
             f"Serial conflict: '{incoming_serial}' is already assigned to device "
             f"'{conflict_device.name}' (ID: {conflict_device.pk})"
@@ -828,6 +826,9 @@ class DeviceImportHelperMixin:
         # Apply user selections (cluster, role, rack) to validation
         _apply_user_selections_to_validation(validation, selections, is_vm)
 
+        # Last, so nothing downstream re-adds identity or re-enables a row this viewer may not see.
+        scope_validation_disclosure(validation, request.user)
+
         return validation, selections
 
     def render_device_row(self, request, libre_device: dict, validation: dict, selections: dict):
@@ -844,7 +845,7 @@ class DeviceImportHelperMixin:
             HttpResponse with rendered device row
         """
         libre_device["_validation"] = validation
-        table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key)
+        table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key, user=request.user)
 
         context = {
             "record": libre_device,
@@ -1121,6 +1122,9 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         }
 
         collisions = scope_bulk_collisions(detect_bulk_collisions(devices), request.user)
+        # After collision detection, which must key on the unrestricted matches to stop two rows
+        # writing the same NetBox device.
+        scope_validation_disclosures([entry.get("validation") for entry in devices], request.user)
         if collisions:
             # Render at 200 (not 4xx): this is an interstitial modal swapped
             # into #htmx-modal-content, exactly like the confirm step. A non-2xx
@@ -1586,7 +1590,9 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
 
                     # Render updated row
-                    table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key)
+                    table = DeviceImportTable(
+                        [libre_device], server_key=self.librenms_api.server_key, user=request.user
+                    )
                     context = {
                         "record": libre_device,
                         "table": table,
@@ -2113,7 +2119,7 @@ class DeviceConflictActionView(
                     incoming_serial = normalize_serial(libre_device.get("serial")) if existing_model is Device else None
                     fields = ["custom_field_data", "name"]
                     if incoming_serial and incoming_serial != "-":
-                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
+                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
                             return err
                         fields.append("serial")
                     existing_device.name = hostname
@@ -2133,7 +2139,7 @@ class DeviceConflictActionView(
                     incoming_serial = normalize_serial(libre_device.get("serial"))
                     fields = ["custom_field_data"]
                     if incoming_serial and incoming_serial != "-":
-                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
+                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
                             return err
                         fields.append("serial")
                     if librenms_device_type:
@@ -2181,7 +2187,7 @@ class DeviceConflictActionView(
                     except Device.DoesNotExist:
                         return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
                     # Re-check for serial ownership conflict under the locks, on the LOCKED row.
-                    if err := _apply_conflict_checked_serial(locked_device, incoming_serial):
+                    if err := _apply_conflict_checked_serial(locked_device, incoming_serial, request.user):
                         return err
                     if err := _save_device(locked_device, update_fields=["serial"], request=request):
                         return err
@@ -2966,7 +2972,7 @@ class AddAsOOBView(
                     "attaching as OOB."
                 )
             if id_conflict is not None:
-                visible = _visible_conflict_label(self, id_conflict)
+                visible = visible_object_label(id_conflict, request.user)
                 if visible is None:
                     return _htmx_error_response(
                         f"LibreNMS device #{librenms_id} is already assigned to another object outside your view scope."

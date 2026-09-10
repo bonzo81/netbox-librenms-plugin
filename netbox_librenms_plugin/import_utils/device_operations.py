@@ -414,7 +414,9 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         existing_link (dict | None): The ``_describe_existing_librenms_link`` result for
             *existing_by_serial*.
         hostname (str): The incoming LibreNMS hostname (already resolved).
-        serial (str): The incoming serial (for warning text only).
+        serial (str): The incoming serial (for warning text only). The matched device's own
+            identity never reaches a warning: the serial lookup is unrestricted, so only the
+            display gate may name it (see ``import_utils/disclosure.py``).
         libre_device (dict): The raw LibreNMS device payload.
         server_key (str): The active LibreNMS server key.
 
@@ -532,22 +534,22 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         # indistinguishable host-link request instead of leaving this branch informational.
         serial_action_value = "oob_already_linked"
         block_warnings.append(
-            f"Device '{existing_by_serial.name}' already has an OOB controller linked. "
-            f"Re-import will update the existing OOB entry."
+            "The matched NetBox device already has an OOB controller linked. "
+            "Re-import will update the existing OOB entry."
         )
     elif not oob_possible and not host_possible:
         # Neither role is feasible -- fall back to legacy hostname/serial
         # warning behaviour so the user still sees a useful message.
         if existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower():
             block_warnings.append(
-                f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
+                f"A device with this serial and hostname already exists in NetBox "
                 f"({_describe_link_note(existing_link)})"
             )
             serial_action_value = "link"
         else:
             block_warnings.append(
-                f"Device with same serial ({serial}) exists as '{existing_by_serial.name}' "
-                f"but hostname differs (LibreNMS: '{hostname}'). Device may have been reinstalled."
+                f"A device with serial {serial} already exists in NetBox but its hostname differs "
+                f"(LibreNMS: '{hostname}'). Device may have been reinstalled."
             )
             serial_action_value = "hostname_differs"
 
@@ -697,6 +699,9 @@ def validate_device_for_import(  # noqa: C901
         "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs", "oob_candidate", "promote_to_host", "merge_netbox_devices"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "serial_duplicate": False,  # True when incoming serial is already on a different device
+        # {"pk", "serial", "phase"} for the device already holding the incoming serial. The
+        # lookup is unrestricted, so only the display gate may name it (see disclosure.py).
+        "serial_conflict": None,
         "serial_role_choice_available": False,  # True when both oob_candidate and promote_to_host are valid choices
         "librenms_id_needs_migration": False,  # True when existing device has legacy bare-int ID
         "oob_candidate": None,  # dict {device, type, version, ip} when oob_candidate detected
@@ -916,16 +921,16 @@ def validate_device_for_import(  # noqa: C901
                         if serial_conflict:
                             result["serial_action"] = "conflict"
                             result["serial_duplicate"] = True
-                            result["warnings"].append(
-                                f"Serial conflict: incoming serial '{incoming_serial}' is already assigned to "
-                                f"device '{serial_conflict.name}' (ID: {serial_conflict.pk}) in NetBox. "
-                                f"Investigate which device should own this serial before updating."
-                            )
+                            result["serial_conflict"] = {
+                                "pk": serial_conflict.pk,
+                                "serial": incoming_serial,
+                                "phase": "updating",
+                            }
                         else:
                             result["serial_action"] = "update_serial"
                             result["warnings"].append(
-                                f"Serial number differs (NetBox: '{existing_device.serial}', "
-                                f"LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
+                                f"Serial number differs from the NetBox record "
+                                f"(LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
                             )
 
         # Only check hostname/serial/IP if not already matched by librenms_id.
@@ -982,9 +987,7 @@ def validate_device_for_import(  # noqa: C901
                 existing_link = _describe_existing_librenms_link(existing_vm, server_key)
                 result["existing_librenms_link"] = existing_link
                 link_note = _describe_link_note(existing_link)
-                result["warnings"].append(
-                    f"VM with same hostname exists in NetBox as '{existing_vm.name}' ({link_note})"
-                )
+                result["warnings"].append(f"A VM with this hostname already exists in NetBox ({link_note})")
                 result["can_import"] = False
             elif existing_device:
                 logger.info(f"Found existing device by hostname: {existing_device.name}")
@@ -1008,22 +1011,20 @@ def validate_device_for_import(  # noqa: C901
                     if serial_conflict:
                         result["serial_action"] = "conflict"
                         result["serial_duplicate"] = True
-                        result["warnings"].append(
-                            f"Serial conflict: incoming serial '{incoming_serial}' is already assigned to "
-                            f"device '{serial_conflict.name}' (ID: {serial_conflict.pk}) in NetBox. "
-                            f"Investigate which device should own this serial before importing."
-                        )
+                        result["serial_conflict"] = {
+                            "pk": serial_conflict.pk,
+                            "serial": incoming_serial,
+                            "phase": "importing",
+                        }
                     else:
                         result["serial_action"] = "update_serial"
                         result["warnings"].append(
-                            f"Hostname matches but serial differs (NetBox: '{existing_device.serial}', "
-                            f"LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
+                            f"Hostname matches but the serial differs from the NetBox record "
+                            f"(LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
                         )
                 else:
                     link_note = _describe_link_note(result["existing_librenms_link"])
-                    result["warnings"].append(
-                        f"Device with same hostname exists in NetBox as '{existing_device.name}' ({link_note})"
-                    )
+                    result["warnings"].append(f"A device with this hostname already exists in NetBox ({link_note})")
 
                 result["can_import"] = False
 
@@ -1251,10 +1252,9 @@ def validate_device_for_import(  # noqa: C901
                                     "model_name": _serial_match._meta.model_name,
                                 },
                                 warning=(
-                                    f"Two NetBox devices appear to represent this physical box: "
-                                    f"'{_hostname_match.name}' (matches LibreNMS hostname) and "
-                                    f"'{_serial_match.name}' (matches chassis serial). "
-                                    f"Choose which one to keep and merge the other into it."
+                                    "Two NetBox devices appear to represent this physical box: one "
+                                    "matches the LibreNMS hostname, the other matches the chassis "
+                                    "serial. Choose which one to keep and merge the other into it."
                                 ),
                             )
 
@@ -1297,7 +1297,7 @@ def validate_device_for_import(  # noqa: C901
                         result["existing_librenms_link"] = _describe_existing_librenms_link(matched_object, server_key)
                         link_note = _describe_link_note(result["existing_librenms_link"])
                         result["warnings"].append(
-                            f"IP address {primary_ip} already assigned to VM '{matched_object.name}' ({link_note})"
+                            f"IP address {primary_ip} is already assigned to a VM in NetBox ({link_note})"
                         )
                         result["can_import"] = False
                     elif matched_object:
@@ -1350,8 +1350,8 @@ def validate_device_for_import(  # noqa: C901
                                 result["existing_device"] = device
                                 result["existing_match_type"] = "primary_ip"
                                 result["warnings"].append(
-                                    f"IP address {primary_ip} already assigned to device '{device.name}' "
-                                    f"(OOB already linked)"
+                                    f"IP address {primary_ip} is already assigned to a device in NetBox "
+                                    "(OOB already linked)"
                                 )
                                 result["can_import"] = False
                         else:
@@ -1362,7 +1362,7 @@ def validate_device_for_import(  # noqa: C901
                             # claiming "not linked to LibreNMS".
                             link_note = _describe_link_note(result.get("existing_librenms_link"))
                             result["warnings"].append(
-                                f"IP address {primary_ip} already assigned to device '{device.name}' ({link_note})"
+                                f"IP address {primary_ip} is already assigned to a device in NetBox ({link_note})"
                             )
                             result["can_import"] = False
 
@@ -1629,9 +1629,8 @@ def validate_device_for_import(  # noqa: C901
                 if librenms_dt and existing.device_type.pk != librenms_dt.pk:
                     result["device_type_mismatch"] = True
                     result["warnings"].append(
-                        f"Device type mismatch: NetBox has '{existing.device_type}' "
-                        f"but LibreNMS reports '{librenms_dt}'. "
-                        f"This may indicate the wrong device was matched."
+                        f"Device type mismatch: LibreNMS reports '{librenms_dt}', which differs from the "
+                        f"NetBox record. This may indicate the wrong device was matched."
                     )
         else:
             result["can_import"] = len(result["issues"]) == 0
@@ -1740,7 +1739,9 @@ def import_single_device(  # noqa: C901
                 "success": False,
                 "device": validation["existing_device"],
                 "message": "",
-                "error": f"Device already exists: {validation['existing_device'].name}",
+                # No name: the match came from an unrestricted search and this string reaches
+                # job data and job logs, which any holder of core.view_job can read.
+                "error": f"Device {device_id} already exists in NetBox",
                 "synced": {},
             }
 
