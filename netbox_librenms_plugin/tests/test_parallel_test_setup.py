@@ -109,11 +109,16 @@ NETBOX_REF_DJANGO_PINS = {
 
 
 def calls_get_librenms_id(tree: ast.AST) -> bool:
-    """Return whether an AST calls get_librenms_id directly or through an object."""
+    """Return whether an AST calls get_librenms_id directly, under an alias, or through an object."""
+    # An `import ... as` binding would otherwise call the helper under a name the scan never sees.
+    direct_names = {"get_librenms_id"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            direct_names.update(alias.asname or alias.name for alias in node.names if alias.name == "get_librenms_id")
     return any(
         isinstance(node, ast.Call)
         and (
-            (isinstance(node.func, ast.Name) and node.func.id == "get_librenms_id")
+            (isinstance(node.func, ast.Name) and node.func.id in direct_names)
             or (isinstance(node.func, ast.Attribute) and node.func.attr == "get_librenms_id")
         )
         for node in ast.walk(tree)
@@ -224,9 +229,17 @@ def test_local_and_ci_commands_request_isolated_workers():
     assert "pytest -n auto --maxschedchunk=1" in workflow
 
 
-@pytest.mark.parametrize("source", ["get_librenms_id(obj)", "utils.get_librenms_id(obj)"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "get_librenms_id(obj)",
+        "utils.get_librenms_id(obj)",
+        "from netbox_librenms_plugin.utils import get_librenms_id as resolve\nresolve(obj)",
+    ],
+    ids=["direct", "qualified", "aliased"],
+)
 def test_shared_boundary_guard_recognizes_direct_and_qualified_calls(source):
-    """Detect both supported Python call forms for the guarded helper."""
+    """Detect every supported Python call form for the guarded helper."""
     assert calls_get_librenms_id(ast.parse(source))
 
 

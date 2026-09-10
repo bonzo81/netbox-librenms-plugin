@@ -1,6 +1,7 @@
 """Browser-level checks for the sync tabs: the cache state machine and table selection."""
 
 import json
+import re
 from html import escape
 from pathlib import Path
 
@@ -2213,14 +2214,16 @@ def test_invalidation_reason_includes_relative_time(page):
 
 
 def _modal_script(marker):
-    """Return the modal's inline script containing *marker*, rendered as Django renders it."""
-    from django.template import Context, Engine
-
+    """Return the modal's inline script containing *marker*, which must carry no template syntax."""
     template = (TEMPLATE_DIR / "htmx" / "add_bay_template_modal.html").read_text()
     blocks = [block.split("</script>", 1)[0] for block in template.split("<script>")[1:]]
     matching = [block for block in blocks if marker in block]
     assert len(matching) == 1, f"expected one script containing {marker!r}, found {len(matching)}"
-    return Engine().from_string(matching[0]).render(Context({}))
+    # Rendering an expression against an empty context blanks it, so the browser would assert
+    # against silently mangled JS. Refuse the block instead of guessing what it should hold.
+    templated = re.findall(r"\{\{.*?\}\}|\{%.*?%\}", matching[0])
+    assert not templated, f"{marker!r} needs a rendering context for {templated}"
+    return matching[0]
 
 
 def test_the_bay_chooser_blocks_next_until_a_bay_is_selected(page):

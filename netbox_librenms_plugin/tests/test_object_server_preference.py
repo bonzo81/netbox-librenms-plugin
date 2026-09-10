@@ -479,6 +479,25 @@ def test_a_blocked_vc_member_links_to_the_sync_device_that_owns_the_mapping(clie
 
 
 @pytest.mark.django_db
+def test_a_preference_without_any_mapping_reports_the_installation_default(client, servers):
+    """The page already runs on the installation default here, so it must not ask for a selection."""
+    mapping = {"_preferred_server": "secondary"}
+    owner = make_device("preference-without-mapping", librenms_cf=mapping)
+    client.force_login(make_superuser("preference-without-mapping-viewer"))
+
+    response = client.get(_sync_url(owner))
+
+    assert response.status_code == 200
+    body = response.content
+    assert b"has no object mapping." in body
+    assert b"Using installation default server &#x27;primary&#x27;." in body
+    assert b"The installation default is not mapped, so select a server." not in body
+    assert b"Select a LibreNMS server to continue." not in body
+    owner.refresh_from_db()
+    assert owner.custom_field_data["librenms_id"] == mapping
+
+
+@pytest.mark.django_db
 def test_only_unusable_mapping_requires_selection_without_get_mutation(client, servers):
     mapping = {
         "retired": {"id": 13529},

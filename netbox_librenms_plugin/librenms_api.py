@@ -501,7 +501,9 @@ class LibreNMSAPI:
                     )
                 set_librenms_device_id(locked_obj, librenms_id, self.server_key)
                 locked_obj.save(update_fields=["custom_field_data"])
-            obj.custom_field_data = locked_obj.custom_field_data
+            # locked_obj is a second row read of the same object, so copying its whole field data
+            # would discard every custom-field edit the caller has not saved yet.
+            obj.custom_field_data["librenms_id"] = locked_obj.custom_field_data.get("librenms_id")
         else:
             # Use cache as fallback
             cache_key = self._get_cache_key(obj)

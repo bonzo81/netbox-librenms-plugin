@@ -27,11 +27,16 @@ class _MappingClaimBarrier:
         self.claim_barrier = claim_barrier
         self.target_lock_seen = False
         self.advisory_lock_seen = False
+        self.claim_wait_done = False
         self.claim_lock_preceded_the_target_lock = None
 
     def __call__(self, execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql:
-            self.claim_barrier.wait(timeout=5)
+            # One wrapper per thread, so this rendezvous holds the two claims together. A second
+            # advisory lock in either path would otherwise wait alone and break the barrier.
+            if not self.claim_wait_done:
+                self.claim_wait_done = True
+                self.claim_barrier.wait(timeout=5)
             result = execute(sql, params, many, context)
             self.advisory_lock_seen = True
             return result

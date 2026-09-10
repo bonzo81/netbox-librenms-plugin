@@ -973,6 +973,28 @@ class TestStorelibrenmsId:
 
         assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
 
+    def test_storing_the_mapping_keeps_the_caller_s_other_unsaved_custom_fields(self, settings, librenms_server):
+        """The claim reads a second row, so copying its whole field data would drop unsaved edits."""
+        from django.contrib.contenttypes.models import ContentType
+        from extras.models import CustomField
+
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        note = CustomField.objects.create(name="store_note", type="text")
+        note.object_types.set([ContentType.objects.get_for_model(Device)])
+        device = make_device("store-preserves-other-cf", librenms_cf={"default": None})
+        # An edit the caller has not saved yet, exactly what a view holds while it resolves an ID.
+        device.custom_field_data["store_note"] = "unsaved"
+        api = api_for(settings, librenms_server.url)
+
+        api._store_librenms_id(device, 42)
+
+        assert device.custom_field_data["store_note"] == "unsaved"
+        assert device.custom_field_data["librenms_id"]["default"] == 42
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
+
     def test_stores_in_cache_when_the_custom_field_is_absent(self, settings, librenms_server):
         """Only a NetBox without the plugin custom field reaches the cache fallback."""
         from django.core.cache import cache

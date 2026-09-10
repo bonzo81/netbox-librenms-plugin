@@ -233,6 +233,10 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
             warning += " The transient server selection remains active."
         elif installation_default_key in selectable_keys:
             warning += f" Using installation default server '{installation_default_key}'."
+        elif not mappings and installation_default_key:
+            # No mapping at all resolves to the installation default below, so asking the
+            # operator to select a server would describe a page that already has one.
+            warning += f" Using installation default server '{installation_default_key}'."
         else:
             warning += " The installation default is not mapped, so select a server."
 
