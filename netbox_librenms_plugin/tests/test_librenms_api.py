@@ -356,12 +356,7 @@ class TestLibreNMSAPIConnection:
 
 
 class TestLibreNMSAPIHttpMethods:
-    """
-    CRITICAL: Verify each API method uses the correct HTTP verb.
-
-    These tests prevent regression bugs where HTTP methods are accidentally
-    changed during refactoring (e.g., GET changed to DELETE).
-    """
+    """Verify that each API method keeps its required HTTP verb during refactoring."""
 
     @patch("netbox_librenms_plugin.librenms_api.requests.delete")
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
@@ -1047,12 +1042,16 @@ class TestLibreNMSAPIDeviceOperations:
         """Failures are never cached, so a transient error doesn't persist for the cache window."""
         mock_get.side_effect = requests.exceptions.Timeout("boom")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
-        assert api.get_device_info(device_id=7778) == (False, None)
-        assert api.get_device_info(device_id=7778) == (False, None)
+        first_success, first_failure = api.get_device_info(device_id=7778)
+        second_success, _second_failure = api.get_device_info(device_id=7778)
 
+        assert (first_success, second_success) == (False, False)
+        # A timeout says nothing about whether the device exists, so it is not "not found".
+        assert isinstance(first_failure, LibreNMSLookupError)
+        assert first_failure.status_code is None
         assert mock_get.call_count == 2  # not cached → re-attempted on the next call
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
@@ -1085,6 +1084,42 @@ class TestLibreNMSAPIDeviceOperations:
         )
         # ...and that live fetch refreshes the cache, so subsequent cached reads see the correction.
         assert api.get_device_info(device_id=424242) == (True, {"device_id": 424242, "hostname": "fresh"})
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_cache_only_reads_a_snapshot_even_when_live_cache_is_disabled(self, mock_get, mock_librenms_config):
+        """A cache-only read must use an existing snapshot regardless of the live-read flag."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        # Start from a cold fixed key, so the cache-only assertion cannot pass on another
+        # test's snapshot instead of the one this test creates.
+        cache.delete("librenms_device_info_default_424243")
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "devices": [{"device_id": 424243, "hostname": "cached-device"}],
+        }
+        api = LibreNMSAPI(server_key="default")
+        expected = (True, {"device_id": 424243, "hostname": "cached-device"})
+        assert api.get_device_info(device_id=424243) == expected
+        mock_get.assert_called_once()
+
+        mock_get.side_effect = AssertionError("cache-only lookup contacted LibreNMS")
+        assert api.get_device_info(device_id=424243, use_cache=False, cache_only=True) == expected
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_cache_only_miss_does_not_contact_librenms(self, mock_get, mock_librenms_config):
+        """A cache-only miss returns a miss without crossing the HTTP boundary."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        cache.delete("librenms_device_info_default_424244")
+        api = LibreNMSAPI(server_key="default")
+
+        assert api.get_device_info(device_id=424244, use_cache=False, cache_only=True) == (False, None)
+        mock_get.assert_not_called()
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_list_devices_with_filters(self, mock_get, mock_librenms_config):
@@ -1505,26 +1540,28 @@ class TestLibreNMSAPIErrorHandling:
         """Verify handling of network errors."""
         mock_get.side_effect = requests.exceptions.ConnectionError("Network unreachable")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123)
+        success, result = api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
+        assert result.status_code is None
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_timeout_error_handling(self, mock_get, mock_librenms_config):
         """Verify handling of timeout errors."""
         mock_get.side_effect = requests.exceptions.Timeout("Request timed out")
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123)
+        success, result = api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
+        assert result.status_code is None
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_invalid_json_response(self, mock_get, mock_librenms_config):
@@ -1537,26 +1574,27 @@ class TestLibreNMSAPIErrorHandling:
         api = LibreNMSAPI(server_key="default")
 
         # ValueError is now caught, returning (False, None) instead of propagating
-        success, result = api.get_device_info(device_id=123)
+        success, result = api.get_device_info(device_id=123, use_cache=False)
         assert success is False
         assert result is None
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_http_500_error_handling(self, mock_get, mock_librenms_config):
-        """Verify handling of HTTP 500 errors."""
+        """Verify that direct status handling classifies a 500 as server failure, not a missing device or malformed payload."""
         mock_get.return_value.status_code = 500
         mock_get.return_value.json.return_value = {
             "status": "error",
             "message": "Internal server error",
         }
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 
         api = LibreNMSAPI(server_key="default")
-        success, result = api.get_device_info(device_id=123)
+        success, result = api.get_device_info(device_id=123, use_cache=False)
 
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
+        assert result.status_code == 500
 
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
     def test_malformed_api_response(self, mock_post, mock_librenms_config):
@@ -2079,100 +2117,116 @@ class TestGetPortVlanDetailsResponseShape:
 # =============================================================================
 
 
+def test_invalid_utf8_json_body_reaches_the_registered_route(librenms_server):
+    """Malformed UTF-8 must be replacement-decoded instead of closing the connection."""
+    received = []
+
+    def respond(**request):
+        received.append(request["body"])
+        return 200, {"status": "ok"}
+
+    librenms_server.register("/invalid-json", respond, method="POST")
+
+    response = requests.post(
+        f"{librenms_server.url}/invalid-json",
+        data=b"\xff",
+        headers={"Content-Type": "application/json"},
+        timeout=2,
+    )
+
+    assert response.status_code == 200
+    assert received == ["\ufffd"]
+
+
 class TestGetPortStack:
     """Tests for LibreNMSAPI.get_port_stack()."""
 
-    def test_returns_mappings_list_on_success(self, mock_librenms_api):
+    def test_returns_mappings_list_on_success(self, mock_librenms_api, librenms_server):
         """get_port_stack returns (True, list) on HTTP 200."""
-        from unittest.mock import MagicMock, patch
-
-        fake_response = MagicMock()
-        fake_response.json.return_value = {
+        path = "/api/v0/devices/42/port_stack"
+        requests_seen = []
+        body = {
             "status": "ok",
             "mappings": [
                 {"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2},
             ],
         }
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response) as mock_get:
-            success, data = mock_librenms_api.get_port_stack(42)
+
+        def response(**request):
+            requests_seen.append(request)
+            return 200, body
+
+        librenms_server.register(path, response, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_port_stack(42)
 
         assert success is True
         assert data == [{"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2}]
-        mock_get.assert_called_once()
-        call_url = mock_get.call_args[0][0]
-        assert "/api/v0/devices/42/port_stack" in call_url
+        assert [(request["method"], request["path"]) for request in requests_seen] == [("GET", path)]
 
-    def test_returns_false_on_404(self, mock_librenms_api):
+    def test_returns_false_on_404(self, mock_librenms_api, librenms_server):
         """get_port_stack returns (False, error_str) when device not found."""
-        import requests as _requests
-        from unittest.mock import MagicMock, patch
+        librenms_server.register(
+            "/api/v0/devices/99/port_stack",
+            {"status": "error", "message": "Device does not exist"},
+            status=404,
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_resp = MagicMock()
-        fake_resp.status_code = 404
-        http_error = _requests.exceptions.HTTPError(response=fake_resp)
-        fake_resp.raise_for_status.side_effect = http_error
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_resp):
-            success, data = mock_librenms_api.get_port_stack(99)
+        success, data = mock_librenms_api.get_port_stack(99)
 
         assert success is False
         assert "not found" in data.lower()
 
     @pytest.mark.parametrize("payload", [{"status": "ok"}, {"status": "ok", "mappings": None}])
-    def test_missing_or_null_mappings_fails_closed(self, mock_librenms_api, payload):
+    def test_missing_or_null_mappings_fails_closed(self, mock_librenms_api, librenms_server, payload):
         """A successful response must contain the documented list-valued mappings field."""
-        from unittest.mock import MagicMock, patch
+        librenms_server.register("/api/v0/devices/5/port_stack", payload)
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_response = MagicMock()
-        fake_response.json.return_value = payload
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert "mappings" in data
 
-    def test_error_status_without_mappings_fails_not_empty(self, mock_librenms_api):
+    def test_error_status_without_mappings_fails_not_empty(self, mock_librenms_api, librenms_server):
         """An error payload that omits 'mappings' must fail, not normalise to (True, []), so a real API failure isn't masked as 'no LAG/parent relationships'."""
-        from unittest.mock import MagicMock, patch
+        librenms_server.register(
+            "/api/v0/devices/5/port_stack",
+            {"status": "error", "message": "device polling disabled"},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_response = MagicMock()
-        fake_response.json.return_value = {"status": "error", "message": "device polling disabled"}
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert data == "device polling disabled"
 
-    def test_error_status_with_mappings_present_still_fails(self, mock_librenms_api):
+    def test_error_status_with_mappings_present_still_fails(self, mock_librenms_api, librenms_server):
         """An error payload that still carries mappings must honor the explicit error status before consuming them, so it fails rather than silently skipping valid sync."""
-        from unittest.mock import MagicMock, patch
+        librenms_server.register(
+            "/api/v0/devices/5/port_stack",
+            {"status": "error", "message": "stale poll", "mappings": []},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
 
-        fake_response = MagicMock()
-        fake_response.json.return_value = {
-            "status": "error",
-            "message": "stale poll",
-            "mappings": [],
-        }
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert data == "stale poll"
 
-    def test_non_string_status_fails_not_empty(self, mock_librenms_api):
+    def test_non_string_status_fails_not_empty(self, mock_librenms_api, librenms_server):
         """A non-string status like `false` is malformed and must fail, not be accepted as (True, [])."""
-        from unittest.mock import MagicMock, patch
-
-        fake_response = MagicMock()
         # {"status": false, "mappings": []} — only an absent status or "ok" is a genuine answer;
         # accepting this would silently suppress LAG/sub-interface relationship updates.
-        fake_response.json.return_value = {"status": False, "mappings": []}
-        fake_response.raise_for_status = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-            success, data = mock_librenms_api.get_port_stack(5)
+        librenms_server.register(
+            "/api/v0/devices/5/port_stack",
+            {"status": False, "mappings": []},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
         assert "LibreNMS reported an error fetching port stack" in data
@@ -2206,29 +2260,23 @@ class TestGetPortStack:
         assert "Invalid JSON" in data
         assert "Error connecting" not in data
 
-    def test_malformed_mappings_fails_not_empty(self, mock_librenms_api):
+    def test_malformed_mappings_fails_not_empty(self, mock_librenms_api, librenms_server):
         """A non-list (or list-of-non-dicts) `mappings` is malformed, not 'no relationships'."""
-        from unittest.mock import MagicMock, patch
-
+        path = "/api/v0/devices/5/port_stack"
+        mock_librenms_api.librenms_url = librenms_server.url
         for bad in ({"mappings": {"oops": 1}}, {"mappings": ["not-a-dict", 2]}):
-            fake_response = MagicMock()
-            fake_response.raise_for_status = MagicMock()
-            fake_response.json.return_value = bad
-            with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-                success, data = mock_librenms_api.get_port_stack(5)
+            librenms_server.register(path, bad)
+            success, data = mock_librenms_api.get_port_stack(5)
             assert success is False, f"{bad!r} should fail"
             assert "mappings" in data
 
-    def test_non_object_payload_fails_not_empty(self, mock_librenms_api):
+    def test_non_object_payload_fails_not_empty(self, mock_librenms_api, librenms_server):
         """A non-object top-level payload (list/string/null) is malformed, not 'no relationships'."""
-        from unittest.mock import MagicMock, patch
-
+        path = "/api/v0/devices/5/port_stack"
+        mock_librenms_api.librenms_url = librenms_server.url
         for bad in ([{"high_port_id": 1, "low_port_id": 2}], "oops", None):
-            fake_response = MagicMock()
-            fake_response.raise_for_status = MagicMock()
-            fake_response.json.return_value = bad
-            with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
-                success, data = mock_librenms_api.get_port_stack(5)
+            librenms_server.register(path, bad)
+            success, data = mock_librenms_api.get_port_stack(5)
             assert success is False, f"{bad!r} should fail"
             assert "non-object" in data
 
@@ -2303,14 +2351,7 @@ class TestResolvePortRelationships:
     """Tests for LibreNMSAPI.resolve_port_relationships()."""
 
     def test_resolves_a_verbatim_live_port_stack_entry(self, mock_librenms_api):
-        """A port_stack entry exactly as a live LibreNMS returns it must resolve.
-
-        Pinned to a real response, not a hand-written one: LibreNMS serves the ports_stack rows
-        verbatim, so an entry carries id/device_id/high_ifIndex/high_port_id/low_ifIndex/
-        low_port_id/ifStackStatus. The API docs advertise port_id_high/port_id_low instead, and
-        every synthetic fixture in this file once used that spelling, so production and its tests
-        agreed on a shape no server sends and every relationship resolved to nothing.
-        """
+        """Verify that a live port_stack row with high_port_id and low_port_id resolves correctly."""
         ports = [
             {"port_id": 6477, "ifName": "em0", "ifType": "ethernetCsmacd"},
             {"port_id": 6482, "ifName": "em0.0", "ifType": "propVirtual"},
@@ -2346,12 +2387,7 @@ class TestResolvePortRelationships:
         assert result["sub_interfaces"] == {}
 
     def test_nameless_lag_aggregate_resolved_by_iftype(self, mock_librenms_api):
-        """A nameless aggregate (ifType=ieee8023adLag, empty ifName/ifDescr) still resolves via ifType.
-
-        ifType alone authoritatively classifies a LAG aggregate, so a valid port_id with no name must
-        stay in the by_id lookup — otherwise the port_stack pair referencing it is skipped and the
-        member's LAG membership is silently dropped.
-        """
+        """Verify that ifType identifies a nameless LAG aggregate and preserves its membership."""
         ports = [
             {"port_id": 201, "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
             {"port_id": 202, "ifName": "", "ifDescr": "", "ifType": "ieee8023adLag"},  # nameless aggregate
@@ -2970,13 +3006,7 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {101: 102}
 
     def test_non_string_ifname_does_not_crash_and_resolves_by_iftype(self, mock_librenms_api):
-        """A non-string ifName must not crash the downstream string ops; membership still resolves by ifType.
-
-        The member's malformed name is irrelevant to LAG classification — the aggregate (502) is
-        authoritatively a LAG via ifType, and the port_stack pairs 501 to it — so the membership
-        resolves. The no-crash guarantee holds because every name op iterates _port_names (which
-        skips the non-string), never the raw ifName.
-        """
+        """Verify that a non-string member ifName does not block LAG resolution through the aggregate ifType."""
         ports = [
             {"port_id": 501, "ifName": 12345, "ifType": "ethernetCsmacd"},  # malformed: non-string
             {"port_id": 502, "ifName": "lag9", "ifType": "ieee8023adLag"},

@@ -5,6 +5,7 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -82,6 +83,11 @@ class BaseVLANTableView(
             # cache is scoped by server_key, so evict the same scoped keys.
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.VLANS,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             messages.error(request, "Device not found in LibreNMS.")
             return self.render_sync_partial(
                 request,
@@ -95,12 +101,28 @@ class BaseVLANTableView(
         if not success:
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.VLANS,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             messages.error(request, error_msg)
             return self.render_sync_partial(
                 request, obj, server_key, {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key)}
             )
 
-        messages.success(request, "VLAN data refreshed successfully.")
+        if SyncCacheConsistency(obj).mark_refresh_outcome(
+            SyncTab.VLANS,
+            server_key,
+            actor_id=request_actor_id(request),
+        ):
+            messages.success(request, "VLAN data refreshed successfully.")
+        else:
+            messages.error(
+                request,
+                "VLAN data could not be cached, so the tab has no snapshot to show. "
+                "Refresh again; see server logs for details.",
+            )
 
         return self.render_sync_partial(
             request, obj, server_key, {"vlan_sync": self.get_vlan_context(request, obj, server_key)}
@@ -144,9 +166,15 @@ class BaseVLANTableView(
         """
         Build context for VLAN sync table.
 
-        Returns context with:
-        - vlan_table: LibreNMSVLANTable instance
-        - vlan_groups: QuerySet of available VLAN groups
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device | VirtualMachine): The NetBox object to synchronize.
+            server_key (str | None): The selected LibreNMS server key. Resolve it from the request if None.
+
+        Returns:
+            dict: Context with:
+                - ``vlan_table``: LibreNMSVLANTable instance.
+                - ``vlan_groups``: QuerySet of available VLAN groups.
         """
         vlan_table = None
 

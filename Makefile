@@ -1,7 +1,7 @@
 sources = netbox_librenms_plugin
 
-.PHONY: test format lint unittest pre-commit clean
-test: format lint unittest
+.PHONY: test format lint unittest browser pre-commit clean
+test: format lint unittest browser
 
 format:
 	ruff format $(sources)
@@ -11,7 +11,10 @@ lint:
 	ruff check $(sources)
 
 unittest:
-	pytest netbox_librenms_plugin/tests/ -v
+	pytest netbox_librenms_plugin/tests/ -v --ignore=netbox_librenms_plugin/tests/browser
+
+browser:
+	pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser
 
 
 pre-commit:

@@ -6,6 +6,11 @@
 {% load i18n %}
 {% load render_table from django_tables2 %}
 
+{% block head %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'netbox_librenms_plugin/css/librenms_sync.css' %}">
+{% endblock %}
+
 {% block javascript %}
 {{ block.super }}
 <script src="{% static 'netbox_librenms_plugin/js/librenms_sync.js' %}"></script>
@@ -228,8 +233,10 @@
                         <tr>
                             <th scope="row" style="width: 40%; padding-left: 1rem;">Status</th>
                             <td>
-                                <span class="{% if has_librenms_id %}text-success{% else %}text-danger{% endif %}">
-                                    {% if found_in_librenms %}
+                                <span class="{% if device_info_unavailable %}text-warning{% elif found_in_librenms %}text-success{% else %}text-danger{% endif %}">
+                                    {% if device_info_unavailable %}
+                                    <i class="mdi mdi-alert-circle-outline"></i> Details unavailable
+                                    {% elif found_in_librenms %}
                                     <i class="mdi mdi-check-circle"></i> Found
                                     {% else %}
                                     <i class="mdi mdi-close-circle"></i> Not found
@@ -384,7 +391,7 @@
                                 </a>
                             </td>
                         </tr>
-                        {% else %}
+                        {% elif not device_info_unavailable %}
                         <!-- Add to LibreNMS -->
                         <tr>
                             <th scope="row">Action</th>
@@ -525,6 +532,11 @@
                                                     title="View VC member serials from inventory">
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
+                                        {% elif vc_inventory_not_loaded %}
+                                            <span class="badge bg-secondary text-white"
+                                                  title="Refresh this tab to load the VC member serials from LibreNMS inventory.">
+                                                <i class="mdi mdi-server-network"></i> VC Serials not loaded
+                                            </span>
                                         {% else %}
                                             {% if librenms_device_serial != "-" %}
                                                 {% if object.serial != librenms_device_serial %}
@@ -695,47 +707,62 @@ A migrated donor has its active librenms_id cleared (so it is never found_in_lib
 banner above directs the user to the per-row "Move to winner" actions that live in these tabs.
 Render the tabs in migrated mode too, or those interface/IP move controls are unreachable.
 {% endcomment %}
-{% if found_in_librenms or migrated_to_marker %}
+{% comment %}
+A failed lookup is not an answer about the device, so it is shown before the branch below rather
+than as one of its outcomes. Saying "not found" here would send the user to clear a librenms_id
+that may well be correct.
+{% endcomment %}
+{% if librenms_lookup_error %}
+<div class="alert alert-danger d-flex align-items-center">
+    <i class="mdi mdi-alert-circle me-2"></i>
+    <div>
+        <strong>LibreNMS lookup failed:</strong>
+        {{ librenms_lookup_error.message }}
+        Whether LibreNMS has the device with <code>librenms_id</code> <code>{{ librenms_device_id }}</code> is unknown.
+        <hr class="my-2">
+        <span class="text-muted">
+            Leave the custom field as it is and retry once LibreNMS answers again. If this
+            continues, check the LibreNMS server and its logs for that device.
+        </span>
+    </div>
+</div>
+{% endif %}
 
+{% if found_in_librenms or migrated_to_marker or device_info_unavailable and has_librenms_id %}
+
+{% if sync_cache_status_url %}
+<div id="librenms-sync-cache-state"
+    data-status-url="{{ sync_cache_status_url }}"
+    data-server-key="{{ server_key }}"></div>
+{{ sync_cache_status|json_script:"librenms-sync-cache-initial" }}
+{{ sync_cache_contract|json_script:"librenms-sync-cache-contract" }}
+{% endif %}
+<div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}">
+{{ sync_cache_status|json_script:"librenms-sync-rendered-status" }}
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="interfaces-tab" data-tab="interfaces" data-bs-toggle="tab"
-                data-bs-target="#interfaces" type="button" role="tab" aria-controls="interfaces">
-                Interfaces
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces only %}
         </li>
         {% if cable_sync %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="cables-tab" data-tab="cables" data-bs-toggle="tab" data-bs-target="#cables"
-                type="button" role="tab" aria-controls="cables">
-                Cables
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables only %}
         </li>
         {% endif %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="ipaddresses-tab" data-tab="ipaddresses" data-bs-toggle="tab"
-                data-bs-target="#ipaddresses" type="button" role="tab" aria-controls="ipaddresses">
-                IP Addresses
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses only %}
         </li>
         {% with model_name=object|meta:"model_name" %}
         {% if model_name == "device" %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="vlans-tab" data-tab="vlans" data-bs-toggle="tab"
-                data-bs-target="#vlans" type="button" role="tab" aria-controls="vlans">
-                VLANs
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans only %}
         </li>
         {% endif %}
         {% endwith %}
         {% if module_sync and object|meta:"model_name" == "device" %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="modules-tab" data-tab="modules" data-bs-toggle="tab"
-                data-bs-target="#modules" type="button" role="tab" aria-controls="modules">
-                Modules
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules only %}
         </li>
         {% endif %}
     </ul>
@@ -743,35 +770,44 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
 </div>
 <!-- Tab Content -->
 <div class="tab-content mt-3" id="librenmsTabContent">
-    <div class="tab-pane fade" id="interfaces" role="tabpanel" aria-labelledby="interfaces-tab"
-        data-tab-id="interfaces">
+    <div class="tab-pane{% if active_sync_tab == 'interfaces' %} show active{% endif %}" id="interfaces"
+        role="tabpanel" aria-labelledby="interfaces-tab"
+        data-tab-id="interfaces" data-fragment-url="{{ sync_cache_fragment_urls.interfaces }}">
         {% include 'netbox_librenms_plugin/_interface_sync.html' %}
     </div>
 
-    <div class="tab-pane fade" id="cables" role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables">
+    {% if cable_sync %}
+    <div class="tab-pane{% if active_sync_tab == 'cables' %} show active{% endif %}" id="cables"
+        role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables"
+        data-fragment-url="{{ sync_cache_fragment_urls.cables }}">
         {% include 'netbox_librenms_plugin/_cable_sync.html' %}
     </div>
+    {% endif %}
 
-    <div class="tab-pane fade" id="ipaddresses" role="tabpanel" aria-labelledby="ipaddresses-tab"
-        data-tab-id="ipaddresses">
+    <div class="tab-pane{% if active_sync_tab == 'ipaddresses' %} show active{% endif %}" id="ipaddresses"
+        role="tabpanel" aria-labelledby="ipaddresses-tab"
+        data-tab-id="ipaddresses" data-fragment-url="{{ sync_cache_fragment_urls.ipaddresses }}">
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
 
     {% if module_sync and object|meta:"model_name" == "device" %}
-    <div class="tab-pane fade" id="modules" role="tabpanel" aria-labelledby="modules-tab"
-        data-tab-id="modules">
+    <div class="tab-pane{% if active_sync_tab == 'modules' %} show active{% endif %}" id="modules"
+        role="tabpanel" aria-labelledby="modules-tab"
+        data-tab-id="modules" data-fragment-url="{{ sync_cache_fragment_urls.modules }}">
         {% include 'netbox_librenms_plugin/_module_sync.html' %}
     </div>
     {% endif %}
 
     {% with model_name=object|meta:"model_name" %}
     {% if model_name == "device" %}
-    <div class="tab-pane fade" id="vlans" role="tabpanel" aria-labelledby="vlans-tab"
-        data-tab-id="vlans">
+    <div class="tab-pane{% if active_sync_tab == 'vlans' %} show active{% endif %}" id="vlans"
+        role="tabpanel" aria-labelledby="vlans-tab"
+        data-tab-id="vlans" data-fragment-url="{{ sync_cache_fragment_urls.vlans }}">
         {% include 'netbox_librenms_plugin/_vlan_sync.html' %}
     </div>
     {% endif %}
     {% endwith %}
+</div>
 </div>
 
 
@@ -888,6 +924,7 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
 {% endif %}
 
 
+{% if not found_in_librenms and not device_info_unavailable %}
 <!-- Add to LibreNMS Modal -->
 <div class="modal fade" id="add-device-modal" tabindex="-1" aria-labelledby="addDeviceModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg">
@@ -1015,6 +1052,7 @@ Render the tabs in migrated mode too, or those interface/IP move controls are un
         </div>
     </div>
 </div>
+{% endif %}
 
 {% if object.virtual_chassis and vc_inventory_serials %}
 <!-- VC Member Serials Modal -->

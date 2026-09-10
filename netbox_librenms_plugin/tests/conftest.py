@@ -2,6 +2,7 @@
 
 import os
 from copy import deepcopy
+from itertools import chain
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -33,12 +34,7 @@ def _isolated_cache_config(caches_config):
 
 @pytest.fixture(autouse=True)
 def _isolate_test_cache(settings):
-    """Run every test in a unique namespace inside its worker cache database.
-
-    The isolated settings assign each pytest worker its own Redis database. A unique key
-    prefix then isolates individual tests without changing that worker assignment or clearing
-    another test process's cache.
-    """
+    """Give each test a unique namespace inside its pytest worker's cache database."""
     settings.CACHES = _isolated_cache_config(settings.CACHES)
     yield
 
@@ -58,20 +54,7 @@ def django_db_modify_db_settings(django_db_modify_db_settings):
 
 @pytest.fixture(autouse=True)
 def _clear_device_info_cache(_isolate_test_cache):
-    """Flush the plugin's caches between tests.
-
-    NetBox uses Redis, which (unlike the test DB) is NOT rolled back between tests, while
-    primary keys ARE reused after each rollback. Every plugin cache key is built from a model
-    name and a pk (``CacheMixin.get_cache_key`` → ``librenms_links_device_7_default``), so a
-    value cached by one test is read by the next test that draws the same pk, with entirely
-    different data behind it.
-
-    ``_isolate_test_cache`` already gives this test its own key prefix, so clearing the whole
-    namespace is exact: it cannot reach another test or the dev server. That covers the
-    ``librenms_*`` render caches, ``get_device_info()``'s short-lived lookup cache and the
-    ``import_device_data_*`` keys the bulk-import collision gate reads through
-    ``cache.get_many`` before it falls back to the stubbed ``get_device_info``.
-    """
+    """Clear each test's isolated Redis namespace because transaction rollbacks reuse primary keys."""
     from django.core.cache import cache
 
     clear_test_cache(cache)
@@ -97,7 +80,7 @@ def _seeded_sap_rows():
 
     Kept apart from :func:`_seeded_model_rows` because migration 0016 sets a second field on rows
     0013 already created, so these rows are applied with ``update()`` rather than
-    ``get_or_create()``. Both the restore and its intactness check read this one definition.
+    ``update_or_create()``. Both the restore and its intactness check read this one definition.
     """
     import importlib
 
@@ -107,95 +90,137 @@ def _seeded_sap_rows():
     yield PortStackLagPattern, "librenms_os", "sap_name_pattern", sap.INITIAL_SAP_PATTERNS
 
 
-def _seeded_inventory_rules():
-    """Read the inventory and serial seeds from their migration's definitions."""
+def _seeded_rule_rows():
+    """Yield ``(model, lookup, defaults)`` for every rule row the data migrations seed.
+
+    Kept apart from :func:`_seeded_model_rows` because these rows are identified by a
+    composite lookup rather than one field. The values are read from the migrations so the
+    restore cannot drift from what they seed.
+    """
     import importlib
 
     from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
 
-    migration = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
-    yield InventoryIgnoreRule, {"name": migration.DEFAULT_RULE["name"]}, migration.DEFAULT_RULE
+    inventory = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    for rule in inventory.INITIAL_INVENTORY_IGNORE_RULES:
+        yield InventoryIgnoreRule, {"name": rule["name"]}, rule
+
+    rules = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+    yield InventoryIgnoreRule, {"name": rules.DEFAULT_RULE["name"]}, rules.DEFAULT_RULE
     yield (
         NormalizationRule,
-        {key: migration.SERIAL_RULE[key] for key in ("scope", "match_pattern")},
-        migration.SERIAL_RULE,
+        {"scope": rules.SERIAL_RULE["scope"], "match_pattern": rules.SERIAL_RULE["match_pattern"]},
+        rules.SERIAL_RULE,
     )
 
 
 def seed_migration_rows():
-    """Recreate every row the plugin's data migrations seed."""
+    """Recreate every row the plugin's data migrations seed, with its declared value."""
     for model, lookup_field, value_field, rows in _seeded_model_rows():
         for lookup, value in rows:
-            model.objects.get_or_create(**{lookup_field: lookup}, defaults={value_field: value})
+            model.objects.update_or_create(**{lookup_field: lookup}, defaults={value_field: value})
 
-    # get_or_create above matches the 0013 row and leaves the 0016 field at the model's blank
+    # update_or_create above sets only the 0013 field and leaves the 0016 one at the model's blank
     # default, so the Nokia SAP rule silently disappears for every test after the first
     # transactional one. Re-apply it from the migration's own seed data.
     for model, lookup_field, value_field, rows in _seeded_sap_rows():
         for lookup, value in rows:
             model.objects.filter(**{lookup_field: lookup}).update(**{value_field: value})
 
-    for model, lookup, defaults in _seeded_inventory_rules():
-        model.objects.get_or_create(**lookup, defaults=defaults)
+    for model, lookup, defaults in _seeded_rule_rows():
+        model.objects.update_or_create(**lookup, defaults=defaults)
+
+
+_transactional_seed_restore_required = False
+
+
+def _restore_librenms_custom_field():
+    """Recreate the custom field that the plugin's post-migrate hook seeds."""
+    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+    executed_aliases = set(getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set()))
+    executed_aliases.discard("default")
+    _ensure_librenms_id_custom_field._executed_aliases = executed_aliases
+    _ensure_librenms_id_custom_field(sender=None, using="default")
+
+
+def _seeds_are_intact():
+    """Return whether every declared seed row and the plugin's custom field are present."""
+    from dcim.models import Device, Interface
+    from django.contrib.contenttypes.models import ContentType
+    from extras.models import CustomField
+    from virtualization.models import VirtualMachine, VMInterface
+
+    # Both seeds, or a corrupted sap_name_pattern reports the state as intact and
+    # restore_seeded_state(force=False) skips the repair it needs.
+    for model, lookup_field, value_field, rows in chain(_seeded_model_rows(), _seeded_sap_rows()):
+        stored = set(model.objects.values_list(lookup_field, value_field))
+        if not stored.issuperset(rows):
+            return False
+
+    for model, _lookup, defaults in _seeded_rule_rows():
+        if not model.objects.filter(**defaults).exists():
+            return False
+
+    custom_field = CustomField.objects.filter(name="librenms_id", type="json").first()
+    if custom_field is None:
+        return False
+    required_type_ids = {
+        content_type.pk
+        for content_type in ContentType.objects.get_for_models(
+            Device,
+            VirtualMachine,
+            Interface,
+            VMInterface,
+        ).values()
+    }
+    configured_type_ids = set(custom_field.object_types.values_list("pk", flat=True))
+    return configured_type_ids.issuperset(required_type_ids)
+
+
+def restore_seeded_state(*, force):
+    """Recreate every row and custom field a flush removed, unless the seeds are intact."""
+    if not force and _seeds_are_intact():
+        return False
+    seed_migration_rows()
+    _restore_librenms_custom_field()
+    return True
 
 
 @pytest.fixture(autouse=True)
 def _restore_migration_seeded_rows(request):
-    """Re-seed the rows a transactional test's flush removes.
-
-    ``django_db(transaction=True)`` truncates every table, including rows a data migration
-    created, so LAG detection loses its per-OS name patterns and every later test in the run
-    sees an empty recognition table.
-
-    The flush runs in the ``transactional_db`` teardown, which finalizes AFTER this fixture, so
-    the restore has to happen on the way in. A non-transactional test runs inside a transaction
-    that is rolled back, so seeding here is visible to it and leaves nothing behind.
-    """
+    """Restore data-migration seeds before tests after a transactional test flushes them."""
     # Gate on the marker, not on request.fixturenames: pytest-django pulls "db" in dynamically
     # from its own autouse fixture, so it is still absent from the closure at this point.
+    global _transactional_seed_restore_required
+
     marker = request.node.get_closest_marker("django_db")
     requested = {"db", "transactional_db"} & set(request.fixturenames)
     if marker is None and not requested:
         yield
         return
 
-    db_fixture = "transactional_db" if (marker and marker.kwargs.get("transaction")) else "db"
+    # A test may ask for "transactional_db" by name instead of marking transaction=True. Both mean
+    # the database is flushed rather than rolled back, so both must pick the transactional fixture
+    # and arm the next restore; selecting "db" here would leave that to pytest-django's own
+    # delegation and to the intactness probe noticing the flush afterwards.
+    is_transactional = bool(marker and marker.kwargs.get("transaction")) or "transactional_db" in requested
+    db_fixture = "transactional_db" if is_transactional else "db"
     # An autouse fixture is set up BEFORE the fixtures it does not request, so ask for the
     # database one here: querying without it raises "Database access not allowed".
     request.getfixturevalue(db_fixture)
-    for model, _lookup_field, _value_field, _rows in _seeded_model_rows():
-        if not model.objects.exists():
-            seed_migration_rows()
-            break
-    _restore_librenms_id_custom_field()
+    restore_seeded_state(force=_transactional_seed_restore_required)
+    _transactional_seed_restore_required = False
+
     yield
 
-
-def _restore_librenms_id_custom_field():
-    """Recreate the librenms_id custom field a transactional flush removed.
-
-    The handler short-circuits on its own ``_executed_aliases`` guard, so after a flush it will
-    not recreate the field by itself. Only act when the field is actually gone, which keeps this
-    to one cheap existence check for the non-transactional majority.
-    """
-    from extras.models import CustomField
-
-    from netbox_librenms_plugin import _ensure_librenms_id_custom_field
-
-    if CustomField.objects.filter(name="librenms_id").exists():
-        return
-    _ensure_librenms_id_custom_field._executed_aliases.discard("default")
-    _ensure_librenms_id_custom_field(sender=None, using="default")
+    if is_transactional:
+        _transactional_seed_restore_required = True
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
-    """Leave the reused database seeded for the next run.
-
-    The last transactional test flushes on its way out, after every function-scoped fixture has
-    finalized. Without this the seeded rows stay missing in the reused database and the next run
-    starts with LAG pattern detection silently disabled.
-    """
+    """Restore data-migration seeds before and after a reused-database run."""
 
     from django.db import connection
 
@@ -205,12 +230,13 @@ def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
         return
 
     with django_db_blocker.unblock():
-        seed_migration_rows()
+        restore_seeded_state(force=True)
 
     yield
 
     with django_db_blocker.unblock():
         seed_migration_rows()
+        _restore_librenms_custom_field()
 
 
 # =============================================================================
@@ -458,15 +484,7 @@ def delete_keeping_pk(obj):
 
 
 def make_superuser(username="review-su"):
-    """Return an ACTUAL active superuser for permission-sensitive view tests.
-
-    ``User.objects.first()`` can hand back a pre-seeded non-superuser (DB-ordering dependent),
-    which would run the test under the wrong principal and cover the wrong branch. This filters
-    explicitly for an active superuser, and otherwise get_or_creates one — reusing and correcting
-    a pre-existing inactive/non-superuser row of the same username rather than tripping the
-    unique-username constraint a bare create() would hit. NetBox's User model has no is_staff
-    field; only is_superuser/is_active gate access here.
-    """
+    """Return an active superuser without relying on database ordering or an ``is_staff`` field."""
     from django.contrib.auth import get_user_model
 
     User = get_user_model()

@@ -1,11 +1,16 @@
 """Tests for ModuleMismatchPreviewView, ReplaceModuleView, and MoveModuleView."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 
-from netbox_librenms_plugin.tests.view_test_helpers import get as _get, post as _post
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    get as _get,
+    post as _post,
+    trusted_module_inventory_payload,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -19,6 +24,7 @@ def _make_device(pk=24, name="test-device"):
     d.name = name
     d.device_type = MagicMock()
     d.device_type.manufacturer = None
+    d.virtual_chassis = None
     return d
 
 
@@ -131,10 +137,111 @@ class TestModuleMismatchPreviewView:
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
         ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
             resp = _get(view, request, pk=24)
 
         assert resp.status_code == 400
+
+    @pytest.mark.django_db
+    def test_the_preview_refuses_an_oob_sourced_row(self):
+        """The preview is the entry point to Replace, so it must refuse an OOB row too.
+
+        Offering the dialog for inventory the install path will not act on invites the user into
+        a flow that cannot succeed.
+        """
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("preview-oob-device")
+        module_type = make_module_type("PREVIEW-OOB-TYPE")
+        bay = make_module_bay(device, "Preview OOB Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=module_type,
+            serial="PREVIEW-OOB-SERIAL",
+        )
+        request = make_request(
+            "get",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+        )
+        view = make_view(
+            ModuleMismatchPreviewView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": module_type.model,
+                        "entPhysicalSerialNum": "OOB-SERIAL",
+                        "_source": "oob",
+                    }
+                ],
+            ),
+            timeout=300,
+        )
+        try:
+            response = view.get(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 400
+        assert b"read-only" in response.content
+
+    @pytest.mark.django_db
+    def test_the_preview_shows_the_serial_without_the_vendor_marker(self):
+        """The preview sits next to the stored module serial, which carries no "S/N ".
+
+        Showing the raw inventory value here reads as a mismatch against a module whose
+        serial was written through the same normalization.
+        """
+        from django.http import HttpResponse
+
+        view = self._view()
+        device = _make_device()
+        installed = _make_module(serial="NS123", type_id=5, type_model="XCM-7s")
+        request = _make_request(data={"module_id": "42", "ent_index": "100"})
+        view.request = request
+        cached = [{"entPhysicalIndex": 100, "entPhysicalModelName": "XCM-7s", "entPhysicalSerialNum": "S/N NS123"}]
+
+        matched_type = MagicMock()
+        matched_type.pk = 5
+
+        with (
+            patch(
+                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+                side_effect=[device, installed],
+            ),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
+                return_value={"XCM-7s": matched_type},
+            ),
+            patch("dcim.models.Module") as mock_module_cls,
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
+        ):
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
+            mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
+            mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 0
+            view.get(request, pk=24)
+
+        context = mock_render.call_args[0][2]
+        assert context["librenms_serial"] == "NS123"
+        # The reported symptom: the row read Serial Mismatch against its own inventory.
+        assert context["serial_mismatch"] is False
 
     def test_renders_template_on_success(self):
         """GET with valid data returns 200 with rendered template."""
@@ -161,11 +268,16 @@ class TestModuleMismatchPreviewView:
                 "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
                 return_value={"XCM-7s": matched_type},
             ),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
+            # Scope-aware: a blanket return_value would also rewrite the serial, which now
+            # goes through this same helper.
+            patch(
+                "netbox_librenms_plugin.utils.apply_normalization_rules",
+                side_effect=lambda value, scope, *a, **kw: "XCM-7s" if scope == "module_type" else value,
+            ),
             patch("dcim.models.Module") as mock_module_cls,
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
             mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 0
             resp = view.get(request, pk=24)
@@ -202,11 +314,16 @@ class TestModuleMismatchPreviewView:
                 "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
                 return_value={"XCM-7s": matched_type},
             ),
-            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
+            # Scope-aware: a blanket return_value would also rewrite the serial, which now
+            # goes through this same helper.
+            patch(
+                "netbox_librenms_plugin.utils.apply_normalization_rules",
+                side_effect=lambda value, scope, *a, **kw: "XCM-7s" if scope == "module_type" else value,
+            ),
             patch("dcim.models.Module") as mock_module_cls,
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
             mock_module_cls.objects.restrict.return_value = mock_module_cls.objects
             mock_module_cls.objects.filter.return_value.exclude.return_value.count.return_value = 1
             mock_module_cls.objects.filter.return_value.select_related.return_value.first.return_value = conflict_module
@@ -218,12 +335,7 @@ class TestModuleMismatchPreviewView:
 
 @pytest.mark.django_db
 class TestModuleMismatchTypeMatchedBadge:
-    """The mismatch modal badges the LibreNMS model as matched when it resolves to the installed type.
-
-    DB-backed and rendering the REAL template (the sibling tests above patch render/resolve): builds a
-    real ModuleTypeMapping so a LibreNMS model string that DIFFERS from the NetBox type still resolves
-    to it — the user's serial-mismatch case where only text said "same type".
-    """
+    """Verify with real models and rendering that a mapped LibreNMS model gets the installed-type match badge."""
 
     def _build(self, *, installed_type_model, mapped_type_model, librenms_model, installed_serial, librenms_serial):
         from dcim.models import (
@@ -289,16 +401,16 @@ class TestModuleMismatchTypeMatchedBadge:
         ckey = view.get_cache_key(sync_device, "inventory", server_key="default")
         cache.set(
             ckey,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                sync_device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": librenms_model,
                         "entPhysicalSerialNum": librenms_serial,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             with patch.object(view, "require_object_permissions", return_value=None):
@@ -370,6 +482,9 @@ class TestReplaceModuleView:
             ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            # Relocation exists from NetBox 4.7; the CI matrix also gates 4.4/4.6, where the view
+            # refuses before this assertion's code path is reached.
+            patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
@@ -405,6 +520,192 @@ class TestReplaceModuleView:
         mock_redirect.assert_called_once()
 
     @pytest.mark.django_db
+    def test_an_oob_sourced_row_cannot_replace_a_host_module(self):
+        """OOB-controller inventory is merged for display only and is read-only.
+
+        The shared install helper rejects it, but this view builds its own Module, so a crafted
+        POST naming an OOB row's entPhysicalIndex would otherwise install it onto the host.
+        """
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("replace-oob-device")
+        old_type = make_module_type("REPLACE-OOB-OLD")
+        new_type = make_module_type("REPLACE-OOB-NEW")
+        bay = make_module_bay(device, "Replace OOB Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=old_type,
+            serial="REPLACE-OOB-KEEP-ME",
+        )
+        request = make_request(
+            "post",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+        )
+        view = make_view(
+            ReplaceModuleView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": "OOB-SERIAL",
+                        "_source": "oob",
+                    }
+                ],
+            ),
+            timeout=300,
+        )
+        try:
+            _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        installed.refresh_from_db()
+        assert installed.module_type == old_type
+        assert installed.serial == "REPLACE-OOB-KEEP-ME"
+        assert Module.objects.filter(device=device, module_bay=bay).count() == 1
+        assert any("read-only" in text for text in message_texts(request))
+
+    @pytest.mark.django_db
+    def test_the_replacement_stores_the_serial_without_the_vendor_marker(self):
+        """The stored serial must match what the install path writes for the same inventory row.
+
+        Juniper reports "S/N BCFB9793"; storing that verbatim leaves the module reading
+        Serial Mismatch against its own inventory row forever.
+        """
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("replace-serial-marker-device")
+        old_type = make_module_type("REPLACE-MARKER-OLD")
+        new_type = make_module_type("REPLACE-MARKER-NEW")
+        bay = make_module_bay(device, "Replace Marker Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=old_type,
+            serial="REPLACE-MARKER-OLD-SERIAL",
+        )
+        request = make_request(
+            "post",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+        )
+        view = make_view(
+            ReplaceModuleView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": "S/N NS123",
+                    }
+                ],
+            ),
+            timeout=300,
+        )
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+
+    @pytest.mark.django_db
+    def test_a_rule_that_leaves_padding_still_stores_a_clean_serial(self):
+        """A serial rule is operator-written, so it can drop a prefix and leave the space behind.
+
+        The padded serial would then never match the same serial normalized anywhere else.
+        """
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        # Replace the seeded rule, which consumes the space itself, with one that does not.
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_SERIAL,
+            match_pattern=r"^S/N(.+)$",
+            replacement=r"\1",
+            priority=100,
+        )
+
+        device = make_device("replace-padded-serial-device")
+        old_type = make_module_type("REPLACE-PADDED-OLD")
+        new_type = make_module_type("REPLACE-PADDED-NEW")
+        bay = make_module_bay(device, "Replace Padded Bay")
+        installed = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=old_type,
+            serial="REPLACE-PADDED-OLD-SERIAL",
+        )
+        request = make_request(
+            "post",
+            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+        )
+        view = make_view(
+            ReplaceModuleView,
+            request,
+            librenms_api=SimpleNamespace(server_key="default"),
+        )
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [
+                    {
+                        "entPhysicalIndex": 100,
+                        "entPhysicalModelName": new_type.model,
+                        "entPhysicalSerialNum": "S/N NS123",
+                    }
+                ],
+            ),
+            timeout=300,
+        )
+        try:
+            _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+
+    @pytest.mark.django_db
     def test_replace_deletes_old_and_creates_new(self):
         """POST with valid data deletes old module and creates new one."""
         from types import SimpleNamespace
@@ -438,16 +739,16 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": new_type.model,
                         "entPhysicalSerialNum": "REPLACE-REAL-NEW-SERIAL",
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
             timeout=300,
         )
         try:
@@ -505,16 +806,16 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": new_type.model,
                         "entPhysicalSerialNum": conflict.serial,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
             timeout=300,
         )
         try:
@@ -593,16 +894,16 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 100,
                         "entPhysicalModelName": new_type.model,
                         "entPhysicalSerialNum": "REPLACE-ADOPTION-NEW-SERIAL",
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
             timeout=300,
         )
         try:
@@ -650,7 +951,8 @@ class TestMoveModuleView:
     def _view(self):
         from netbox_librenms_plugin.views.sync.modules import MoveModuleView
 
-        v = object.__new__(MoveModuleView)
+        v = MoveModuleView()
+        v._librenms_api = SimpleNamespace(server_key="production")
         v.required_object_permissions = {}
         return v
 
@@ -693,6 +995,7 @@ class TestMoveModuleView:
             ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
@@ -736,6 +1039,9 @@ class TestMoveModuleView:
             ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            # Relocation exists from NetBox 4.7; the CI matrix also gates 4.4/4.6, where the view
+            # refuses before this assertion's code path is reached.
+            patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,

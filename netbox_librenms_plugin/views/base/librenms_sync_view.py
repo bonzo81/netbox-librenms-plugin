@@ -3,23 +3,38 @@ import re
 from django.conf import settings as django_settings
 from django.contrib import messages
 from django.shortcuts import render
+from django.urls import reverse
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.sync_cache import (
+    TAB_SPECS,
+    SyncCacheConsistency,
+    SyncTab,
+    SyncTabState,
+    mapped_server_keys,
+    sync_cache_browser_contract,
+)
 from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     find_matching_platform,
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
+    get_user_pref,
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     resolve_naming_preferences,
     resolve_server_mapping_display_id,
+    save_user_pref,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+# Remembering the tab is what makes the page usable across a detour into NetBox proper:
+# an operator who leaves to fix a bay mapping comes back to the tab they were working in.
+SYNC_TAB_PREFERENCE = "plugins.netbox_librenms_plugin.sync_tab"
 
 INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
 
@@ -136,7 +151,22 @@ class BaseLibreNMSSyncView(
         """Get the context data for the LibreNMS sync view."""
         # Get context from parent classes (including LibreNMSAPIMixin)
         context = super().get_context_data()
-        active_sync_tab = request.GET.get("tab") or "interfaces"
+        coordinator = SyncCacheConsistency(obj)
+        applicable_tabs = coordinator.applicable_tabs()
+        applicable_tab_names = {tab.value for tab in applicable_tabs}
+        posted_sync_tab = request.GET.get("tab")
+        remembered_sync_tab = get_user_pref(request, SYNC_TAB_PREFERENCE)
+        requested_sync_tab = posted_sync_tab or remembered_sync_tab or SyncTab.INTERFACES.value
+        active_sync_tab = requested_sync_tab if requested_sync_tab in applicable_tab_names else SyncTab.INTERFACES.value
+        # Remember only a tab the operator actually asked for. A fallback render must not
+        # overwrite the choice, and an unchanged choice must not cost a write per page view.
+        if posted_sync_tab in applicable_tab_names and active_sync_tab != remembered_sync_tab:
+            save_user_pref(request, SYNC_TAB_PREFERENCE, active_sync_tab)
+        sync_tab_urls = {}
+        for sync_tab in applicable_tabs:
+            query = request.GET.copy()
+            query["tab"] = sync_tab.value
+            sync_tab_urls[sync_tab.value] = f"{request.path}?{query.urlencode()}"
 
         # Add our specific context
         context.update(
@@ -144,7 +174,7 @@ class BaseLibreNMSSyncView(
                 "object": obj,
                 "tab": self.tab,
                 "active_sync_tab": active_sync_tab,
-                "interface_name_selector_tabs": ",".join(INTERFACE_NAME_SELECTOR_TABS),
+                "sync_tab_urls": sync_tab_urls,
                 "interface_name_selector_visible": active_sync_tab in INTERFACE_NAME_SELECTOR_TABS,
                 # self.librenms_id is normalised to a positive int or None at assignment
                 # (see post()), so `is not None` is correct here — 0/negatives never reach it.
@@ -183,7 +213,25 @@ class BaseLibreNMSSyncView(
                 }
             )
 
-        librenms_info = self.get_librenms_device_info(obj, request)
+        render_server_key = self._scoped_render_server_key or self.active_server_key
+        sync_cache_status = None
+        if render_server_key and render_server_key in mapped_server_keys(obj, render_server_key):
+            sync_cache_status = coordinator.status_for_request(
+                request,
+                render_server_key,
+                active_tab=SyncTab(active_sync_tab),
+            )
+
+        active_cache_state = sync_cache_status.get(active_sync_tab) if sync_cache_status else None
+        cache_only_device_info = bool(
+            active_cache_state
+            and active_cache_state["state"] in (SyncTabState.INVALIDATED.value, SyncTabState.REFRESH_FAILED.value)
+        )
+        librenms_info = self.get_librenms_device_info(
+            obj,
+            request,
+            cache_only=cache_only_device_info,
+        )
 
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
@@ -214,6 +262,8 @@ class BaseLibreNMSSyncView(
         librenms_id_serial_confirmed = _lookup_is_vm or bool(
             _librenms_serial and _librenms_serial != "-" and _netbox_serial and _librenms_serial == _netbox_serial
         )
+        device_info_unavailable = librenms_info.get("device_info_unavailable", False)
+        show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
 
         context.update(
             {
@@ -231,13 +281,20 @@ class BaseLibreNMSSyncView(
                 # misconfigured default no client is bound, so the property would reconstruct
                 # LibreNMSAPI() and 500 the degraded render; the render key also keeps the page's
                 # forms scoped to the requested (gone) server so they fail closed server-side.
-                "server_key": self._scoped_render_server_key or self.active_server_key,
-                "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
-                "v3form": AddToLIbreSNMPV3(prefix="v3"),
+                "server_key": render_server_key,
+                # Scope the poller-group choices to the same render key the hidden field carries:
+                # they used to come from the installation default on every page, so a non-default
+                # tab offered groups that belong to another server.
+                "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2", server_key=render_server_key)
+                if show_add_device
+                else None,
+                "v3form": AddToLIbreSNMPV3(prefix="v3", server_key=render_server_key) if show_add_device else None,
                 "librenms_device_id": self.librenms_id,
                 "found_in_librenms": librenms_info.get("found_in_librenms"),
+                "device_info_unavailable": device_info_unavailable,
                 "librenms_device_details": librenms_info.get("librenms_device_details"),
                 "mismatched_device": librenms_info.get("mismatched_device"),
+                "librenms_lookup_error": librenms_info.get("librenms_lookup_error"),
                 **librenms_info["librenms_device_details"],
                 "interface_name_field": interface_name_field,
                 "platform_info": platform_info,
@@ -267,6 +324,37 @@ class BaseLibreNMSSyncView(
                 **self._build_migrated_context(obj, self._scoped_render_server_key or self.active_server_key),
             }
         )
+
+        if sync_cache_status is not None:
+            object_type = obj._meta.model_name
+            for sync_tab in applicable_tabs:
+                if sync_cache_status[sync_tab.value]["snapshot_available"]:
+                    continue
+                spec = TAB_SPECS[sync_tab]
+                tab_context = context.get(spec.context_name)
+                if isinstance(tab_context, dict):
+                    context[spec.context_name] = {
+                        **tab_context,
+                        spec.table_context_key: None,
+                        "cache_expiry": None,
+                    }
+            context.update(
+                {
+                    "sync_cache_status": sync_cache_status,
+                    "sync_cache_contract": sync_cache_browser_contract(applicable_tabs),
+                    "sync_cache_status_url": reverse(
+                        "plugins:netbox_librenms_plugin:sync_cache_status",
+                        kwargs={"object_type": object_type, "pk": obj.pk},
+                    ),
+                    "sync_cache_fragment_urls": {
+                        tab.value: reverse(
+                            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+                            kwargs={"object_type": object_type, "pk": obj.pk, "tab": tab.value},
+                        )
+                        for tab in applicable_tabs
+                    },
+                }
+            )
 
         return context
 
@@ -313,6 +401,13 @@ class BaseLibreNMSSyncView(
 
         Returns ``None`` for legacy bare-int format (no per-server info to show)
         and ``None`` when the CF is absent/invalid.
+
+        Args:
+            obj (Device or VirtualMachine): The NetBox object with the LibreNMS mappings.
+            active_server_key (str): The key for the active LibreNMS server.
+
+        Returns:
+            list[dict] or None: The server mappings, or None when no mapping information is available.
         """
         cf_value = obj.custom_field_data.get("librenms_id")
         if not isinstance(cf_value, dict) or not cf_value:
@@ -368,10 +463,12 @@ class BaseLibreNMSSyncView(
         result.sort(key=lambda e: 0 if e["is_active"] else (1 if e["is_configured"] else 2))
         return result or None
 
-    def get_librenms_device_info(self, obj, request=None):
+    def get_librenms_device_info(self, obj, request=None, *, cache_only=False):
         """Get the LibreNMS device information for the given object."""
         found_in_librenms = False
         mismatched_device = False
+        device_info_unavailable = False
+        lookup_error = None
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
@@ -382,10 +479,18 @@ class BaseLibreNMSSyncView(
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
             "vc_inventory_serials": [],
+            "vc_inventory_not_loaded": False,
         }
 
         if self.librenms_id is not None:
-            success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+            success, device_info = self.librenms_api.get_device_info(self.librenms_id, cache_only=cache_only)
+            # A lookup that failed for its own reason must not be reported as a missing device.
+            from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
+            lookup_error = device_info if isinstance(device_info, LibreNMSLookupError) else None
+            # One flag for "no usable device info", so every consumer (status text, the add
+            # action, its modal, the tab region) stays in step. The reason travels separately.
+            device_info_unavailable = (cache_only and not success) or lookup_error is not None
             # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
             # device_info.get(...) calls below; fall back to the default details block instead
             # of trusting success=True alone (issue #100).
@@ -450,10 +555,14 @@ class BaseLibreNMSSyncView(
                     }
                 )
 
-                # For Virtual Chassis, fetch inventory
+                # For Virtual Chassis, fetch inventory. Inventory has no snapshot, so a
+                # cache-only render must skip it instead of contacting LibreNMS. The skip is
+                # reported separately, or an unloaded inventory renders as an empty one.
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    vc_serials = self._get_vc_inventory_serials(obj)
-                    librenms_device_details["vc_inventory_serials"] = vc_serials
+                    if cache_only:
+                        librenms_device_details["vc_inventory_not_loaded"] = True
+                    else:
+                        librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
 
                 # Device was retrieved successfully via librenms_id — trust the ID
                 found_in_librenms = True
@@ -513,42 +622,69 @@ class BaseLibreNMSSyncView(
 
         return {
             "found_in_librenms": found_in_librenms,
+            "device_info_unavailable": device_info_unavailable,
             "librenms_device_details": librenms_device_details,
             "mismatched_device": mismatched_device,
+            "librenms_lookup_error": lookup_error,
         }
 
     def get_interface_context(self, request, obj):
         """
         Get the context data for interface sync.
+
         Subclasses should override this method.
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
     def get_cable_context(self, request, obj):
         """
         Get the context data for cable sync.
+
         Subclasses should override this method if applicable.
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
     def get_ip_context(self, request, obj):
         """
         Get the context data for IP address sync.
+
         Subclasses should override this method.
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
     def get_vlan_context(self, request, obj):
         """
         Get the context data for VLAN sync.
+
         Subclasses should override this method.
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
     def get_module_context(self, request, obj):
         """
         Get the context data for module sync.
+
         Subclasses should override this method if applicable (e.g. VMs return None).
+
+        Args:
+            request (HttpRequest): The current request.
+            obj (Device or VirtualMachine): The NetBox object to synchronize.
         """
         return None
 
@@ -562,8 +698,12 @@ class BaseLibreNMSSyncView(
         pattern ``-M{position}`` and name ``switch01-m2``, this returns
         ``switch01``.
 
-        Returns the stripped name, or None if it equals the original
-        (i.e. no suffix was found).
+        Args:
+            name (str): The device name.
+
+        Returns:
+            str or None: The stripped name, or None if it equals the original
+                (i.e. no suffix was found).
         """
         try:
             from netbox_librenms_plugin.models import LibreNMSSettings

@@ -26,6 +26,13 @@ from django.urls import get_script_prefix, reverse
 from django.views import View
 from ipam.models import IPAddress
 
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    claim_sync_subjects,
+    schedule_request_cache_mutation,
+    sync_subject_key,
+)
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
     DEVICE_IP_FK_LABELS,
@@ -39,6 +46,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    SyncSubjectClaimMixin,
     relock_scoped_row,
     resolve_configured_server_key,
     validated_referer,
@@ -53,11 +61,18 @@ def _parse_marker_winner_pk(device_id):
 
     A marker id from a tampered/legacy source may arrive as a string: accept ONLY a plain digit
     string (``str.isdecimal()``) so whitespace/sign/decimal forms (``" 5 "``, ``"+5"``, ``"1.9"``)
-    fail closed — deliberately stricter than the raw ``int()`` :func:`~netbox_librenms_plugin.utils.
-    coerce_librenms_id` applies to LibreNMS ids. The int/positive-value coercion itself is delegated
-    to ``coerce_librenms_id`` (bool rejected, positive int only) so that rule lives in one place and
-    can't drift from the rest of the plugin's id handling. Shared by :func:`_resolve_winner_for_donor`
-    and :func:`_winner_unavailable_reason` so the two can't disagree on a parseable winner id.
+    fail closed. This is deliberately stricter than the raw ``int()``
+    :func:`~netbox_librenms_plugin.utils.coerce_librenms_id` applies to LibreNMS ids. The
+    int/positive-value coercion itself is delegated to ``coerce_librenms_id`` (bool rejected,
+    positive int only) so that rule lives in one place and can't drift from the rest of the plugin's
+    id handling. This function is shared by :func:`_resolve_winner_for_donor` and
+    :func:`_winner_unavailable_reason` so the two can't disagree on a parseable winner id.
+
+    Args:
+        device_id (object): The marker's candidate winner device id.
+
+    Returns:
+        int | None: The positive winner device pk, or None if the marker value is invalid.
     """
     if isinstance(device_id, str) and not device_id.isdecimal():
         return None
@@ -217,6 +232,11 @@ def _safe_referer(request, fallback=None):
     return fallback or get_script_prefix()
 
 
+def _schedule_winner_cache_mutation(request, winner, source_tab, server_key):
+    """Schedule cleanup of the winner's mapped snapshots after a move."""
+    schedule_request_cache_mutation(request, winner, source_tab, server_key)
+
+
 def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallback_url=None):
     """
     Build the common HTMX (or redirect) response after a successful move.
@@ -239,8 +259,10 @@ def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallba
     """
     messages.add_message(request, level, message)
     if request.headers.get("HX-Request"):
-        return HttpResponse(status=status, headers={"HX-Refresh": "true"})
-    return redirect(_safe_referer(request, fallback_url))
+        response = HttpResponse(status=status, headers={"HX-Refresh": "true"})
+    else:
+        response = redirect(_safe_referer(request, fallback_url))
+    return apply_request_cache_transition(request, response)
 
 
 def _reconcile_donor_device_ip_fks(donor, winner):
@@ -322,7 +344,9 @@ def _reconcile_donor_device_ip_fks(donor, winner):
     return notes
 
 
-class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class _BaseMoveToWinnerView(
+    LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, SyncSubjectClaimMixin, View
+):
     """Shared plumbing for the per-resource move endpoints."""
 
     # Per-request, server-built non-HTMX redirect fallback (donor sync tab +
@@ -458,9 +482,12 @@ def _refresh_cable_termination_caches(interface):
 
     ``CableTermination`` denormalizes ``_device``/``_rack``/``_location``/``_site``
     for cable-list filtering, and recomputes them only inside its own ``save()``
-    (``cache_related_objects()``) — nothing tracks an Interface changing device
+    (``cache_related_objects()``). Nothing tracks an Interface changing device
     (the same upstream gap as netbox#9788 for device site moves). Without this,
     the moved interface's cables keep filtering under the DONOR's cable lists.
+
+    Args:
+        interface (Interface): The moved interface whose cable termination caches to refresh.
     """
     ct_type = ContentType.objects.get_for_model(Interface)
     for termination in CableTermination.objects.filter(termination_type=ct_type, termination_id=interface.pk):
@@ -473,9 +500,16 @@ def _donor_side_dependents(interface, donor):
 
     Interfaces left on the donor whose ``lag``/``parent``/``bridge`` points at a
     moved row would persist as cross-device relationships NetBox itself refuses
-    to create — surfacing only as a validation error on their NEXT save. The
-    move therefore carries the whole family. BFS order (level by level) so a
+    to create. These relationships surface only as a validation error on their NEXT save. The
+    move therefore carries the whole family. The function uses BFS order (level by level), so a
     parent is always moved before its own dependents ``full_clean()``.
+
+    Args:
+        interface (Interface): The moved interface whose dependents to collect.
+        donor (Device): The donor device whose interfaces to search.
+
+    Returns:
+        list[Interface]: The locked dependent interfaces in breadth-first order.
     """
     dependents = []
     seen = {interface.pk}
@@ -549,173 +583,177 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 status=409,
             )
 
-        with transaction.atomic():
-            donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
-            if err is not None:
-                return err
-            # Lock the donor interface row and re-read it under the lock. A
-            # concurrent rename would otherwise let a stale name slip past the
-            # collision check below while the row is still moved by pk.
-            interface = (
-                self.restricted_queryset(Interface, "change")
-                .select_for_update(of=("self",))
-                .filter(pk=interface.pk, device=donor)
-                .first()
-            )
-            if interface is None:
-                return self._fail(
-                    request,
-                    f"Interface is no longer attached to '{donor.name}'.",
-                    status=409,
-                )
-            # Re-check the collision under the lock, using the locked name.
-            if Interface.objects.filter(device=winner, name=interface.name).exists():
-                return self._fail(
-                    request,
-                    f"Winner device '{winner.name}' already has an interface named '{interface.name}'. "
-                    "Rename or remove the existing interface first.",
-                    status=409,
-                )
-            # Carry the moved row's donor-side family (lag members, children, bridged
-            # peers) in the same transaction. Pre-check ALL their names on the winner
-            # before anything is saved, so the family either moves whole or not at all.
-            dependents = _donor_side_dependents(interface, donor)
-            # The family is DERIVED from the moved row, not the scoped pk, and every member is
-            # saved below. The move is all-or-nothing, so refuse unless the grant covers all of it.
-            if dependents:
-                dependent_pks = {dep.pk for dep in dependents}
-                authorized = set(
+        with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
+            with transaction.atomic():
+                donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
+                if err is not None:
+                    return err
+                # Lock the donor interface row and re-read it under the lock. A
+                # concurrent rename would otherwise let a stale name slip past the
+                # collision check below while the row is still moved by pk.
+                interface = (
                     self.restricted_queryset(Interface, "change")
-                    .filter(pk__in=dependent_pks)
-                    .values_list("pk", flat=True)
+                    .select_for_update(of=("self",))
+                    .filter(pk=interface.pk, device=donor)
+                    .first()
                 )
-                if authorized != dependent_pks:
+                if interface is None:
                     return self._fail(
                         request,
-                        f"Interface '{interface.name}' has attached interface(s) that must move with "
-                        "it, and you do not have permission to change all of them.",
-                        status=403,
+                        f"Interface is no longer attached to '{donor.name}'.",
+                        status=409,
                     )
-            colliding = sorted(
-                Interface.objects.filter(device=winner, name__in=[dep.name for dep in dependents]).values_list(
-                    "name", flat=True
+                # Re-check the collision under the lock, using the locked name.
+                if Interface.objects.filter(device=winner, name=interface.name).exists():
+                    return self._fail(
+                        request,
+                        f"Winner device '{winner.name}' already has an interface named '{interface.name}'. "
+                        "Rename or remove the existing interface first.",
+                        status=409,
+                    )
+                # Carry the moved row's donor-side family (lag members, children, bridged
+                # peers) in the same transaction. Pre-check ALL their names on the winner
+                # before anything is saved, so the family either moves whole or not at all.
+                dependents = _donor_side_dependents(interface, donor)
+                # The family is DERIVED from the moved row, not the scoped pk, and every member is
+                # saved below. The move is all-or-nothing, so refuse unless the grant covers all of it.
+                if dependents:
+                    dependent_pks = {dep.pk for dep in dependents}
+                    authorized = set(
+                        self.restricted_queryset(Interface, "change")
+                        .filter(pk__in=dependent_pks)
+                        .values_list("pk", flat=True)
+                    )
+                    if authorized != dependent_pks:
+                        return self._fail(
+                            request,
+                            f"Interface '{interface.name}' has attached interface(s) that must move with "
+                            "it, and you do not have permission to change all of them.",
+                            status=403,
+                        )
+                colliding = sorted(
+                    Interface.objects.filter(device=winner, name__in=[dep.name for dep in dependents]).values_list(
+                        "name", flat=True
+                    )
                 )
-            )
-            if colliding:
-                return self._fail(
-                    request,
-                    f"Winner device '{winner.name}' already has interface(s) named "
-                    f"{', '.join(colliding)}. They are attached to '{interface.name}' and must move "
-                    "with it — rename or remove the colliding interface(s) first.",
-                    status=409,
-                )
-            # Move via full_clean()+save(), not a bare .update(): a plain column update
-            # bypasses Interface.clean(), which is exactly what guards against the moved
-            # interface keeping a parent/lag/bridge that still lives on the donor (a
-            # cross-device link NetBox forbids). Surface that as a 409 so the user unlinks
-            # the relationship first rather than silently creating an invalid interface.
-            #
-            # NetBox's ComponentModel.clean() also hard-blocks ANY device change on an
-            # existing component ("Components cannot be moved to a different device"), keyed
-            # on the device_id cached into self._original_device at load time. That blanket
-            # block is precisely the operation this view exists to perform, so re-seed the
-            # cached original to the new device to defeat ONLY that one check — every other
-            # validation in clean() (the cross-device parent/lag/bridge checks above, name
-            # uniqueness, …) still runs, and save() still refreshes the denormalized
-            # _site/_location/_rack columns. A bare .update(device=...) would skip all of
-            # that (stale denormalized location + no relationship validation).
-            interface.device = winner
-            # Coupling to a private NetBox internal: ComponentModel seeds
-            # _original_device from device_id in __init__ and clean() raises
-            # "Components cannot be moved to a different device" when it differs
-            # (dcim/models/device_components.py — ComponentModel.__init__ /
-            # ComponentModel.clean). If a NetBox upgrade renames or drops this
-            # attribute, the move below will silently stop working or 500 — treat
-            # any change to that attribute as a breaking change in upgrade notes.
-            interface._original_device = winner.pk
-            try:
-                interface.full_clean()
-            except ValidationError as exc:
-                detail = validation_error_detail(exc)
-                return self._fail(
-                    request,
-                    f"Cannot move interface '{interface.name}' to '{winner.name}': {detail}",
-                    status=409,
-                )
-            try:
-                interface.save()
-            except IntegrityError:
-                # IntegrityError already marks this atomic block rollback-only; keep the
-                # rollback explicit here to match the non-database failure handlers below.
-                transaction.set_rollback(True)
-                # A concurrent rename/create on the winner side can still trip a DB unique
-                # constraint between our name re-check and this save. Surface it as the same
-                # 409 the collision check uses rather than letting it bubble up as a 500.
-                logger.warning(
-                    "IntegrityError moving interface pk=%s to winner pk=%s (concurrent winner-side change)",
-                    interface.pk,
-                    winner.pk,
-                )
-                return self._fail(
-                    request,
-                    f"Winner device '{winner.name}' already has an interface named '{interface.name}'. "
-                    "Rename or remove the existing interface first.",
-                    status=409,
-                )
-
-            # Carry the donor-side family collected (and locked) above. BFS order
-            # guarantees each dependent's lag/parent/bridge target has already moved,
-            # so full_clean()'s cross-device checks pass for real.
-            for dep in dependents:
-                dep.device = winner
-                dep._original_device = winner.pk  # same ComponentModel re-seed as above
+                if colliding:
+                    return self._fail(
+                        request,
+                        f"Winner device '{winner.name}' already has interface(s) named "
+                        f"{', '.join(colliding)}. They are attached to '{interface.name}' and must move "
+                        "with it — rename or remove the colliding interface(s) first.",
+                        status=409,
+                    )
+                # Move via full_clean()+save(), not a bare .update(): a plain column update
+                # bypasses Interface.clean(), which is exactly what guards against the moved
+                # interface keeping a parent/lag/bridge that still lives on the donor (a
+                # cross-device link NetBox forbids). Surface that as a 409 so the user unlinks
+                # the relationship first rather than silently creating an invalid interface.
+                #
+                # NetBox's ComponentModel.clean() also hard-blocks ANY device change on an
+                # existing component ("Components cannot be moved to a different device"), keyed
+                # on the device_id cached into self._original_device at load time. That blanket
+                # block is precisely the operation this view exists to perform, so re-seed the
+                # cached original to the new device to defeat ONLY that one check — every other
+                # validation in clean() (the cross-device parent/lag/bridge checks above, name
+                # uniqueness, …) still runs, and save() still refreshes the denormalized
+                # _site/_location/_rack columns. A bare .update(device=...) would skip all of
+                # that (stale denormalized location + no relationship validation).
+                interface.device = winner
+                # Coupling to a private NetBox internal: ComponentModel seeds
+                # _original_device from device_id in __init__ and clean() raises
+                # "Components cannot be moved to a different device" when it differs
+                # (dcim/models/device_components.py — ComponentModel.__init__ /
+                # ComponentModel.clean). If a NetBox upgrade renames or drops this
+                # attribute, the move below will silently stop working or 500 — treat
+                # any change to that attribute as a breaking change in upgrade notes.
+                interface._original_device = winner.pk
                 try:
-                    dep.full_clean()
-                    dep.save()
-                except (ValidationError, IntegrityError) as exc:
-                    # The master already saved in this transaction; a plain return would
-                    # COMMIT the half-moved family, so roll the whole move back explicitly
-                    # (IntegrityError poisons the transaction anyway; ValidationError doesn't).
+                    interface.full_clean()
+                except ValidationError as exc:
+                    detail = validation_error_detail(exc)
+                    return self._fail(
+                        request,
+                        f"Cannot move interface '{interface.name}' to '{winner.name}': {detail}",
+                        status=409,
+                    )
+                try:
+                    interface.save()
+                except IntegrityError:
+                    # IntegrityError already marks this atomic block rollback-only; keep the
+                    # rollback explicit here to match the non-database failure handlers below.
                     transaction.set_rollback(True)
+                    # A concurrent rename/create on the winner side can still trip a DB unique
+                    # constraint between our name re-check and this save. Surface it as the same
+                    # 409 the collision check uses rather than letting it bubble up as a 500.
                     logger.warning(
-                        "Family move failed for attached interface pk=%s (master pk=%s): %s",
-                        dep.pk,
+                        "IntegrityError moving interface pk=%s to winner pk=%s (concurrent winner-side change)",
                         interface.pk,
-                        exc,
+                        winner.pk,
                     )
                     return self._fail(
                         request,
-                        f"Cannot move attached interface '{dep.name}' with '{interface.name}'; "
-                        "the whole move was rolled back.",
+                        f"Winner device '{winner.name}' already has an interface named '{interface.name}'. "
+                        "Rename or remove the existing interface first.",
                         status=409,
                     )
 
-            # Refresh the denormalized cable-list cache columns for every moved row.
-            _refresh_cable_termination_caches(interface)
-            for dep in dependents:
-                _refresh_cable_termination_caches(dep)
+                # Carry the donor-side family collected (and locked) above. BFS order
+                # guarantees each dependent's lag/parent/bridge target has already moved,
+                # so full_clean()'s cross-device checks pass for real.
+                for dep in dependents:
+                    dep.device = winner
+                    dep._original_device = winner.pk  # same ComponentModel re-seed as above
+                    try:
+                        dep.full_clean()
+                        dep.save()
+                    except (ValidationError, IntegrityError) as exc:
+                        # The master already saved in this transaction; a plain return would
+                        # COMMIT the half-moved family, so roll the whole move back explicitly
+                        # (IntegrityError poisons the transaction anyway; ValidationError doesn't).
+                        transaction.set_rollback(True)
+                        logger.warning(
+                            "Family move failed for attached interface pk=%s (master pk=%s): %s",
+                            dep.pk,
+                            interface.pk,
+                            exc,
+                        )
+                        return self._fail(
+                            request,
+                            f"Cannot move attached interface '{dep.name}' with '{interface.name}'; "
+                            "the whole move was rolled back.",
+                            status=409,
+                        )
 
-            # The moved interface may carry an address the donor still points at via
-            # primary_ip4/primary_ip6/oob_ip; reconcile those device FKs so the donor isn't
-            # left referencing an address now on a winner-owned interface.
-            try:
-                notes = _reconcile_donor_device_ip_fks(donor, winner)
-            except ValueError as exc:
-                # A corrupt donor IP FK (e.g. a primary_ip4 referencing an IPv6 address) makes
-                # set_device_ip_fk() refuse the transfer. Fail closed — roll back the whole move
-                # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
-                transaction.set_rollback(True)
-                return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
+                # Refresh the denormalized cable-list cache columns for every moved row.
+                _refresh_cable_termination_caches(interface)
+                for dep in dependents:
+                    _refresh_cable_termination_caches(dep)
 
-        message = f"Moved interface '{interface.name}' to {winner.name}."
-        if dependents:
-            message = (
-                f"Moved interface '{interface.name}' and {len(dependents)} attached "
-                f"interface(s) ({', '.join(dep.name for dep in dependents)}) to {winner.name}."
-            )
-        if notes:
-            message += " " + "; ".join(notes) + "."
-        return _hx_response(request, message, fallback_url=self._fallback_url)
+                # The moved interface may carry an address the donor still points at via
+                # primary_ip4/primary_ip6/oob_ip; reconcile those device FKs so the donor isn't
+                # left referencing an address now on a winner-owned interface.
+                try:
+                    notes = _reconcile_donor_device_ip_fks(donor, winner)
+                except ValueError as exc:
+                    # A corrupt donor IP FK (e.g. a primary_ip4 referencing an IPv6 address) makes
+                    # set_device_ip_fk() refuse the transfer. Fail closed — roll back the whole move
+                    # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
+                    transaction.set_rollback(True)
+                    return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
+
+            message = f"Moved interface '{interface.name}' to {winner.name}."
+            if dependents:
+                message = (
+                    f"Moved interface '{interface.name}' and {len(dependents)} attached "
+                    f"interface(s) ({', '.join(dep.name for dep in dependents)}) to {winner.name}."
+                )
+            if notes:
+                message += " " + "; ".join(notes) + "."
+            schedule_request_cache_mutation(request, donor, SyncTab.INTERFACES, server_key)
+            _schedule_winner_cache_mutation(request, winner, SyncTab.INTERFACES, server_key)
+            response = _hx_response(request, message, fallback_url=self._fallback_url)
+            return response
 
 
 class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
@@ -774,50 +812,59 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                 status=409,
             )
 
-        with transaction.atomic():
-            donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
-            if err is not None:
-                return err
-            ip = self.restricted_queryset(IPAddress, "change").select_for_update(of=("self",)).filter(pk=ip.pk).first()
-            if ip is None:
-                return self._fail(request, "IP address no longer exists.", status=410)
-            assigned = ip.assigned_object
-            if not isinstance(assigned, Interface) or assigned.device_id != donor.pk:
-                return self._fail(request, "IP is no longer assigned to the donor interface.", status=409)
-            # Lock the donor interface row too and re-read it: its name is used
-            # below to find the winner-side interface, so a concurrent rename
-            # would otherwise send the IP to the wrong interface (TOCTOU).
-            assigned = self.relock_scoped_row(Interface, pk=assigned.pk, device=donor)
-            if assigned is None:
-                return self._fail(request, "IP is no longer assigned to the donor interface.", status=409)
-            # Re-fetch the winner interface under the lock to close the TOCTOU window.
-            winner_iface = Interface.objects.select_for_update().filter(device=winner, name=assigned.name).first()
-            if winner_iface is None:
-                return self._fail(
-                    request,
-                    f"Winner '{winner.name}' has no interface named '{assigned.name}'. "
-                    "Move the interface first, then retry.",
-                    status=409,
+        with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
+            with transaction.atomic():
+                donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
+                if err is not None:
+                    return err
+                ip = (
+                    self.restricted_queryset(IPAddress, "change")
+                    .select_for_update(of=("self",))
+                    .filter(pk=ip.pk)
+                    .first()
                 )
-            ip.assigned_object = winner_iface
-            ip.save(update_fields=["assigned_object_type", "assigned_object_id"])
+                if ip is None:
+                    return self._fail(request, "IP address no longer exists.", status=410)
+                assigned = ip.assigned_object
+                if not isinstance(assigned, Interface) or assigned.device_id != donor.pk:
+                    return self._fail(request, "IP is no longer assigned to the donor interface.", status=409)
+                # Lock the donor interface row too and re-read it: its name is used
+                # below to find the winner-side interface, so a concurrent rename
+                # would otherwise send the IP to the wrong interface (TOCTOU).
+                assigned = self.relock_scoped_row(Interface, pk=assigned.pk, device=donor)
+                if assigned is None:
+                    return self._fail(request, "IP is no longer assigned to the donor interface.", status=409)
+                # Re-fetch the winner interface under the lock to close the TOCTOU window.
+                winner_iface = Interface.objects.select_for_update().filter(device=winner, name=assigned.name).first()
+                if winner_iface is None:
+                    return self._fail(
+                        request,
+                        f"Winner '{winner.name}' has no interface named '{assigned.name}'. "
+                        "Move the interface first, then retry.",
+                        status=409,
+                    )
+                ip.assigned_object = winner_iface
+                ip.save(update_fields=["assigned_object_type", "assigned_object_id"])
 
-            # The moved address may itself be the donor's primary_ip4/primary_ip6/oob_ip;
-            # reconcile those device FKs so the donor isn't left referencing an address now on a
-            # winner-owned interface.
-            try:
-                notes = _reconcile_donor_device_ip_fks(donor, winner)
-            except ValueError as exc:
-                # A corrupt donor IP FK (e.g. a primary_ip4 referencing an IPv6 address) makes
-                # set_device_ip_fk() refuse the transfer. Fail closed — roll back the whole move
-                # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
-                transaction.set_rollback(True)
-                return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
+                # The moved address may itself be the donor's primary_ip4/primary_ip6/oob_ip;
+                # reconcile those device FKs so the donor isn't left referencing an address now on a
+                # winner-owned interface.
+                try:
+                    notes = _reconcile_donor_device_ip_fks(donor, winner)
+                except ValueError as exc:
+                    # A corrupt donor IP FK (e.g. a primary_ip4 referencing an IPv6 address) makes
+                    # set_device_ip_fk() refuse the transfer. Fail closed — roll back the whole move
+                    # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
+                    transaction.set_rollback(True)
+                    return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
 
-        message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
-        if notes:
-            message += " " + "; ".join(notes) + "."
-        return _hx_response(request, message, fallback_url=self._fallback_url)
+            message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
+            if notes:
+                message += " " + "; ".join(notes) + "."
+            schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
+            _schedule_winner_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
+            response = _hx_response(request, message, fallback_url=self._fallback_url)
+            return response
 
 
 class TransferDeviceIPView(_BaseMoveToWinnerView):
@@ -872,78 +919,82 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                 status=409,
             )
 
-        with transaction.atomic():
-            donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
-            if err is not None:
-                return err
-            # Re-check under the lock so concurrent transfers don't race.
-            donor_ip = getattr(donor, field, None)
-            if donor_ip is None:
-                return self._fail(request, f"Donor has no {human} to transfer.", status=409)
-            # Lock the IPAddress row itself before validating its assignment below: the
-            # device FKs are locked but the address is not, so a concurrent reassignment
-            # could otherwise change assigned_object between this check and the FK update,
-            # leaving winner.primary_ip*/oob_ip pointing at an address it no longer owns.
-            donor_ip = self.relock_scoped_row(IPAddress, pk=donor_ip.pk)
-            if donor_ip is None:
-                return self._fail(request, f"Donor's {human} no longer exists.", status=410)
-            if getattr(winner, field, None) is not None:
-                return self._fail(
-                    request,
-                    f"Winner '{winner.name}' already has a {human}. Clear it on the winner first.",
-                    status=409,
-                )
-            # The save below uses update_fields (skips full_clean), so nothing else
-            # validates that the address belongs to the winner. NetBox requires
-            # primary_ip/oob_ip be assigned to one of the device's OWN interfaces, so
-            # refuse to point the winner at an address still attached to the donor —
-            # the interface/IP must be moved to the winner first (MoveIPAddressToWinnerView).
-            #
-            # Locking the IPAddress only pins which interface it points at, not that
-            # interface's device_id. Re-lock the owning interface so a concurrent move
-            # can't change its device after this check but before the FK saves, which
-            # would leave winner.primary_ip*/oob_ip on an interface it no longer owns.
-            assigned = getattr(donor_ip, "assigned_object", None)
-            # Only re-lock when the assignment really is a dcim Interface. GenericForeignKey
-            # pks aren't unique across models, so filtering Interface by a non-Interface pk
-            # (e.g. a VMInterface) could lock an unrelated Interface and let the device_id
-            # check validate the wrong row. A non-Interface assignment fails closed (None).
-            if isinstance(assigned, Interface):
-                # Lock the owning interface row (this transfer is device-scoped).
-                assigned = self.relock_scoped_row(Interface, pk=assigned.pk)
-                if assigned is not None:
-                    # Freshen the cached GFK to the locked row: set_device_ip_fk() re-reads
-                    # donor_ip.assigned_object for its ownership check, and the pre-lock snapshot
-                    # would spuriously 409 a move that landed on the winner just before the lock —
-                    # same freshen-after-lock as _reconcile_donor_device_ip_fks.
-                    donor_ip.assigned_object = assigned
-            else:
-                assigned = None
-            if getattr(assigned, "device_id", None) != winner.pk:
-                return self._fail(
-                    request,
-                    f"{human} ({donor_ip}) is still attached to '{donor.name}'. "
-                    f"Move its interface/IP to '{winner.name}' first.",
-                    status=409,
-                )
-            # set_device_ip_fk() saves only the touched FK column (skips full_clean(), so a
-            # pre-existing inconsistency like ``face`` without ``rack`` can't block the merge)
-            # while enforcing the "address must live on the winner's own interface" invariant
-            # the bare update_fields save would skip. device.primary_ip4/6 / oob_ip are UNIQUE
-            # per address, so the donor must release the FK (saved first, below) BEFORE the
-            # winner claims it — the reverse order trips the unique constraint.
-            try:
-                set_device_ip_fk(donor, field, None)
-                set_device_ip_fk(winner, field, donor_ip)
-            except ValueError as exc:
-                # A corrupt donor FK (e.g. a primary_ip4 referencing an IPv6 address) makes
-                # set_device_ip_fk() refuse the claim. Roll back the donor release rather than
-                # 500ing or leaving the donor's FK cleared with the winner's left unset.
-                transaction.set_rollback(True)
-                return self._fail(request, f"Cannot transfer {human}: {exc}", status=409)
+        with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
+            with transaction.atomic():
+                donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
+                if err is not None:
+                    return err
+                # Re-check under the lock so concurrent transfers don't race.
+                donor_ip = getattr(donor, field, None)
+                if donor_ip is None:
+                    return self._fail(request, f"Donor has no {human} to transfer.", status=409)
+                # Lock the IPAddress row itself before validating its assignment below: the
+                # device FKs are locked but the address is not, so a concurrent reassignment
+                # could otherwise change assigned_object between this check and the FK update,
+                # leaving winner.primary_ip*/oob_ip pointing at an address it no longer owns.
+                donor_ip = self.relock_scoped_row(IPAddress, pk=donor_ip.pk)
+                if donor_ip is None:
+                    return self._fail(request, f"Donor's {human} no longer exists.", status=410)
+                if getattr(winner, field, None) is not None:
+                    return self._fail(
+                        request,
+                        f"Winner '{winner.name}' already has a {human}. Clear it on the winner first.",
+                        status=409,
+                    )
+                # The save below uses update_fields (skips full_clean), so nothing else
+                # validates that the address belongs to the winner. NetBox requires
+                # primary_ip/oob_ip be assigned to one of the device's OWN interfaces, so
+                # refuse to point the winner at an address still attached to the donor —
+                # the interface/IP must be moved to the winner first (MoveIPAddressToWinnerView).
+                #
+                # Locking the IPAddress only pins which interface it points at, not that
+                # interface's device_id. Re-lock the owning interface so a concurrent move
+                # can't change its device after this check but before the FK saves, which
+                # would leave winner.primary_ip*/oob_ip on an interface it no longer owns.
+                assigned = getattr(donor_ip, "assigned_object", None)
+                # Only re-lock when the assignment really is a dcim Interface. GenericForeignKey
+                # pks aren't unique across models, so filtering Interface by a non-Interface pk
+                # (e.g. a VMInterface) could lock an unrelated Interface and let the device_id
+                # check validate the wrong row. A non-Interface assignment fails closed (None).
+                if isinstance(assigned, Interface):
+                    # Lock the owning interface row (this transfer is device-scoped).
+                    assigned = self.relock_scoped_row(Interface, pk=assigned.pk)
+                    if assigned is not None:
+                        # Freshen the cached GFK to the locked row: set_device_ip_fk() re-reads
+                        # donor_ip.assigned_object for its ownership check, and the pre-lock snapshot
+                        # would spuriously 409 a move that landed on the winner just before the lock —
+                        # same freshen-after-lock as _reconcile_donor_device_ip_fks.
+                        donor_ip.assigned_object = assigned
+                else:
+                    assigned = None
+                if getattr(assigned, "device_id", None) != winner.pk:
+                    return self._fail(
+                        request,
+                        f"{human} ({donor_ip}) is still attached to '{donor.name}'. "
+                        f"Move its interface/IP to '{winner.name}' first.",
+                        status=409,
+                    )
+                # set_device_ip_fk() saves only the touched FK column (skips full_clean(), so a
+                # pre-existing inconsistency like ``face`` without ``rack`` can't block the merge)
+                # while enforcing the "address must live on the winner's own interface" invariant
+                # the bare update_fields save would skip. device.primary_ip4/6 / oob_ip are UNIQUE
+                # per address, so the donor must release the FK (saved first, below) BEFORE the
+                # winner claims it — the reverse order trips the unique constraint.
+                try:
+                    set_device_ip_fk(donor, field, None)
+                    set_device_ip_fk(winner, field, donor_ip)
+                except ValueError as exc:
+                    # A corrupt donor FK (e.g. a primary_ip4 referencing an IPv6 address) makes
+                    # set_device_ip_fk() refuse the claim. Roll back the donor release rather than
+                    # 500ing or leaving the donor's FK cleared with the winner's left unset.
+                    transaction.set_rollback(True)
+                    return self._fail(request, f"Cannot transfer {human}: {exc}", status=409)
 
-        return _hx_response(
-            request,
-            f"Transferred {human} ({donor_ip}) to {winner.name}.",
-            fallback_url=self._fallback_url,
-        )
+            schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
+            _schedule_winner_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
+            response = _hx_response(
+                request,
+                f"Transferred {human} ({donor_ip}) to {winner.name}.",
+                fallback_url=self._fallback_url,
+            )
+            return response

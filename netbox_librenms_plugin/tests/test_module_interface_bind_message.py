@@ -14,6 +14,16 @@ from django.contrib.auth import get_user_model
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.test import RequestFactory
 
+from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+
+@pytest.fixture(autouse=True)
+def _configure_default_server(settings):
+    """Configure the server key used by these real request tests."""
+    configure_librenms_servers(
+        settings, {"default": {"librenms_url": "https://default.example.com", "api_token": "test-token"}}
+    )
+
 
 def _seed(name, *, port_id_on_interface):
     from dcim.models import (
@@ -65,12 +75,12 @@ def _post(device, module, *, port_id, ifname):
 
 
 def _drive(device, module, *, port_id, ifname):
+    from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
     from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
     view = UpdateModuleInterfaceView()
     request = _post(device, module, port_id=port_id, ifname=ifname)
-    view.request = request  # dispatch() normally wires this; we call post() directly
-    view.post(request, pk=device.pk)
+    post_view(view, request, pk=device.pk)
     return [(m.level_tag, m.message) for m in request._messages]
 
 

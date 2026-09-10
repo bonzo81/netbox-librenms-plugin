@@ -1,690 +1,1059 @@
 """Coverage tests for librenms_api.py missing lines."""
 
-from unittest.mock import MagicMock, patch
+from copy import deepcopy
+from unittest.mock import patch
 
+import pytest
 import requests
 
 
-def _make_api(url="https://librenms.example.com", token="test-token"):
-    """Create a LibreNMSAPI instance without database calls."""
-    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-        mock_cfg.side_effect = lambda plugin, key, default=None: {
-            "servers": None,
-            "librenms_url": url,
-            "api_token": token,
-            "cache_timeout": 300,
-            "verify_ssl": True,
-        }.get(key, default)
+def configure_servers(settings, servers):
+    """Replace the plugin's configured servers, leaving the rest of PLUGINS_CONFIG intact."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["servers"] = servers
+    plugin_settings.pop("librenms_url", None)
+    plugin_settings.pop("api_token", None)
+    settings.PLUGINS_CONFIG = plugin_config
 
+
+def configure_legacy(settings, url=None, token="legacy-token"):
+    """Configure the pre-multi-server shape: no ``servers`` mapping, just a bare url/token."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_settings = plugin_config["netbox_librenms_plugin"]
+    plugin_settings["servers"] = None
+    if url is None:
+        plugin_settings.pop("librenms_url", None)
+        plugin_settings.pop("api_token", None)
+    else:
+        plugin_settings["librenms_url"] = url
+        plugin_settings["api_token"] = token
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+def api_for(settings, url, *, key="default", token="test-token"):
+    """Point the plugin at *url* and return a real client bound to it."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    configure_servers(settings, {key: {"librenms_url": url, "api_token": token, "verify_ssl": False}})
+    return LibreNMSAPI(server_key=key)
+
+
+@pytest.mark.django_db
+class TestLibreNMSAPIInitFallback:
+    """__init__ resolves the server key from LibreNMSSettings when the caller gives none."""
+
+    def test_init_reads_selected_server_from_settings(self, settings):
+        """With no explicit key, the stored selected_server decides which server is bound."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        configure_servers(
+            settings,
+            {
+                "primary": {"librenms_url": "https://primary.example.com", "api_token": "tok"},
+                "secondary": {"librenms_url": "https://secondary.example.com", "api_token": "tok2"},
+            },
+        )
+        row, _ = LibreNMSSettings.objects.get_or_create()
+        row.selected_server = "primary"
+        row.save(update_fields=["selected_server"])
+
+        api = LibreNMSAPI()
+
+        assert api.server_key == "primary"
+        assert api.librenms_url == "https://primary.example.com"
+        assert api.api_token == "tok"
+
+    def test_init_without_a_stored_selection_falls_back_to_default(self, settings):
+        """No stored selection leaves the auto-default key, which the legacy config serves."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        configure_legacy(settings, "https://x.example.com", token="tok")
+        LibreNMSSettings.objects.all().delete()
+
+        api = LibreNMSAPI()
+
+        assert api.server_key == "default"
+        assert api.librenms_url == "https://x.example.com"
+        assert api.api_token == "tok"
+        assert api.api_token == "tok"
+
+    def test_init_survives_a_settings_lookup_that_raises(self, settings):
+        """A broken settings model must not stop the client binding the default server."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        return LibreNMSAPI(server_key="default")
+        configure_legacy(settings, "https://x.example.com", token="tok")
+
+        # Error injection at the boundary __init__ guards with (ImportError, AttributeError).
+        with patch("netbox_librenms_plugin.models.LibreNMSSettings") as broken:
+            broken.objects.first.side_effect = AttributeError("no attr")
+            api = LibreNMSAPI()
+
+        assert api.server_key == "default"
+        assert api.librenms_url == "https://x.example.com"
 
 
-class TestLibreNMSAPIInitFallback:
-    """Tests for __init__ fallback when no server_key (lines 35-36)."""
-
-    def test_init_reads_selected_server_from_settings(self):
-        """When no server_key, tries to get selected_server from LibreNMSSettings."""
-        servers_config = {
-            "primary": {
-                "librenms_url": "https://primary.example.com",
-                "api_token": "tok",
-                "cache_timeout": 300,
-                "verify_ssl": True,
-            }
-        }
-
-        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-            mock_cfg.side_effect = lambda plugin, key, default=None: servers_config if key == "servers" else default
-
-            mock_settings_obj = MagicMock()
-            mock_settings_obj.selected_server = "primary"
-            mock_settings_class = MagicMock()
-            mock_settings_class.objects.first.return_value = mock_settings_obj
-
-            # LibreNMSSettings is imported inline in __init__, patch via models
-            with patch.dict(
-                "sys.modules", {"netbox_librenms_plugin.models": MagicMock(LibreNMSSettings=mock_settings_class)}
-            ):
-                from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-                api = LibreNMSAPI()
-                assert api.server_key == "primary"
-                assert api.librenms_url == "https://primary.example.com"
-                assert api.api_token == "tok"
-
-    def test_init_settings_import_error_defaults_to_default(self):
-        """When LibreNMSSettings can't be imported, defaults to 'default'."""
-        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-            mock_cfg.side_effect = lambda plugin, key, default=None: {
-                "servers": None,
-                "librenms_url": "https://x.example.com",
-                "api_token": "tok",
-                "cache_timeout": 300,
-                "verify_ssl": True,
-            }.get(key, default)
-
-            # Simulate AttributeError when accessing LibreNMSSettings (covers except branch)
-            mock_models = MagicMock()
-            mock_models.LibreNMSSettings.objects.first.side_effect = AttributeError("no attr")
-
-            with patch.dict("sys.modules", {"netbox_librenms_plugin.models": mock_models}):
-                from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-                api = LibreNMSAPI()
-                assert api.server_key == "default"
-                assert api.librenms_url == "https://x.example.com"
-                assert api.api_token == "tok"
-
-
+@pytest.mark.django_db
 class TestTestConnectionErrors:
-    """Tests for test_connection error paths (lines 116, 121, 137, 146-147, 157-171)."""
+    """test_connection turns each server answer into a user-facing outcome."""
 
-    def test_http_403_returns_error(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 403
-        with patch("requests.get", return_value=mock_resp):
-            result = api.test_connection()
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (401, "authentication failed"),
+            (403, "forbidden"),
+            (404, "not found"),
+            (500, "server error"),
+            (503, "server error"),
+            (302, "302"),
+        ],
+    )
+    def test_http_status_is_reported(self, settings, librenms_server, status, expected):
+        """A real response with this status reaches the caller as the matching message."""
+        librenms_server.register("/api/v0/system", {"status": "error"}, status=status, method="GET")
+        api = api_for(settings, librenms_server.url)
+
+        result = api.test_connection()
+
         assert result["error"] is True
-        assert "forbidden" in result["message"].lower()
+        assert expected in result["message"].lower()
 
-    def test_http_404_returns_error(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        with patch("requests.get", return_value=mock_resp):
-            result = api.test_connection()
+    def test_successful_system_call_returns_the_system_row(self, settings, librenms_server):
+        """A 200 with a system payload returns the first row, not an error dict."""
+        librenms_server.register(
+            "/api/v0/system",
+            {"status": "ok", "system": [{"version": "24.9.0"}]},
+            method="GET",
+        )
+        api = api_for(settings, librenms_server.url)
+
+        assert api.test_connection() == {"version": "24.9.0"}
+
+    def test_ok_status_without_a_system_payload_is_reported(self, settings, librenms_server):
+        """A 200 that carries no system rows falls through to the unexpected-response branch."""
+        librenms_server.register("/api/v0/system", {"status": "ok"}, method="GET")
+        api = api_for(settings, librenms_server.url)
+
+        result = api.test_connection()
+
         assert result["error"] is True
-        assert "not found" in result["message"].lower()
+        assert "200" in result["message"]
 
-    def test_http_500_returns_error(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        with patch("requests.get", return_value=mock_resp):
-            result = api.test_connection()
-        assert result["error"] is True
-        assert "server error" in result["message"].lower()
+    def test_connection_refused_is_reported(self, settings, librenms_server):
+        """A dead server is a real connection failure, no injection needed."""
+        url = librenms_server.url
+        api = api_for(settings, url)
+        librenms_server.stop()  # free the port so the next request is refused
 
-    def test_http_unexpected_code_returns_error(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 302
-        with patch("requests.get", return_value=mock_resp):
-            result = api.test_connection()
-        assert result["error"] is True
-        assert "302" in result["message"]
+        result = api.test_connection()
 
-    def test_ssl_error_returns_error(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.SSLError("cert failed")):
-            result = api.test_connection()
-        assert result["error"] is True
-        assert "SSL" in result["message"] or "ssl" in result["message"].lower()
-
-    def test_connection_error_returns_error(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("unreachable")):
-            result = api.test_connection()
         assert result["error"] is True
         assert "Connection failed" in result["message"]
 
-    def test_timeout_returns_error(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
+    @pytest.mark.parametrize(
+        ("exception", "expected"),
+        [
+            (requests.exceptions.SSLError("cert failed"), "ssl"),
+            (requests.exceptions.Timeout("timed out"), "timeout"),
+            (ValueError("something weird"), "unexpected error"),
+        ],
+    )
+    def test_transport_failures_are_reported(self, settings, librenms_server, exception, expected):
+        """Injected at the requests boundary: a real TLS or timeout failure is not reproducible here."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.get", side_effect=exception):
             result = api.test_connection()
+
         assert result["error"] is True
-        assert "timeout" in result["message"].lower()
-
-    def test_generic_exception_returns_error(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=ValueError("something weird")):
-            result = api.test_connection()
-        assert result["error"] is True
-        assert "Unexpected error" in result["message"]
+        assert expected in result["message"].lower()
 
 
+@pytest.mark.django_db
 class TestGetAvailableServersLegacy:
-    """Tests for get_available_servers legacy path (line 231)."""
+    """get_available_servers on the pre-multi-server config shape."""
 
-    def test_legacy_config_no_servers(self):
-        """When no servers_config, returns default server with legacy URL."""
-        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
+    def test_legacy_config_no_servers(self, settings):
+        """With no servers mapping, the legacy URL is offered under the default key."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-            def side_effect(plugin, key, default=None):
-                if key == "servers":
-                    return None
-                if key == "librenms_url":
-                    return "https://legacy.example.com"
-                return default
+        configure_legacy(settings, "https://legacy.example.com")
 
-            mock_cfg.side_effect = side_effect
-            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        result = LibreNMSAPI.get_available_servers()
 
-            result = LibreNMSAPI.get_available_servers()
-            assert "default" in result
-            assert "legacy.example.com" in result["default"]
+        assert result == {"default": "Default Server (https://legacy.example.com)"}
 
-    def test_no_legacy_url_returns_default_label(self):
-        """When no servers_config and no legacy URL, returns default label."""
-        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
+    def test_no_legacy_url_returns_default_label(self, settings):
+        """With neither a servers mapping nor a legacy URL, only the bare default label is offered."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-            def side_effect(plugin, key, default=None):
-                return None
+        configure_legacy(settings, None)
 
-            mock_cfg.side_effect = side_effect
-            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        result = LibreNMSAPI.get_available_servers()
 
-            result = LibreNMSAPI.get_available_servers()
-            assert "default" in result
-            assert result["default"] == "Default Server"
+        assert result == {"default": "Default Server"}
 
 
+@pytest.mark.django_db
 class TestGetLibreNMSIdDictServerKey:
-    """Tests for get_librenms_id → _store_librenms_id with dict CF (lines 259-262)."""
+    """get_librenms_id reads and writes real per-server device mappings."""
 
-    def test_dict_cf_routes_to_get_librenms_device_id(self):
-        """When CF has a dict 'librenms_id', get_librenms_id uses get_librenms_device_id(obj, server_key, auto_save=False)."""
-        api = _make_api()
+    def test_dict_cf_uses_the_client_server_key(self, settings, librenms_server):
+        """The client returns the mapping for its bound server."""
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        obj = MagicMock()
-        obj.cf = {"librenms_id": {"default": None}}
-        obj.custom_field_data = {"librenms_id": {"default": None}}
-        obj._meta.model_name = "device"
-        obj.pk = 42
-        obj.primary_ip = None
-        obj.name = None
+        device = make_device("mapped-device", librenms_cf={"primary": "23", "secondary": 47})
+        api = api_for(settings, librenms_server.url, key="primary")
 
-        with patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=None) as mock_get_id:
-            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                result = api.get_librenms_id(obj)
-                assert result is None
-                mock_get_id.assert_called_once_with(obj, "default", auto_save=False)
+        assert api.get_librenms_id(device) == 23
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"]["primary"] == "23"
 
-    def test_get_librenms_id_zero_is_valid(self):
-        """Regression: librenms_id == 0 must be returned directly without falling through to API lookup.
-        The code uses 'is not None' guards, so 0 is a valid cached/stored ID."""
-        api = _make_api()
+    def test_zero_mapping_is_ignored_and_discovered(self, settings, librenms_server):
+        """A zero mapping is invalid, so hostname discovery replaces it."""
+        from dcim.models import Device
 
-        obj = MagicMock()
-        obj.cf = {"librenms_id": {"default": 0}}
-        obj.custom_field_data = {"librenms_id": {"default": 0}}
-        obj._meta.model_name = "device"
-        obj.pk = 1
-        obj.primary_ip = None
-        obj.name = "zero-device"
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        # get_librenms_device_id returns 0 (valid ID, must not be treated as falsy)
-        with patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=0) as mock_get_id:
-            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                result = api.get_librenms_id(obj)
-        # 0 is a valid ID — method should return 0, not fall through to hostname lookup
-        assert result == 0
-        mock_get_id.assert_called_once_with(obj, "default", auto_save=False)
+        device = make_device("stored-zero-device", librenms_cf={"default": 0})
+        librenms_server.register(
+            "/api/v0/devices/stored-zero-device",
+            {"status": "ok", "devices": [{"device_id": 31}]},
+            method="GET",
+        )
 
-    def test_store_librenms_id_via_hostname_lookup(self):
-        """get_librenms_id reaches _store_librenms_id when CF/cache miss but hostname API hit."""
-        api = _make_api()
+        result = api_for(settings, librenms_server.url).get_librenms_id(device)
 
-        obj = MagicMock()
-        obj.cf = {"librenms_id": None}  # CF key present so _store_librenms_id uses CF path
-        obj.custom_field_data = {}
-        obj._meta.model_name = "device"
-        obj.pk = 99
-        obj.primary_ip = None
-        obj.name = "hostname"
+        assert result == 31
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 31
 
-        with patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=None):
-            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
-                mock_cache.get.return_value = None
-                with patch.object(api, "get_device_id_by_hostname", return_value=42) as mock_by_hostname:
-                    with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_set_id:
-                        result = api.get_librenms_id(obj)
+    def test_store_librenms_id_via_hostname_lookup(self, settings, librenms_server):
+        """A hostname lookup writes only the bound server mapping."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("hostname-device", librenms_cf={"default": 11, "primary": None})
+        librenms_server.register(
+            "/api/v0/devices/hostname-device",
+            {"status": "ok", "devices": [{"device_id": 42}]},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url, key="primary").get_librenms_id(device)
 
         assert result == 42
-        mock_by_hostname.assert_called_once_with("hostname")
-        mock_set_id.assert_called_once_with(obj, 42, "default")
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {
+            "default": 11,
+            "primary": 42,
+        }
 
 
+# Each read endpoint, its route, accepted body, expected value, query, and HTTP error details.
+READ_ENDPOINTS = [
+    pytest.param(
+        "/api/v0/devices/1/ports",
+        lambda api: api.get_ports(1),
+        {"status": "ok", "ports": [{"port_id": 7, "ifName": "Gi0/1"}]},
+        {"status": "ok", "ports": [{"port_id": 7, "ifName": "Gi0/1"}]},
+        {
+            "columns": [
+                "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
+            ],
+            "with": ["vlans"],
+        },
+        {
+            404: ("Device not found in LibreNMS",),
+            500: ("HTTP error:", "500"),
+        },
+        id="get_ports",
+    ),
+    pytest.param(
+        "/api/v0/inventory/1",
+        lambda api: api.get_inventory_filtered(1),
+        {"status": "ok", "inventory": [{"entPhysicalIndex": 1, "entPhysicalClass": "chassis"}]},
+        [{"entPhysicalIndex": 1, "entPhysicalClass": "chassis"}],
+        {},
+        {
+            404: ("404", "/api/v0/inventory/1"),
+            500: ("500", "/api/v0/inventory/1"),
+        },
+        id="get_inventory_filtered",
+    ),
+    pytest.param(
+        "/api/v0/resources/vlans",
+        lambda api: api.get_device_vlans(1),
+        {
+            "status": "ok",
+            "vlans": [
+                {"device_id": 1, "vlan_vlan": 100},
+                {"device_id": 2, "vlan_vlan": 200},
+            ],
+        },
+        [{"device_id": 1, "vlan_vlan": 100}],
+        {},
+        {
+            404: ("VLANs resource not found",),
+            500: ("HTTP error:", "500"),
+        },
+        id="get_device_vlans",
+    ),
+    pytest.param(
+        "/api/v0/devices/1/links",
+        lambda api: api.get_device_links(1),
+        {"status": "ok", "links": [{"id": 3}]},
+        {"status": "ok", "links": [{"id": 3}]},
+        {},
+        {
+            404: ("404", "/api/v0/devices/1/links"),
+            500: ("500", "/api/v0/devices/1/links"),
+        },
+        id="get_device_links",
+    ),
+    pytest.param(
+        "/api/v0/devices",
+        lambda api: api.list_devices(),
+        {"status": "ok", "devices": [{"device_id": 1}]},
+        [{"device_id": 1}],
+        {},
+        {
+            404: ("404", "/api/v0/devices"),
+            500: ("500", "/api/v0/devices"),
+        },
+        id="list_devices",
+    ),
+    pytest.param(
+        "/api/v0/devices/1/ip",
+        lambda api: api.get_device_ips(1),
+        {"status": "ok", "addresses": [{"ipv4_address": "192.0.2.10"}]},
+        [{"ipv4_address": "192.0.2.10"}],
+        {},
+        {
+            404: ("404", "/api/v0/devices/1/ip"),
+            500: ("500", "/api/v0/devices/1/ip"),
+        },
+        id="get_device_ips",
+    ),
+    pytest.param(
+        "/api/v0/ports/1",
+        lambda api: api.get_port_vlan_details(1),
+        {"status": "ok", "port": [{"port_id": 1, "ifName": "Gi0/1"}]},
+        {"port_id": 1, "ifName": "Gi0/1"},
+        {"with": ["vlans"]},
+        {
+            404: ("Port not found in LibreNMS",),
+            500: ("HTTP error:", "500"),
+        },
+        id="get_port_vlan_details",
+    ),
+]
+
+
+@pytest.mark.django_db
+class TestReadEndpointOutcomes:
+    """Every read endpoint answers (ok, payload) over real HTTP and never raises at the caller."""
+
+    @pytest.mark.parametrize(
+        ("route", "call", "body", "expected", "expected_query", "http_errors"),
+        READ_ENDPOINTS,
+    )
+    def test_a_served_body_is_returned(
+        self,
+        settings,
+        librenms_server,
+        route,
+        call,
+        body,
+        expected,
+        expected_query,
+        http_errors,
+    ):
+        """Pins the route and the payload each reader pulls out, so the failure cases below are not vacuous."""
+        received = []
+
+        def read_endpoint(method, path, query, headers, body):
+            received.append((method, path, query))
+            return 200, expected_body
+
+        expected_body = body
+        librenms_server.register(route, read_endpoint, method="GET")
+
+        ok, payload = call(api_for(settings, librenms_server.url))
+
+        assert ok is True, payload
+        assert payload == expected
+        assert received == [("GET", route, expected_query)]
+
+    @pytest.mark.parametrize("status", [404, 500])
+    @pytest.mark.parametrize(
+        ("route", "call", "body", "expected", "expected_query", "http_errors"),
+        READ_ENDPOINTS,
+    )
+    def test_a_failing_status_is_reported(
+        self,
+        settings,
+        librenms_server,
+        route,
+        call,
+        body,
+        expected,
+        expected_query,
+        http_errors,
+        status,
+    ):
+        """A success-shaped body with a failing HTTP status is rejected."""
+        librenms_server.register(route, body, status=status, method="GET")
+
+        ok, detail = call(api_for(settings, librenms_server.url))
+
+        assert ok is False
+        for expected_detail in http_errors[status]:
+            assert expected_detail in str(detail)
+
+    @pytest.mark.parametrize(
+        ("route", "call", "body", "expected", "expected_query", "http_errors"),
+        READ_ENDPOINTS,
+    )
+    def test_an_unreachable_server_is_reported(
+        self,
+        settings,
+        librenms_server,
+        route,
+        call,
+        body,
+        expected,
+        expected_query,
+        http_errors,
+    ):
+        """A refused connection is a real transport failure, reported rather than raised."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()  # free the port so the request is refused
+
+        ok, detail = call(api)
+
+        assert ok is False
+        assert detail is not None
+
+    @pytest.mark.parametrize(
+        ("route", "call", "body", "expected", "expected_query", "http_errors"),
+        READ_ENDPOINTS,
+    )
+    def test_a_timeout_is_reported(
+        self,
+        settings,
+        librenms_server,
+        route,
+        call,
+        body,
+        expected,
+        expected_query,
+        http_errors,
+    ):
+        """Every read endpoint catches the full RequestException hierarchy."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
+            ok, detail = call(api)
+
+        assert ok is False
+        assert "timed out" in str(detail).lower()
+
+
+@pytest.mark.django_db
 class TestGetPortsErrors:
-    """Tests for get_ports error paths (lines 373, 375-376)."""
+    """get_ports names a missing device rather than reporting a bare failure."""
 
-    def test_http_error_404_returns_false(self):
-        api = _make_api()
-        http_err = requests.exceptions.HTTPError(response=MagicMock(status_code=404))
-        with patch("requests.get", side_effect=http_err):
-            ok, msg = api.get_ports(1)
+    def test_http_error_404_says_not_found(self, settings, librenms_server):
+        librenms_server.register(
+            "/api/v0/devices/1/ports",
+            {"status": "error"},
+            status=404,
+            method="GET",
+        )
+
+        ok, msg = api_for(settings, librenms_server.url).get_ports(1)
+
         assert ok is False
         assert "not found" in msg.lower()
 
-    def test_http_error_other_returns_false(self):
-        api = _make_api()
-        http_err = requests.exceptions.HTTPError(response=MagicMock(status_code=500))
-        http_err.response = MagicMock(status_code=500)
-        with patch("requests.get", side_effect=http_err):
-            ok, msg = api.get_ports(1)
-        assert ok is False
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("conn error")):
-            ok, msg = api.get_ports(1)
-        assert ok is False
-
-
+@pytest.mark.django_db
 class TestGetInventoryFilteredErrors:
-    """Tests for get_inventory_filtered error paths (lines 405, 407, 409, 411)."""
+    """get_inventory_filtered falls back to the /all endpoint when the filtered one is empty."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, result = api.get_inventory_filtered(1)
-        assert ok is False
-        assert isinstance(result, str)  # error message string
+    def test_empty_results_with_no_filters_returns_true_empty_list(self, settings, librenms_server):
+        """An empty inventory with status ok is a successful empty answer, not a failure."""
+        librenms_server.register(
+            "/api/v0/inventory/1",
+            {"status": "ok", "inventory": []},
+            method="GET",
+        )
 
-    def test_empty_results_with_no_filters_returns_true_empty_list(self):
-        """Empty inventory with status:ok is a valid successful empty response."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "inventory": []}
+        ok, result = api_for(settings, librenms_server.url).get_inventory_filtered(1)
 
-        with patch("requests.get", return_value=mock_resp):
-            ok, result = api.get_inventory_filtered(1)
         assert ok is True
         assert result == []
 
-    def test_fallback_to_all_endpoint_when_filtered_empty(self):
-        """If filtered endpoint returns empty and params present, falls back to /all."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "inventory": []}
+    def test_fallback_to_all_endpoint_when_filtered_empty(self, settings, librenms_server):
+        """A filtered query that comes back empty is retried against /all and filtered locally."""
+        librenms_server.register(
+            "/api/v0/inventory/1",
+            {"status": "ok", "inventory": []},
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/inventory/1/all",
+            {
+                "status": "ok",
+                "inventory": [
+                    {
+                        "entPhysicalName": "target",
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalContainedIn": 0,
+                    },
+                    {
+                        "entPhysicalName": "wrong-class",
+                        "entPhysicalClass": "module",
+                        "entPhysicalContainedIn": 0,
+                    },
+                    {
+                        "entPhysicalName": "wrong-parent",
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalContainedIn": 2,
+                    },
+                ],
+            },
+            method="GET",
+        )
 
-        all_inventory = [{"entPhysicalClass": "chassis", "entPhysicalContainedIn": 0}]
-
-        with patch("requests.get", return_value=mock_resp):
-            with patch.object(api, "get_device_inventory", return_value=(True, all_inventory)):
-                ok, result = api.get_inventory_filtered(1, ent_physical_class="chassis")
+        ok, result = api_for(settings, librenms_server.url).get_inventory_filtered(
+            1,
+            ent_physical_class="chassis",
+            ent_physical_contained_in=0,
+        )
 
         assert ok is True
-        assert len(result) == 1
+        assert result == [
+            {
+                "entPhysicalName": "target",
+                "entPhysicalClass": "chassis",
+                "entPhysicalContainedIn": 0,
+            }
+        ]
 
-    def test_fallback_fails_when_all_endpoint_fails(self):
-        """If /all fallback also fails, returns False, []."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "inventory": []}
+    def test_fallback_fails_when_all_endpoint_fails(self, settings, librenms_server):
+        """When the fallback also fails there is nothing to report but the failure."""
+        librenms_server.register(
+            "/api/v0/inventory/1",
+            {"status": "ok", "inventory": []},
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/inventory/1/all",
+            {"status": "error"},
+            status=500,
+            method="GET",
+        )
 
-        with patch("requests.get", return_value=mock_resp):
-            with patch.object(api, "get_device_inventory", return_value=(False, [])):
-                ok, result = api.get_inventory_filtered(1, ent_physical_class="chassis")
+        ok, result = api_for(settings, librenms_server.url).get_inventory_filtered(1, ent_physical_class="chassis")
 
         assert ok is False
-        assert result == []
+        assert isinstance(result, str)
+        assert result
 
 
+@pytest.mark.django_db
 class TestGetDeviceVlansErrors:
-    """Tests for get_device_vlans error paths (lines 474-480)."""
+    """get_device_vlans distinguishes a missing resource from a server error."""
 
-    def test_http_error_404_returns_false(self):
-        api = _make_api()
-        http_err = requests.exceptions.HTTPError(response=MagicMock(status_code=404))
-        http_err.response = MagicMock(status_code=404)
-        with patch("requests.get", side_effect=http_err):
-            ok, msg = api.get_device_vlans(1)
+    def test_http_error_404_names_the_resource(self, settings, librenms_server):
+        librenms_server.register(
+            "/api/v0/resources/vlans",
+            {"status": "error"},
+            status=404,
+            method="GET",
+        )
+
+        ok, msg = api_for(settings, librenms_server.url).get_device_vlans(1)
+
         assert ok is False
+        assert "not found" in msg.lower()
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("error")):
-            ok, msg = api.get_device_vlans(1)
-        assert ok is False
+    def test_non_200_returns_http_status(self, settings, librenms_server):
+        librenms_server.register(
+            "/api/v0/resources/vlans",
+            {"status": "error"},
+            status=503,
+            method="GET",
+        )
 
-    def test_non_200_returns_http_status(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 503
-        http_err = requests.exceptions.HTTPError("503 Service Unavailable")
-        http_err.response = mock_resp
-        mock_resp.raise_for_status.side_effect = http_err
-        with patch("requests.get", return_value=mock_resp):
-            ok, msg = api.get_device_vlans(1)
+        ok, msg = api_for(settings, librenms_server.url).get_device_vlans(1)
+
         assert ok is False
         assert "503" in msg
 
 
-class TestGetDeviceLinksErrors:
-    """Tests for get_device_links error paths (lines 505-508)."""
-
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("error")):
-            ok, msg = api.get_device_links(1)
-        assert ok is False
-
-    def test_request_exception_base_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.get_device_links(1)
-        assert ok is False
-
-
-class TestListDevicesErrors:
-    """Tests for list_devices error paths (lines 542-547)."""
-
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("error")):
-            ok, msg = api.list_devices()
-        assert ok is False
-
-    def test_non_200_returns_empty(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "error"}
-        with patch("requests.get", return_value=mock_resp):
-            ok, result = api.list_devices()
-        assert ok is False
-
-
-class TestGetDeviceIpsErrors:
-    """Tests for get_device_ips error paths (lines 580-585)."""
-
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("error")):
-            ok, msg = api.get_device_ips(1)
-        assert ok is False
-
-
+@pytest.mark.django_db
 class TestGetDeviceInfoErrors:
-    """Tests for get_device_info error paths (lines 606-607)."""
+    """get_device_info separates "the server says no such device" from "I could not ask"."""
 
-    def test_non_200_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        mock_resp.raise_for_status.return_value = None
-        with patch("requests.get", return_value=mock_resp):
-            ok, data = api.get_device_info(1)
+    def test_non_200_returns_false(self, settings, librenms_server):
+        librenms_server.register(
+            "/api/v0/devices/1",
+            {"status": "error"},
+            status=404,
+            method="GET",
+        )
+
+        ok, data = api_for(settings, librenms_server.url).get_device_info(1)
+
         assert ok is False
-        assert data is None
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, data = api.get_device_info(1)
+    def test_a_404_drops_a_cached_device_so_a_later_read_cannot_serve_it(self, settings, librenms_server):
+        """An authoritative 404 invalidates the cached device instead of leaving it readable until the TTL."""
+        from django.core.cache import cache
+
+        device_id = 909091
+        cache.delete(f"librenms_device_info_default_{device_id}")
+        answers = [
+            (200, {"status": "ok", "devices": [{"device_id": device_id, "hostname": "present"}]}),
+            (404, {"status": "error", "message": "Device does not exist"}),
+        ]
+        librenms_server.register(
+            f"/api/v0/devices/{device_id}",
+            lambda **_: answers.pop(0) if answers else (404, {"status": "error"}),
+            method="GET",
+        )
+        api = api_for(settings, librenms_server.url)
+
+        # A sync-tab render caches the device...
+        assert api.get_device_info(device_id) == (True, {"device_id": device_id, "hostname": "present"})
+        # ...then the import path reads live and LibreNMS denies the device.
+        assert api.get_device_info(device_id, use_cache=False) == (False, None)
+
+        # A cache-only read (the partial refresh) must not resurrect the deleted device.
+        assert api.get_device_info(device_id, cache_only=True) == (False, None)
+
+    def test_request_exception_reports_the_lookup_failure(self, settings, librenms_server):
+        """A transport failure is not an answer about the device, so it is not "not found"."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, data = api.get_device_info(1)
+
         assert ok is False
-        assert data is None
+        assert isinstance(data, LibreNMSLookupError)
+        assert data.status_code is None
 
 
+@pytest.mark.django_db
 class TestGetPortVlanDetailsErrors:
-    """Tests for get_port_vlan_details error paths."""
+    """get_port_vlan_details names a missing port rather than reporting a bare failure."""
 
-    def test_http_error_404_returns_false(self):
-        api = _make_api()
-        http_err = requests.exceptions.HTTPError(response=MagicMock(status_code=404))
-        http_err.response = MagicMock(status_code=404)
-        with patch("requests.get", side_effect=http_err):
-            ok, msg = api.get_port_vlan_details(1)
+    def test_http_error_404_says_port_not_found(self, settings, librenms_server):
+        librenms_server.register(
+            "/api/v0/ports/1",
+            {"status": "error"},
+            status=404,
+            method="GET",
+        )
+
+        ok, msg = api_for(settings, librenms_server.url).get_port_vlan_details(1)
+
         assert ok is False
         assert "not found" in msg.lower()
 
-    def test_non_404_http_error_returns_false(self):
-        api = _make_api()
-        http_err = requests.exceptions.HTTPError(response=MagicMock(status_code=500))
-        http_err.response = MagicMock(status_code=500)
-        with patch("requests.get", side_effect=http_err):
-            ok, msg = api.get_port_vlan_details(1)
-        assert ok is False
+    def test_a_non_ok_payload_is_reported(self, settings, librenms_server):
+        """A 200 whose body says error must not be read as a port."""
+        librenms_server.register(
+            "/api/v0/ports/1",
+            {"status": "error", "message": "boom"},
+            method="GET",
+        )
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("error")):
-            ok, msg = api.get_port_vlan_details(1)
-        assert ok is False
+        ok, msg = api_for(settings, librenms_server.url).get_port_vlan_details(1)
 
-    def test_non_200_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 503
-        mock_resp.raise_for_status.return_value = None
-        with patch("requests.get", return_value=mock_resp):
-            ok, msg = api.get_port_vlan_details(1)
         assert ok is False
-
-    def test_request_exception_base_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.get_port_vlan_details(1)
-        assert ok is False
-
-    def test_http_404_via_raise_for_status_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        http_error = requests.exceptions.HTTPError(response=mock_resp)
-        mock_resp.raise_for_status.side_effect = http_error
-        with patch("requests.get", return_value=mock_resp):
-            ok, msg = api.get_port_vlan_details(1)
-        assert ok is False
+        assert msg == "boom"
 
 
 class TestListDevicesSuccess:
-    """Tests for list_devices success (lines 805+)."""
+    """list_devices reads real responses and forwards filters."""
 
-    def test_list_devices_with_filters(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "devices": [{"device_id": 1}]}
+    def test_list_devices_with_filters(self, settings, librenms_server):
+        """A filter reaches the server and the matching devices reach the caller."""
+        received = {}
 
-        with patch("requests.get", return_value=mock_resp) as mock_get:
-            ok, result = api.list_devices({"type": "network"})
+        def devices(method, path, query, headers, body):
+            received.update(method=method, path=path, query=query)
+            return 200, {"status": "ok", "devices": [{"device_id": 1}]}
+
+        librenms_server.register("/api/v0/devices", devices, method="GET")
+
+        ok, result = api_for(settings, librenms_server.url).list_devices({"type": "network"})
 
         assert ok is True
-        assert len(result) == 1
-        # Verify the filter was forwarded to the outgoing request
-        assert mock_get.call_args[1]["params"] == {"type": "network"}
+        assert result == [{"device_id": 1}]
+        assert received == {
+            "method": "GET",
+            "path": "/api/v0/devices",
+            "query": {"type": ["network"]},
+        }
 
-    def test_list_devices_no_filters(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "devices": []}
+    def test_list_devices_no_filters(self, settings, librenms_server):
+        """An empty device list is a successful response."""
+        librenms_server.register("/api/v0/devices", {"status": "ok", "devices": []}, method="GET")
 
-        with patch("requests.get", return_value=mock_resp):
-            ok, result = api.list_devices()
+        ok, result = api_for(settings, librenms_server.url).list_devices()
 
         assert ok is True
         assert result == []
 
+    def test_http_200_error_envelope_returns_false(self, settings, librenms_server):
+        """An HTTP 200 error envelope returns the server message."""
+        librenms_server.register(
+            "/api/v0/devices",
+            {"status": "error", "message": "Device query rejected"},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url).list_devices()
+
+        assert result == (False, "Device query rejected")
+
 
 class TestGetPoller:
-    """Tests for get_poller_groups error path."""
+    """get_poller_groups handles real success, API failure, and transport failure responses."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, result = api.get_poller_groups()
-        assert ok is False
+    def test_success_returns_poller_groups(self, settings, librenms_server):
+        """A valid poller response returns its group list."""
+        groups = [{"id": 1, "group_name": "edge", "descr": "Edge pollers"}]
+        librenms_server.register(
+            "/api/v0/poller_group",
+            {"status": "ok", "get_poller_group": groups},
+            method="GET",
+        )
 
-    def test_non_ok_status_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "error"}
-        with patch("requests.get", return_value=mock_resp):
-            ok, result = api.get_poller_groups()
+        assert api_for(settings, librenms_server.url).get_poller_groups() == (True, groups)
+
+    def test_request_exception_returns_false(self, settings, librenms_server):
+        """A refused connection returns a failed result."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, result = api.get_poller_groups()
+
         assert ok is False
+        assert result
+
+    def test_timeout_returns_false(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.get_poller_groups()
+
+        assert result == (False, "timed out")
+
+    def test_non_ok_status_returns_false(self, settings, librenms_server):
+        """An error payload returns the server message."""
+        librenms_server.register(
+            "/api/v0/poller_group",
+            {"status": "error", "message": "Poller groups unavailable"},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url).get_poller_groups()
+
+        assert result == (False, "Poller groups unavailable")
 
 
 class TestAddDeviceErrors:
-    """Tests for add_device errors."""
+    """add_device uses the real POST endpoint and reports failures."""
 
     def _make_device_data(self):
-        return {"hostname": "router01", "snmp_version": "v2c", "community": "public", "force_add": False}
+        return {
+            "hostname": "router01",
+            "snmp_version": "v2c",
+            "community": "test-community",
+            "force_add": False,
+        }
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.post", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.add_device(self._make_device_data())
-        assert ok is False
+    def test_success_posts_the_device_payload(self, settings, librenms_server):
+        """A valid device is posted with the LibreNMS field names."""
+        received = {}
 
-    def test_non_ok_response_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "error", "message": "Already exists"}
-        with patch("requests.post", return_value=mock_resp):
-            ok, msg = api.add_device(self._make_device_data())
+        def add_device(method, path, query, headers, body):
+            received.update(method=method, path=path, body=body)
+            return 200, {"status": "ok"}
+
+        librenms_server.register("/api/v0/devices", add_device, method="POST")
+
+        result = api_for(settings, librenms_server.url).add_device(self._make_device_data())
+
+        assert result == (True, "Device added successfully.")
+        assert received == {
+            "method": "POST",
+            "path": "/api/v0/devices",
+            "body": {
+                "hostname": "router01",
+                "snmpver": "v2c",
+                "force_add": False,
+                "community": "test-community",
+            },
+        }
+
+    def test_request_exception_returns_false(self, settings, librenms_server):
+        """A refused connection returns a failed result."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, msg = api.add_device(self._make_device_data())
+
         assert ok is False
+        assert msg
+
+    def test_timeout_returns_false(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.post", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.add_device(self._make_device_data())
+
+        assert result == (False, "timed out")
+
+    def test_non_ok_response_returns_false(self, settings, librenms_server):
+        """An error payload returns the server message."""
+        librenms_server.register(
+            "/api/v0/devices",
+            {"status": "error", "message": "Already exists"},
+            method="POST",
+        )
+
+        result = api_for(settings, librenms_server.url).add_device(self._make_device_data())
+
+        assert result == (False, "Already exists")
 
 
 class TestGetLocationsErrors:
-    """Tests for get_locations errors."""
+    """get_locations reads a real response and handles a refused connection."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.get_locations()
+    def test_success_returns_locations(self, settings, librenms_server):
+        """A locations payload returns its location list."""
+        locations = [{"id": 3, "location": "Test site"}]
+        librenms_server.register(
+            "/api/v0/resources/locations",
+            {"status": "ok", "locations": locations},
+            method="GET",
+        )
+
+        assert api_for(settings, librenms_server.url).get_locations() == (True, locations)
+
+    def test_request_exception_returns_false(self, settings, librenms_server):
+        """A refused connection returns a failed result."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, msg = api.get_locations()
+
         assert ok is False
+        assert msg
+
+    def test_timeout_returns_false(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.get_locations()
+
+        assert result == (False, "timed out")
 
 
 class TestUpdateDeviceFieldErrors:
-    """Tests for update_device_field errors."""
+    """update_device_field uses PATCH and handles a refused connection."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.patch", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.update_device_field(1, {"field": "value"})
+    def test_success_patches_the_device(self, settings, librenms_server):
+        """A successful update sends the field payload with PATCH."""
+        received = {}
+
+        def update_device(method, path, query, headers, body):
+            received.update(method=method, path=path, body=body)
+            return 200, {"status": "ok"}
+
+        librenms_server.register("/api/v0/devices/1", update_device, method="PATCH")
+
+        result = api_for(settings, librenms_server.url).update_device_field(1, {"field": "value"})
+
+        assert result == (True, "Device fields updated successfully")
+        assert received == {
+            "method": "PATCH",
+            "path": "/api/v0/devices/1",
+            "body": {"field": "value"},
+        }
+
+    def test_request_exception_returns_false(self, settings, librenms_server):
+        """A refused connection returns a failed result."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, msg = api.update_device_field(1, {"field": "value"})
+
         assert ok is False
+        assert msg
+
+    def test_timeout_returns_false(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.patch", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.update_device_field(1, {"field": "value"})
+
+        assert result == (False, "timed out")
 
 
 class TestGetDeviceIdByIPErrors:
-    """Tests for get_device_id_by_ip errors."""
+    """get_device_id_by_ip handles real lookup and failure responses."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            result = api.get_device_id_by_ip("192.168.1.1")
+    IP = "198.18.0.10"
+    ROUTE = f"/api/v0/devices/{IP}"
+
+    def test_success_returns_device_id(self, settings, librenms_server):
+        """A device response returns its ID."""
+        librenms_server.register(self.ROUTE, {"devices": [{"device_id": 37}]}, method="GET")
+
+        assert api_for(settings, librenms_server.url).get_device_id_by_ip(self.IP) == 37
+
+    def test_request_exception_returns_none(self, settings, librenms_server):
+        """A refused connection returns no device ID."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        assert api.get_device_id_by_ip(self.IP) is None
+
+    def test_timeout_returns_none(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.get_device_id_by_ip(self.IP)
+
         assert result is None
 
-    def test_non_200_returns_none(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        http_error = requests.exceptions.HTTPError(response=mock_resp)
-        mock_resp.raise_for_status.side_effect = http_error
-        with patch("requests.get", return_value=mock_resp):
-            result = api.get_device_id_by_ip("192.168.1.1")
-        assert result is None
+    def test_non_200_returns_none(self, settings, librenms_server):
+        """A 404 response returns no device ID."""
+        librenms_server.register(self.ROUTE, {"status": "error"}, status=404, method="GET")
 
-    def test_null_devices_field_returns_none(self):
-        """API returns {"devices": null} — TypeError must be caught, not propagate."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"devices": None}
-        with patch("requests.get", return_value=mock_resp):
-            result = api.get_device_id_by_ip("192.168.1.1")
-        assert result is None
+        assert api_for(settings, librenms_server.url).get_device_id_by_ip(self.IP) is None
 
-    def test_empty_devices_list_returns_none(self):
-        """API returns {"devices": []} — no match, returns None."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"devices": []}
-        with patch("requests.get", return_value=mock_resp):
-            result = api.get_device_id_by_ip("192.168.1.1")
-        assert result is None
+    def test_null_devices_field_returns_none(self, settings, librenms_server):
+        """A null devices field returns no device ID."""
+        librenms_server.register(self.ROUTE, {"devices": None}, method="GET")
+
+        assert api_for(settings, librenms_server.url).get_device_id_by_ip(self.IP) is None
+
+    def test_empty_devices_list_returns_none(self, settings, librenms_server):
+        """An empty devices list returns no device ID."""
+        librenms_server.register(self.ROUTE, {"devices": []}, method="GET")
+
+        assert api_for(settings, librenms_server.url).get_device_id_by_ip(self.IP) is None
 
 
 class TestGetDeviceIdByHostnameErrors:
-    """Tests for get_device_id_by_hostname errors."""
+    """get_device_id_by_hostname handles real lookup and failure responses."""
 
-    def test_request_exception_returns_none(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            result = api.get_device_id_by_hostname("router01")
+    HOSTNAME = "router01"
+    ROUTE = f"/api/v0/devices/{HOSTNAME}"
+
+    def test_success_returns_device_id(self, settings, librenms_server):
+        """A device response returns its ID."""
+        librenms_server.register(self.ROUTE, {"devices": [{"device_id": 41}]}, method="GET")
+
+        assert api_for(settings, librenms_server.url).get_device_id_by_hostname(self.HOSTNAME) == 41
+
+    def test_request_exception_returns_none(self, settings, librenms_server):
+        """A refused connection returns no device ID."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        assert api.get_device_id_by_hostname(self.HOSTNAME) is None
+
+    def test_timeout_returns_none(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.get_device_id_by_hostname(self.HOSTNAME)
+
         assert result is None
 
-    def test_null_devices_field_returns_none(self):
-        """API returns {"devices": null} — TypeError must be caught, not propagate."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"devices": None}
-        with patch("requests.get", return_value=mock_resp):
-            result = api.get_device_id_by_hostname("router01")
-        assert result is None
+    def test_null_devices_field_returns_none(self, settings, librenms_server):
+        """A null devices field returns no device ID."""
+        librenms_server.register(self.ROUTE, {"devices": None}, method="GET")
 
-    def test_empty_devices_list_returns_none(self):
-        """API returns {"devices": []} — no match, returns None."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"devices": []}
-        with patch("requests.get", return_value=mock_resp):
-            result = api.get_device_id_by_hostname("router01")
-        assert result is None
+        assert api_for(settings, librenms_server.url).get_device_id_by_hostname(self.HOSTNAME) is None
+
+    def test_empty_devices_list_returns_none(self, settings, librenms_server):
+        """An empty devices list returns no device ID."""
+        librenms_server.register(self.ROUTE, {"devices": []}, method="GET")
+
+        assert api_for(settings, librenms_server.url).get_device_id_by_hostname(self.HOSTNAME) is None
 
 
+@pytest.mark.django_db
 class TestStorelibrenmsId:
-    """Tests for _store_librenms_id (lines 259-262)."""
+    """_store_librenms_id persists to a real device mapping or the real cache."""
 
-    def test_stores_via_set_librenms_device_id_when_cf_has_key(self):
-        api = _make_api()
-        obj = MagicMock()
-        obj.cf = {"librenms_id": {"default": None}}
-        obj.custom_field_data = {"librenms_id": {"default": None}}
+    def test_stores_via_custom_field_when_cf_has_key(self, settings, librenms_server):
+        """An existing mapping field stores the ID in the database."""
+        from dcim.models import Device
 
-        with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_set:
-            api._store_librenms_id(obj, 42)
-        mock_set.assert_called_once_with(obj, 42, "default")
-        obj.save.assert_called_once()
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-    def test_stores_in_cache_when_no_cf_key(self):
-        api = _make_api()
-        obj = MagicMock()
-        obj.cf = {}  # No 'librenms_id' key
+        device = make_device("store-mapped-device", librenms_cf={"default": None})
+        api = api_for(settings, librenms_server.url)
 
-        with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
-            api._store_librenms_id(obj, 42)
-        mock_cache.set.assert_called_once()
-        cache_key_used = mock_cache.set.call_args[0][0]
-        assert api.server_key in cache_key_used
+        api._store_librenms_id(device, 42)
+
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
+
+    def test_stores_in_cache_when_the_custom_field_is_absent(self, settings, librenms_server):
+        """Only a NetBox without the plugin custom field reaches the cache fallback."""
+        from django.core.cache import cache
+        from extras.models import CustomField
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-cached-device")
+        # The plugin migration gives every Device and VM this field, so the fallback below is
+        # unreachable until the field is gone.
+        CustomField.objects.filter(name="librenms_id").delete()
+        device.refresh_from_db()
+        assert "librenms_id" not in device.cf
+
+        api = api_for(settings, librenms_server.url)
+        cache_key = api._get_cache_key(device)
+
+        api._store_librenms_id(device, 42)
+
+        assert cache.get(cache_key) == 42
+        assert api.server_key in cache_key
 
 
 class TestParsePortVlanData:
-    """Tests for parse_port_vlan_data (lines 978+)."""
+    """parse_port_vlan_data normalizes VLAN data through a real client."""
 
-    def test_no_if_vlan_returns_mode_none(self):
-        api = _make_api()
+    def test_no_if_vlan_returns_mode_none(self, settings, librenms_server):
+        api = api_for(settings, librenms_server.url)
         port_data = {"port_id": 1, "ifName": "Gi0/1", "ifDescr": "GigabitEthernet", "ifVlan": ""}
         result = api.parse_port_vlan_data(port_data)
         assert result["mode"] is None
 
-    def test_trunk_mode_set_correctly(self):
-        api = _make_api()
+    def test_trunk_mode_set_correctly(self, settings, librenms_server):
+        api = api_for(settings, librenms_server.url)
         port_data = {
             "port_id": 1,
             "ifName": "Gi0/1",
@@ -698,8 +1067,8 @@ class TestParsePortVlanData:
         assert 100 in result["tagged_vlans"]
         assert 200 in result["tagged_vlans"]
 
-    def test_access_mode_from_vlan_array(self):
-        api = _make_api()
+    def test_access_mode_from_vlan_array(self, settings, librenms_server):
+        api = api_for(settings, librenms_server.url)
         port_data = {
             "port_id": 1,
             "ifName": "Gi0/2",
@@ -711,29 +1080,29 @@ class TestParsePortVlanData:
         assert result["mode"] == "access"
         assert result["untagged_vlan"] == 100
 
-    def test_fallback_to_if_vlan_when_no_vlans_array(self):
-        api = _make_api()
+    def test_fallback_to_if_vlan_when_no_vlans_array(self, settings, librenms_server):
+        api = api_for(settings, librenms_server.url)
         port_data = {"port_id": 1, "ifName": "Gi0/3", "ifDescr": "GE", "ifVlan": "50", "ifTrunk": None}
         result = api.parse_port_vlan_data(port_data)
         assert result["mode"] == "access"
         assert result["untagged_vlan"] == 50
 
-    def test_invalid_if_vlan_fallback_returns_none(self):
-        """Lines 1028-1029: ValueError when ifVlan is not an integer."""
-        api = _make_api()
+    def test_invalid_if_vlan_fallback_returns_none(self, settings, librenms_server):
+        """A nonnumeric ifVlan leaves the untagged VLAN unset."""
+        api = api_for(settings, librenms_server.url)
         port_data = {"port_id": 1, "ifName": "Gi0/4", "ifDescr": "GE", "ifVlan": "not-a-number"}
         result = api.parse_port_vlan_data(port_data)
         assert result["untagged_vlan"] is None
 
-    def test_if_descr_used_as_interface_name(self):
-        api = _make_api()
+    def test_if_descr_used_as_interface_name(self, settings, librenms_server):
+        api = api_for(settings, librenms_server.url)
         port_data = {"port_id": 1, "ifName": "Gi0/5", "ifDescr": "GigabitEthernet0/5", "ifVlan": ""}
         result = api.parse_port_vlan_data(port_data, interface_name_field="ifDescr")
         assert result["interface_name"] == "GigabitEthernet0/5"
 
-    def test_string_vlan_id_normalized_to_int(self):
-        """VLAN ID as string '50' must be coerced to int 50 to avoid string sort."""
-        api = _make_api()
+    def test_string_vlan_id_normalized_to_int(self, settings, librenms_server):
+        """String VLAN IDs are normalized to integers."""
+        api = api_for(settings, librenms_server.url)
         port_data = {
             "port_id": 1,
             "ifName": "Gi0/6",
@@ -745,9 +1114,9 @@ class TestParsePortVlanData:
         assert result["untagged_vlan"] == 50
         assert result["tagged_vlans"] == [100]
 
-    def test_none_vlan_id_skipped(self):
-        """Entry with missing 'vlan' key (None) must be skipped."""
-        api = _make_api()
+    def test_none_vlan_id_skipped(self, settings, librenms_server):
+        """An entry without a VLAN ID is skipped."""
+        api = api_for(settings, librenms_server.url)
         port_data = {
             "port_id": 1,
             "ifName": "Gi0/7",
@@ -759,9 +1128,9 @@ class TestParsePortVlanData:
         assert result["untagged_vlan"] == 200
         assert result["tagged_vlans"] == []
 
-    def test_malformed_vlan_id_skipped(self):
-        """Non-numeric string vlan ID is skipped gracefully."""
-        api = _make_api()
+    def test_malformed_vlan_id_skipped(self, settings, librenms_server):
+        """A nonnumeric VLAN ID is skipped."""
+        api = api_for(settings, librenms_server.url)
         port_data = {
             "port_id": 1,
             "ifName": "Gi0/8",
@@ -773,476 +1142,633 @@ class TestParsePortVlanData:
         assert result["untagged_vlan"] == 300
         assert result["tagged_vlans"] == []
 
-    def test_empty_vlans_array_falls_back_to_if_vlan(self):
-        """Empty vlans array should use ifVlan fallback."""
-        api = _make_api()
+    def test_empty_vlans_array_falls_back_to_if_vlan(self, settings, librenms_server):
+        """An empty VLAN array uses the ifVlan fallback."""
+        api = api_for(settings, librenms_server.url)
         port_data = {"port_id": 1, "ifName": "Gi0/9", "ifDescr": "GE", "ifVlan": "10", "vlans": []}
         result = api.parse_port_vlan_data(port_data)
         assert result["untagged_vlan"] == 10
 
 
 class TestGetDeviceInfoResponseFormats:
-    """Tests for get_device_info with unusual API response shapes."""
+    """get_device_info handles unusual real response shapes."""
 
-    def test_null_devices_returns_false(self):
-        """{"devices": null} must return (False, None), not raise TypeError."""
-        from unittest.mock import MagicMock, patch
+    def test_null_devices_returns_false(self, settings, librenms_server):
+        """A null devices field returns an absent result."""
+        librenms_server.register("/api/v0/devices/1", {"devices": None}, method="GET")
 
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"devices": None}
-        with patch("requests.get", return_value=mock_resp):
-            success, result = api.get_device_info(1)
+        success, result = api_for(settings, librenms_server.url).get_device_info(1)
+
         assert success is False
         assert result is None
 
-    def test_empty_devices_list_returns_false(self):
-        """{"devices": []} must return (False, None)."""
-        from unittest.mock import MagicMock, patch
+    def test_empty_devices_list_returns_false(self, settings, librenms_server):
+        """An empty devices list returns an absent result."""
+        librenms_server.register("/api/v0/devices/1", {"devices": []}, method="GET")
 
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"devices": []}
-        with patch("requests.get", return_value=mock_resp):
-            success, result = api.get_device_info(1)
+        success, result = api_for(settings, librenms_server.url).get_device_info(1)
+
         assert success is False
         assert result is None
 
-    def test_non_200_returns_false(self):
-        """Non-200 status code returns (False, None)."""
-        from unittest.mock import MagicMock, patch
+    def test_non_200_returns_false(self, settings, librenms_server):
+        """A 404 response returns an absent result."""
+        librenms_server.register("/api/v0/devices/1", {"status": "error"}, status=404, method="GET")
 
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        with patch("requests.get", return_value=mock_resp):
-            success, result = api.get_device_info(1)
+        success, result = api_for(settings, librenms_server.url).get_device_info(1)
+
         assert success is False
         assert result is None
 
-    def test_valid_device_returns_device_dict(self):
-        """Normal response returns (True, device_dict)."""
-        from unittest.mock import MagicMock, patch
-
-        api = _make_api()
+    def test_valid_device_returns_device_dict(self, settings, librenms_server):
+        """A valid response returns the first device object."""
         device = {"device_id": 42, "hostname": "router01"}
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"devices": [device]}
-        with patch("requests.get", return_value=mock_resp):
-            success, result = api.get_device_info(42)
+        librenms_server.register("/api/v0/devices/42", {"devices": [device]}, method="GET")
+
+        success, result = api_for(settings, librenms_server.url).get_device_info(42)
+
         assert success is True
-        assert result["device_id"] == 42
+        assert result == device
 
 
 class TestGetPortByIdErrors:
-    """Tests for get_port_by_id errors."""
+    """get_port_by_id reads a real port response and handles a refused connection."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.get_port_by_id(1)
+    def test_success_returns_port_response(self, settings, librenms_server):
+        """A port response reaches the caller unchanged."""
+        body = {"status": "ok", "ports": [{"port_id": 1}]}
+        librenms_server.register("/api/v0/ports/1", body, method="GET")
+
+        assert api_for(settings, librenms_server.url).get_port_by_id(1) == (True, body)
+
+    def test_request_exception_returns_false(self, settings, librenms_server):
+        """A refused connection returns a failed result."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, msg = api.get_port_by_id(1)
+
         assert ok is False
+        assert msg
+
+    def test_timeout_returns_false(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.get_port_by_id(1)
+
+        assert result == (False, "timed out")
 
 
 class TestGetDeviceInventoryErrors:
-    """Tests for get_device_inventory errors."""
+    """get_device_inventory reads a real response and handles a refused connection."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.get_device_inventory(1)
+    def test_success_returns_inventory(self, settings, librenms_server):
+        """A valid inventory payload returns its item list."""
+        inventory = [{"entPhysicalName": "Chassis", "entPhysicalClass": "chassis"}]
+        librenms_server.register(
+            "/api/v0/inventory/1/all",
+            {"status": "ok", "inventory": inventory},
+            method="GET",
+        )
+
+        assert api_for(settings, librenms_server.url).get_device_inventory(1) == (True, inventory)
+
+    def test_request_exception_returns_false(self, settings, librenms_server):
+        """A refused connection returns a failed result."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, msg = api.get_device_inventory(1)
+
         assert ok is False
+        assert msg
+
+    def test_timeout_returns_false(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.get", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.get_device_inventory(1)
+
+        assert result == (False, "timed out")
 
 
+@pytest.mark.django_db
 class TestGetAvailableServersMultiConfig:
-    """Tests for get_available_servers with multi-server config (lines 161-165)."""
+    """get_available_servers on a multi-server config."""
 
-    def test_multi_server_config_returns_dict(self):
-        api = _make_api()
-        # Both fully configured (url + token) so they pass the usable-config filter and are offered.
-        servers_config = {
-            "primary": {"librenms_url": "https://p.example.com", "api_token": "pt", "display_name": "Primary Server"},
-            "secondary": {
-                "librenms_url": "https://s.example.com",
-                "api_token": "st",
-                "display_name": "Secondary Server",
+    def test_multi_server_config_returns_dict(self, settings):
+        """Every fully configured server is offered under its display name."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        configure_servers(
+            settings,
+            {
+                "primary": {
+                    "librenms_url": "https://p.example.com",
+                    "api_token": "pt",
+                    "display_name": "Primary Server",
+                },
+                "secondary": {
+                    "librenms_url": "https://s.example.com",
+                    "api_token": "st",
+                    "display_name": "Secondary Server",
+                },
             },
+        )
+
+        assert LibreNMSAPI.get_available_servers() == {
+            "primary": "Primary Server",
+            "secondary": "Secondary Server",
         }
 
-        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config:
-            mock_config.side_effect = lambda plugin, key, default=None: servers_config if key == "servers" else None
-            result = api.get_available_servers()
-        assert result == {"primary": "Primary Server", "secondary": "Secondary Server"}
+    def test_multi_server_config_uses_key_when_no_display_name(self, settings):
+        """A server without a display name is offered under its key."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-    def test_multi_server_config_uses_key_when_no_display_name(self):
-        api = _make_api()
-        # Usable (url + token) but no display_name → the key is used as the display label.
-        servers_config = {
-            "main": {"librenms_url": "https://m.example.com", "api_token": "mt"},
-        }
+        configure_servers(settings, {"main": {"librenms_url": "https://m.example.com", "api_token": "mt"}})
 
-        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config:
-            mock_config.side_effect = lambda plugin, key, default=None: servers_config if key == "servers" else None
-            result = api.get_available_servers()
-        assert result == {"main": "main"}
+        assert LibreNMSAPI.get_available_servers() == {"main": "main"}
+
+    def test_a_partially_configured_server_is_not_offered(self, settings):
+        """A server missing its token cannot be bound, so it must not appear as selectable."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        configure_servers(
+            settings,
+            {
+                "usable": {"librenms_url": "https://u.example.com", "api_token": "ut"},
+                "half": {"librenms_url": "https://h.example.com"},
+            },
+        )
+
+        assert LibreNMSAPI.get_available_servers() == {"usable": "usable"}
 
 
 class TestAddDeviceWithOptionalFields:
-    """Tests for add_device with optional fields (lines 405, 407, 409, 411)."""
+    """add_device sends each optional field over real HTTP."""
 
     def _make_base_data(self):
-        return {"hostname": "router01", "snmp_version": "v2c", "community": "public", "force_add": False}
+        return {
+            "hostname": "router01",
+            "snmp_version": "v2c",
+            "community": "test-community",
+            "force_add": False,
+        }
 
-    def test_add_device_with_port(self):
-        api = _make_api()
-        data = {**self._make_base_data(), "port": 161}
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "message": "Device added"}
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            ok, msg = api.add_device(data)
-        assert ok is True
-        assert msg == "Device added successfully."
-        assert "port" in mock_post.call_args[1]["json"]
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("port", 161, id="port"),
+            pytest.param("transport", "udp6", id="transport"),
+            pytest.param("port_association_mode", "ifName", id="port-association-mode"),
+            pytest.param("poller_group", 2, id="poller-group"),
+        ],
+    )
+    def test_add_device_with_optional_field(self, settings, librenms_server, field, value):
+        """The selected optional field is present in the received JSON body."""
+        received = []
 
-    def test_add_device_with_transport(self):
-        api = _make_api()
-        data = {**self._make_base_data(), "transport": "udp6"}
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "message": "ok"}
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            ok, msg = api.add_device(data)
-        assert ok is True
-        assert msg == "Device added successfully."
-        assert "transport" in mock_post.call_args[1]["json"]
+        def add_device(method, path, query, headers, body):
+            received.append(body)
+            return 200, {"status": "ok"}
 
-    def test_add_device_with_port_association_mode(self):
-        api = _make_api()
-        data = {**self._make_base_data(), "port_association_mode": "ifName"}
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "message": "ok"}
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            ok, msg = api.add_device(data)
-        assert ok is True
-        assert msg == "Device added successfully."
-        assert "port_association_mode" in mock_post.call_args[1]["json"]
+        librenms_server.register("/api/v0/devices", add_device, method="POST")
+        data = {**self._make_base_data(), field: value}
 
-    def test_add_device_with_poller_group(self):
-        api = _make_api()
-        data = {**self._make_base_data(), "poller_group": 2}
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok", "message": "ok"}
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            ok, msg = api.add_device(data)
-        assert ok is True
-        assert msg == "Device added successfully."
-        assert "poller_group" in mock_post.call_args[1]["json"]
+        result = api_for(settings, librenms_server.url).add_device(data)
+
+        assert result == (True, "Device added successfully.")
+        assert received == [
+            {
+                "hostname": "router01",
+                "snmpver": "v2c",
+                "force_add": False,
+                "community": "test-community",
+                field: value,
+            }
+        ]
 
 
 class TestUpdateDeviceFieldUnexpected:
-    """Tests for update_device_field non-ok status (line 474)."""
+    """update_device_field reports real API error payloads."""
 
-    def test_non_ok_status_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "error", "message": "Failed"}
-        with patch("requests.patch", return_value=mock_resp):
-            ok, msg = api.update_device_field(1, {"field": "value"})
-        assert ok is False
+    def test_non_ok_status_returns_false(self, settings, librenms_server):
+        """A 200 error payload returns the server message."""
+        librenms_server.register(
+            "/api/v0/devices/1",
+            {"status": "error", "message": "Failed"},
+            method="PATCH",
+        )
 
-    def test_request_exception_with_json_response(self):
-        """Lines 477-479: extract message from JSON error response."""
-        api = _make_api()
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"message": "Detailed error"}
-        exc = requests.exceptions.RequestException("error")
-        exc.response = mock_response
-        with patch("requests.patch", side_effect=exc):
-            ok, msg = api.update_device_field(1, {"field": "value"})
-        assert ok is False
-        assert "Detailed error" in msg
+        result = api_for(settings, librenms_server.url).update_device_field(1, {"field": "value"})
+
+        assert result == (False, "Failed")
+
+    def test_http_error_uses_json_response_message(self, settings, librenms_server):
+        """An HTTP error returns the JSON response message."""
+        librenms_server.register(
+            "/api/v0/devices/1",
+            {"status": "error", "message": "Detailed error"},
+            status=400,
+            method="PATCH",
+        )
+
+        result = api_for(settings, librenms_server.url).update_device_field(1, {"field": "value"})
+
+        assert result == (False, "Detailed error")
 
 
 class TestGetLocationsNoLocations:
-    """Tests for get_locations when no locations found (line 505)."""
+    """get_locations rejects a real payload without locations."""
 
-    def test_no_locations_in_response(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "ok"}  # No 'locations' key
-        with patch("requests.get", return_value=mock_resp):
-            ok, msg = api.get_locations()
-        assert ok is False
+    def test_no_locations_in_response(self, settings, librenms_server):
+        """A payload without locations returns the format error."""
+        librenms_server.register("/api/v0/resources/locations", {"status": "ok"}, method="GET")
+
+        result = api_for(settings, librenms_server.url).get_locations()
+
+        assert result == (False, "No locations found or unexpected response format")
 
 
 class TestAddLocationErrors:
-    """Tests for add_location error paths (lines 542-547)."""
+    """add_location uses the real POST endpoint and reports failures."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.post", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.add_location({"location": "TestSite", "lat": 0, "lng": 0})
-        assert ok is False
+    LOCATION = {"location": "TestSite", "lat": 0, "lng": 0}
 
-    def test_request_exception_with_json_response(self):
-        api = _make_api()
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"message": "Detailed error"}
-        exc = requests.exceptions.RequestException("error")
-        exc.response = mock_response
-        with patch("requests.post", side_effect=exc):
-            ok, msg = api.add_location({"location": "TestSite", "lat": 0, "lng": 0})
+    def test_success_adds_location(self, settings, librenms_server):
+        """A successful response returns the new location ID."""
+        received = []
+
+        def add_location(method, path, query, headers, body):
+            received.append((method, body))
+            return 200, {"status": "ok", "message": "Location added #12"}
+
+        librenms_server.register("/api/v0/locations", add_location, method="POST")
+
+        result = api_for(settings, librenms_server.url).add_location(self.LOCATION)
+
+        assert result == (True, {"id": "12", "message": "Location added #12"})
+        assert received == [("POST", self.LOCATION)]
+
+    def test_request_exception_returns_false(self, settings, librenms_server):
+        """A refused connection returns a failed result."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, msg = api.add_location(self.LOCATION)
+
         assert ok is False
-        assert "Detailed error" in msg
+        assert msg
+
+    def test_timeout_returns_false(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.post", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.add_location(self.LOCATION)
+
+        assert result == (False, "timed out")
+
+    def test_http_error_uses_json_response_message(self, settings, librenms_server):
+        """An HTTP error returns the JSON response message."""
+        librenms_server.register(
+            "/api/v0/locations",
+            {"status": "error", "message": "Detailed error"},
+            status=400,
+            method="POST",
+        )
+
+        result = api_for(settings, librenms_server.url).add_location(self.LOCATION)
+
+        assert result == (False, "Detailed error")
 
 
 class TestUpdateLocationErrors:
-    """Tests for update_location error paths (lines 580-585)."""
+    """update_location uses the real PATCH endpoint and reports failures."""
 
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.patch", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.update_location("TestSite", {"lat": 0, "lng": 0})
-        assert ok is False
+    LOCATION_DATA = {"lat": 0, "lng": 0}
 
-    def test_request_exception_with_json_response(self):
-        api = _make_api()
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"message": "Update failed"}
-        exc = requests.exceptions.RequestException("error")
-        exc.response = mock_response
-        with patch("requests.patch", side_effect=exc):
-            ok, msg = api.update_location("TestSite", {"lat": 0, "lng": 0})
+    def test_success_updates_encoded_location(self, settings, librenms_server):
+        """A successful update encodes the name and sends the field payload."""
+        received = []
+
+        def update_location(method, path, query, headers, body):
+            received.append((method, path, body))
+            return 200, {"status": "ok", "message": "Location updated"}
+
+        librenms_server.register("/api/v0/locations/Test%20Site", update_location, method="PATCH")
+
+        result = api_for(settings, librenms_server.url).update_location("Test Site", self.LOCATION_DATA)
+
+        assert result == (True, "Location updated")
+        assert received == [("PATCH", "/api/v0/locations/Test%20Site", self.LOCATION_DATA)]
+
+    def test_success_encodes_slash_as_part_of_the_location_segment(self, settings, librenms_server):
+        """A slash in a location name must not become another route segment."""
+        encoded_path = "/api/v0/locations/Building%20A%2FFloor%202"
+        received = []
+
+        def update_location(method, path, query, headers, body):
+            received.append((method, path, body))
+            return 200, {"status": "ok", "message": "Location updated"}
+
+        librenms_server.register(encoded_path, update_location, method="PATCH")
+
+        result = api_for(settings, librenms_server.url).update_location(
+            "Building A/Floor 2",
+            self.LOCATION_DATA,
+        )
+
+        assert result == (True, "Location updated")
+        assert received == [("PATCH", encoded_path, self.LOCATION_DATA)]
+
+    def test_request_exception_returns_false(self, settings, librenms_server):
+        """A refused connection returns a failed result."""
+        api = api_for(settings, librenms_server.url)
+        librenms_server.stop()
+
+        ok, msg = api.update_location("TestSite", self.LOCATION_DATA)
+
         assert ok is False
-        assert "Update failed" in msg
+        assert msg
+
+    def test_timeout_returns_false(self, settings, librenms_server):
+        """A timeout is caught through the RequestException base class."""
+        api = api_for(settings, librenms_server.url)
+
+        with patch("requests.patch", side_effect=requests.exceptions.Timeout("timed out")):
+            result = api.update_location("TestSite", self.LOCATION_DATA)
+
+        assert result == (False, "timed out")
+
+    def test_http_error_uses_json_response_message(self, settings, librenms_server):
+        """An HTTP error returns the JSON response message."""
+        librenms_server.register(
+            "/api/v0/locations/TestSite",
+            {"status": "error", "message": "Update failed"},
+            status=400,
+            method="PATCH",
+        )
+
+        result = api_for(settings, librenms_server.url).update_location("TestSite", self.LOCATION_DATA)
+
+        assert result == (False, "Update failed")
 
 
 class TestGetInventoryFilteredNonOk:
-    """Tests for get_inventory_filtered non-200 response (line 689 + 791, 799)."""
+    """get_inventory_filtered reports real HTTP and payload failures."""
 
-    def test_non_200_response_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        mock_resp.raise_for_status.return_value = None
-        with patch("requests.get", return_value=mock_resp):
-            ok, data = api.get_inventory_filtered(1)
+    def test_non_200_response_returns_false(self, settings, librenms_server):
+        """A 404 response returns an HTTP error detail."""
+        librenms_server.register("/api/v0/inventory/1", {"status": "error"}, status=404, method="GET")
+
+        ok, data = api_for(settings, librenms_server.url).get_inventory_filtered(1)
+
         assert ok is False
-        assert isinstance(data, str)  # error message, not empty list
+        assert "404" in data
 
-    def test_ent_physical_contained_in_filter(self):
-        """Line 791: ent_physical_contained_in filter exercised — API returns already-filtered list."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        # The real LibreNMS API filters server-side; mock returns only the matching item.
-        inventory = [
-            {"entPhysicalContainedIn": "1", "entPhysicalName": "slot1"},
-        ]
-        mock_resp.json.return_value = {"status": "ok", "inventory": inventory}
-        with patch("requests.get", return_value=mock_resp) as mock_get:
-            ok, data = api.get_inventory_filtered(1, ent_physical_contained_in="1")
+    def test_ent_physical_contained_in_filter(self, settings, librenms_server):
+        """The contained-in filter reaches the server."""
+        inventory = [{"entPhysicalContainedIn": "1", "entPhysicalName": "slot1"}]
+        received = []
+
+        def filtered_inventory(method, path, query, headers, body):
+            received.append(query)
+            return 200, {"status": "ok", "inventory": inventory}
+
+        librenms_server.register("/api/v0/inventory/1", filtered_inventory, method="GET")
+
+        ok, data = api_for(settings, librenms_server.url).get_inventory_filtered(
+            1,
+            ent_physical_contained_in="1",
+        )
+
         assert ok is True
-        assert len(data) == 1
-        mock_get.assert_called_once()
-        _, call_kwargs = mock_get.call_args
-        assert call_kwargs.get("params", {}).get("entPhysicalContainedIn") == "1"
+        assert data == inventory
+        assert received == [{"entPhysicalContainedIn": ["1"]}]
 
-    def test_empty_inventory_returns_empty(self):
-        """Line 799: when response lacks status:ok (even with an empty inventory list), returns False."""
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"inventory": []}  # Empty inventory
-        with patch("requests.get", return_value=mock_resp):
-            ok, data = api.get_inventory_filtered(1)
-        # No "status":"ok" in response → falls through to return False, message
-        assert ok is False
-        assert isinstance(data, str)  # error message, not empty list
+    def test_empty_inventory_without_ok_status_returns_false(self, settings, librenms_server):
+        """An empty inventory without an ok status is a format failure."""
+        librenms_server.register("/api/v0/inventory/1", {"inventory": []}, method="GET")
+
+        result = api_for(settings, librenms_server.url).get_inventory_filtered(1)
+
+        assert result == (False, "Unexpected response format")
 
 
 class TestGetDeviceVlansHttpError:
-    """Tests for get_device_vlans HTTP error paths (lines 918, 924)."""
+    """get_device_vlans reports real HTTP errors."""
 
-    def test_http_404_returns_not_found(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        exc = requests.exceptions.HTTPError(response=mock_resp)
-        mock_resp.raise_for_status.side_effect = exc
-        exc.response = mock_resp
-        with patch("requests.get", side_effect=exc):
-            ok, msg = api.get_device_vlans(1)
-        assert ok is False
+    def test_http_404_returns_not_found(self, settings, librenms_server):
+        """A 404 response names the missing VLAN resource."""
+        librenms_server.register("/api/v0/resources/vlans", {"status": "error"}, status=404, method="GET")
 
-    def test_http_5xx_returns_error(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        exc = requests.exceptions.HTTPError(response=mock_resp)
-        exc.response = mock_resp
-        with patch("requests.get", side_effect=exc):
-            ok, msg = api.get_device_vlans(1)
+        result = api_for(settings, librenms_server.url).get_device_vlans(1)
+
+        assert result == (False, "VLANs resource not found")
+
+    def test_http_5xx_returns_error(self, settings, librenms_server):
+        """A 500 response returns an HTTP error detail."""
+        librenms_server.register("/api/v0/resources/vlans", {"status": "error"}, status=500, method="GET")
+
+        ok, msg = api_for(settings, librenms_server.url).get_device_vlans(1)
+
         assert ok is False
+        assert "HTTP error" in msg
+        assert "500" in msg
 
 
 class TestGetPortVlanDetailsHttpError:
-    """Tests for get_port_vlan_details HTTP error paths (line 974)."""
+    """get_port_vlan_details reports a real non-404 HTTP error."""
 
-    def test_http_non_404_returns_http_error(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        exc = requests.exceptions.HTTPError(response=mock_resp)
-        exc.response = mock_resp
-        with patch("requests.get", side_effect=exc):
-            ok, msg = api.get_port_vlan_details(1)
+    def test_http_non_404_returns_http_error(self, settings, librenms_server):
+        """A 500 response returns an HTTP error detail."""
+        librenms_server.register("/api/v0/ports/1", {"status": "error"}, status=500, method="GET")
+
+        ok, msg = api_for(settings, librenms_server.url).get_port_vlan_details(1)
+
         assert ok is False
         assert "HTTP error" in msg
+        assert "500" in msg
 
 
 class TestGetInventoryFilteredNonOkStatus:
-    """Line 689: non-200 returns False with error message."""
+    """get_inventory_filtered reports a real 500 response."""
 
-    def test_non_200_status(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_resp.raise_for_status.return_value = None
-        with patch("requests.get", return_value=mock_resp):
-            ok, data = api.get_inventory_filtered(1)
+    def test_non_200_status(self, settings, librenms_server):
+        """A 500 response returns an HTTP error detail."""
+        librenms_server.register("/api/v0/inventory/1", {"status": "error"}, status=500, method="GET")
+
+        ok, data = api_for(settings, librenms_server.url).get_inventory_filtered(1)
+
         assert ok is False
-        assert isinstance(data, str)  # error message, not empty list
+        assert "500" in data
 
 
 class TestGetDeviceVlansNonOkResponse:
-    """Line 918: get_device_vlans when status != ok."""
+    """get_device_vlans reports a real non-ok payload."""
 
-    def test_vlans_response_status_not_ok(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = {"status": "error", "message": "Failed to retrieve VLANs"}
-        with patch("requests.get", return_value=mock_resp):
-            ok, msg = api.get_device_vlans(1)
-        assert ok is False
-        assert "Failed" in msg
+    def test_vlans_response_status_not_ok(self, settings, librenms_server):
+        """An error payload returns the server message."""
+        librenms_server.register(
+            "/api/v0/resources/vlans",
+            {"status": "error", "message": "Failed to retrieve VLANs"},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url).get_device_vlans(1)
+
+        assert result == (False, "Failed to retrieve VLANs")
 
 
 class TestGetDeviceInventoryNonOkStatus:
-    """Line 689: get_device_inventory non-200 returns False, []."""
+    """get_device_inventory reports a real 500 response."""
 
-    def test_non_200_status(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError("500 Server Error")
-        with patch("requests.get", return_value=mock_resp):
-            ok, data = api.get_device_inventory(1)
+    def test_non_200_status(self, settings, librenms_server):
+        """A 500 response returns an HTTP error detail."""
+        librenms_server.register("/api/v0/inventory/1/all", {"status": "error"}, status=500, method="GET")
+
+        ok, data = api_for(settings, librenms_server.url).get_device_inventory(1)
+
         assert ok is False
+        assert "500" in data
 
 
 class TestMalformedPayloads:
-    """Tests for malformed-payload guards in API methods (inventory, devices, vlans)."""
+    """API readers reject malformed payloads served over real HTTP."""
 
-    def _ok_resp(self, body: dict):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = body
-        return mock_resp
+    def test_get_device_inventory_none_inventory(self, settings, librenms_server):
+        """A null inventory is rejected."""
+        librenms_server.register(
+            "/api/v0/inventory/1/all",
+            {"status": "ok", "inventory": None},
+            method="GET",
+        )
 
-    def test_get_device_inventory_none_inventory(self):
-        """get_device_inventory: inventory=None returns (False, ...)."""
-        api = _make_api()
-        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "inventory": None})):
-            ok, msg = api.get_device_inventory(1)
-        assert ok is False
-        assert msg is not None
+        result = api_for(settings, librenms_server.url).get_device_inventory(1)
 
-    def test_get_device_inventory_non_list_inventory(self):
-        """get_device_inventory: inventory as dict returns (False, ...)."""
-        api = _make_api()
-        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "inventory": {}})):
-            ok, msg = api.get_device_inventory(1)
-        assert ok is False
+        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
 
-    def test_get_device_inventory_non_dict_inventory_item(self):
-        """get_device_inventory: list containing non-dict items returns (False, ...)."""
-        api = _make_api()
-        body = {"status": "ok", "inventory": [None, {"entPhysicalName": "slot1"}]}
-        with patch("requests.get", return_value=self._ok_resp(body)):
-            ok, msg = api.get_device_inventory(1)
-        assert ok is False
-        assert msg is not None
+    def test_get_device_inventory_non_list_inventory(self, settings, librenms_server):
+        """An object inventory is rejected."""
+        librenms_server.register(
+            "/api/v0/inventory/1/all",
+            {"status": "ok", "inventory": {}},
+            method="GET",
+        )
 
-    def test_get_inventory_filtered_none_inventory(self):
-        """get_inventory_filtered: inventory=None in filtered path returns (False, ...) without calling get_device_inventory."""
-        api = _make_api()
-        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "inventory": None})):
-            with patch.object(api, "get_device_inventory") as mock_get_inv:
-                ok, msg = api.get_inventory_filtered(1, ent_physical_class="chassis")
-        assert ok is False
-        assert msg is not None
-        mock_get_inv.assert_not_called()
+        result = api_for(settings, librenms_server.url).get_device_inventory(1)
 
-    def test_get_inventory_filtered_non_dict_inventory_item(self):
-        """get_inventory_filtered: list containing non-dict items returns (False, ...) without fallback."""
-        api = _make_api()
-        body = {"status": "ok", "inventory": ["bad"]}
-        with patch("requests.get", return_value=self._ok_resp(body)):
-            with patch.object(api, "get_device_inventory") as mock_get_inv:
-                ok, msg = api.get_inventory_filtered(1, ent_physical_class="chassis")
-        assert ok is False
-        assert msg is not None
-        mock_get_inv.assert_not_called()
+        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
 
-    def test_list_devices_none_devices(self):
-        """list_devices: devices=None returns (False, ...)."""
-        api = _make_api()
-        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "devices": None})):
-            ok, msg = api.list_devices()
-        assert ok is False
-        assert msg is not None
+    def test_get_device_inventory_non_dict_inventory_item(self, settings, librenms_server):
+        """A non-object inventory item is rejected."""
+        librenms_server.register(
+            "/api/v0/inventory/1/all",
+            {"status": "ok", "inventory": [None, {"entPhysicalName": "slot1"}]},
+            method="GET",
+        )
 
-    def test_list_devices_non_list_devices(self):
-        """list_devices: devices as string returns (False, ...)."""
-        api = _make_api()
-        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "devices": "bad"})):
-            ok, msg = api.list_devices()
-        assert ok is False
+        result = api_for(settings, librenms_server.url).get_device_inventory(1)
 
-    def test_get_device_vlans_none_vlans(self):
-        """get_device_vlans: vlans=None returns (False, ...)."""
-        api = _make_api()
-        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "vlans": None})):
-            ok, msg = api.get_device_vlans(1)
-        assert ok is False
-        assert msg is not None
+        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
 
-    def test_get_device_vlans_fails_closed_on_non_dict_items(self):
-        """get_device_vlans: non-dict items in vlans list cause fail-closed (False, error message)."""
-        api = _make_api()
+    def test_get_inventory_filtered_none_inventory(self, settings, librenms_server):
+        """A null filtered inventory is rejected without using the fallback."""
+        librenms_server.register(
+            "/api/v0/inventory/1",
+            {"status": "ok", "inventory": None},
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/inventory/1/all",
+            {"status": "ok", "inventory": [{"entPhysicalClass": "chassis"}]},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url).get_inventory_filtered(
+            1,
+            ent_physical_class="chassis",
+        )
+
+        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
+
+    def test_get_inventory_filtered_non_dict_inventory_item(self, settings, librenms_server):
+        """A non-object filtered inventory item is rejected without using the fallback."""
+        librenms_server.register(
+            "/api/v0/inventory/1",
+            {"status": "ok", "inventory": ["bad"]},
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/inventory/1/all",
+            {"status": "ok", "inventory": [{"entPhysicalClass": "chassis"}]},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url).get_inventory_filtered(
+            1,
+            ent_physical_class="chassis",
+        )
+
+        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
+
+    def test_list_devices_none_devices(self, settings, librenms_server):
+        """A null devices field is rejected."""
+        librenms_server.register(
+            "/api/v0/devices",
+            {"status": "ok", "devices": None},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url).list_devices()
+
+        assert result == (False, "Unexpected response format: missing 'devices' list")
+
+    def test_list_devices_non_list_devices(self, settings, librenms_server):
+        """A string devices field is rejected."""
+        librenms_server.register(
+            "/api/v0/devices",
+            {"status": "ok", "devices": "bad"},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url).list_devices()
+
+        assert result == (False, "Unexpected response format: missing 'devices' list")
+
+    def test_get_device_vlans_none_vlans(self, settings, librenms_server):
+        """A null VLANs field is rejected."""
+        librenms_server.register(
+            "/api/v0/resources/vlans",
+            {"status": "ok", "vlans": None},
+            method="GET",
+        )
+
+        result = api_for(settings, librenms_server.url).get_device_vlans(1)
+
+        assert result == (False, "Unexpected response format: missing 'vlans' list")
+
+    def test_get_device_vlans_fails_closed_on_non_dict_items(self, settings, librenms_server):
+        """A non-object VLAN item is rejected."""
         vlans = [None, "bad", {"device_id": 1, "vlan_id": 10}]
-        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "vlans": vlans})):
-            ok, msg = api.get_device_vlans(1)
-        assert ok is False
-        assert "invalid item shape" in msg
+        librenms_server.register(
+            "/api/v0/resources/vlans",
+            {"status": "ok", "vlans": vlans},
+            method="GET",
+        )
 
-    def test_get_device_ips_none_addresses(self):
-        """get_device_ips: addresses=None returns (False, ...)."""
-        api = _make_api()
-        with patch("requests.get", return_value=self._ok_resp({"addresses": None})):
-            ok, _ = api.get_device_ips(1)
-        assert ok is False
+        result = api_for(settings, librenms_server.url).get_device_vlans(1)
+
+        assert result == (False, "Unexpected response format: invalid item shape in 'vlans'")
+
+    def test_get_device_ips_none_addresses(self, settings, librenms_server):
+        """A null addresses field is rejected."""
+        librenms_server.register("/api/v0/devices/1/ip", {"addresses": None}, method="GET")
+
+        result = api_for(settings, librenms_server.url).get_device_ips(1)
+
+        assert result == (False, "Unexpected response format: 'addresses' must be a list")

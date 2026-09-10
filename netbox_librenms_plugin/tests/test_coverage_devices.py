@@ -787,21 +787,16 @@ class TestSingleModuleVerifyView:
         import json
 
         from dcim.models import Interface, Module, ModuleBayTemplate, ModuleType
-        from django.apps import apps
         from django.http import JsonResponse
         from django.test import RequestFactory
 
         from netbox_librenms_plugin.models import (
             CarrierAutoInstallRule,
+            LibreNMSSettings,
             ModuleBayMapping,
             ModuleTypeMapping,
         )
         from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
-
-        # Resolve via the app registry, not the module attribute: the autouse mock_librenms_config
-        # fixture patches netbox_librenms_plugin.models.LibreNMSSettings to a MagicMock in the full
-        # suite, which would otherwise break ObjectType.get_for_model() in _user_with_perms.
-        LibreNMSSettings = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
 
         device = _make_real_device("mod-canchange")  # non-VC real device (with real device_type/manufacturer)
         user = _user_with_perms(
