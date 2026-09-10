@@ -252,7 +252,10 @@ class BaseInterfaceTableView(
         self.librenms_id, lookup_error = self.resolve_librenms_id(lookup_device)
 
         if self.librenms_id is None:
-            messages.error(request, lookup_error.message if lookup_error else "Device not found in LibreNMS.")
+            messages.error(
+                request,
+                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
+            )
             return self._failure_redirect(request, obj, _server_key)
 
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)

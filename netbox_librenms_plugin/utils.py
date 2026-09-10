@@ -2063,11 +2063,20 @@ def find_devices_by_serial(serial: str, limit: int = 2) -> list:
     from django.db.models import CharField, F, Func, Value
 
     matches = list(Device.objects.filter(serial=serial)[:limit])
-    if matches:
+    if len(matches) >= limit:
         return matches
+    # An exact hit does not mean a unique one: a row written with padding normalizes to the same
+    # serial, and the caller uses len(matches) > 1 to refuse a duplicate. Returning early on the
+    # first exact match would hide that twin and let the import bind an arbitrary row.
     # Django's Trim() strips spaces only; normalize_serial() uses str.strip(), so name the same set.
     trimmed = Func(F("serial"), Value(" \t\n\r\v\f"), function="BTRIM", output_field=CharField())
-    return list(Device.objects.annotate(trimmed_serial=trimmed).filter(trimmed_serial=serial)[:limit])
+    remaining = limit - len(matches)
+    matches.extend(
+        Device.objects.annotate(trimmed_serial=trimmed)
+        .filter(trimmed_serial=serial)
+        .exclude(pk__in=[device.pk for device in matches])[:remaining]
+    )
+    return matches
 
 
 def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -> str:

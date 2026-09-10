@@ -21,6 +21,21 @@ SERVER_KEY = "test-server"
 
 
 @pytest.mark.django_db
+def test_a_padded_duplicate_serial_is_reported_alongside_the_exact_match():
+    """The caller blocks an import on len(matches) > 1, so a padded twin must not stay hidden."""
+    from netbox_librenms_plugin.utils import find_devices_by_serial
+
+    exact = make_device("serial-exact", serial="DUP-SERIAL")
+    padded = make_device("serial-padded", serial="  DUP-SERIAL  ")
+
+    matches = find_devices_by_serial("DUP-SERIAL")
+
+    assert {device.pk for device in matches} == {exact.pk, padded.pk}, (
+        "an exact hit returned early and hid the whitespace-only duplicate"
+    )
+
+
+@pytest.mark.django_db
 def test_trimmed_serial_lookup_uses_expression_index():
     from netbox_librenms_plugin.utils import find_devices_by_serial
 
@@ -1498,7 +1513,9 @@ class TestImportSingleDevice:
         )
 
         assert result["success"] is False
-        assert f"device '{owner.name}'" in result["error"]
+        # The claim search is unrestricted and this path takes no user, so the owner stays unnamed.
+        assert "already assigned to another device" in result["error"]
+        assert owner.name not in result["error"]
 
     def test_vm_assignment_conflict_is_identified_as_a_vm(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
@@ -1517,7 +1534,8 @@ class TestImportSingleDevice:
         )
 
         assert result["success"] is False
-        assert f"VM '{owner.name}'" in result["error"]
+        assert "already assigned to another VM" in result["error"]
+        assert owner.name not in result["error"]
 
     def test_empty_resolved_name_recomputes_from_sync_preferences(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device

@@ -215,6 +215,9 @@ class TestAddDeviceToLibreNMSView:
 
         assert response.status_code == 400
         assert b"rack&lt;script&gt;" in response.content
+        # The test name claims rejection happens BEFORE api access, which the status code alone
+        # does not show: resolving the object and calling LibreNMS first would also return 400.
+        assert librenms_server.requests == [], librenms_server.requests
 
     def test_user_without_device_change_permission_cannot_submit(self, client, librenms_server):
         device = make_device("add-device-permission-denied")

@@ -408,7 +408,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 server_key,
                 actor_id=request_actor_id(request),
             )
-            messages.error(request, lookup_error.message if lookup_error else "Device not found in LibreNMS.")
+            messages.error(
+                request,
+                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
+            )
             return self.render_sync_partial(
                 request,
                 obj,
@@ -651,7 +654,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         else:
             current_librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
             if lookup_error is not None:
-                messages.error(request, lookup_error.message)
+                messages.error(request, self.scoped_lookup_message(lookup_error))
         if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}

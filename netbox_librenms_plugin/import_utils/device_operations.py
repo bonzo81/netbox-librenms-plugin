@@ -1832,7 +1832,8 @@ def import_single_device(
                     "success": False,
                     "device": None,
                     "message": "",
-                    "error": (f"LibreNMS ID {device_id} is already assigned to {object_label} '{conflict.name}'"),
+                    # Unrestricted claim search and no user here, so the owner stays unnamed.
+                    "error": (f"LibreNMS ID {device_id} is already assigned to another {object_label}"),
                     "synced": {},
                 }
 

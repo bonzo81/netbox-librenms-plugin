@@ -85,9 +85,11 @@ def create_vm_from_librenms(
         _locked_owner, conflict = lock_librenms_id_assignment(librenms_device_id, server_key)
         if conflict is not None:
             object_label = "VM" if isinstance(conflict, VirtualMachine) else "device"
+            # The claim search is unrestricted and this helper takes no user, so it cannot check
+            # who may see the owner. Naming it here would disclose an object outside the caller's
+            # scope; the permission-checked callers name it through _visible_conflict_label().
             raise ValueError(
-                f"VM cannot be imported: LibreNMS ID {librenms_device_id} is already assigned to "
-                f"{object_label} '{conflict.name}'"
+                f"VM cannot be imported: LibreNMS ID {librenms_device_id} is already assigned to another {object_label}"
             )
         vm = VirtualMachine.objects.create(
             name=vm_name,

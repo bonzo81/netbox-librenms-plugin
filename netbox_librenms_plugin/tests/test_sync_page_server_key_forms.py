@@ -218,6 +218,9 @@ class TestSyncPageFormsCarryServerKey:
         from django.urls import reverse
 
         device = make_device("sync-page-legacy-form", serial="NB-SER-2", librenms_cf=42)
+        # The installation default must MATCH the query key here: server_selection.py:248 accepts a
+        # requested key for a legacy bare-integer mapping only when it equals the installation
+        # default, so separating them makes this scenario unreachable rather than stronger.
         LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "secondary"})
 
         html = _render_sync_page(device, servers, "?server_key=secondary")

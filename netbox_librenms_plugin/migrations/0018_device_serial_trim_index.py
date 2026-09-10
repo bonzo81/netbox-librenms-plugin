@@ -63,10 +63,15 @@ def ensure_device_serial_trim_index(apps, schema_editor):
 
         schema_editor.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {schema_editor.quote_name(_SERIAL_INDEX)}")
 
+    # CREATE INDEX takes no bound parameters. Django's psycopg3 backend hides that by binding
+    # client-side by default, but a deployment setting OPTIONS["server_side_binding"] = True sends
+    # the parameter to PostgreSQL, which answers "could not determine data type of parameter $1"
+    # and leaves the migration unapplied. Inline the character set as a literal instead.
+    trim_literal = "'" + _SERIAL_TRIM_CHARACTERS.replace("'", "''") + "'"
     schema_editor.execute(
         f"CREATE INDEX CONCURRENTLY {schema_editor.quote_name(_SERIAL_INDEX)} "
-        f"ON {schema_editor.quote_name(_SERIAL_TABLE)} (BTRIM({schema_editor.quote_name('serial')}, %s))",
-        [_SERIAL_TRIM_CHARACTERS],
+        f"ON {schema_editor.quote_name(_SERIAL_TABLE)} "
+        f"(BTRIM({schema_editor.quote_name('serial')}, {trim_literal}))"
     )
 
 
