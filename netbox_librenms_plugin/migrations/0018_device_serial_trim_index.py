@@ -15,6 +15,13 @@ def ensure_device_serial_trim_index(apps, schema_editor):
     # IF NOT EXISTS also accepts an invalid index left by a failed concurrent build.
     # Inspect the catalog so retries can repair that state without trusting a wrong definition.
     with connection.cursor() as cursor:
+        # pg_get_expr renders through the session's quoting rules, and quote_all_identifiers=on
+        # yields "btrim"(("serial")::"text", ...) instead of btrim((serial)::text, ...). The shape
+        # check below compares that text, so read it under a known setting rather than trying to
+        # match every spelling, and restore whatever the deployment had set.
+        cursor.execute("SHOW quote_all_identifiers")
+        previous_quoting = cursor.fetchone()[0]
+        cursor.execute("SET quote_all_identifiers = off")
         cursor.execute(
             """
             SELECT
@@ -41,6 +48,7 @@ def ensure_device_serial_trim_index(apps, schema_editor):
             [_SERIAL_TABLE, _SERIAL_INDEX],
         )
         existing = cursor.fetchone()
+        cursor.execute(f"SET quote_all_identifiers = {'on' if previous_quoting == 'on' else 'off'}")
 
     if existing is not None:
         valid, ready, on_device, unique, primary, unfiltered, no_includes, method, single_expression, expression = (
