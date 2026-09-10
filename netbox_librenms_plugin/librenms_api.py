@@ -504,7 +504,12 @@ class LibreNMSAPI:
                 except AmbiguousLibreNMSIdError as exc:
                     # resolve_librenms_id turns only LibreNMSIDConflictError into a user-facing
                     # message, so an ambiguous claim would otherwise reach the view as a 500.
-                    raise LibreNMSIDConflictError(str(exc)) from None
+                    # The ambiguity text names the unrestricted owners by pk, so it stays in the
+                    # log and the rendered message says only that the claim is ambiguous.
+                    logger.warning("Ambiguous LibreNMS ID claim: %s", exc)
+                    raise LibreNMSIDConflictError(
+                        f"LibreNMS ID {librenms_id} is claimed by more than one NetBox object."
+                    ) from None
                 except ObjectDoesNotExist:
                     # A concurrent delete removes the row this claim locks, and the bare
                     # DoesNotExist would reach the view as a 500 for the same reason.

@@ -191,8 +191,8 @@ def test_the_sync_page_reports_an_ambiguous_id_claim(client, librenms_server, se
     # lock_librenms_id_assignment raises AmbiguousLibreNMSIdError for this state, and
     # resolve_librenms_id converts only LibreNMSIDConflictError, so the page used to 500.
     server_key = _point_plugin_at(settings, librenms_server.url)
-    make_device("librenms-ambiguous-owner-a", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
-    make_device("librenms-ambiguous-owner-b", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
+    owner_a = make_device("librenms-ambiguous-owner-a", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
+    owner_b = make_device("librenms-ambiguous-owner-b", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
     target = make_device("librenms-ambiguous-target.example.com", librenms_cf={server_key: None})
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
@@ -205,7 +205,12 @@ def test_the_sync_page_reports_an_ambiguous_id_claim(client, librenms_server, se
     body = unescape(response.content.decode())
 
     assert response.status_code == 200
-    assert "matches multiple Device host records" in body
+    assert f"LibreNMS ID {AMBIGUOUS_DEVICE_ID} is claimed by more than one NetBox object." in body
+    # The ambiguity text names the competing owners by pk and the search that produced them is
+    # unrestricted, so it belongs in the log, never in the response.
+    assert "matches multiple Device host records" not in body
+    for owner in (owner_a, owner_b):
+        assert f"pk={owner.pk}" not in body
 
 
 @pytest.mark.django_db
