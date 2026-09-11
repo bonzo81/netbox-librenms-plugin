@@ -40,7 +40,7 @@ If the field was not created automatically (fallback): follow these steps to cre
         - Check **dcim > device**
         - Check **virtualization > virtual machine**
         - Check **dcim > interface**
-        - Check **virtualization > interfaces (optional)**
+        - Check **virtualization > interface**
     - **Name:** `librenms_id`
     - **Label:** `LibreNMS ID`
     - **Description:** (Optional) Add a description like "LibreNMS Device ID for synchronization".
