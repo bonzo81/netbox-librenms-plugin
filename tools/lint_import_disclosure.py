@@ -67,10 +67,12 @@ MESSAGE_KWARGS = frozenset({"warning", "message"})
 DEFAULT_PATHS = ("netbox_librenms_plugin",)
 
 
-def _unwrap(node):
+def _unwrap(node, tainted=frozenset()):
     """Strip the wrappers that pass a NetBox object (or a collection of them) straight through."""
     while True:
         if isinstance(node, ast.Subscript):
+            if isinstance(node.value, ast.Name) and _variadic_taint(node.value.id, tainted):
+                return node
             node = node.value
             continue
         if isinstance(node, ast.Call):
@@ -88,6 +90,21 @@ def _unwrap(node):
                 node = func.value
                 continue
         return node
+
+
+def _variadic_taint(name, tainted):
+    """Whether any element of a variadic parameter is tainted."""
+    return any(isinstance(parameter, tuple) and parameter[0] == name for parameter in tainted)
+
+
+def _tainted_element(node, tainted):
+    """Whether a variadic element received an unrestricted object."""
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and isinstance(node.slice, ast.Constant)
+        and (node.value.id, node.slice.value) in tainted
+    )
 
 
 def reads_unrestricted_key(node) -> bool:
@@ -134,7 +151,7 @@ def _is_scoped(node) -> bool:
 
 def names_an_unrestricted_object(node, tainted, object_functions=frozenset()) -> bool:
     """Whether *node* evaluates to a NetBox object that no permission scope filtered."""
-    inner_branch = _unwrap(node)
+    inner_branch = _unwrap(node, tainted)
     # Per branch, before the scope check: ``unrestricted or Model.objects.restrict(user).first()``
     # returns the UNRESTRICTED side whenever it is truthy, so a scoped sibling proves nothing about
     # the value that actually arrives. A whole-expression scope check would call this one scoped.
@@ -151,13 +168,15 @@ def names_an_unrestricted_object(node, tainted, object_functions=frozenset()) ->
         # A module-private helper that hands the matched object back is as unrestricted as the
         # query inside it: ``_device()`` returning ``Device.objects.filter(...).first()``.
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
-            if sub.func.id in UNRESTRICTED_RESOLVERS or sub.func.id in object_functions:
+            if sub.func.id in UNRESTRICTED_RESOLVERS or sub in object_functions:
                 return True
         if reads_unrestricted_key(sub):
             return True
-    inner = _unwrap(node)
+    inner = _unwrap(node, tainted)
+    if _tainted_element(inner, tainted):
+        return True
     if isinstance(inner, ast.Name):
-        return inner.id in tainted
+        return inner.id in tainted or _variadic_taint(inner.id, tainted)
     if isinstance(inner, ast.Attribute):
         return inner.attr == "objects"
     return False
@@ -183,12 +202,66 @@ def bound_names(targets):
     return names
 
 
+def scope_nodes(scope):
+    """Walk one scope without entering nested definitions."""
+    pending = list(reversed(list(ast.iter_child_nodes(scope))))
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            pending.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+def local_bindings(function):
+    """Names bound in a function that shadow its enclosing scope."""
+    names = set()
+    for node in scope_nodes(function):
+        if isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+    return names
+
+
+def resolve_functions(tree):
+    """Index every function and resolve bare calls in their lexical scope."""
+    functions = {}
+    callees = {}
+    parents = {}
+
+    def visit(scope, enclosing, parent=None):
+        nodes = list(scope_nodes(scope))
+        bindings = dict(enclosing)
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for name in local_bindings(scope):
+                bindings.pop(name, None)
+            parent = id(scope)
+        for node in nodes:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions[id(node)] = node
+                parents[id(node)] = parent
+                bindings[node.name] = id(node)
+        for node in nodes:
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in bindings:
+                    callees[node] = bindings[node.func.id]
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(node, enclosing if isinstance(scope, ast.ClassDef) else bindings, parent)
+
+    visit(tree, {})
+    return functions, callees, parents
+
+
 def _local_taint(function, seeded, object_functions=frozenset()):
     """Names inside *function* bound to an unrestricted NetBox object, to a fixed point."""
     tainted = set(seeded)
     while True:
         grew = False
-        for node in ast.walk(function):
+        for node in scope_nodes(function):
             if not isinstance(node, (ast.Assign, ast.AnnAssign)):
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -206,41 +279,53 @@ def positional_parameters(function):
     return [arg.arg for arg in (*args.posonlyargs, *args.args)]
 
 
-def module_taint(tree, object_functions=frozenset()):
-    """Taint every function in *tree*, letting it cross into helpers defined in the same module.
+def call_arguments(function, call):
+    """Yield each argument with the parameter that receives it."""
+    positional = positional_parameters(function)
+    for index, argument in enumerate(call.args):
+        if index < len(positional):
+            yield positional[index], argument
+        elif function.args.vararg:
+            yield (function.args.vararg.arg, index - len(positional)), argument
+    keywords = {arg.arg for arg in (*function.args.args, *function.args.kwonlyargs)}
+    for keyword in call.keywords:
+        if keyword.arg in keywords:
+            yield keyword.arg, keyword.value
+        elif function.args.kwarg:
+            yield (function.args.kwarg.arg, keyword.arg), keyword.value
+
+
+def module_taint(functions, callees, parents, object_functions=frozenset()):
+    """Taint every function, letting it cross into helpers defined in the same module.
 
     An unrestricted object handed to a module-private helper is still unrestricted inside it, and
     that is exactly how the serial-match branch built three warnings naming its matched device.
     """
-    functions = {
-        node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    seeded = {name: set() for name in functions}
+    seeded = {key: set() for key in functions}
+    bindings = {key: local_bindings(function) for key, function in functions.items()}
     while True:
-        taint = {name: _local_taint(node, seeded[name], object_functions) for name, node in functions.items()}
+        taint = {key: _local_taint(node, seeded[key], object_functions) for key, node in functions.items()}
         grew = False
-        for name, node in functions.items():
-            for call in ast.walk(node):
-                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+        for key, node in functions.items():
+            inherited = {
+                parameter
+                for parameter in taint.get(parents[key], ())
+                if (parameter[0] if isinstance(parameter, tuple) else parameter) not in bindings[key]
+            }
+            if inherited - seeded[key]:
+                seeded[key].update(inherited)
+                grew = True
+            for call in scope_nodes(node):
+                callee_key = callees.get(call)
+                if callee_key is None:
                     continue
-                callee = functions.get(call.func.id)
-                if callee is None:
-                    continue
-                positional = positional_parameters(callee)
-                for index, argument in enumerate(call.args):
-                    if index >= len(positional):
-                        break
-                    if names_an_unrestricted_object(argument, taint[name], object_functions):
-                        if positional[index] not in seeded[call.func.id]:
-                            seeded[call.func.id].add(positional[index])
-                            grew = True
-                for keyword in call.keywords:
-                    if keyword.arg and names_an_unrestricted_object(keyword.value, taint[name], object_functions):
-                        if keyword.arg not in seeded[call.func.id]:
-                            seeded[call.func.id].add(keyword.arg)
+                for parameter, argument in call_arguments(functions[callee_key], call):
+                    if names_an_unrestricted_object(argument, taint[key], object_functions):
+                        if parameter not in seeded[callee_key]:
+                            seeded[callee_key].add(parameter)
                             grew = True
         if not grew:
-            return functions, taint
+            return taint
 
 
 def message_list_key(node):
@@ -256,7 +341,7 @@ def message_list_key(node):
 def message_list_aliases(function):
     """Local names whose list the function hands back as a warnings/issues list."""
     aliases = set()
-    for node in ast.walk(function):
+    for node in scope_nodes(function):
         if isinstance(node, ast.Dict):
             for key, value in zip(node.keys, node.values):
                 if isinstance(key, ast.Constant) and key.value in MESSAGE_LISTS and isinstance(value, ast.Name):
@@ -299,24 +384,39 @@ def message_expressions(node, aliases):
 
 
 def identity_references(
-    node, tainted, local_functions=frozenset(), identity_functions=frozenset(), object_functions=frozenset()
+    node,
+    tainted,
+    local_functions=frozenset(),
+    identity_functions=frozenset(),
+    object_functions=frozenset(),
+    aggregate_functions=frozenset(),
 ):
     """Yield the identity-bearing subexpressions of *node*.
 
     Prunes where identity cannot survive: an aggregate of a tainted object, and a call to a helper
     defined in the same module, whose own body this check reads anyway.
     """
-    if reads_unrestricted_key(node):
+    children = ast.iter_child_nodes(node)
+    if reads_unrestricted_key(node) or _tainted_element(node, tainted):
         yield node
+        return
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and _variadic_taint(node.value.id, tainted):
         return
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         # A local helper that hands identity back carries it through its call, even with no tainted
         # argument to follow: ``_owner_name()`` returning ``Device.objects...first().name``.
-        if node.func.id in identity_functions:
+        if node in identity_functions:
             yield node
             return
-        if node.func.id in NON_IDENTITY_CALLS or node.func.id in local_functions:
+        if node.func.id in NON_IDENTITY_CALLS or node in aggregate_functions:
             return
+        if node in local_functions:
+            # Object arguments pass through transparent wrappers into the helper's body.
+            children = (
+                argument
+                for argument in (*node.args, *(keyword.value for keyword in node.keywords))
+                if not isinstance(_unwrap(argument), ast.Name)
+            )
     if isinstance(node, ast.Attribute):
         if node.attr in NON_IDENTITY_ATTRS:
             return
@@ -338,14 +438,16 @@ def identity_references(
             yield node
             return
     if isinstance(node, ast.Name):
-        if node.id in tainted:
+        if node.id in tainted or _variadic_taint(node.id, tainted):
             yield node
         return
-    for child in ast.iter_child_nodes(node):
-        yield from identity_references(child, tainted, local_functions, identity_functions, object_functions)
+    for child in children:
+        yield from identity_references(
+            child, tainted, local_functions, identity_functions, object_functions, aggregate_functions
+        )
 
 
-def identity_returning_functions(functions, taint, object_functions=frozenset()):
+def identity_returning_functions(functions, callees, taint, object_functions, aggregate_functions):
     """Local helpers whose RETURN VALUE can carry identity.
 
     A call to a local helper is normally pruned at the call site, because this check reads the
@@ -356,26 +458,31 @@ def identity_returning_functions(functions, taint, object_functions=frozenset())
     returning = set()
     while True:
         grew = False
-        for name, function in functions.items():
-            if name in returning:
+        for key, function in functions.items():
+            calls = {call for call, callee in callees.items() if callee == key}
+            if calls <= returning:
                 continue
-            # Prune only helpers not yet known to return identity, so a chain of them converges.
-            prunable = set(functions) - returning - {name}
-            for node in ast.walk(function):
+            prunable = set(callees) - returning - calls
+            for node in scope_nodes(function):
                 if not isinstance(node, ast.Return) or node.value is None:
                     continue
                 if (
-                    next(identity_references(node.value, taint[name], prunable, returning, object_functions), None)
+                    next(
+                        identity_references(
+                            node.value, taint[key], prunable, returning, object_functions, aggregate_functions
+                        ),
+                        None,
+                    )
                     is not None
                 ):
-                    returning.add(name)
+                    returning.update(calls)
                     grew = True
                     break
         if not grew:
             return returning
 
 
-def object_returning_functions(functions, taint, object_functions):
+def object_returning_functions(functions, callees, taint, object_functions):
     """Local helpers whose RETURN VALUE is the unrestricted object itself.
 
     Distinct from :func:`identity_returning_functions`, which classifies a helper that returns an
@@ -385,18 +492,42 @@ def object_returning_functions(functions, taint, object_functions):
     returning = set(object_functions)
     while True:
         grew = False
-        for name, function in functions.items():
-            if name in returning:
+        for key, function in functions.items():
+            calls = {call for call, callee in callees.items() if callee == key}
+            if calls <= returning:
                 continue
-            for node in ast.walk(function):
+            for node in scope_nodes(function):
                 if not isinstance(node, ast.Return) or node.value is None:
                     continue
-                if names_an_unrestricted_object(node.value, taint[name], returning):
-                    returning.add(name)
+                if names_an_unrestricted_object(node.value, taint[key], returning):
+                    returning.update(calls)
                     grew = True
                     break
         if not grew:
             return frozenset(returning)
+
+
+def aggregate_returning_functions(functions, callees):
+    """Calls to helpers whose returns all reduce their inputs to aggregates."""
+    returning = set()
+    while True:
+        previous = set(returning)
+        for key, function in functions.items():
+            values = [node.value for node in scope_nodes(function) if isinstance(node, ast.Return)]
+            if values and all(
+                isinstance(value, ast.Call)
+                and (
+                    value in returning
+                    or isinstance(value.func, ast.Name)
+                    and value.func.id in NON_IDENTITY_CALLS
+                    or isinstance(value.func, ast.Attribute)
+                    and value.func.attr in NON_IDENTITY_ATTRS
+                )
+                for value in values
+            ):
+                returning.update(call for call, callee in callees.items() if callee == key)
+        if returning == previous:
+            return returning
 
 
 def check_file(path):
@@ -405,26 +536,30 @@ def check_file(path):
     # Taint and the object-returning helper set define each other, so grow both to a joint fixed
     # point: a helper can only be classified once its own body is tainted, and classifying it can
     # taint a caller that then classifies another helper.
+    functions, callees, parents = resolve_functions(tree)
     object_functions = frozenset()
     while True:
-        functions, taint = module_taint(tree, object_functions)
-        grown = object_returning_functions(functions, taint, object_functions)
+        taint = module_taint(functions, callees, parents, object_functions)
+        grown = object_returning_functions(functions, callees, taint, object_functions)
         if grown == object_functions:
             break
         object_functions = grown
-    returning = identity_returning_functions(functions, taint, object_functions)
-    prunable = set(functions) - returning
+    aggregates = aggregate_returning_functions(functions, callees)
+    returning = identity_returning_functions(functions, callees, taint, object_functions, aggregates)
+    prunable = set(callees) - returning
     findings = []
-    for name, function in functions.items():
+    for key, function in functions.items():
         # No early skip on an empty taint set: a message can read the match straight out of the
         # validation dict, with no local in between.
-        tainted = taint[name]
+        tainted = taint[key]
         aliases = message_list_aliases(function)
-        for node in ast.walk(function):
+        for node in scope_nodes(function):
             for message in message_expressions(node, aliases):
-                for reference in identity_references(message, tainted, prunable, returning, object_functions):
+                for reference in identity_references(
+                    message, tainted, prunable, returning, object_functions, aggregates
+                ):
                     findings.append((str(path), node.lineno, ast.unparse(reference)))
-    return findings
+    return list(dict.fromkeys(findings))
 
 
 def iter_python_files(paths):

@@ -289,6 +289,31 @@ def test_a_withheld_match_does_not_disclose_its_role(client, librenms_server, se
 
 
 @pytest.mark.django_db
+def test_a_withheld_match_does_not_disclose_its_librenms_linkage(client, librenms_server, settings):
+    """The modal must not render the LibreNMS host ID of a withheld hostname match."""
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    stale_host_id = 987654
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    hidden_match = make_device("disclosure-import-host.example.net")
+    # Linked to a DIFFERENT LibreNMS host than the one being imported, so the row still matches by
+    # hostname while carrying a linkage of its own to disclose.
+    set_librenms_device_id(hidden_match, stale_host_id, server_key)
+    hidden_match.save()
+    elsewhere = make_device("disclosure-unrelated-link-scope")
+    _register_device(librenms_server)
+    client.force_login(_viewer_scoped_to("disclosure-link-viewer", elsewhere))
+
+    body = unescape(_open_validation_modal(client, server_key).content.decode())
+
+    # Precondition: the row really did resolve to the hidden match and was withheld.
+    # The hostname itself is the LibreNMS device being imported, so it legitimately appears; the
+    # linkage of the NetBox object behind it is what must not.
+    assert "outside your view scope" in body
+    assert str(stale_host_id) not in body, "the withheld match's LibreNMS host ID was disclosed"
+
+
+@pytest.mark.django_db
 def test_a_withheld_match_does_not_disclose_that_it_is_a_vm(client, librenms_server, settings):
     """A hostname match to a VM flips the row into VM mode, which the modal shows as a Cluster row."""
     server_key = _point_plugin_at(settings, librenms_server.url)
@@ -432,6 +457,36 @@ def test_the_package_names_no_unrestricted_object_in_a_warning():
 @pytest.mark.parametrize(
     ("case", "source"),
     [
+        (
+            "identity passed into a pruned local helper",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    device = Device.objects.filter(serial=serial).first()\n"
+            '    result["warnings"].append(_describe(device.name))\n'
+            "\n\n"
+            "def _describe(value):\n"
+            "    return str(value)\n",
+        ),
+        (
+            "identity passed through a variadic positional helper",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    device = Device.objects.filter(serial=serial).first()\n"
+            '    result["warnings"].append(_describe(device))\n'
+            "\n\n"
+            "def _describe(*values):\n"
+            "    return str(values[0])\n",
+        ),
+        (
+            "identity passed through a variadic keyword helper",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    device = Device.objects.filter(serial=serial).first()\n"
+            '    result["warnings"].append(_describe(value=device))\n'
+            "\n\n"
+            "def _describe(**values):\n"
+            '    return str(values["value"])\n',
+        ),
         (
             "a local helper that returns the unrestricted object itself",
             "def probe(result):\n"
@@ -581,6 +636,36 @@ def test_the_checker_flags_every_shape_identity_can_take(tmp_path, case, source)
     ("case", "source"),
     [
         (
+            "an aggregate passed into a pruned local helper",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    devices = Device.objects.filter(serial=serial)\n"
+            '    result["warnings"].append(_describe(devices.count()))\n'
+            "\n\n"
+            "def _describe(value):\n"
+            "    return str(value)\n",
+        ),
+        (
+            "a queryset wrapper passed into an aggregate helper",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    devices = Device.objects.filter(serial=serial)\n"
+            '    result["warnings"].append(_count(devices.all()))\n'
+            "\n\n"
+            "def _count(values):\n"
+            "    return len(values)\n",
+        ),
+        (
+            "a list wrapper passed into an aggregate helper",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    devices = Device.objects.filter(serial=serial)\n"
+            '    result["warnings"].append(_count(list(devices)))\n'
+            "\n\n"
+            "def _count(values):\n"
+            "    return len(values)\n",
+        ),
+        (
             "a helper that returns a scoped object stays quiet",
             "def probe(result, user):\n"
             '    result["warnings"].append(f"in scope {_allowed(user).name}")\n'
@@ -641,3 +726,115 @@ def test_the_checker_flags_every_shape_identity_can_take(tmp_path, case, source)
 def test_the_checker_stays_quiet_on_legitimate_messages(tmp_path, case, source):
     """A lint nobody trusts gets disabled, so the negative cases matter as much as the positive ones."""
     assert _scan(tmp_path, source) == [], f"false positive on {case}"
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "expected"),
+    [
+        (
+            "same-named methods both get checked",
+            "class A:\n"
+            "    def probe(self, result, serial):\n"
+            "        from dcim.models import Device\n"
+            "        owner = Device.objects.filter(serial=serial).first()\n"
+            '        result["warnings"].append(f"owner {owner.name}")\n'
+            "\n\n"
+            "class B:\n"
+            "    def probe(self, result):\n"
+            "        from dcim.models import Device\n"
+            "        device = Device.objects.first()\n"
+            '        result["warnings"].append(device.serial)\n',
+            ["owner.name", "device.serial"],
+        ),
+        (
+            "a nested helper captures an unrestricted object",
+            "from dcim.models import Device\n"
+            "def preview(result):\n"
+            "    device = Device.objects.first()\n"
+            "    def helper():\n"
+            '        result["warnings"].append(device.name)\n'
+            "    helper()\n",
+            ["device.name"],
+        ),
+        (
+            "a nested helper shadows a captured object",
+            "from dcim.models import Device\n"
+            "def preview(result):\n"
+            "    device = Device.objects.first()\n"
+            "    def helper(device):\n"
+            '        result["warnings"].append(str(device))\n'
+            '    helper("safe")\n',
+            [],
+        ),
+        (
+            "a variadic helper returns the whole tuple",
+            "from dcim.models import Device\n"
+            "def preview(result):\n"
+            "    device = Device.objects.first()\n"
+            '    result["warnings"].append(_describe(device))\n'
+            "def _describe(*values):\n"
+            "    return str(values)\n",
+            ["_describe(device)"],
+        ),
+        (
+            "a variadic keyword helper returns an untainted element",
+            "from dcim.models import Device\n"
+            "def preview(result):\n"
+            "    device = Device.objects.first()\n"
+            '    result["warnings"].append(_describe(hidden=device, label="safe"))\n'
+            "def _describe(**values):\n"
+            '    return str(values["label"])\n',
+            [],
+        ),
+        (
+            "a nested helper shadows an identity-returning module helper",
+            "from dcim.models import Device\n"
+            "def _describe(value):\n"
+            "    return value.name\n"
+            "def preview():\n"
+            "    def _describe(value):\n"
+            '        return "generic conflict"\n'
+            "    device = Device.objects.first()\n"
+            "    warnings = []\n"
+            "    warnings.append(_describe(device))\n"
+            '    return {"warnings": warnings}\n',
+            [],
+        ),
+        (
+            "aggregate helpers consume identity and starred arguments",
+            "from dcim.models import Device\n"
+            "def probe(result):\n"
+            "    devices = Device.objects.all()\n"
+            '    result["warnings"].append(_count(devices[0].name))\n'
+            '    result["warnings"].append(_count_args(*devices))\n'
+            "def _count(value):\n"
+            "    return len(value)\n"
+            "def _count_args(*values):\n"
+            "    return len(values)\n",
+            [],
+        ),
+        (
+            "a variadic helper returns an untainted element",
+            "from dcim.models import Device\n"
+            "def probe(result):\n"
+            "    device = Device.objects.first()\n"
+            '    result["warnings"].append(_describe(device, "safe"))\n'
+            "def _describe(*values):\n"
+            "    return str(values[1])\n",
+            [],
+        ),
+        (
+            "a nested same-named function reports each sink once",
+            "from dcim.models import Device\n"
+            "def probe(result):\n"
+            "    def probe():\n"
+            "        device = Device.objects.first()\n"
+            '        result["warnings"].append(device.name)\n'
+            "    probe()\n",
+            ["device.name"],
+        ),
+    ],
+)
+def test_the_checker_reports_exact_disclosures(tmp_path, case, source, expected):
+    """Check scope, argument selection, and finding multiplicity."""
+    assert _scan(tmp_path, source) == expected, case
