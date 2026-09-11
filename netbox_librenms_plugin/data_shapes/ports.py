@@ -57,11 +57,81 @@ _MAX_LAG_PATTERN_LEN = 200
 _BOUNDED_RANGE_RE = re.compile(r"\{(\d*),(\d+)\}")
 _FIXED_GROUP_REPEAT_RE = re.compile(r"\)\{(\d+)(?:,(\d+))?\}")
 _UNBOUNDED_QUANTIFIER = r"(?:[*+]|\{\d*,\})"
-_NESTED_QUANTIFIER_RE = re.compile(rf"\([^()]*{_UNBOUNDED_QUANTIFIER}[^()]*\)\s*{_UNBOUNDED_QUANTIFIER}")
-# An unbounded quantifier over an ALTERNATION backtracks the same way without any nested quantifier:
-# ``^(a|aa)+$`` splits 255 characters exponentially because the branches can match the same text.
-# Only a quantified group is refused, so the real LAG shape ``^(Po|Te)\d+$`` still compiles.
-_QUANTIFIED_ALTERNATION_RE = re.compile(rf"\([^()]*\|[^()]*\)\s*{_UNBOUNDED_QUANTIFIER}")
+# Matched at the position right after a group's ``)``: the group is repeated an unbounded number
+# of times, which is what makes an ambiguous body catastrophic.
+_UNBOUNDED_AFTER_RE = re.compile(_UNBOUNDED_QUANTIFIER)
+_OPEN_RANGE_RE = re.compile(r"\{\d*,\}")
+
+
+def _scan(pattern):
+    """Yield ``(index, char, depth)`` for every character outside an escape or character class."""
+    index = 0
+    depth = 0
+    in_class = False
+    length = len(pattern)
+    while index < length:
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if in_class:
+            if char == "]":
+                in_class = False
+            index += 1
+            continue
+        if char == "[":
+            in_class = True
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            yield index, char, depth
+        elif char == ")":
+            yield index, char, depth
+            depth -= 1
+        else:
+            yield index, char, depth
+        index += 1
+
+
+def _group_spans(pattern):
+    """Return ``(open_index, close_index)`` for every balanced group, innermost last."""
+    stack = []
+    spans = []
+    for index, char, _depth in _scan(pattern):
+        if char == "(":
+            stack.append(index)
+        elif char == ")" and stack:
+            spans.append((stack.pop(), index))
+    return spans
+
+
+def _content_is_ambiguous(pattern, start, end):
+    """Whether the group body holds an unbounded quantifier or a branch at its own top level."""
+    body = pattern[start + 1 : end]
+    for index, char, depth in _scan(body):
+        if char == "|" and depth == 0:
+            # ``(a|aa)+`` backtracks without any nested quantifier: the branches overlap.
+            return True
+        if char in "*+":
+            return True
+        if char == "{" and _OPEN_RANGE_RE.match(body, index):
+            return True
+    return False
+
+
+def _has_ambiguous_quantified_group(pattern):
+    """Whether any unbounded-quantified group can partition its input more than one way.
+
+    Depth-aware on purpose: a bounded ``\\([^()]*...\\)`` scan cannot see past a wrapper group, so
+    ``^((a+))+$`` read as safe while a 26-character near-match already took seconds to fail.
+    """
+    for start, end in _group_spans(pattern):
+        if not _UNBOUNDED_AFTER_RE.match(pattern, end + 1):
+            continue
+        if _content_is_ambiguous(pattern, start, end):
+            return True
+    return False
 
 
 def is_redos_prone(pattern):
@@ -89,10 +159,7 @@ def is_redos_prone(pattern):
     structural_pattern = _FIXED_GROUP_REPEAT_RE.sub(
         lambda match: ")+" if int(match[2] or match[1]) > 1 else match[0], structural_pattern
     )
-    return (
-        _NESTED_QUANTIFIER_RE.search(structural_pattern) is not None
-        or _QUANTIFIED_ALTERNATION_RE.search(structural_pattern) is not None
-    )
+    return _has_ambiguous_quantified_group(structural_pattern)
 
 
 def _compile_recording_patterns(recording, key):

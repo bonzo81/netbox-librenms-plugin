@@ -176,7 +176,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         self.librenms_id, lookup_error = self.resolve_librenms_id(librenms_lookup_device)
 
         if lookup_error is not None:
-            messages.error(request, lookup_error.message)
+            messages.error(request, self.scoped_lookup_message(lookup_error))
             return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
@@ -263,7 +263,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         self.librenms_id, lookup_error = self.resolve_librenms_id(device)
 
         if lookup_error is not None:
-            messages.error(request, lookup_error.message)
+            messages.error(request, self.scoped_lookup_message(lookup_error))
             return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
@@ -330,7 +330,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         self.librenms_id, lookup_error = self.resolve_librenms_id(device)
 
         if lookup_error is not None:
-            messages.error(request, lookup_error.message)
+            messages.error(request, self.scoped_lookup_message(lookup_error))
             return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
@@ -411,7 +411,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         self.librenms_id, lookup_error = self.resolve_librenms_id(device)
 
         if lookup_error is not None:
-            messages.error(request, lookup_error.message)
+            messages.error(request, self.scoped_lookup_message(lookup_error))
             return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:

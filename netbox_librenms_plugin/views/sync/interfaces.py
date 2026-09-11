@@ -971,6 +971,14 @@ class SyncInterfacesView(
                 f"VLANs were not synced for the selected interfaces: your account is missing "
                 f"{', '.join(hidden)}. Existing VLAN assignments were left unchanged.",
             )
+        elif self._vlan_scope_incomplete:
+            # A constrained grant passes the permission-name check, so the branch above says
+            # nothing. Without this the VLAN write is skipped silently and the user cannot tell why.
+            messages.warning(
+                self.request,
+                "VLANs were not synced for the selected interfaces: your account cannot view every "
+                "VLAN in scope for this device. Existing VLAN assignments were left unchanged.",
+            )
 
     def _lock_selected_device_targets(self, obj):
         """Lock the page Device and its current chassis scope in the shared lock order."""

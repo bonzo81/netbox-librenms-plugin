@@ -195,6 +195,37 @@ class TestVlanTabIpamScoping:
         assert row["netbox_vlan_id"] == vlan.pk
         assert row["netbox_vlan_group"] == group.name
 
+    def test_a_constrained_ipam_grant_is_reported_as_incomplete(self, settings):
+        """A constrained grant satisfies the permission-name check while still hiding rows.
+
+        The tab would otherwise render a VLAN comparison with no notice that part of the scope is
+        invisible, which is exactly what the sync path guards against.
+        """
+        from django.core.cache import cache
+        from ipam.models import VLAN, VLANGroup
+
+        server_key = configure_default_librenms_server(settings)
+        device = make_device("vlan-tab-constrained")
+        group, vlan = _site_group_with_vlan(device, "vlan-tab-constrained")
+        # A second group the constrained grant hides, so the scoped read is genuinely short.
+        VLANGroup.objects.create(name="vlan-tab-constrained-hidden", slug="vlan-tab-constrained-hidden")
+        user = make_user_with_perms("vlan-tab-constrained-user", [("view", type(device))], plugin_write=False)
+        user = grant(user, "view", VLANGroup, constraints={"pk": group.pk})
+        user = grant(user, "view", VLAN, constraints={"pk": vlan.pk})
+        view, request = self._view(user)
+        cache.set(
+            view.get_cache_key(device, "vlans", server_key),
+            [{"vlan_vlan": 100, "vlan_name": "vlan-tab-constrained-vlan"}],
+        )
+
+        try:
+            context = view.get_vlan_context(request, device, server_key)
+        finally:
+            cache.delete(view.get_cache_key(device, "vlans", server_key))
+
+        assert context["hidden_ipam_permissions"] == [], "precondition: the permission-name check must pass"
+        assert context["vlan_scope_incomplete"] is True
+
     def test_the_unresolved_server_branch_is_scoped(self, settings):
         """The early return renders the same group list, so it needs the same scope."""
         server_key = configure_default_librenms_server(settings)

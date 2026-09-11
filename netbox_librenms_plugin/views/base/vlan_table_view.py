@@ -205,6 +205,7 @@ class BaseVLANTableView(
                     "cache_expiry": None,
                     "server_key": server_key,
                     "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
+                    "vlan_scope_incomplete": self.vlan_scope_is_incomplete([obj], vlan_scope_user),
                 }
             # No buildable client → no valid server scope: degrade to None (empty table) instead of
             # the "default" placeholder resolve_get_render_server_key falls back to, mirroring the
@@ -257,6 +258,7 @@ class BaseVLANTableView(
             "cache_expiry": cache_expiry,
             "server_key": server_key,
             "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
+            "vlan_scope_incomplete": self.vlan_scope_is_incomplete([obj], vlan_scope_user),
         }
 
     def _get_error_context(self, obj, error_message, server_key=_SERVER_KEY_UNSET):
@@ -289,6 +291,7 @@ class BaseVLANTableView(
             "vlan_groups": self.get_vlan_groups_for_device(obj, user=vlan_scope_user),
             "server_key": resolved,
             "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
+            "vlan_scope_incomplete": self.vlan_scope_is_incomplete([obj], vlan_scope_user),
         }
 
     def compare_vlans(self, librenms_vlans, lookup_maps=None, device=None):

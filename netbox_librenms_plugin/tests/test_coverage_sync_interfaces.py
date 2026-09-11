@@ -113,6 +113,10 @@ def test_a_constrained_vlan_grant_also_skips_the_vlan_write(settings):
 
     interface.refresh_from_db()
     assert interface.untagged_vlan_id == hidden.pk, "the constrained-hidden VLAN assignment was cleared"
+    # The skip must be explained: the permission-name check reports nothing missing for this user.
+    assert any("cannot view every VLAN in scope" in text for text in message_texts(view.request, "warning")), (
+        "a silently skipped VLAN sync leaves the user with no way to tell why"
+    )
 
 
 def _sync_view(request=None):

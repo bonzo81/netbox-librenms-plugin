@@ -529,9 +529,26 @@ def test_is_redos_prone_flags_nested_quantifiers_but_not_real_lag_patterns():
         r"(a{2,})+",
         r"(a{1,}){2,}",
         r"(a+){2,}",
+        # A wrapper group hid the nesting from the old bounded scan, and a 26-character
+        # near-match already took seconds to fail.
+        r"^((a+))+$",
+        r"^(((a+)))+$",
+        r"^((a+)b)+$",
+        r"^(a|aa)+$",
     ):
         assert ports.is_redos_prone(evil) is True, evil
-    for ok in (r"^Po\d+$", r"^Port-channel\d+$", r"^ae\d+$", r"^Bundle-Ether\d+$", r"^(Po|Te)\d+$", r"bond\d+"):
+    for ok in (
+        r"^Po\d+$",
+        r"^Port-channel\d+$",
+        r"^ae\d+$",
+        r"^Bundle-Ether\d+$",
+        r"^(Po|Te)\d+$",
+        r"bond\d+",
+        # Repeating an unambiguous group is fine, and a quantifier inside a character class
+        # is a literal, not a repeat.
+        r"^(Po)+$",
+        r"^[a+]+$",
+    ):
         assert ports.is_redos_prone(ok) is False, ok
     # A non-string and an over-long (garbage/suspect) pattern are also refused — the latter bounds the
     # detector's own scan cost on an adversarial input.
