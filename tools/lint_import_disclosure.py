@@ -132,21 +132,27 @@ def _is_scoped(node) -> bool:
     return False
 
 
-def names_an_unrestricted_object(node, tainted) -> bool:
+def names_an_unrestricted_object(node, tainted, object_functions=frozenset()) -> bool:
     """Whether *node* evaluates to a NetBox object that no permission scope filtered."""
     inner_branch = _unwrap(node)
     # Per branch, before the scope check: ``unrestricted or Model.objects.restrict(user).first()``
     # returns the UNRESTRICTED side whenever it is truthy, so a scoped sibling proves nothing about
     # the value that actually arrives. A whole-expression scope check would call this one scoped.
     if isinstance(inner_branch, ast.IfExp):
-        return any(names_an_unrestricted_object(branch, tainted) for branch in (inner_branch.body, inner_branch.orelse))
+        return any(
+            names_an_unrestricted_object(branch, tainted, object_functions)
+            for branch in (inner_branch.body, inner_branch.orelse)
+        )
     if isinstance(inner_branch, ast.BoolOp):
-        return any(names_an_unrestricted_object(value, tainted) for value in inner_branch.values)
+        return any(names_an_unrestricted_object(value, tainted, object_functions) for value in inner_branch.values)
     if _is_scoped(node):
         return False
     for sub in ast.walk(node):
-        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in UNRESTRICTED_RESOLVERS:
-            return True
+        # A module-private helper that hands the matched object back is as unrestricted as the
+        # query inside it: ``_device()`` returning ``Device.objects.filter(...).first()``.
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+            if sub.func.id in UNRESTRICTED_RESOLVERS or sub.func.id in object_functions:
+                return True
         if reads_unrestricted_key(sub):
             return True
     inner = _unwrap(node)
@@ -177,7 +183,7 @@ def bound_names(targets):
     return names
 
 
-def _local_taint(function, seeded):
+def _local_taint(function, seeded, object_functions=frozenset()):
     """Names inside *function* bound to an unrestricted NetBox object, to a fixed point."""
     tainted = set(seeded)
     while True:
@@ -187,7 +193,7 @@ def _local_taint(function, seeded):
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             names = bound_names(targets) - tainted
-            if names and node.value is not None and names_an_unrestricted_object(node.value, tainted):
+            if names and node.value is not None and names_an_unrestricted_object(node.value, tainted, object_functions):
                 tainted |= names
                 grew = True
         if not grew:
@@ -200,7 +206,7 @@ def positional_parameters(function):
     return [arg.arg for arg in (*args.posonlyargs, *args.args)]
 
 
-def module_taint(tree):
+def module_taint(tree, object_functions=frozenset()):
     """Taint every function in *tree*, letting it cross into helpers defined in the same module.
 
     An unrestricted object handed to a module-private helper is still unrestricted inside it, and
@@ -211,7 +217,7 @@ def module_taint(tree):
     }
     seeded = {name: set() for name in functions}
     while True:
-        taint = {name: _local_taint(node, seeded[name]) for name, node in functions.items()}
+        taint = {name: _local_taint(node, seeded[name], object_functions) for name, node in functions.items()}
         grew = False
         for name, node in functions.items():
             for call in ast.walk(node):
@@ -224,12 +230,12 @@ def module_taint(tree):
                 for index, argument in enumerate(call.args):
                     if index >= len(positional):
                         break
-                    if names_an_unrestricted_object(argument, taint[name]):
+                    if names_an_unrestricted_object(argument, taint[name], object_functions):
                         if positional[index] not in seeded[call.func.id]:
                             seeded[call.func.id].add(positional[index])
                             grew = True
                 for keyword in call.keywords:
-                    if keyword.arg and names_an_unrestricted_object(keyword.value, taint[name]):
+                    if keyword.arg and names_an_unrestricted_object(keyword.value, taint[name], object_functions):
                         if keyword.arg not in seeded[call.func.id]:
                             seeded[call.func.id].add(keyword.arg)
                             grew = True
@@ -292,7 +298,9 @@ def message_expressions(node, aliases):
             yield keyword.value
 
 
-def identity_references(node, tainted, local_functions=frozenset(), identity_functions=frozenset()):
+def identity_references(
+    node, tainted, local_functions=frozenset(), identity_functions=frozenset(), object_functions=frozenset()
+):
     """Yield the identity-bearing subexpressions of *node*.
 
     Prunes where identity cannot survive: an aggregate of a tainted object, and a call to a helper
@@ -325,7 +333,7 @@ def identity_references(node, tainted, local_functions=frozenset(), identity_fun
             isinstance(node.value, (ast.Call, ast.Subscript))
             and node.attr not in SCOPING_CALLS
             and node.attr not in TRANSPARENT_CALLS
-            and names_an_unrestricted_object(node.value, tainted)
+            and names_an_unrestricted_object(node.value, tainted, object_functions)
         ):
             yield node
             return
@@ -334,10 +342,10 @@ def identity_references(node, tainted, local_functions=frozenset(), identity_fun
             yield node
         return
     for child in ast.iter_child_nodes(node):
-        yield from identity_references(child, tainted, local_functions, identity_functions)
+        yield from identity_references(child, tainted, local_functions, identity_functions, object_functions)
 
 
-def identity_returning_functions(functions, taint):
+def identity_returning_functions(functions, taint, object_functions=frozenset()):
     """Local helpers whose RETURN VALUE can carry identity.
 
     A call to a local helper is normally pruned at the call site, because this check reads the
@@ -356,7 +364,10 @@ def identity_returning_functions(functions, taint):
             for node in ast.walk(function):
                 if not isinstance(node, ast.Return) or node.value is None:
                     continue
-                if next(identity_references(node.value, taint[name], prunable, returning), None) is not None:
+                if (
+                    next(identity_references(node.value, taint[name], prunable, returning, object_functions), None)
+                    is not None
+                ):
                     returning.add(name)
                     grew = True
                     break
@@ -364,11 +375,44 @@ def identity_returning_functions(functions, taint):
             return returning
 
 
+def object_returning_functions(functions, taint, object_functions):
+    """Local helpers whose RETURN VALUE is the unrestricted object itself.
+
+    Distinct from :func:`identity_returning_functions`, which classifies a helper that returns an
+    identity *attribute*. ``_device()`` returning ``Device.objects.filter(...).first()`` hands the
+    object back, so ``_device().name`` at the call site reads identity off an unrestricted match.
+    """
+    returning = set(object_functions)
+    while True:
+        grew = False
+        for name, function in functions.items():
+            if name in returning:
+                continue
+            for node in ast.walk(function):
+                if not isinstance(node, ast.Return) or node.value is None:
+                    continue
+                if names_an_unrestricted_object(node.value, taint[name], returning):
+                    returning.add(name)
+                    grew = True
+                    break
+        if not grew:
+            return frozenset(returning)
+
+
 def check_file(path):
     """Report ``(path, line, expression)`` for every disclosing message in one file."""
     tree = ast.parse(Path(path).read_text())
-    functions, taint = module_taint(tree)
-    returning = identity_returning_functions(functions, taint)
+    # Taint and the object-returning helper set define each other, so grow both to a joint fixed
+    # point: a helper can only be classified once its own body is tainted, and classifying it can
+    # taint a caller that then classifies another helper.
+    object_functions = frozenset()
+    while True:
+        functions, taint = module_taint(tree, object_functions)
+        grown = object_returning_functions(functions, taint, object_functions)
+        if grown == object_functions:
+            break
+        object_functions = grown
+    returning = identity_returning_functions(functions, taint, object_functions)
     prunable = set(functions) - returning
     findings = []
     for name, function in functions.items():
@@ -378,7 +422,7 @@ def check_file(path):
         aliases = message_list_aliases(function)
         for node in ast.walk(function):
             for message in message_expressions(node, aliases):
-                for reference in identity_references(message, tainted, prunable, returning):
+                for reference in identity_references(message, tainted, prunable, returning, object_functions):
                     findings.append((str(path), node.lineno, ast.unparse(reference)))
     return findings
 

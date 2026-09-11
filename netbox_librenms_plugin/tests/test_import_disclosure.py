@@ -433,6 +433,25 @@ def test_the_package_names_no_unrestricted_object_in_a_warning():
     ("case", "source"),
     [
         (
+            "a local helper that returns the unrestricted object itself",
+            "def probe(result):\n"
+            '    result["warnings"].append(f"owner {_device().name}")\n'
+            "\n\n"
+            "def _device():\n"
+            "    from dcim.models import Device\n"
+            '    return Device.objects.filter(serial="x").first()\n',
+        ),
+        (
+            "an object-returning helper bound to a local first",
+            "def probe(result):\n"
+            "    owner = _device()\n"
+            '    result["warnings"].append(f"owner {owner.name}")\n'
+            "\n\n"
+            "def _device():\n"
+            "    from dcim.models import Device\n"
+            '    return Device.objects.filter(serial="x").first()\n',
+        ),
+        (
             "a scoped nested filter does not clear the unrestricted outer query",
             "def probe(result, user):\n"
             "    from dcim.models import Device, Site\n"
@@ -561,6 +580,15 @@ def test_the_checker_flags_every_shape_identity_can_take(tmp_path, case, source)
 @pytest.mark.parametrize(
     ("case", "source"),
     [
+        (
+            "a helper that returns a scoped object stays quiet",
+            "def probe(result, user):\n"
+            '    result["warnings"].append(f"in scope {_allowed(user).name}")\n'
+            "\n\n"
+            "def _allowed(user):\n"
+            "    from dcim.models import Device\n"
+            '    return Device.objects.restrict(user, "view").filter(serial="x").first()\n',
+        ),
         (
             "an inline scoped query names an object the viewer may see",
             "def probe(result, user, serial):\n"
