@@ -5,6 +5,7 @@ the viewer cannot see is still a real conflict that must block the import. Ident
 be withheld at DISPLAY time, so every test here drives a real view with a constrained grant.
 """
 
+import logging
 import sys
 from html import unescape
 from pathlib import Path
@@ -193,7 +194,7 @@ def test_the_import_row_still_links_a_visible_match(client, librenms_server, set
 @pytest.mark.django_db
 @pytest.mark.parametrize("owner_is_visible", [False, True])
 def test_the_serial_write_guard_names_its_conflict_only_within_the_view_scope(
-    client, librenms_server, settings, owner_is_visible
+    client, librenms_server, settings, owner_is_visible, caplog
 ):
     """The write path runs the same unrestricted serial lookup as the preview and needs the gate too."""
     from dcim.models import Device
@@ -211,17 +212,23 @@ def test_the_serial_write_guard_names_its_conflict_only_within_the_view_scope(
     )
     client.force_login(viewer)
 
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:device_conflict_action", args=[IMPORT_DEVICE_ID]),
-        {
-            "action": "update_serial",
-            "existing_device_id": target.pk,
-            "existing_device_type": "device",
-            "server_key": server_key,
-        },
-        headers={"HX-Request": "true"},
-    )
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_conflict_action", args=[IMPORT_DEVICE_ID]),
+            {
+                "action": "update_serial",
+                "existing_device_id": target.pk,
+                "existing_device_type": "device",
+                "server_key": server_key,
+            },
+            headers={"HX-Request": "true"},
+        )
     body = unescape(response.content.decode())
+
+    # The lookup behind this block is unrestricted, so the log must not name its owner either.
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Serial assignment blocked" in logged, "the guard did not run"
+    assert owner.name not in logged
 
     # Either way the duplicate serial blocks the write.
     target.refresh_from_db()
@@ -369,6 +376,34 @@ def test_a_visible_but_unnamed_match_is_not_withheld(client, librenms_server, se
     assert "outside your view scope" not in body
 
 
+@pytest.mark.django_db
+def test_the_shared_device_cache_never_stores_validation(client, librenms_server, settings):
+    """That cache key is shared by every viewer, so it must hold no unrestricted match."""
+    from dcim.models import Device, DeviceRole
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    make_device("disclosure-cache-infra")  # seeds the shared site / device type / role
+    role = DeviceRole.objects.get(slug="test-role")
+    name = "disclosure-fresh-import.example.net"
+    _register_device(librenms_server, hostname=name, sysName=name, hardware="TestDT", location="TestSite")
+    client.force_login(make_superuser("disclosure-cache-importer"))
+
+    client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {"select": [str(IMPORT_DEVICE_ID)], "server_key": server_key, f"role_{IMPORT_DEVICE_ID}": str(role.pk)},
+        headers={"HX-Request": "true"},
+    )
+
+    # Precondition: the import really ran, so the re-render path that writes the cache was reached.
+    assert Device.objects.filter(name=name).exists(), "the row did not import"
+    cached = cache.get(get_import_device_cache_key(IMPORT_DEVICE_ID, server_key))
+    assert cached is not None, "the raw device payload was not cached"
+    assert "_validation" not in cached
+
+
 # ---------------------------------------------------------------------------
 # Structural guard
 # ---------------------------------------------------------------------------
@@ -448,6 +483,46 @@ def test_the_package_names_no_unrestricted_object_in_a_warning():
             '    return {"warnings": notes}["warnings"]\n',
         ),
         (
+            "a scoped sibling branch does not clear the unrestricted one",
+            "def probe(result, serial, user):\n"
+            "    from dcim.models import Device\n"
+            "    owner = Device.objects.filter(serial=serial).first() or Device.objects.restrict(user).first()\n"
+            '    result["warnings"].append(f"owner {owner.name}")\n',
+        ),
+        (
+            "a scoped ternary branch does not clear the unrestricted one",
+            "def probe(result, serial, user, any_match):\n"
+            "    from dcim.models import Device\n"
+            "    owner = Device.objects.filter(serial=serial).first() if any_match else Device.objects.restrict(user).first()\n"
+            '    result["warnings"].append(f"owner {owner.name}")\n',
+        ),
+        (
+            "a local message list built by its initializer",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    owner = Device.objects.filter(serial=serial).first()\n"
+            '    notes = [f"owner {owner.name}"]\n'
+            '    return {"warnings": notes}\n',
+        ),
+        (
+            "an annotated local message list initializer",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    owner = Device.objects.filter(serial=serial).first()\n"
+            '    notes: list = [f"owner {owner.name}"]\n'
+            '    return {"warnings": notes}\n',
+        ),
+        (
+            "identity handed back by a local helper",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    owner = Device.objects.filter(serial=serial).first()\n"
+            '    result["warnings"].append(_label(owner))\n'
+            "\n\n"
+            "def _label(device):\n"
+            "    return device.name\n",
+        ),
+        (
             "transformed on the way in",
             "def probe(result, serial):\n"
             "    from dcim.models import Device\n"
@@ -484,6 +559,16 @@ def test_the_checker_flags_every_shape_identity_can_take(tmp_path, case, source)
             "    from dcim.models import Device\n"
             "    rows = Device.objects.filter(serial=serial)\n"
             '    result["warnings"].append(f"{rows.count()} conflicts, {len(rows)} rows")\n',
+        ),
+        (
+            "a helper that only aggregates stays pruned at its call site",
+            "def probe(result, serial):\n"
+            "    from dcim.models import Device\n"
+            "    rows = Device.objects.filter(serial=serial)\n"
+            '    result["warnings"].append(f"{_summarise(rows)} conflicts")\n'
+            "\n\n"
+            "def _summarise(matches):\n"
+            "    return matches.count()\n",
         ),
         (
             "a message that names nothing",

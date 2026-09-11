@@ -503,10 +503,9 @@ def _apply_conflict_checked_serial(device, incoming_serial: str, user) -> HttpRe
     _acquire_serial_assignment_lock(incoming_serial)
     conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=device.pk).first()
     if conflict_device:
-        logger.warning(
-            f"Serial assignment blocked: '{incoming_serial}' already assigned to "
-            f"'{conflict_device.name}' (pk={conflict_device.pk})"
-        )
+        # No identity in the log either: the lookup is unrestricted, and the serial alone lets an
+        # operator find the owner without writing an unviewable object's name to a log file.
+        logger.warning(f"Serial assignment blocked: '{incoming_serial}' is already assigned to another device")
         visible = visible_object_label(conflict_device, user)
         if visible is None:
             return _htmx_error_response(
@@ -1584,10 +1583,16 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     )
                     validation["import_as_vm"] = is_vm
 
-                    # Update cache with fresh validation
                     libre_device["_validation"] = validation
+                    # Cache the raw LibreNMS payload only. This key is shared by every user, and
+                    # the validation it would otherwise carry holds matches from unrestricted
+                    # searches; the row table and the modal scope or recompute it per request.
                     cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-                    cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
+                    cache.set(
+                        cache_key,
+                        {key: value for key, value in libre_device.items() if key != "_validation"},
+                        self.librenms_api.cache_timeout,
+                    )
 
                     # Render updated row
                     table = DeviceImportTable(

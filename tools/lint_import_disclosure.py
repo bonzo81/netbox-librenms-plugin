@@ -112,6 +112,14 @@ def _is_scoped(node) -> bool:
 
 def names_an_unrestricted_object(node, tainted) -> bool:
     """Whether *node* evaluates to a NetBox object that no permission scope filtered."""
+    inner_branch = _unwrap(node)
+    # Per branch, before the scope check: ``unrestricted or Model.objects.restrict(user).first()``
+    # returns the UNRESTRICTED side whenever it is truthy, so a scoped sibling proves nothing about
+    # the value that actually arrives. A whole-expression scope check would call this one scoped.
+    if isinstance(inner_branch, ast.IfExp):
+        return any(names_an_unrestricted_object(branch, tainted) for branch in (inner_branch.body, inner_branch.orelse))
+    if isinstance(inner_branch, ast.BoolOp):
+        return any(names_an_unrestricted_object(value, tainted) for value in inner_branch.values)
     if _is_scoped(node):
         return False
     for sub in ast.walk(node):
@@ -120,11 +128,6 @@ def names_an_unrestricted_object(node, tainted) -> bool:
         if reads_unrestricted_key(sub):
             return True
     inner = _unwrap(node)
-    # ``x = matches[0] if matches else None`` and ``x = a or b`` both pass an object through.
-    if isinstance(inner, ast.IfExp):
-        return names_an_unrestricted_object(inner.body, tainted) or names_an_unrestricted_object(inner.orelse, tainted)
-    if isinstance(inner, ast.BoolOp):
-        return any(names_an_unrestricted_object(value, tainted) for value in inner.values)
     if isinstance(inner, ast.Name):
         return inner.id in tainted
     if isinstance(inner, ast.Attribute):
@@ -242,8 +245,16 @@ def message_list_aliases(function):
 
 def message_expressions(node, aliases):
     """Every expression that becomes a user-visible warning or issue message."""
-    if isinstance(node, ast.Assign):
-        if any(message_list_key(target) in MESSAGE_LISTS for target in node.targets):
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(message_list_key(target) in MESSAGE_LISTS for target in targets):
+            if node.value is not None:
+                yield node.value
+        # ``notes = [f"{device.name}"]`` where the function hands ``notes`` back as its warnings
+        # list: the identity sits in the initializer, never in an append.
+        elif node.value is not None and any(
+            isinstance(target, ast.Name) and target.id in aliases for target in targets
+        ):
             yield node.value
         return
     if not isinstance(node, ast.Call):
@@ -288,10 +299,38 @@ def identity_references(node, tainted, local_functions=frozenset()):
         yield from identity_references(child, tainted, local_functions)
 
 
+def identity_returning_functions(functions, taint):
+    """Local helpers whose RETURN VALUE can carry identity.
+
+    A call to a local helper is normally pruned at the call site, because this check reads the
+    helper's own body. That is wrong when the helper hands identity back instead of appending it:
+    ``_label(device)`` returning ``device.name`` has no message sink of its own, so
+    ``warnings.append(_label(device))`` would escape. Aggregate-only helpers stay prunable.
+    """
+    returning = set()
+    while True:
+        grew = False
+        for name, function in functions.items():
+            if name in returning:
+                continue
+            # Prune only helpers not yet known to return identity, so a chain of them converges.
+            prunable = set(functions) - returning - {name}
+            for node in ast.walk(function):
+                if not isinstance(node, ast.Return) or node.value is None:
+                    continue
+                if next(identity_references(node.value, taint[name], prunable), None) is not None:
+                    returning.add(name)
+                    grew = True
+                    break
+        if not grew:
+            return returning
+
+
 def check_file(path):
     """Report ``(path, line, expression)`` for every disclosing message in one file."""
     tree = ast.parse(Path(path).read_text())
     functions, taint = module_taint(tree)
+    prunable = set(functions) - identity_returning_functions(functions, taint)
     findings = []
     for name, function in functions.items():
         # No early skip on an empty taint set: a message can read the match straight out of the
@@ -300,7 +339,7 @@ def check_file(path):
         aliases = message_list_aliases(function)
         for node in ast.walk(function):
             for message in message_expressions(node, aliases):
-                for reference in identity_references(message, tainted, functions.keys()):
+                for reference in identity_references(message, tainted, prunable):
                     findings.append((str(path), node.lineno, ast.unparse(reference)))
     return findings
 
