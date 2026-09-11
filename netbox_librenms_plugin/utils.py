@@ -1336,7 +1336,7 @@ def match_librenms_hardware_to_device_type(hardware_name: str, *, preloaded_rule
 
     # Normalize the raw LibreNMS hardware string per the documented ``device_type``
     # NormalizationRule scope before the DeviceTypeMapping lookup (docs/usage_tips/
-    # mapping_rules.md: "normalizes LibreNMS hardware string before DeviceTypeMapping
+    # mappings.md: "normalizes LibreNMS hardware string before DeviceTypeMapping
     # lookup"). With no device_type rules configured this returns the input unchanged.
     # .strip() to match how DeviceTypeMapping stores the key: its save() does .strip().lower(), so
     # an unstripped search_name (e.g. rule output or raw hardware carrying surrounding whitespace)

@@ -24,15 +24,15 @@ Region is inherited from the resolved Site because NetBox does not assign a regi
 ### Import as Device
 
 - **Site** (required) - Auto-matched from LibreNMS location. See [Location Parsing](import_settings.md#location-parsing) for splitting the location string into site, location, rack, and tenant.
-- **Device Type** (required) - Auto-matched from LibreNMS hardware string, or via [Device Type Mapping](../usage_tips/mapping_rules.md#device-type-mappings)
+- **Device Type** (required) - Auto-matched from LibreNMS hardware string, or via [Device Type Mapping](../usage_tips/mappings.md#device-type-mappings)
 - **Device Role** (required) - Must be selected manually
-- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mapping_rules.md#platform-mappings). If no mapping exists and the platform is not found, a **Create Platform** button opens a modal to create a new NetBox Platform and mapping in one step.
-- **Region, Location, Rack, and Tenant** (optional) - Previewed in the validation comparison table. Region is inherited from the matched Site; Location, Rack, and Tenant are applied from parsed location tokens when they resolve uniquely. Location displays its NetBox hierarchy when it has parent locations. Rack selection is available when the site has racks, and an explicit selection takes precedence over the parsed rack. See [Location Parsing](import_settings.md#location-parsing) and [Location Mappings](../usage_tips/mapping_rules.md#location-mappings).
+- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mappings.md#platform-mappings). If no mapping exists and the platform is not found, a **Create Platform** button opens a modal to create a new NetBox Platform and mapping in one step.
+- **Region, Location, Rack, and Tenant** (optional) - Previewed in the validation comparison table. Region is inherited from the matched Site; Location, Rack, and Tenant are applied from parsed location tokens when they resolve uniquely. Location displays its NetBox hierarchy when it has parent locations. Rack selection is available when the site has racks, and an explicit selection takes precedence over the parsed rack. See [Location Parsing](import_settings.md#location-parsing) and [Location Mappings](../usage_tips/mappings.md#location-mappings).
 
 ### Import as Virtual Machine
 
 - **Cluster** (required) - Must be selected manually
-- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mapping_rules.md#platform-mappings). The same **Create Platform** modal is available if needed.
+- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mappings.md#platform-mappings). The same **Create Platform** modal is available if needed.
 
 ## Virtual Chassis Detection
 

@@ -53,13 +53,16 @@ class TestConsolidatedMenu:
         ]
 
 
-def test_mapping_rules_docs_use_top_level_librenms_menu_path():
-    """The mapping guide follows NetBox's top-level PluginMenu label."""
-    docs = (Path(__file__).resolve().parents[2] / "docs/usage_tips/mapping_rules.md").read_text(encoding="utf-8")
+def test_mapping_docs_use_top_level_librenms_menu_paths():
+    """The mapping and rules guides follow NetBox's top-level PluginMenu labels."""
+    docs_root = Path(__file__).resolve().parents[2] / "docs/usage_tips"
+    mappings = (docs_root / "mappings.md").read_text(encoding="utf-8")
+    rules = (docs_root / "rules_and_patterns.md").read_text(encoding="utf-8")
 
-    assert "Plugins > LibreNMS" not in docs
-    assert "**LibreNMS > Mappings**" in docs
-    assert "**LibreNMS > Rules & Patterns**" in docs
+    assert "Plugins > LibreNMS" not in mappings
+    assert "Plugins > LibreNMS" not in rules
+    assert "**LibreNMS > Mappings**" in mappings
+    assert "**LibreNMS > Rules & Patterns**" in rules
 
 
 @pytest.mark.django_db

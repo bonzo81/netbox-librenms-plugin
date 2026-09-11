@@ -3,7 +3,7 @@
 * Search and discover devices from LibreNMS using flexible filters
 * Validate device prerequisites before import (Site, Device Type, Device Role)
 * Import devices as physical Devices or Virtual Machines
-* Smart matching for Sites, Device Types, and Platforms (via [mapping rules](usage_tips/mapping_rules.md)), including optional parsing of LibreNMS location strings into site, location, rack, and tenant values
+* Smart matching for Sites, Device Types, and Platforms (via [mappings](usage_tips/mappings.md)), including optional parsing of LibreNMS location strings into site, location, rack, and tenant values
 * Unified Platform creation modal — same experience on import page and device sync page
 * Bulk import support
 * Automatic Virtual Chassis creation for stackable devices
@@ -27,17 +27,23 @@
 * Inline modal to create missing ModuleBayTemplate, ModuleTypeMapping, or ModuleBayMapping without leaving the page
 * Carrier Auto-Install suggestion for chassis that omit holder modules from SNMP
 
-### [Mapping Rules](usage_tips/mapping_rules.md)
+### [Mappings](usage_tips/mappings.md)
 
+* **Interface Type Mappings** — LibreNMS interface type and speed to NetBox interface type
 * **Platform Mappings** — LibreNMS OS string to NetBox Platform
 * **Device Type Mappings** — LibreNMS hardware string to NetBox DeviceType
 * **Location Mappings** — parsed LibreNMS location value to a NetBox Site, Location, Rack, or Tenant
 * **Module Type Mappings** — LibreNMS entPhysicalModelName to NetBox ModuleType (with manufacturer scoping)
 * **Module Bay Mappings** — LibreNMS entPhysicalName to NetBox bay name (exact or regex, manufacturer scoping)
-* **Normalization Rules** — regex-based string transformation before matching (strips vendor suffixes etc.)
-* **Inventory Ignore Rules** — skip or make-transparent phantom EEPROM/IDPROM entities
-* **Carrier Auto-Install Rules** — suggest carrier module installation for vendors that omit them from SNMP
 * Bulk YAML import/export for all mapping types
+
+### [Rules & Patterns](usage_tips/rules_and_patterns.md)
+
+* **Normalization Rules** — regex-based string transformation before matching (strips vendor suffixes etc.)
+* **Inventory Ignore Rules** — include, skip, or make transparent selected ENTITY-MIB inventory items
+* **Carrier Auto-Install Rules** — suggest carrier module installation for vendors that omit them from SNMP
+* **Port Stack LAG Patterns** — identify LAG interfaces and service access points by LibreNMS OS
+* Bulk YAML import/export for all rule and pattern types
 * Vendor-contributed example rules in `contrib/`
 
 ### Plugin Settings
@@ -96,9 +102,4 @@
 
 * NetBox Site to LibreNMS location synchronization
 * Sync location latitude and longitude values from NetBox to LibreNMS
-
-### [Interface Mapping](usage_tips/interface_mappings.md)
-
-* Customizable LibreNMS to NetBox interface type mappings
-* Interface Speed-based mapping rules
-* Bulk import support
+* Map parsed LibreNMS location values to NetBox Sites, Locations, Racks, and Tenants with [Location Mappings](usage_tips/mappings.md#location-mappings)
