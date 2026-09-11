@@ -65,8 +65,12 @@ addopts = "-v --tb=short --cov=netbox_librenms_plugin --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 120
+# force-exclude so excluded paths are skipped even when passed explicitly (e.g. by the ruff
+# pre-commit hook). Keeps the opengrep rule-test fixtures, which deliberately contain
+# rule-violating code, out of ruff's scope.
+force-exclude = true
 # Python only (skip Ruff Markdown formatting).
-extend-exclude = ["*.md"]
+extend-exclude = ["*.md", ".opengrep"]
 
 [tool.ruff.lint]
 # Explicit defaults; stable across Ruff versions.

@@ -1,0 +1,87 @@
+# Custom opengrep ruleset encoding this project's import-preview invariants. These run ON TOP OF
+# CodeRabbit's default opengrep packs: the file is intentionally NOT named opengrep.yml / semgrep.yml
+# at the repo root, so CodeRabbit does NOT treat it as its config (which would replace its default
+# ruleset). The local pre-push hook and the CI job enforce these rules instead.
+#
+# Rule-test fixtures live in .opengrep/tests/; run them with scripts/opengrep-test.sh.
+#
+# The scan needs --taint-intrafile: taint must cross into a module-private helper, which is where a
+# per-function analysis loses the serial-match branch.
+rules:
+  - id: import-disclosure
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This message names a NetBox object that no restrict() call filtered. The import preview
+      searches NetBox without a permission scope on purpose: a duplicate the viewer cannot see is
+      still a real conflict that must block the import. Identity is therefore withheld at display
+      time by import_utils/disclosure.py, which can only do that if the identity travels as
+      structured data. A name or pk baked into a warnings/issues string escapes that gate.
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe:
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      references:
+        - "netbox_librenms_plugin/import_utils/disclosure.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    mode: taint
+    pattern-sources:
+      # an unscoped manager chain
+      - pattern: $M.objects
+      # helpers that resolve a NetBox object with no permission scope applied
+      - pattern: resolve_device_by_host_ip(...)
+      - pattern: find_devices_by_serial(...)
+      - pattern: find_by_librenms_id(...)
+      - pattern: get_librenms_sync_device(...)
+      # a match an unrestricted search already bound into the validation dict
+      - pattern: $V["existing_device"]
+    pattern-sanitizers:
+      # a permission-scoped lookup may name its object: that is the display gate doing its job
+      - pattern: $X.restrict(...)
+      - pattern: restricted_queryset(...)
+      - pattern: restrict_object_or_404(...)
+      # aggregates reduce an object to a value that carries no identity. Flagging a count would
+      # push real code into contortions, so taint follows objects, not every value from a query.
+      - pattern: $X.count()
+      - pattern: $X.exists()
+      - pattern: len(...)
+      - pattern: sum(...)
+      - pattern: all(...)
+      - pattern: any(...)
+      # returns one of three fixed link-status strings, never identity
+      - pattern: _describe_link_note(...)
+    pattern-sinks:
+      # the validation dict's message lists
+      - pattern: $R["warnings"].append($MSG)
+      - pattern: $R["issues"].append($MSG)
+      - pattern: $R["warnings"].extend($MSG)
+      - pattern: $R["issues"].extend($MSG)
+      # whole-list assignment, not just append/extend
+      - patterns:
+          - pattern: $R["warnings"] = $MSG
+          - focus-metavariable: $MSG
+      - patterns:
+          - pattern: $R["issues"] = $MSG
+          - focus-metavariable: $MSG
+      # a local list alias appended to directly, before the function hands it back
+      - patterns:
+          - pattern: $L.append($MSG)
+          - metavariable-regex:
+              metavariable: $L
+              regex: ^(.*_)?(warnings|issues)$
+      # a local list of any name handed back under a warnings/issues key
+      - patterns:
+          - pattern-either:
+              - pattern: '{..., "warnings": $MSG, ...}'
+              - pattern: '{..., "issues": $MSG, ...}'
+          - focus-metavariable: $MSG
+      # the merge-candidate prose. host_named=/oob_named= carry pk and name as STRUCTURED data on
+      # purpose: that is the sanctioned channel the display gate can withhold, so focus on the
+      # message alone or the rule flags the very shape the fix prescribes.
+      - patterns:
+          - pattern: apply_merge_candidates(..., warning=$MSG, ...)
+          - focus-metavariable: $MSG
