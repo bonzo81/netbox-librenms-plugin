@@ -2871,5 +2871,7 @@ def test_cable_verify_updates_every_cell_of_a_complete_row(page):
 
     page.wait_for_selector("#new-action")
     assert page.locator('td[data-col="local_port"]').inner_text() == "Ethernet9"
+    assert page.locator('td[data-col="remote_port"]').inner_text() == "Ethernet8"
     assert page.locator('td[data-col="remote_device"]').inner_text() == "other-remote"
+    assert page.locator('td[data-col="cable_status"]').inner_text() == "Connected"
     assert page.evaluate("window.warnings") == []
