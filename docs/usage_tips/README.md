@@ -6,12 +6,12 @@
     - Set up the `librenms_id` custom field for optimal device matching
     - This ensures reliable device identification between NetBox and LibreNMS
 
-2. [Configure Interface Mappings](interface_mappings.md)
+2. [Configure Mappings](mappings.md)
     - Review and set up interface type mappings before synchronization
     - Create specific mappings for your network equipment types
     - Pay attention to speed-based mappings for accurate interface types
 
-3. [Configure Platform Mappings](mapping_rules.md#platform-mappings) (optional)
+3. [Configure Platform Mappings](mappings.md#platform-mappings) (optional)
     - Map LibreNMS OS strings to NetBox Platform objects
     - Ensures correct platform assignment during device import and sync
 
@@ -24,7 +24,9 @@
 
 [Module Sync Guide](module_sync.md) - Synchronize physical inventory from LibreNMS to NetBox modules
 
-[Mapping Rules Guide](mapping_rules.md) - Configure all mapping types (Platform, Device Type, Module Type, Module Bay, Normalization, Ignore, Carrier)
+[Mappings Guide](mappings.md) - Configure Interface, Platform, Device Type, Module Type, Module Bay, and Location mappings
+
+[Rules & Patterns Guide](rules_and_patterns.md) - Configure Normalization, Inventory Ignore, Carrier Auto-Install, and Port Stack LAG behavior
 
 ## Device Import
 

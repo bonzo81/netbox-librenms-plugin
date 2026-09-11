@@ -31,7 +31,7 @@ Synchronize physical inventory data from LibreNMS (via ENTITY-MIB) to NetBox ins
 * Rich mapping system: ModuleTypeMapping, ModuleBayMapping (with regex support), NormalizationRules, InventoryIgnoreRules, CarrierAutoInstallRules
 * Virtual Chassis aware — inventory rows distributed across correct VC members
 
-See the [Module Sync Guide](usage_tips/module_sync.md) and [Mapping Rules Guide](usage_tips/mapping_rules.md) for details.
+See the [Module Sync Guide](usage_tips/module_sync.md), [Mappings Guide](usage_tips/mappings.md), and [Rules & Patterns Guide](usage_tips/rules_and_patterns.md) for details.
 
 ### Device Field Sync
 
@@ -40,7 +40,7 @@ Synchronize device information from LibreNMS to NetBox. The following device fie
 * Device Name (with naming preference support)
 * Serial Number (including virtual chassis members)
 * Device Type
-* Platform (via [Platform Mappings](usage_tips/mapping_rules.md#platform-mappings))
+* Platform (via [Platform Mappings](usage_tips/mappings.md#platform-mappings))
 
 ### Interface Sync
 
@@ -49,7 +49,7 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 * Name
 * Description
 * Status (Enabled/Disabled)
-* Type (with [custom mapping support](usage_tips/interface_mappings.md))
+* Type (with [custom mapping support](usage_tips/mappings.md#interface-type-mappings))
 * Speed
 * MTU
 * MAC Address

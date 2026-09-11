@@ -117,12 +117,12 @@ Each parsed token is resolved to a NetBox object during import. Matching is **ca
 
 | Token | Matched against | Scope |
 |-------|-----------------|-------|
-| `site` | Site name, then a [Location Mapping](../usage_tips/mapping_rules.md#location-mappings) | Global |
+| `site` | Site name, then a [Location Mapping](../usage_tips/mappings.md#location-mappings) | Global |
 | `location` | Location name or ancestor name within the matched site, then a Location Mapping | Scoped to the site |
 | `rack` | Rack name within the matched site, then a Location Mapping | Scoped to the site |
 | `tenant` | Tenant name, then a Location Mapping | Global |
 
-When a token does not match a NetBox object's name exactly, add a [Location Mapping](../usage_tips/mapping_rules.md#location-mappings) to alias the LibreNMS value to a specific NetBox object. Create the target NetBox Site, Location, Rack, or Tenant before creating its mapping.
+When a token does not match a NetBox object's name exactly, add a [Location Mapping](../usage_tips/mappings.md#location-mappings) to alias the LibreNMS value to a specific NetBox object. Create the target NetBox Site, Location, Rack, or Tenant before creating its mapping.
 
 **Notes:**
 

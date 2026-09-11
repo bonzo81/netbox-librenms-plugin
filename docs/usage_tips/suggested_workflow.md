@@ -31,7 +31,7 @@ Ensure NetBox has the basic objects needed for device imports:
 
 ## 4. Configure Interface Mappings
 
-If you have specific interface type mapping requirements, configure them via **Plugins → LibreNMS Plugin → Interface Type Mappings** - see [Interface Mappings](interface_mappings.md).
+If you have specific interface type mapping requirements, configure them under **LibreNMS → Mappings → Interface Mappings**. See [Interface Type Mappings](mappings.md#interface-type-mappings).
 
 **Why**: Ensure specific NetBox interface types are used for your LibreNMS interface data.
 
@@ -59,7 +59,7 @@ After devices are imported, sync their interfaces:
 
 1. Navigate to a device in NetBox
 2. Use the LibreNMS sync button to pull interface data
-3. Review and adjust [Interface Mappings](interface_mappings.md) if needed
+3. Review and adjust [Interface Type Mappings](mappings.md#interface-type-mappings) if needed
 
 **Why after import**: Interfaces require the device to exist in NetBox first. The `librenms_id` field set during import enables accurate synchronization.
 
