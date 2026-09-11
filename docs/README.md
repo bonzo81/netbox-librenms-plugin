@@ -92,19 +92,19 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 
 > Screenshots from older plugin version
 
-#### Site & Location Sync
+### Site & Location Sync
 
 ![Site Location Sync](img/Netbox-librenms-plugin-Sites.gif)
 
-#### Sync devices and Interfaces
+### Sync devices and Interfaces
 
 ![Add device and interfaces](img/Netbox-librenms-plugin-interfaceadd.gif)
 
-#### Virtual Chassis Member Select
+### Virtual Chassis Member Select
 
 ![Virtual Chassis Member Selection](img/Netbox-librenms-plugin-virtualchassis.gif)
 
-#### Interface Type Mappings
+### Interface Type Mappings
 
 ![Interfaces Type Mappings](img/Netbox-librenms-plugin-mappings.png)
 

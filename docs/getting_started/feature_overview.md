@@ -1,18 +1,18 @@
 # Feature Overview
 
-### [Device Import](../device_import/overview.md)
+## [Device Import](../device_import/overview.md)
 
 * Search and discover devices from LibreNMS using flexible filters
 * Validate device prerequisites before import (Site, Device Type, Device Role)
 * Import devices as physical Devices or Virtual Machines
-* Smart matching for Sites, Device Types, and Platforms (via [mappings](configuration/mappings.md)), including optional parsing of LibreNMS location strings into site, location, rack, and tenant values
+* Smart matching for Sites, Device Types, and Platforms (via [mappings](../configuration/mappings.md)), including optional parsing of LibreNMS location strings into site, location, rack, and tenant values
 * Unified Platform creation modal — same experience on import page and device sync page
 * Bulk import support
 * Automatic Virtual Chassis creation for stackable devices
 * Background job processing for large device sets
 * Duplicate detection to prevent re-importing existing devices
 
-### [Out-of-Band (OOB) Management](../device_import/oob_management.md)
+## [Out-of-Band (OOB) Management](../device_import/oob_management.md)
 
 * Detects when a LibreNMS device (iDRAC/iLO/BMC/IPMI/CIMC) is the OOB controller of an existing NetBox device
 * **Add as OOB** — link the controller to the host and set `oob_ip` on a chosen (or new) interface
@@ -21,7 +21,7 @@
 * Per-server linkage stored in the `librenms_id` custom field as `{"<server_key>": {"id": N, "oob": {"id": M, "type": "drac"}}}`
 * Post-merge **Move to winner** actions to migrate interfaces, IP addresses, and primary/OOB IPs at your own pace
 
-### [Module / Inventory Sync](../device_sync/module_sync.md)
+## [Module / Inventory Sync](../device_sync/module_sync.md)
 
 * Compare LibreNMS ENTITY-MIB inventory to NetBox module bays and installed modules
 * Install, update, or skip modules directly from the sync table
@@ -29,7 +29,7 @@
 * Inline modal to create missing ModuleBayTemplate, ModuleTypeMapping, or ModuleBayMapping without leaving the page
 * Carrier Auto-Install suggestion for chassis that omit holder modules from SNMP
 
-### [Mappings](../configuration/mappings.md)
+## [Mappings](../configuration/mappings.md)
 
 * **Interface Type Mappings** — LibreNMS interface type and speed to NetBox interface type
 * **Platform Mappings** — LibreNMS OS string to NetBox Platform
@@ -39,7 +39,7 @@
 * **Module Bay Mappings** — LibreNMS entPhysicalName to NetBox bay name (exact or regex, manufacturer scoping)
 * Bulk YAML import/export for all mapping types
 
-### [Rules & Patterns](../configuration/rules_and_patterns.md)
+## [Rules & Patterns](../configuration/rules_and_patterns.md)
 
 * **Normalization Rules** — regex-based string transformation before matching (strips vendor suffixes etc.)
 * **Inventory Ignore Rules** — include, skip, or make transparent selected ENTITY-MIB inventory items
@@ -48,14 +48,14 @@
 * Bulk YAML import/export for all rule and pattern types
 * Vendor-contributed example rules in `contrib/`
 
-### Plugin Settings
+## Plugin Settings
 
 * Multi-server LibreNMS configuration support
 * Configurable device naming defaults (sysName vs hostname)
 * Domain stripping options during import for cleaner device names
 * Virtual Chassis member naming pattern customization during import
 
-### Device
+## Device
 
 * LibreNMS device identification via:
   * [Custom field `librenms_id`](../configuration/custom_field.md) _(recommended)_
@@ -64,13 +64,13 @@
   * Hostname
 * Add device to LibreNMS from netbox via SNMP v2c or v3
 
-### [Virtual Chassis Support](../device_sync/virtual_chassis.md)
+## [Virtual Chassis Support](../device_sync/virtual_chassis.md)
 
 * Automatic VC member selection for each interface
 * Member-specific interface synchronization
 * Bulk member editing capabilities
 
-### Interface Sync {#interface-sync}
+## Interface Sync {#interface-sync}
 
 * Create or Update interface in NetBox from LibreNMS interface data
   * Name
@@ -83,24 +83,24 @@
   * VLAN assignments
 * Sync all or specific fields
 
-### Cable Sync {#cable-sync}
+## Cable Sync {#cable-sync}
 
 * Create Cable connection in NetBox from LibreNMS links data
 * Best results when the [custom field](../configuration/custom_field.md) `librenms_id` is populated on interfaces
 
-### IP Address Sync {#ip-address-sync}
+## IP Address Sync {#ip-address-sync}
 
 * Create IP address objects in Netbox from LibreNMS device IP data
 * Optionally set the device or VM Primary IP from the LibreNMS management IP (opt-in **Set Primary IP** toggle on the IP Address Sync tab)
 * Best results when the [custom field](../configuration/custom_field.md) `librenms_id` is populated on interfaces
 
-### VLAN Sync {#vlan-sync}
+## VLAN Sync {#vlan-sync}
 
 * Create VLAN objects in NetBox from LibreNMS device VLAN data
 * Per-VLAN group assignment with scope-aware auto-selection
 
 
-### Location
+## Location
 
 * NetBox Site to LibreNMS location synchronization
 * Sync location latitude and longitude values from NetBox to LibreNMS
