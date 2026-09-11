@@ -9,9 +9,9 @@ The import page should be clear and intuitive to use, but this overview provides
 
 The import workflow consists of three main steps:
 
-1. **[Search & Filter](search.md)** - Find devices in LibreNMS using flexible filter criteria
-2. **[Review & Validate](validation.md)** - Validate import readiness and configure missing NetBox objects
-3. **[Import](import_settings.md)** - Configure import settings and create devices in NetBox
+1. **[Search & Filter](searching_for_devices.md)** - Find devices in LibreNMS using flexible filter criteria
+2. **[Review & Validate](validation_and_configuration.md)** - Validate import readiness and configure missing NetBox objects
+3. **[Import](../configuration/import_settings.md)** - Configure import settings and create devices in NetBox
 
 The plugin validates all required NetBox objects (Site, Device Type, Device Role) before allowing import.
 
@@ -36,7 +36,7 @@ The plugin validates all required NetBox objects (Site, Device Type, Device Role
 
 Navigate to the import interface through the NetBox menu:
 
-**Plugins → LibreNMS Plugin → Import → LibreNMS Import**
+**LibreNMS → Import → LibreNMS Import**
 
 This opens the device import page where you can search for and import devices from your LibreNMS instance.
 
@@ -65,7 +65,7 @@ All imported devices are linked to the server used during import, allowing you t
 
 Explore each step of the import workflow:
 
-- [Search for Devices](search.md) - Learn about filters, matching rules, and search options
-- [Validation & Configuration](validation.md) - Understand validation status and resolve issues
-- [Import Settings](import_settings.md) - Configure device naming and import options
-- [Background Jobs & Caching](background_jobs.md) - Job processing and performance optimization
+- [Search for Devices](searching_for_devices.md) - Learn about filters, matching rules, and search options
+- [Validation & Configuration](validation_and_configuration.md) - Understand validation status and resolve issues
+- [Import Settings](../configuration/import_settings.md) - Configure device naming and import options
+- [Background Jobs & Caching](background_jobs_and_caching.md) - Job processing and performance optimization

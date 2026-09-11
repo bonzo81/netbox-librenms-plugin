@@ -23,20 +23,20 @@ Region is inherited from the resolved Site because NetBox does not assign a regi
 
 ### Import as Device
 
-- **Site** (required) - Auto-matched from LibreNMS location. See [Location Parsing](import_settings.md#location-parsing) for splitting the location string into site, location, rack, and tenant.
-- **Device Type** (required) - Auto-matched from LibreNMS hardware string, or via [Device Type Mapping](../usage_tips/mappings.md#device-type-mappings)
+- **Site** (required) - Auto-matched from LibreNMS location. See [Location Parsing](../configuration/import_settings.md#location-parsing) for splitting the location string into site, location, rack, and tenant.
+- **Device Type** (required) - Auto-matched from LibreNMS hardware string, or via [Device Type Mapping](../configuration/mappings.md#device-type-mappings)
 - **Device Role** (required) - Must be selected manually
-- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mappings.md#platform-mappings). If no mapping exists and the platform is not found, a **Create Platform** button opens a modal to create a new NetBox Platform and mapping in one step.
-- **Region, Location, Rack, and Tenant** (optional) - Previewed in the validation comparison table. Region is inherited from the matched Site; Location, Rack, and Tenant are applied from parsed location tokens when they resolve uniquely. Location displays its NetBox hierarchy when it has parent locations. Rack selection is available when the site has racks, and an explicit selection takes precedence over the parsed rack. See [Location Parsing](import_settings.md#location-parsing) and [Location Mappings](../usage_tips/mappings.md#location-mappings).
+- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../configuration/mappings.md#platform-mappings). If no mapping exists and the platform is not found, a **Create Platform** button opens a modal to create a new NetBox Platform and mapping in one step.
+- **Region, Location, Rack, and Tenant** (optional) - Previewed in the validation comparison table. Region is inherited from the matched Site; Location, Rack, and Tenant are applied from parsed location tokens when they resolve uniquely. Location displays its NetBox hierarchy when it has parent locations. Rack selection is available when the site has racks, and an explicit selection takes precedence over the parsed rack. See [Location Parsing](../configuration/import_settings.md#location-parsing) and [Location Mappings](../configuration/mappings.md#location-mappings).
 
 ### Import as Virtual Machine
 
 - **Cluster** (required) - Must be selected manually
-- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mappings.md#platform-mappings). The same **Create Platform** modal is available if needed.
+- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../configuration/mappings.md#platform-mappings). The same **Create Platform** modal is available if needed.
 
 ## Virtual Chassis Detection
 
-When Virtual Chassis Detection is enabled during search, the validation details show detected stack members with their positions, serials, and suggested names. The plugin automatically creates the Virtual Chassis object during import. See [Virtual Chassis](../usage_tips/virtual_chassis.md) for details.
+When Virtual Chassis Detection is enabled during search, the validation details show detected stack members with their positions, serials, and suggested names. The plugin automatically creates the Virtual Chassis object during import. See [Virtual Chassis](../device_sync/virtual_chassis.md) for details.
 
 ## Duplicate Detection
 
@@ -50,9 +50,9 @@ If both a VM and Device with the same hostname exist, the plugin cannot determin
 
 ## Out-of-Band (OOB) Detection
 
-When an incoming LibreNMS device looks like an out-of-band controller (iDRAC, iLO, BMC, …) and matches an existing NetBox device, the validation details show an **OOB Detected** panel instead of a plain import button. Rather than creating a duplicate device, the plugin offers the appropriate reconciliation action — **Add as OOB**, **Promote to host**, or **Merge NetBox devices**. See [Out-of-Band (OOB) Management](../usage_tips/oob_management.md) for the full flow.
+When an incoming LibreNMS device looks like an out-of-band controller (iDRAC, iLO, BMC, …) and matches an existing NetBox device, the validation details show an **OOB Detected** panel instead of a plain import button. Rather than creating a duplicate device, the plugin offers the appropriate reconciliation action — **Add as OOB**, **Promote to host**, or **Merge NetBox devices**. See [Out-of-Band (OOB) Management](oob_management.md) for the full flow.
 
 ## Next Steps
 
-- [Import Settings](import_settings.md) - Configure device naming and import options
-- [Out-of-Band Management](../usage_tips/oob_management.md) - Reconcile OOB controllers with their host devices
+- [Import Settings](../configuration/import_settings.md) - Configure device naming and import options
+- [Out-of-Band Management](oob_management.md) - Reconcile OOB controllers with their host devices

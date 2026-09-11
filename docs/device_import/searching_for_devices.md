@@ -1,3 +1,5 @@
+# Searching for Devices
+
 The import feature requires at least one filter to search for devices. This prevents accidentally loading thousands of devices and helps you work with focused device sets.
 
 ## Available Filters
@@ -26,7 +28,7 @@ The import feature requires at least one filter to search for devices. This prev
 : When checked, includes devices marked as disabled in LibreNMS. By default, only active devices are shown.
 
 **Include Virtual Chassis Detection**
-: When checked, analyzes device inventory to detect stackable switches and chassis. This adds processing time but provides helpful information about multi-member devices. See [Virtual Chassis](../usage_tips/virtual_chassis.md) for details.
+: When checked, analyzes device inventory to detect stackable switches and chassis. This adds processing time but provides helpful information about multi-member devices. See [Virtual Chassis](../device_sync/virtual_chassis.md) for details.
 
 **Clear cache before search**
 : Forces the plugin to fetch fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance.
@@ -83,10 +85,10 @@ Type: firewall
 ## Search Options
 
 **Run as background job**
-: Enabled by default. Runs searches asynchronously, allowing you to track progress and cancel operations. Recommended for most use cases, especially with Virtual Chassis detection or large device sets. See [Background Jobs & Caching](background_jobs.md) for details.
+: Enabled by default. Runs searches asynchronously, allowing you to track progress and cancel operations. Recommended for most use cases, especially with Virtual Chassis detection or large device sets. See [Background Jobs & Caching](background_jobs_and_caching.md) for details.
 
 **Clear cache before search**
-: Forces fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance. See [Background Jobs & Caching](background_jobs.md) for caching details.
+: Forces fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance. See [Background Jobs & Caching](background_jobs_and_caching.md) for caching details.
 
 ## Saved Cached Searches
 The import page displays all your recent searches at the top, showing which filter combinations, that are still found in the cache. Each cached search shows the filters used, device count, and time remaining before expiration.  Click any cached search to instantly reload those results without re-running filters. This is particularly useful when switching between different filter combinations.
@@ -94,5 +96,5 @@ The import page displays all your recent searches at the top, showing which filt
 ## Next Steps
 
 After searching, proceed to:
-- [Validation & Configuration](validation.md) - Review and configure devices for import
-- [Background Jobs & Caching](background_jobs.md) - Understand job processing and performance optimization
+- [Validation & Configuration](validation_and_configuration.md) - Review and configure devices for import
+- [Background Jobs & Caching](background_jobs_and_caching.md) - Understand job processing and performance optimization

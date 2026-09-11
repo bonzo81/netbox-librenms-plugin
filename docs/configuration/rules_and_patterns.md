@@ -1,6 +1,6 @@
 # Rules & Patterns
 
-Rules and patterns transform or filter LibreNMS data when a direct mapping is not enough. Open **LibreNMS > Rules & Patterns** and use the tabs at the top of the page to switch between rule types.
+Rules and patterns transform or filter LibreNMS data when a direct mapping is not enough. Open **LibreNMS → Rules & Patterns** and use the tabs at the top of the page to switch between rule types.
 
 Each tab supports creating, editing, deleting, filtering, bulk importing, and exporting rules or patterns.
 
@@ -123,4 +123,4 @@ All Rules & Patterns tabs support NetBox's standard CSV, JSON, and YAML bulk imp
 
 To back up or move rules between NetBox installations, select records in a list and use the YAML export action. Example files for Normalization, Inventory Ignore, and Carrier Auto-Install rules are available in the repository's [`contrib/`](../../contrib/) directory.
 
-For the complete module synchronization workflow, see the [Module Sync guide](module_sync.md).
+For the complete module synchronization workflow, see the [Module Sync guide](../device_sync/module_sync.md).

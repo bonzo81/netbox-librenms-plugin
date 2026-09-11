@@ -482,7 +482,7 @@ class TestMatchLibrenmsHardwareDeviceTypeMappingPaths:
 
 @pytest.mark.django_db
 class TestMatchLibrenmsHardwareDeviceTypeNormalization:
-    """Issue #90: the documented ``device_type`` NormalizationRule scope must clean the raw LibreNMS hardware string before the DeviceTypeMapping / part_number / model lookups (docs/usage_tips/rules_and_patterns.md)."""
+    """Issue #90: the documented ``device_type`` NormalizationRule scope must clean the raw LibreNMS hardware string before the DeviceTypeMapping / part_number / model lookups (docs/configuration/rules_and_patterns.md)."""
 
     def _make_device_type(self):
         from dcim.models import DeviceType, Manufacturer

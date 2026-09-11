@@ -1,8 +1,6 @@
 # NetBox LibreNMS Plugin
 
-### Intro
-
-The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox.
+The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for your network, but this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox.
 
 ## Features
 
@@ -20,7 +18,7 @@ Search and import devices from LibreNMS into NetBox with comprehensive validatio
 * Automatic Virtual Chassis creation for stackable switches
 * Background job processing for large device sets
 
-See the [Device Import Guide](librenms_import/overview.md) for detailed usage instructions.
+See the [Device Import Guide](device_import/overview.md) for detailed usage instructions.
 
 ### Module / Inventory Sync
 
@@ -31,7 +29,7 @@ Synchronize physical inventory data from LibreNMS (via ENTITY-MIB) to NetBox ins
 * Rich mapping system: ModuleTypeMapping, ModuleBayMapping (with regex support), NormalizationRules, InventoryIgnoreRules, CarrierAutoInstallRules
 * Virtual Chassis aware — inventory rows distributed across correct VC members
 
-See the [Module Sync Guide](usage_tips/module_sync.md), [Mappings Guide](usage_tips/mappings.md), and [Rules & Patterns Guide](usage_tips/rules_and_patterns.md) for details.
+See the [Module Sync Guide](device_sync/module_sync.md), [Mappings Guide](configuration/mappings.md), and [Rules & Patterns Guide](configuration/rules_and_patterns.md) for details.
 
 ### Device Field Sync
 
@@ -40,7 +38,7 @@ Synchronize device information from LibreNMS to NetBox. The following device fie
 * Device Name (with naming preference support)
 * Serial Number (including virtual chassis members)
 * Device Type
-* Platform (via [Platform Mappings](usage_tips/mappings.md#platform-mappings))
+* Platform (via [Platform Mappings](configuration/mappings.md#platform-mappings))
 
 ### Interface Sync
 
@@ -49,7 +47,7 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 * Name
 * Description
 * Status (Enabled/Disabled)
-* Type (with [custom mapping support](usage_tips/mappings.md#interface-type-mappings))
+* Type (with [custom mapping support](configuration/mappings.md#interface-type-mappings))
 * Speed
 * MTU
 * MAC Address
@@ -59,7 +57,7 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 
 ### Cable Sync
 
-Create cable connection in NetBox from LibreNMS links data.
+Create cable connections in NetBox from LibreNMS links data.
 
 ### IP Address Sync
 
@@ -71,9 +69,9 @@ An opt-in **Set Primary IP** toggle on the IP Address Sync tab can also set the 
 - Create VLAN objects in NetBox from LibreNMS device VLAN data
 - Per-VLAN group assignment with scope-aware auto-selection
 
-### Add device to LibreNMS from Netbox
+### Add Device to LibreNMS from NetBox
 
-* Add device to LibreNMS from Netbox device page. SNMP v2c and v3 are supported.
+* Add a device to LibreNMS from the NetBox device page. SNMP v2c and v3 are supported.
 
 ### Site & Location Sync
 
@@ -90,7 +88,7 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 * Switch between different LibreNMS servers through the web interface
 * Maintain backward compatibility with single-server configurations
 
-### Screenshots/GIFs
+## Screenshots/GIFs
 
 > Screenshots from older plugin version
 
@@ -121,7 +119,8 @@ Or just share your ideas for the plugin over in [discussions](https://github.com
 | NetBox Version | Plugin Version |
 | -------------- | -------------- |
 | 4.1            | 0.2.x - 0.3.5  |
-| 4.2 - 4.5      | 0.3.6+         |
+| 4.2 - 4.3.x    | 0.3.6 - 0.3.9  |
+| 4.4.0+         | 0.4.7+         |
 
 
 ## Installing
@@ -206,7 +205,7 @@ PLUGINS_CONFIG = {
 }
 ```
 
-Or use the original single server confiig example:
+Or use the original single-server configuration example:
 
 ```python
 PLUGINS_CONFIG = {
@@ -250,7 +249,7 @@ As of version 0.4.4, the plugin **automatically creates** the `librenms_id` cust
 
 The field is created for Device, Virtual Machine, Interface, and VM Interface objects and stores a per-server mapping (e.g., `{"production": 42}`).
 
-For more info check out [custom field docs](usage_tips/custom_field.md)
+For more info check out [custom field docs](configuration/custom_field.md)
 
 ## Update
 
@@ -272,11 +271,11 @@ source /opt/netbox/venv/bin/activate
 python manage.py migrate netbox_librenms_plugin zero
 ```
 
-This is the supported way to undo everything the plugin's migrations created: its own tables and migration records, plus any objects it adds to NetBox's own tables (for example indexes on `dcim_device`). Those cross-app changes are **not** covered by NetBox's generic removal steps — which only look for tables named `netbox_librenms_plugin_*` — so reversing the migrations first ensures nothing is left behind.
+This is the supported way to undo everything the plugin's migrations created: its own tables and migration records, plus any objects it adds to NetBox's own tables (for example indexes on `dcim_device`). Those cross-app changes are **not** covered by NetBox's generic removal steps, which only look for tables named `netbox_librenms_plugin_*`, so reversing the migrations first ensures nothing is left behind.
 
-Then continue with the [general removal instructions](https://netboxlabs.com/docs/netbox/en/stable/plugins/removal/) (disable the plugin, remove its configuration, uninstall the package, and restart NetBox).
+Then continue with the [general removal instructions](https://netboxlabs.com/docs/netbox/en/stable/plugins/removal/) to disable the plugin, remove its configuration, uninstall the package, and restart NetBox.
 
-> If you already removed the plugin without reversing its migrations, reinstall the matching version, run the `migrate … zero` command above, and then uninstall again.
+> If you already removed the plugin without reversing its migrations, reinstall the matching version, run the `migrate netbox_librenms_plugin zero` command, and then uninstall again.
 
 ## Credits
 

@@ -6,7 +6,7 @@ This plugin bridges the two models. During import it detects when an incoming Li
 
 ## How the link is stored
 
-OOB linkage is recorded in the `librenms_id` [custom field](custom_field.md) alongside the host's own LibreNMS ID. The per-server value is promoted from a bare integer to a small object:
+OOB linkage is recorded in the `librenms_id` [custom field](../configuration/custom_field.md) alongside the host's own LibreNMS ID. The per-server value is promoted from a bare integer to a small object:
 
 ```json
 {
@@ -46,7 +46,7 @@ The **Add as OOB to *device*** action links the controller's LibreNMS ID into th
 The OOB IP is then created (or re-homed) assigned to the chosen interface and set as the device's `oob_ip`. If you make no interface selection, the link is still recorded and the OOB IP is left for you to set later.
 
 !!! note "Permissions"
-    Setting the OOB IP can create an Interface, create an IPAddress, or re-home an existing one. The action requires the matching NetBox `add`/`change` permissions for those models; if you lack them the link is still recorded and the IP step is skipped with a warning. See [Permissions & Access](permissions.md).
+    Setting the OOB IP can create an Interface, create an IPAddress, or re-home an existing one. The action requires the matching NetBox `add`/`change` permissions for those models; if you lack them the link is still recorded and the IP step is skipped with a warning. See [Permissions & Access](../configuration/permissions.md).
 
 ### Promote to host
 
@@ -81,6 +81,6 @@ This keeps every IP relationship valid against NetBox's requirement that primary
 
 ## See also
 
-- [Custom Field Setup](custom_field.md) — the `librenms_id` field that stores the linkage.
-- [Validation & Configuration](../librenms_import/validation.md) — where OOB is detected during import.
-- [Permissions & Access](permissions.md) — permissions required for the OOB/IP actions.
+- [Custom Field Setup](../configuration/custom_field.md) — the `librenms_id` field that stores the linkage.
+- [Validation & Configuration](validation_and_configuration.md) — where OOB is detected during import.
+- [Permissions & Access](../configuration/permissions.md) — permissions required for the OOB/IP actions.
