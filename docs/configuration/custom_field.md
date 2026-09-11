@@ -55,7 +55,7 @@ If the field was not created automatically (fallback): follow these steps to cre
         {"production": {"id": 42, "oob": {"id": 99, "type": "drac"}}}
         ```
 
-        This shape is written automatically by the OOB flows — see [Out-of-Band Management](oob_management.md). You don't normally edit it by hand.
+        This shape is written automatically by the OOB flows — see [Out-of-Band Management](../device_import/oob_management.md). You don't normally edit it by hand.
       - Legacy single-server example (integer) — read-only/deprecated; do not use for new entries:
         ```
         42

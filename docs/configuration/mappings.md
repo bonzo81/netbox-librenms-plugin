@@ -2,7 +2,7 @@
 
 Mappings translate values reported by LibreNMS into the corresponding NetBox object or choice. They are useful when the two systems use different names for the same platform, hardware, location, module, bay, or interface type.
 
-Open **LibreNMS > Mappings** and use the tabs at the top of the page to switch between mapping types. Each tab supports creating, editing, deleting, filtering, bulk importing, and exporting mappings.
+Open **LibreNMS → Mappings** and use the tabs at the top of the page to switch between mapping types. Each tab supports creating, editing, deleting, filtering, bulk importing, and exporting mappings.
 
 ## Interface Type Mappings
 
@@ -139,7 +139,7 @@ Site and Tenant mappings are global. Location and Rack mappings are scoped to a 
 
 `netbox_object` and `parent_site` use NetBox object names. The `parent_site` value identifies the target during import; it is not the parsed LibreNMS site token.
 
-The `region` placeholder can be used when [parsing a location string](../librenms_import/import_settings.md#location-parsing), but Region is not a Location Mapping type. A device inherits its region from its site.
+The `region` placeholder can be used when [parsing a location string](import_settings.md#location-parsing), but Region is not a Location Mapping type. A device inherits its region from its site.
 
 ## Importing and Exporting Mappings
 

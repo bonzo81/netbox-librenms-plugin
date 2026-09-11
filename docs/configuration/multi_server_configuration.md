@@ -65,9 +65,10 @@ PLUGINS_CONFIG = {
 
 ## Usage
 
-1. Navigate to **LibreNMS Plugin** > **Settings** > **Server Settings**
-2. Select your desired LibreNMS server from the dropdown
-3. Click **Save Settings**
+1. Navigate to **LibreNMS → Settings → Plugin Settings**
+2. Find the **LibreNMS Server Settings** section
+3. Select your desired LibreNMS server from the dropdown
+4. Click **Save Settings**
 
 This server is the installation default. Import uses its own transient server selection. An object sync page uses only servers that have a mapping in the object's `librenms_id` field.
 

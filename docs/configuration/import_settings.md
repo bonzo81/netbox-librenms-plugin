@@ -6,10 +6,9 @@ Configure how devices are named and what data is imported from LibreNMS to NetBo
 
 To configure global defaults for all imports:
 
-1. Navigate to **Plugins → LibreNMS Plugin → Settings**
-2. Click **Plugin Settings**
-3. Configure Use sysName and Strip Domain to your preferred defaults
-4. Save changes
+1. Navigate to **LibreNMS → Settings → Plugin Settings**
+2. Configure Use sysName and Strip Domain to your preferred defaults
+3. Save changes
 
 These defaults apply to all future imports unless overridden during the import process.
 
@@ -28,7 +27,7 @@ The plugin uses a two-tier preference system for the **Use sysName** and **Strip
 
 ## Device Naming Options
 
-The plugin provides two settings that control how device names are created in NetBox. Both are configured in Plugin Settings under **Plugins → LibreNMS Plugin → Settings → Plugin Settings** and can be overridden on the LibreNMS import page.
+The plugin provides two settings that control how device names are created in NetBox. Both are configured in Plugin Settings under **LibreNMS → Settings → Plugin Settings** and can be overridden on the LibreNMS import page.
 
 ### Use sysName
 
@@ -74,7 +73,7 @@ This allows you to:
 
 LibreNMS stores a device's location as a single free-text string (the SNMP `sysLocation`, e.g. `NYC, Suite 400, R12`). The **Location Parse Pattern** tells the plugin how to split that string into separate NetBox fields — **site**, **location**, **rack**, and **tenant** — during device import.
 
-Configure it under **Plugins → LibreNMS Plugin → Settings → Plugin Settings**:
+Configure it under **LibreNMS → Settings → Plugin Settings**:
 
 - **Location Parse Pattern** — describes the structure of your location string
 - **Use regex** — treat the pattern as a raw regular expression instead of placeholders
@@ -117,12 +116,12 @@ Each parsed token is resolved to a NetBox object during import. Matching is **ca
 
 | Token | Matched against | Scope |
 |-------|-----------------|-------|
-| `site` | Site name, then a [Location Mapping](../usage_tips/mappings.md#location-mappings) | Global |
+| `site` | Site name, then a [Location Mapping](mappings.md#location-mappings) | Global |
 | `location` | Location name or ancestor name within the matched site, then a Location Mapping | Scoped to the site |
 | `rack` | Rack name within the matched site, then a Location Mapping | Scoped to the site |
 | `tenant` | Tenant name, then a Location Mapping | Global |
 
-When a token does not match a NetBox object's name exactly, add a [Location Mapping](../usage_tips/mappings.md#location-mappings) to alias the LibreNMS value to a specific NetBox object. Create the target NetBox Site, Location, Rack, or Tenant before creating its mapping.
+When a token does not match a NetBox object's name exactly, add a [Location Mapping](mappings.md#location-mappings) to alias the LibreNMS value to a specific NetBox object. Create the target NetBox Site, Location, Rack, or Tenant before creating its mapping.
 
 **Notes:**
 

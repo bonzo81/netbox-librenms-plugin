@@ -28,7 +28,7 @@ Mixins in `views/mixins.py` provide reusable logic to keep views clean and DRY (
   - `require_all_permissions()` and `require_all_permissions_json()` combine the plugin write check with the NetBox object-permission check. Sync POST handlers should use one of these combined helpers.
   - `restricted_queryset()` and `restrict_object_or_404()` resolve objects through NetBox's object-permission constraints, so a model-level grant cannot expose an out-of-scope object by primary key.
 
-The plugin therefore retains a two-tier permission model: plugin permissions control access to LibreNMS integration features, while NetBox object permissions control which NetBox objects a user may view or change. Both tiers are required for operations that modify NetBox objects. See the [permissions guide](../usage_tips/permissions.md) for the user-facing permission model.
+The plugin therefore retains a two-tier permission model: plugin permissions control access to LibreNMS integration features, while NetBox object permissions control which NetBox objects a user may view or change. Both tiers are required for operations that modify NetBox objects. See the [permissions guide](../configuration/permissions.md) for the user-facing permission model.
 
 **LibreNMSAPIMixin**
 
