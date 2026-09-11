@@ -1,34 +1,36 @@
-# Usage Tips
+# Initial Setup
 
 ## Initial Setup
 
-1. [Configure Custom Field](custom_field.md)
+1. [Configure Custom Field](../configuration/custom_field.md)
     - Set up the `librenms_id` custom field for optimal device matching
     - This ensures reliable device identification between NetBox and LibreNMS
 
-2. [Configure Interface Mappings](interface_mappings.md)
+2. [Configure Mappings](../configuration/mappings.md)
     - Review and set up interface type mappings before synchronization
     - Create specific mappings for your network equipment types
     - Pay attention to speed-based mappings for accurate interface types
 
-3. [Configure Platform Mappings](mapping_rules.md#platform-mappings) (optional)
+3. [Configure Platform Mappings](../configuration/mappings.md#platform-mappings) (optional)
     - Map LibreNMS OS strings to NetBox Platform objects
     - Ensures correct platform assignment during device import and sync
 
-4. [Multi-Server Configuration](multi_server_configuration.md)
+4. [Multi-Server Configuration](../configuration/multi_server_configuration.md)
     - Configure multiple LibreNMS instances in your NetBox configuration
     - Switch between different LibreNMS servers through the web interface
     - Maintain backward compatibility with single-server configurations
 
 ## Module Sync
 
-[Module Sync Guide](module_sync.md) - Synchronize physical inventory from LibreNMS to NetBox modules
+[Module Sync Guide](../device_sync/module_sync.md) - Synchronize physical inventory from LibreNMS to NetBox modules
 
-[Mapping Rules Guide](mapping_rules.md) - Configure all mapping types (Platform, Device Type, Module Type, Module Bay, Normalization, Ignore, Carrier)
+[Mappings Guide](../configuration/mappings.md) - Configure Interface, Platform, Device Type, Module Type, Module Bay, and Location mappings
+
+[Rules & Patterns Guide](../configuration/rules_and_patterns.md) - Configure Normalization, Inventory Ignore, Carrier Auto-Install, and Port Stack LAG behavior
 
 ## Device Import
 
-[Device Import Guide](../librenms_import/overview.md) - Import devices from LibreNMS into NetBox
+[Device Import Guide](../device_import/overview.md) - Import devices from LibreNMS into NetBox
 
 1. Search for devices using flexible filters (location, type, OS, hostname, sysname)
 2. Validate import prerequisites (Site, Device Type, Device Role)
@@ -44,7 +46,7 @@ The Device Import feature automatically sets the `librenms_id` custom field, ena
 
 ### Devices
 
-> **Note:** If you imported devices using the [Device Import feature](../librenms_import/overview.md), the `librenms_id` is already set and will be used automatically. The steps below apply to devices added to NetBox manually.
+> **Note:** If you imported devices using the [Device Import feature](../device_import/overview.md), the `librenms_id` is already set and will be used automatically. The steps below apply to devices added to NetBox manually.
 
 1. Ensure devices have either:
     - Primary IP configured

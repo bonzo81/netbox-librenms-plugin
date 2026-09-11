@@ -65,9 +65,10 @@ PLUGINS_CONFIG = {
 
 ## Usage
 
-1. Navigate to **LibreNMS Plugin** > **Settings** > **Server Settings**
-2. Select your desired LibreNMS server from the dropdown
-3. Click **Save Settings**
+1. Navigate to **LibreNMS → Settings → Plugin Settings**
+2. Find the **LibreNMS Server Settings** section
+3. Select your desired LibreNMS server from the dropdown
+4. Click **Save Settings**
 
 All subsequent LibreNMS operations will use the selected server.
 

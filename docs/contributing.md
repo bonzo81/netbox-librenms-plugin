@@ -92,6 +92,26 @@ Ready to contribute? Here's how to set up `netbox-librenms-plugin` for local dev
 
 7. Submit a pull request through the GitHub website.
 
+## Building the Documentation
+
+The documentation site is built with [MkDocs](https://www.mkdocs.org/) and the Material theme. To build or preview it locally, install the `docs` extra from the plugin's root directory:
+
+```
+$ pip install -e ".[docs]"
+```
+
+Then serve the docs with live-reload:
+
+```
+$ mkdocs serve
+```
+
+Or build the static site to the `site/` directory:
+
+```
+$ mkdocs build
+```
+
 ## Pull Request Guidelines
 
 Before you submit a pull request, check that it meets these guidelines:

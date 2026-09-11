@@ -2,14 +2,14 @@
 
 ## Overview
 
-To enhance device identification and synchronization between NetBox and LibreNMS, this plugin supports using a custom field `librenms_id` on Device, Virtual Machine and Interface objects. While the plugin works without it, using this custom field is recommended for LibreNMS API lookups, and to assist with matching the remote device and remote interfaces for cable creation in Netbox. It can also be entered manually if no primary IP or FQDN is available.
+To enhance device identification and synchronization between NetBox and LibreNMS, this plugin supports using a custom field `librenms_id` on Device, Virtual Machine, Interface, and VM Interface objects. While the plugin works without it, using this custom field is recommended for LibreNMS API lookups, and to assist with matching the remote device and remote interfaces for cable creation in Netbox. It can also be entered manually if no primary IP or FQDN is available.
 
 !!! info "Automatic Creation"
     As of version 0.4.4, the plugin **automatically creates** the `librenms_id` custom field when migrations are run. You no longer need to create it manually. The field is created for Device, Virtual Machine, Interface, and VM Interface objects with JSON type for per-server device tracking.
 
 For the Device and Virtual Machine objects the plugin will automatically populate the LibreNMS ID custom field when opening the LibreNMS Sync page if the device has been found in LibreNMS.
 
-For the Interface object, the plugin will automatically populate the LibreNMS ID custom field when the interface data is synced from LibreNMS.
+For Interface and VM Interface objects, the plugin will automatically populate the LibreNMS ID custom field when the interface data is synced from LibreNMS.
 
 ## Benefits of Using `librenms_id`
 
@@ -40,7 +40,7 @@ If the field was not created automatically (fallback): follow these steps to cre
         - Check **dcim > device**
         - Check **virtualization > virtual machine**
         - Check **dcim > interface**
-        - Check **virtualization > interfaces (optional)**
+        - Check **virtualization > interface**
     - **Name:** `librenms_id`
     - **Label:** `LibreNMS ID`
     - **Description:** (Optional) Add a description like "LibreNMS Device ID for synchronization".
@@ -55,12 +55,12 @@ If the field was not created automatically (fallback): follow these steps to cre
         {"production": {"id": 42, "oob": {"id": 99, "type": "drac"}}}
         ```
 
-        This shape is written automatically by the OOB flows — see [Out-of-Band Management](oob_management.md). You don't normally edit it by hand.
+        This shape is written automatically by the OOB flows — see [Out-of-Band Management](../device_import/oob_management.md). You don't normally edit it by hand.
       - Legacy single-server example (integer) — read-only/deprecated; do not use for new entries:
         ```
         42
         ```
-        > Note: to create new entries manually use the JSON format shown above.
+        To convert a legacy value, open the device's LibreNMS Sync page and click **Convert ID**. Conversion is available only when the NetBox and LibreNMS serial numbers match. To create new entries manually, use the JSON format shown above.
     - **Required:** Leave unchecked (optional).
     - **Default Value:** Leave blank.
 

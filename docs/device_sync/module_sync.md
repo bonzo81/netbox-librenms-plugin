@@ -53,7 +53,7 @@ For Virtual Chassis devices, the Modules tab automatically distributes inventory
 
 ## Related Configuration
 
-Before using Module Sync you will typically need to configure one or more of the following mapping types (see [Mapping Rules](mapping_rules.md)):
+Before using Module Sync you will typically need to configure one or more [mappings](../configuration/mappings.md) or [rules and patterns](../configuration/rules_and_patterns.md):
 
 - **ModuleTypeMapping** — maps LibreNMS model strings (e.g. `SFP-1G-T`) to NetBox ModuleType objects
 - **ModuleBayMapping** — maps LibreNMS bay names (e.g. `Power Supply 1`) to NetBox bay names (e.g. `PSU1`), with optional regex and manufacturer scoping
