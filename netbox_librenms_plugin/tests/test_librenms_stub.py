@@ -754,12 +754,14 @@ def test_stub_stops_answering_patch_on_a_hostname_a_rename_superseded():
         server.stop()
 
 
-def _raw_headers_only_post(server, *, content_length, token, request_connection_close=True, timeout=5):
+def _raw_headers_only_post(
+    server, *, content_length, token, path="/api/v0/devices", request_connection_close=True, timeout=5
+):
     """Send POST headers that declare a body, send no body, and return the status line."""
     host, _, port = server.url.removeprefix("http://").partition(":")
     connection_header = "Connection: close\r\n" if request_connection_close else ""
     request = (
-        "POST /api/v0/devices HTTP/1.1\r\n"
+        f"POST {path} HTTP/1.1\r\n"
         f"Host: {host}:{port}\r\n"
         f"X-Auth-Token: {token}\r\n"
         f"Content-Length: {content_length}\r\n"
@@ -773,6 +775,27 @@ def _raw_headers_only_post(server, *, content_length, token, request_connection_
             received += chunk
     lines = received.decode(errors="replace").splitlines()
     return lines[0] if lines else ""
+
+
+def test_stub_refuses_an_unauthenticated_body_request_to_healthz():
+    """The unauthenticated /healthz exemption is GET-only.
+
+    A body-bearing method would otherwise skip the token check, so a caller could declare a
+    Content-Length, send no body, and hold a ThreadingHTTPServer thread inside rfile.read().
+    """
+    server = _start_stub()
+    try:
+        status_line = _raw_headers_only_post(
+            server,
+            path="/healthz",
+            content_length=MAX_REQUEST_BODY_BYTES,
+            token=f"not-{TOKEN}",
+            request_connection_close=False,
+        )
+
+        assert "401" in status_line, status_line
+    finally:
+        server.stop()
 
 
 @pytest.mark.parametrize(

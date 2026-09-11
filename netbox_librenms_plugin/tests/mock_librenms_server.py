@@ -120,7 +120,10 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
     def _reject_unauthenticated(self):
         """Send 401 and report True when the request carries no valid token."""
         api_token = self.server.api_token  # type: ignore[attr-defined]
-        if not api_token or urlparse(self.path).path == "/healthz":
+        # GET only: _handle_request answers /healthz before any auth check, so the exemption is
+        # needed nowhere else. Extending it to a body-bearing method would let an unauthenticated
+        # caller declare a Content-Length, send no body, and hold a handler thread in rfile.read().
+        if not api_token or (urlparse(self.path).path == "/healthz" and self.command == "GET"):
             return False
         if self.headers.get("X-Auth-Token") == api_token:
             return False
