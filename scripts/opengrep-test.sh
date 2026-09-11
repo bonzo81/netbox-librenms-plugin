@@ -21,4 +21,5 @@ for fixture in "$repo_root"/.opengrep/tests/*.py; do
   cp "$fixture" "$tmp/$stem.py"
 done
 
-exec "$opengrep_bin" test --taint-intrafile "$tmp"
+# Not exec: that would replace the shell before the EXIT trap removes the staging directory.
+"$opengrep_bin" test --taint-intrafile "$tmp"

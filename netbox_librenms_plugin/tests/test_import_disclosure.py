@@ -6,7 +6,9 @@ be withheld at DISPLAY time, so every test here drives a real view with a constr
 """
 
 import logging
+import os
 import subprocess
+import tempfile
 from html import unescape
 from pathlib import Path
 
@@ -314,6 +316,30 @@ def test_a_withheld_match_does_not_disclose_its_librenms_linkage(client, librenm
 
 
 @pytest.mark.django_db
+def test_a_withheld_match_leaves_no_match_state_behind(client, librenms_server, settings):
+    """The teardown must demote the match itself, not only the fields today's templates render."""
+    from netbox_librenms_plugin.import_utils.disclosure import OUT_OF_SCOPE_MATCH_MESSAGE
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    hidden_match = make_device("disclosure-import-host.example.net")
+    set_librenms_device_id(hidden_match, 987654, server_key)
+    hidden_match.save()
+    elsewhere = make_device("disclosure-unrelated-teardown-scope")
+    _register_device(librenms_server)
+    client.force_login(_viewer_scoped_to("disclosure-teardown-viewer", elsewhere))
+
+    validation = _open_validation_modal(client, server_key).context["validation"]
+
+    # Precondition: the row really did resolve to the hidden match and was withheld.
+    assert validation["existing_device"] is None
+    assert OUT_OF_SCOPE_MATCH_MESSAGE in validation["warnings"]
+
+    assert validation["existing_match_type"] is None, "the withheld match's match type survived the teardown"
+    assert validation["existing_librenms_link"] is None, "the withheld match's linkage survived the teardown"
+
+
+@pytest.mark.django_db
 def test_a_withheld_match_does_not_disclose_that_it_is_a_vm(client, librenms_server, settings):
     """A hostname match to a VM flips the row into VM mode, which the modal shows as a Cluster row."""
     server_key = _point_plugin_at(settings, librenms_server.url)
@@ -453,3 +479,22 @@ def test_the_package_names_no_unrestricted_object_in_a_warning():
     if result.returncode == OPENGREP_NOT_INSTALLED:
         pytest.skip("opengrep is not installed; see .opengrep/README.md")
     assert result.returncode == 0, result.stdout or result.stderr
+
+
+def test_the_rule_test_script_removes_its_staging_directory():
+    """The script stages fixture/rule pairs under a temp dir; each run must take it away again."""
+    script = REPOSITORY_ROOT / "scripts" / "opengrep-test.sh"
+    if not script.exists():
+        pytest.skip("opengrep test script not present")
+    with tempfile.TemporaryDirectory() as private_tmp:
+        result = subprocess.run(
+            [str(script)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "TMPDIR": private_tmp},
+        )
+        if result.returncode == OPENGREP_NOT_INSTALLED:
+            pytest.skip("opengrep is not installed; see .opengrep/README.md")
+        # Precondition: the rule-tests really ran, so the staging directory really was created.
+        assert result.returncode == 0, result.stdout or result.stderr
+        assert list(Path(private_tmp).iterdir()) == [], "the staging directory outlived the run"

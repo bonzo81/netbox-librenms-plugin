@@ -420,6 +420,85 @@ def _warn_kw(result, **devices):
     result["warnings"].append(devices["device"].name)
 
 
+# --- The six shapes review raised against the deleted AST checker. Each is pinned here so the
+#     replacement rule cannot silently regain the gap the checker had.
+
+# --- [ok] the built-in all() reduces a queryset to a bool, so nothing identifying survives
+def probe_cr01_all_builtin(result):
+    devices = Device.objects.filter(serial="x")
+    flag = all(devices)
+    # ok: import-disclosure
+    result["warnings"].append(f"flag {flag}")
+
+
+# --- [flag] a queryset .all() stays transparent
+def probe_cr02_all_queryset(result):
+    owner = Device.objects.all().first()
+    # ruleid: import-disclosure
+    result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] min() selects an element out of a tainted collection
+def probe_cr03_min(result):
+    devices = Device.objects.filter(serial="x")
+    owner = min(devices)
+    # ruleid: import-disclosure
+    result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] max() likewise
+def probe_cr04_max(result):
+    devices = Device.objects.filter(serial="x")
+    owner = max(devices)
+    # ruleid: import-disclosure
+    result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] a statically known same-class self. helper
+class ProbeCr05:
+    def preview(self, result):
+        device = Device.objects.first()
+        self._render_warning(result, device)
+
+    def _render_warning(self, result, device):
+        # ruleid: import-disclosure
+        result["warnings"].append(f"owner {device.name}")
+
+
+# --- [flag] a for-loop target
+def probe_cr06_for(result):
+    for device in Device.objects.filter(serial="x"):
+        # ruleid: import-disclosure
+        result["warnings"].append(f"owner {device.name}")
+
+
+# --- [flag] a comprehension target
+def probe_cr07_comprehension(result):
+    # ruleid: import-disclosure
+    result["warnings"] = [f"owner {device.name}" for device in Device.objects.filter(serial="x")]
+
+
+# --- [flag] tuple unpacking of a loop target
+def probe_cr08_unpack(result):
+    for device, _score in [(d, 1) for d in Device.objects.filter(serial="x")]:
+        # ruleid: import-disclosure
+        result["warnings"].append(f"owner {device.name}")
+
+
+# --- [flag] an inline warnings dict, never assigned to a list first
+def probe_cr09_inline_dict():
+    device = Device.objects.first()
+    # ruleid: import-disclosure
+    return {"warnings": [f"owner {device.name}"], "issues": []}
+
+
+# --- [flag] a walrus binding
+def probe_cr10_walrus(result):
+    if (owner := Device.objects.first()) is not None:
+        # ruleid: import-disclosure
+        result["warnings"].append(f"owner {owner.name}")
+
+
 # The one shape this rule does not report is a keyword argument read back out of a **kwargs
 # dict. See "Known limitation" in .opengrep/README.md; the reverse shape, a caller-side
 # **{...} unpacking, is covered by probe_unpack_kw above.

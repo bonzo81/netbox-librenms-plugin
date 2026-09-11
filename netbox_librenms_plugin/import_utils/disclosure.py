@@ -209,6 +209,10 @@ def _scope_existing_match(validation: dict, scope: ViewerScope) -> bool:
     # object, and the modal falls back to printing validation["device_role"] exactly when
     # existing_device is absent, so leaving them would disclose the withheld object's role.
     clear_match_derived_action_fields(validation)
+    # The shared helper leaves match-type demotion and linkage to its callers. This teardown is
+    # terminal (no fresh lookup follows it, unlike bulk_import's refresh), so it demotes them here.
+    validation["existing_match_type"] = None
+    validation["existing_librenms_link"] = None
     validation["librenms_id_needs_migration"] = False
     validation["device_type_mismatch"] = False
     reset_device_role(validation)
