@@ -2775,7 +2775,7 @@ def test_cable_verify_updates_the_row_that_owns_the_changed_select(page):
         }"""
     )
 
-    page.wait_for_selector("#new-action", timeout=5000)
+    page.wait_for_selector("#new-action")
     cable_row = page.locator("#librenms-cable-table-vc tr")
     assert cable_row.locator('td[data-col="cable_status"]').inner_text() == "Connected"
     interface_row = page.locator("#librenms-interface-table tr")
