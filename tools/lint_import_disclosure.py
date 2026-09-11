@@ -99,9 +99,31 @@ def reads_unrestricted_key(node) -> bool:
     return False
 
 
+def _receiver_chain(node):
+    """Yield each call and attribute on the chain that produces *node*'s own value."""
+    while True:
+        if isinstance(node, ast.Subscript):
+            node = node.value
+            continue
+        if isinstance(node, ast.Attribute):
+            yield node
+            node = node.value
+            continue
+        if isinstance(node, ast.Call):
+            yield node
+            node = node.func
+            continue
+        return
+
+
 def _is_scoped(node) -> bool:
-    """Whether a permission scope was applied anywhere in *node*."""
-    for sub in ast.walk(node):
+    """Whether a permission scope was applied on the chain that produces *node*.
+
+    Only the receiver chain counts. A whole-expression walk would read the ``restrict()`` inside an
+    argument, so ``Device.objects.filter(site=Site.objects.restrict(user).first())`` would pass as
+    scoped while the Device it returns is not.
+    """
+    for sub in _receiver_chain(node):
         if isinstance(sub, ast.Call):
             func = sub.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
@@ -270,7 +292,7 @@ def message_expressions(node, aliases):
             yield keyword.value
 
 
-def identity_references(node, tainted, local_functions=frozenset()):
+def identity_references(node, tainted, local_functions=frozenset(), identity_functions=frozenset()):
     """Yield the identity-bearing subexpressions of *node*.
 
     Prunes where identity cannot survive: an aggregate of a tainted object, and a call to a helper
@@ -280,6 +302,11 @@ def identity_references(node, tainted, local_functions=frozenset()):
         yield node
         return
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        # A local helper that hands identity back carries it through its call, even with no tainted
+        # argument to follow: ``_owner_name()`` returning ``Device.objects...first().name``.
+        if node.func.id in identity_functions:
+            yield node
+            return
         if node.func.id in NON_IDENTITY_CALLS or node.func.id in local_functions:
             return
     if isinstance(node, ast.Attribute):
@@ -291,12 +318,23 @@ def identity_references(node, tainted, local_functions=frozenset()):
         if isinstance(base, ast.Name) and base.id in tainted:
             yield node
             return
+        # ``Device.objects.filter(...).first().name`` never binds a local, so the taint pass has no
+        # name to mark. Read the receiver itself, but only where it already resolved to an object:
+        # a bare ``Model.objects`` path and the method names on the chain are not identity reads.
+        if (
+            isinstance(node.value, (ast.Call, ast.Subscript))
+            and node.attr not in SCOPING_CALLS
+            and node.attr not in TRANSPARENT_CALLS
+            and names_an_unrestricted_object(node.value, tainted)
+        ):
+            yield node
+            return
     if isinstance(node, ast.Name):
         if node.id in tainted:
             yield node
         return
     for child in ast.iter_child_nodes(node):
-        yield from identity_references(child, tainted, local_functions)
+        yield from identity_references(child, tainted, local_functions, identity_functions)
 
 
 def identity_returning_functions(functions, taint):
@@ -318,7 +356,7 @@ def identity_returning_functions(functions, taint):
             for node in ast.walk(function):
                 if not isinstance(node, ast.Return) or node.value is None:
                     continue
-                if next(identity_references(node.value, taint[name], prunable), None) is not None:
+                if next(identity_references(node.value, taint[name], prunable, returning), None) is not None:
                     returning.add(name)
                     grew = True
                     break
@@ -330,7 +368,8 @@ def check_file(path):
     """Report ``(path, line, expression)`` for every disclosing message in one file."""
     tree = ast.parse(Path(path).read_text())
     functions, taint = module_taint(tree)
-    prunable = set(functions) - identity_returning_functions(functions, taint)
+    returning = identity_returning_functions(functions, taint)
+    prunable = set(functions) - returning
     findings = []
     for name, function in functions.items():
         # No early skip on an empty taint set: a message can read the match straight out of the
@@ -339,7 +378,7 @@ def check_file(path):
         aliases = message_list_aliases(function)
         for node in ast.walk(function):
             for message in message_expressions(node, aliases):
-                for reference in identity_references(message, tainted, prunable):
+                for reference in identity_references(message, tainted, prunable, returning):
                     findings.append((str(path), node.lineno, ast.unparse(reference)))
     return findings
 
