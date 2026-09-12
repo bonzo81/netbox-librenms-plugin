@@ -13,6 +13,10 @@ urlpatterns = [
     # ok: url-numeric-pk-converter
     django.urls.path("ports/<str:id>/", view),
     # ruleid: url-numeric-pk-converter
+    django.urls.path("devices/<str:pk>/", view),
+    # ruleid: url-numeric-pk-converter
+    django.urls.path(route="devices/<str:pk>/", view=view),
+    # ruleid: url-numeric-pk-converter
     path(route="devices/<str:pk>/", view=view),
     # ok: url-numeric-pk-converter
     path("devices/<int:pk>/", view),

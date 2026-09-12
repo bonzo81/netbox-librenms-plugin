@@ -527,10 +527,18 @@ def test_an_option_only_scan_keeps_the_default_targets():
 
 
 def test_an_explicit_target_replaces_the_defaults():
-    """A caller that names a target scans that target alone, whichever side of the option it sits."""
+    """A target after `--` replaces the default package and test targets."""
     target = sorted((REPOSITORY_ROOT / "netbox_librenms_plugin" / "tests").rglob("*.py"))[0]
-    for args in (("--json", target), (target, "--json")):
-        assert _scanned(_scan(*args)) == {target}, args
+    assert _scanned(_scan("--json", "--", target)) == {target}
+
+
+def test_an_exclude_option_accepts_an_existing_path():
+    """An existing path before `--` stays with the option that consumes it."""
+    package = REPOSITORY_ROOT / "netbox_librenms_plugin"
+    excluded = package / "tests"
+    assert excluded.is_dir(), "the excluded test tree does not exist"
+    scanned = _scanned(_scan("--json", "--exclude", excluded))
+    assert package / "librenms_api.py" in scanned, "the option-only scan lost the default package"
 
 
 def test_each_rule_applies_to_its_declared_paths(tmp_path):
@@ -556,7 +564,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         staged.parent.mkdir(parents=True, exist_ok=True)
         staged.write_text(source)
 
-    report = _scan("--json", *[tmp_path / name for name in sources], expect=1)
+    report = _scan("--json", "--", *[tmp_path / name for name in sources], expect=1)
     found = {
         (Path(f["path"]).relative_to(tmp_path).as_posix(), f["check_id"].split(".")[-1]) for f in report["results"]
     }

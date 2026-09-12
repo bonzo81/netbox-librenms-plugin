@@ -40,7 +40,7 @@ unchecked until that review.
 | `.opengrep/tests/*.py` | Annotated rule-test fixtures. |
 | `scripts/opengrep-scan.sh` | Scan the source tree. Pre-push hook and CI. Non-zero on any finding. |
 | `scripts/opengrep-test.sh` | Run the rule-tests against the ruleset. |
-| `.opengrep/test-scan.py` | Check scan options and explicit targets with the real executable. |
+| `netbox_librenms_plugin/tests/test_import_disclosure.py` | Check scan options and explicit targets with the real executable. |
 | `scripts/opengrep-bin.sh` | Shared binary lookup, sourced by both scripts. |
 
 ## Rules
@@ -63,9 +63,8 @@ in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
 targets into the package directory and explicit Python test files. Options alone keep these defaults.
-Explicit path targets replace them. Use `--` before paths that start with a dash.
-Options accept `--name=value` syntax. The wrapper also pairs the separate values of the
-options listed by `opengrep scan --help` in version 1.30.0.
+Pass options before the first `--`. The wrapper passes them to opengrep unchanged.
+Pass explicit targets after `--` to replace the defaults. With no `--`, the defaults apply.
 
 The test script stages fixtures in a flat temporary directory. In opengrep 1.30.0, `opengrep test`
 ignores rule `paths` filters. A path-scoped fixture still runs there. A flipped `ruleid:` annotation
@@ -106,7 +105,7 @@ per-function analysis. Without the flag those sites are missed.
 ```bash
 ./scripts/opengrep-scan.sh   # scan (same as the pre-push hook)
 ./scripts/opengrep-test.sh   # run the rule-tests
-python .opengrep/test-scan.py  # check scan argument handling
+./scripts/opengrep-scan.sh --json -- netbox_librenms_plugin/urls.py  # scan one target
 ```
 
 Both find opengrep via `$OPENGREP_BIN`, then `PATH`, then `~/.local/opt/opengrep/bin`. Install it

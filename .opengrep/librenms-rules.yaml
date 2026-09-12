@@ -123,6 +123,11 @@ rules:
               - pattern: $REQUESTS.$METHOD(...)
           - patterns:
               - pattern-inside: |
+                  from requests import $METHOD
+                  ...
+              - pattern: $METHOD(...)
+          - patterns:
+              - pattern-inside: |
                   from requests import $METHOD as $CALL
                   ...
               - pattern: $CALL(...)
