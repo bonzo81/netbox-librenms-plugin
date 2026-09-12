@@ -258,6 +258,30 @@ def probe_flag16(result, serial, user, any_match):
     result["warnings"].append(f"owner {owner.name}")
 
 
+# --- [flag] a permission sanitizer must not hide a sink nested in its arguments
+def probe_exact_sanitizer_restrict(result):
+    from dcim.models import Device
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    Device.objects.restrict(result["warnings"].append(owner.name))
+
+
+# --- [flag] a view permission sanitizer must not hide a nested sink
+def probe_exact_sanitizer_queryset(result):
+    from dcim.models import Device
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    restricted_queryset(result["warnings"].append(owner.name))
+
+
+# --- [flag] a permission-scoped lookup must not hide a nested sink
+def probe_exact_sanitizer_object(result):
+    from dcim.models import Device
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    restrict_object_or_404(Device, result["warnings"].append(owner.name))
+
+
 # --- [flag] a local message list built by its initializer
 def probe_flag17(result, serial):
     from dcim.models import Device

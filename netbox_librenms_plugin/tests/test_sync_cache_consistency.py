@@ -1832,7 +1832,10 @@ def test_partial_cable_refresh_renders_no_syncable_rows(client, settings):
 def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings):
     """QueryDict.get() keeps the LAST repeated value, so an ambiguous POST could refresh another server."""
     _configure_servers(settings)
-    device = make_device("cache-cable-ambiguous", librenms_cf={"primary": {"id": 671}})
+    device = make_device(
+        "cache-cable-ambiguous",
+        librenms_cf={"primary": {"id": 671}, "secondary": {"id": 672}},
+    )
     client.force_login(make_superuser("cache-cable-ambiguous-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
 

@@ -44,8 +44,11 @@ rules:
     pattern-sanitizers:
       # a permission-scoped lookup may name its object: that is the display gate doing its job
       - pattern: $X.restrict(...)
+        exact: true
       - pattern: restricted_queryset(...)
+        exact: true
       - pattern: restrict_object_or_404(...)
+        exact: true
       # Aggregates are exempted to keep real code workable, not because they provably erase
       # identity: a contrived len(range(owner.pk)) still carries the pk. sum() is NOT exempt,
       # because sum([owner.pk]) preserves it by accident rather than by contrivance.

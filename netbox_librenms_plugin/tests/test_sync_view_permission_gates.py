@@ -90,7 +90,7 @@ def _post_without_writes(view, request, **kwargs):
     return response
 
 
-def _assert_object_denial(view, request, response, *, htmx):
+def _assert_object_denial(view, request, response, *, htmx, expected_missing=None):
     import json
 
     from django.http import JsonResponse
@@ -106,6 +106,8 @@ def _assert_object_denial(view, request, response, *, htmx):
         if not request.user.has_perm(get_permission_for_model(model, action))
     ]
     assert len(missing) > 0, "Case must lack a required object permission"
+    if expected_missing is not None:
+        assert missing == expected_missing
     message = f"Missing permissions: {', '.join(missing)}"
     if isinstance(response, JsonResponse):
         assert response.status_code == 403
@@ -124,6 +126,7 @@ class TestSyncPostPermissionGates:
 
         from dcim.models import Platform
         from ipam.models import VLANGroup
+        from utilities.permissions import get_permission_for_model
 
         from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN
         from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_interface, make_ip, make_vm
@@ -169,6 +172,28 @@ class TestSyncPostPermissionGates:
         response = _post_without_writes(view, request, **kwargs)
 
         _assert_object_denial(view, request, response, htmx=htmx)
+
+        required = tuple(dict.fromkeys(view.required_object_permissions.get("POST", [])))
+        assert required, "Sync POST must declare at least one object permission"
+        for index, omitted in enumerate(required):
+            granted = [requirement for requirement in required if requirement != omitted]
+            user = make_user_with_perms(f"permission-omission-{index}", granted)
+            assert all(user.has_perm(get_permission_for_model(model, action)) for action, model in granted)
+            request = make_request(data=data, user=user, **({"HTTP_HX_REQUEST": "true"} if htmx else {}))
+            view = view_class()
+
+            response = _post_without_writes(view, request, **kwargs)
+
+            action, model = omitted
+            missing_permission = get_permission_for_model(model, action)
+            assert not user.has_perm(missing_permission)
+            _assert_object_denial(
+                view,
+                request,
+                response,
+                htmx=htmx,
+                expected_missing=[missing_permission],
+            )
 
     @pytest.mark.parametrize("allow_create", [False, True], ids=["missing-add-platform", "permitted-control"])
     def test_platform_creation_with_valid_payload(self, allow_create, settings, librenms_server):
