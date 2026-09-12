@@ -181,7 +181,7 @@ class TestImportListContract:
         view._job_results_loaded = True
         view._import_data = import_data
         view._active_server_key = SERVER_KEY
-        request = RequestFactory().get(_import_url(), {"sort": "hostname"})
+        request = RequestFactory().get(_import_url(), {"import_sort": "-hostname"})
         request.user = make_superuser()
 
         queryset = view.get_queryset(request)
@@ -192,6 +192,7 @@ class TestImportListContract:
         assert isinstance(table, DeviceImportTable)
         assert list(table.data) == import_data
         assert table.server_key == SERVER_KEY
+        assert tuple(table.order_by) == ("-hostname",)
 
     def test_import_queryset_stays_empty_until_a_valid_search_exists(self):
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
