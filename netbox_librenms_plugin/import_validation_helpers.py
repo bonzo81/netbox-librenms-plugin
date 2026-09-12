@@ -321,7 +321,7 @@ def reset_cluster(validation: dict) -> None:
     """
     Reset the row's cluster selection to "not found", preserving available_clusters.
 
-    The VM twin of :func:`reset_device_role` — VM rows are gated on cluster, not role.
+    The VM twin of :func:`reset_device_role`: VM rows are gated on cluster, not role.
 
     Args:
         validation (dict): The import-row validation dict, mutated in place.

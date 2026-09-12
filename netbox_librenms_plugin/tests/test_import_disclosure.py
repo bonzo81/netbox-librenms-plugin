@@ -1,6 +1,6 @@
 """Import-preview disclosure control: an unrestricted match must not name an unviewable object.
 
-The conflict searches in ``validate_device_for_import`` are deliberately unrestricted — a duplicate
+The conflict searches in ``validate_device_for_import`` are deliberately unrestricted: a duplicate
 the viewer cannot see is still a real conflict that must block the import. Identity therefore has to
 be withheld at DISPLAY time, so every test here drives a real view with a constrained grant.
 """

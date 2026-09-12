@@ -849,7 +849,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # ambiguous payload would silently refresh one server's cache namespace from another's.
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
-            if len(request.POST.getlist("server_key")) > 1:
+            getlist = getattr(request.POST, "getlist", None)
+            posted_values = getlist("server_key") if callable(getlist) else request.POST.get("server_key")
+            if isinstance(posted_values, (list, tuple)) and len(posted_values) > 1:
                 messages.error(request, "Select exactly one configured LibreNMS server.")
             else:
                 messages.error(request, "Selected LibreNMS server is no longer configured.")
