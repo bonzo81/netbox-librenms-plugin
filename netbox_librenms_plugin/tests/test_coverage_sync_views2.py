@@ -19,7 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-from netbox_librenms_plugin.utils import set_librenms_device_id
+from netbox_librenms_plugin.utils import get_librenms_cable_tag, set_librenms_device_id
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
@@ -161,6 +161,8 @@ class TestCableWriteFailures:
         assert any("dcim.view_device" in text for text in _response_messages(response, "error"))
 
     def test_matching_existing_cable_is_not_duplicated(self, client, live_librenms):
+        from extras.models import Tag
+
         device = make_device("cable-existing", librenms_cf={SERVER_KEY: {"id": 105}})
         remote_device = make_device("cable-existing-remote", librenms_cf={SERVER_KEY: {"id": 106}})
         local = make_interface(device, "Ethernet1")
@@ -185,6 +187,7 @@ class TestCableWriteFailures:
                 ]
             },
         )
+        Tag.objects.create(name="Unrelated tag", slug="librenms")
         _login(client, "cable-existing-user")
 
         response = client.post(
@@ -202,7 +205,7 @@ class TestCableWriteFailures:
         assert response.status_code == 302
         assert list(Cable.objects.values_list("pk", flat=True)) == [existing.pk]
         existing.refresh_from_db()
-        assert existing.tags.filter(name="librenms").exists()
+        assert get_librenms_cable_tag(create=False).pk in set(existing.tags.values_list("pk", flat=True))
 
 
 @pytest.mark.django_db
