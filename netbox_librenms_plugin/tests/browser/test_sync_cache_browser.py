@@ -57,7 +57,8 @@ def _selection_row_markup(row):
     if row.get("bridge_name"):
         attrs.append(f'data-bridge-name="{esc(row["bridge_name"])}"')
     companion = (
-        f'<select name="device_selection_{esc(row["port_id"])}"><option value="7">m7</option></select>'
+        f'<select name="device_selection_{esc(row["port_id"])}">'
+        '<option value="7">m7</option><option value="9">m9</option></select>'
         if row.get("companion")
         else ""
     )
@@ -565,6 +566,18 @@ class TestCrossPageSelection:
 
         assert page.locator("#librenms-module-table-offpage-selection").count() == 0
         assert page.evaluate("Object.keys(readStoredSelection(document.querySelector('table'))).length") == 0
+
+    def test_a_companion_input_is_restored_when_its_row_returns(self, page):
+        rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.select_option('[name="device_selection_4303"]', "9")
+        page.check("#cb-4303")
+
+        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+
+        assert "4303" in _checked_values(page)
+        assert page.locator('[name="device_selection_4303"]').input_value() == "9"
 
 
 def _selection_form_pairs(post_data):

@@ -408,7 +408,7 @@ def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together()
 
     settings.refresh_from_db()
     tag.refresh_from_db()
-    assert settings.cable_sync_tag in {"managed-first", "managed-second"}
+    assert settings.cable_sync_tag == "managed-second"
     assert tag.name == settings.cable_sync_tag
 
 

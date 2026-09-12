@@ -1623,8 +1623,23 @@ function restoreTableSelection(table) {
     let restored = false;
     table.querySelectorAll('td input[name="select"]:not(:disabled)').forEach(function (checkbox) {
         const entry = selection[checkbox.value];
-        if (!entry || checkbox.checked) return;
-        checkbox.checked = true;
+        if (!entry) return;
+        const row = checkbox.closest('tr');
+        const companionInputs = (entry && entry.inputs) || {};
+        if (row) {
+            row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
+                if (!Object.hasOwn(companionInputs, input.name)) return;
+                if (input.tomselect) {
+                    input.tomselect.setValue(companionInputs[input.name], true);
+                } else {
+                    input.value = companionInputs[input.name];
+                }
+            });
+        }
+        if (!checkbox.checked) {
+            checkbox.checked = true;
+            restored = true;
+        }
         // Restore how the row got there: a row the cascade added must still be released when
         // the row that needed it is cleared, rather than becoming a choice of the user's.
         if (entry.auto === 'required') {
@@ -1632,7 +1647,6 @@ function restoreTableSelection(table) {
         } else if (entry.auto === 'member') {
             checkbox.dataset[MEMBER_MARKER] = 'true';
         }
-        restored = true;
     });
     if (restored) {
         refreshRequiredSelections();

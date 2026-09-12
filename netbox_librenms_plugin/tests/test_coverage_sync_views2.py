@@ -330,9 +330,11 @@ class TestSyncCablesViewSuccessPath:
         from django.test import Client
         from django.urls import reverse
         from dcim.models import Cable
+        from extras.models import Tag
         from tenancy.models import Tenant
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         dev_local = make_device("cable-enrich-local")
@@ -360,6 +362,7 @@ class TestSyncCablesViewSuccessPath:
         user = get_user_model().objects.create_superuser("cable-enrich-user", "", "pw")
         client = Client()
         client.force_login(user)
+        Tag.objects.create(name="Unrelated tag", slug="librenms")
         persist_test_server_mapping(dev_local, server_key)
         rendered = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[dev_local.pk]),
@@ -382,7 +385,7 @@ class TestSyncCablesViewSuccessPath:
         assert response.status_code == 302
         local.refresh_from_db()
         cable = Cable.objects.get(pk=local.cable_id)
-        assert "librenms" in set(cable.tags.values_list("slug", flat=True))
+        assert get_librenms_cable_tag(create=False).pk in set(cable.tags.values_list("pk", flat=True))
         assert cable.color == "009688"
         assert cable.description == f"Synced from LibreNMS ({server_key})"
         assert cable.tenant == dev_remote.tenant  # remote side's tenant wins
