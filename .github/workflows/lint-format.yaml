@@ -57,29 +57,3 @@ jobs:
           echo "  ruff check --fix ."
           echo "  ruff format ."
           echo "Then commit and push the changes."
-
-  opengrep:
-    runs-on: ubuntu-latest
-    name: Custom opengrep ruleset
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install opengrep
-        env:
-          OPENGREP_VERSION: v1.30.0
-          OPENGREP_SHA256: 35779bdd72e92129c8df2a77f0c55e8c08356801ea92591ef32108d6b28d564c
-        run: |
-          curl -fsSL -o /usr/local/bin/opengrep \
-            "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
-          echo "${OPENGREP_SHA256}  /usr/local/bin/opengrep" | sha256sum -c -
-          chmod +x /usr/local/bin/opengrep
-          opengrep --version
-
-      - name: Run opengrep rule-tests
-        run: ./scripts/opengrep-test.sh
-
-      - name: Run the custom ruleset over the package
-        run: ./scripts/opengrep-scan.sh

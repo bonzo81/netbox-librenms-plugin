@@ -18,11 +18,19 @@ that checker documented as an unfixable limitation (see **Known limitation** bel
 
 ## Relationship to CodeRabbit (these run *on top* of CR's defaults)
 
-CodeRabbit auto-detects an opengrep config **only** when it is named `opengrep.yml` / `semgrep.yml`
-(and a few variants), and when it finds one it runs *that* **instead of** its default packs. We
-deliberately do **not** use those names: the ruleset lives at **`.opengrep/librenms-rules.yaml`**, so
-CodeRabbit keeps running its own default packs and these rules are enforced *additionally* by the
-pre-push hook and the CI job.
+CodeRabbit backs off from opengrep in two separate cases, and this repo avoids both.
+
+1. **A recognised config name.** CodeRabbit auto-detects an opengrep config only when it is named
+   `opengrep.yml` / `semgrep.yml` (and a few variants), and when it finds one it runs *that*
+   **instead of** its default packs. The ruleset therefore lives at
+   **`.opengrep/librenms-rules.yaml`**, so CodeRabbit keeps running its own default packs.
+2. **An opengrep step in GitHub Actions.** When CodeRabbit sees CI already running opengrep, it
+   skips its own opengrep analysis and leaves the finding to the workflow. There is therefore
+   deliberately **no opengrep job** in `.github/workflows/`, even though one used to exist here.
+
+The cost of (2) is that these rules have no CI gate. They are enforced by the pre-push hook below,
+and CodeRabbit runs opengrep over the pull request itself. A push that bypasses the hook lands
+unchecked until that review.
 
 ## Layout
 

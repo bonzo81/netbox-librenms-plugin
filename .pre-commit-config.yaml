@@ -31,7 +31,8 @@ repos:
         pass_filenames: false
         files: ^netbox_librenms_plugin/.*\.py$
       # Runs at pre-push, not per commit: it needs the opengrep binary, which is not a pip
-      # install. See .opengrep/README.md. CI runs the same scan.
+      # install. See .opengrep/README.md. This hook is the only automated gate: a CI opengrep
+      # step would make CodeRabbit skip its own opengrep analysis of the pull request.
       - id: import-disclosure
         name: import disclosure check (opengrep)
         description: A warning names a NetBox object that no permission scope filtered.

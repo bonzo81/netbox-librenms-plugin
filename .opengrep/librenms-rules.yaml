@@ -1,7 +1,9 @@
 # Custom opengrep ruleset encoding this project's coding guidelines. These run ON TOP OF
 # CodeRabbit's default opengrep packs: the file is intentionally NOT named opengrep.yml / semgrep.yml
 # at the repo root, so CodeRabbit does NOT treat it as its config (which would replace its default
-# ruleset). The local pre-push hook and the CI job enforce these rules instead.
+# ruleset). A CI step running opengrep ALSO makes CodeRabbit skip its own opengrep analysis, so
+# there is deliberately no such step: the local pre-push hook enforces these rules, and
+# CodeRabbit runs opengrep itself on the pull request.
 #
 # Rule-test fixtures live in .opengrep/tests/; run them with scripts/opengrep-test.sh.
 #
