@@ -105,6 +105,8 @@ class DeviceImportTable(tables.Table):
         # LibreNMSSettings.selected_server happens to be when the modal is opened.
         self.server_key = kwargs.pop("server_key", None)
         super().__init__(*args, **kwargs)
+        self.tab = "import"
+        self.prefix = "import_"
 
         # Redact in place, after any caller has finished reading the unrestricted matches (bulk
         # collision detection keys on them) and written them to cache. One batch call: a per-row

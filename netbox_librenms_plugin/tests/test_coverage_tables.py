@@ -120,6 +120,12 @@ class TestDeviceImportTable:
         kwargs.setdefault("user", make_superuser())
         return DeviceImportTable(data=data or [], **kwargs)
 
+    def test_pagination_uses_import_query_namespace(self):
+        table = self._table()
+
+        assert table.tab == "import"
+        assert table.prefix == "import_"
+
     @pytest.mark.parametrize(
         ("order_by", "field"),
         [

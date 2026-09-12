@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Run the repo's custom opengrep ruleset (.opengrep/librenms-rules.yaml) over the source tree.
-# Used by the pre-push hook and CI. Exits non-zero on any finding.
+# Used by the pre-push hook and for manual scans. Exits non-zero on any finding.
 # Pass opengrep options before the first -- and targets after it.
 # Without targets after --, scan the default package and test tree.
 #

@@ -849,7 +849,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # ambiguous payload would silently refresh one server's cache namespace from another's.
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
-            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            if len(request.POST.getlist("server_key")) > 1:
+                messages.error(request, "Select exactly one configured LibreNMS server.")
+            else:
+                messages.error(request, "Selected LibreNMS server is no longer configured.")
             # rebind_api_for_server() returned None to avoid building a missing/misconfigured
             # default client; reading the lazy `librenms_api` property here would reconstruct it
             # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.

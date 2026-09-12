@@ -39,5 +39,5 @@ repos:
         entry: scripts/opengrep-scan.sh
         language: system
         pass_filenames: false
+        always_run: true
         stages: [pre-push]
-        files: ^netbox_librenms_plugin/.*\.py$

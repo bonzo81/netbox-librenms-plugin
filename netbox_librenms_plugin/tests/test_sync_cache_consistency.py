@@ -1843,7 +1843,23 @@ def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings):
         response = client.post(url, {"server_key": ["primary", "secondary"]}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
-    assert b"no longer configured" in response.content
+    assert b"Select exactly one configured LibreNMS server." in response.content
+    assert b"no longer configured" not in response.content
+
+
+@pytest.mark.django_db
+def test_cable_refresh_reports_a_single_unconfigured_server_key(client, settings):
+    _configure_servers(settings)
+    device = make_device("cache-cable-unconfigured", librenms_cf={"primary": {"id": 672}})
+    client.force_login(make_superuser("cache-cable-unconfigured-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
+
+    with patch("netbox_librenms_plugin.librenms_api.requests.get") as request:
+        response = client.post(url, {"server_key": "removed"}, HTTP_HX_REQUEST="true")
+
+    request.assert_not_called()
+    assert response.status_code == 200
+    assert b"Selected LibreNMS server is no longer configured." in response.content
 
 
 @pytest.mark.django_db

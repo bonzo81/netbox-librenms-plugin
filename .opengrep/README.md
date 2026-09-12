@@ -38,7 +38,7 @@ unchecked until that review.
 | --- | --- |
 | `.opengrep/librenms-rules.yaml` | The ruleset. **Single source of truth.** |
 | `.opengrep/tests/*.py` | Annotated rule-test fixtures. |
-| `scripts/opengrep-scan.sh` | Scan the source tree. Pre-push hook and CI. Non-zero on any finding. |
+| `scripts/opengrep-scan.sh` | Scan the source tree. Pre-push hook and manual use. Non-zero on any finding. |
 | `scripts/opengrep-test.sh` | Run the rule-tests against the ruleset. |
 | `netbox_librenms_plugin/tests/test_import_disclosure.py` | Check scan options and explicit targets with the real executable. |
 | `scripts/opengrep-bin.sh` | Shared binary lookup, sourced by both scripts. |
