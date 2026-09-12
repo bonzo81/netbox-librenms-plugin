@@ -157,5 +157,6 @@ class TestCableSyncContentTemplateMigratedMode:
 
         html = table.as_html(request)
 
-        assert 'hx-get="/plugins/librenms_plugin/picker/1/"' in html
+        assert 'data-cable-picker-url="/plugins/librenms_plugin/picker/1/"' in html
+        assert 'hx-get="/plugins/librenms_plugin/picker/1/"' not in html
         assert 'aria-label="Pick remote end"' in html

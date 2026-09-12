@@ -863,6 +863,10 @@ that may well be correct.
             hx-trigger="librenms:load-fragment" hx-target="#cable-sync-content"
             hx-sync="#cable-sync-content:abort" hx-swap="innerHTML"></span>
         {% endif %}
+        <span class="d-none" data-cable-picker-loader
+            hx-get="{% url 'plugins:netbox_librenms_plugin:cable_remote_picker' object.pk %}"
+            hx-trigger="librenms:open-cable-picker" hx-target="#htmx-modal-content"
+            hx-swap="innerHTML"></span>
         {% include 'netbox_librenms_plugin/_cable_sync.html' %}
     </div>
     {% endif %}

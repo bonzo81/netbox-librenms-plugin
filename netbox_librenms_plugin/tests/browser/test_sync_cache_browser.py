@@ -2924,3 +2924,66 @@ def test_cable_verify_updates_every_cell_of_a_complete_row(page):
     assert page.locator('td[data-col="remote_device"]').inner_text() == "other-remote"
     assert page.locator('td[data-col="cable_status"]').inner_text() == "Connected"
     assert page.evaluate("window.warnings") == []
+
+
+def test_refreshed_cable_picker_uses_the_persistent_htmx_loader(page):
+    """A picker inserted by verification must work without a global HTMX object."""
+    picker_url = "https://plugin.example.com/picker?row_id=row-1&server_key=primary"
+    page.set_content(
+        f"""
+        <div id="cables">
+          <span class="d-none" data-cable-picker-loader
+                hx-get="https://plugin.example.com/picker"
+                hx-trigger="librenms:open-cable-picker"
+                hx-target="#htmx-modal-content" hx-swap="innerHTML"></span>
+          {_cable_row_html(with_actions_cell=True)}
+        </div>
+        <div id="htmx-modal" aria-labelledby="htmx-modal-label">
+          <span id="htmx-modal-label">Loading</span>
+          <div id="htmx-modal-content"></div>
+        </div>
+        """
+    )
+    page.route(
+        "https://plugin.example.com/picker?*",
+        lambda route: route.fulfill(
+            body='<div class="modal-header"><h5 class="modal-title">Pick remote end</h5></div>',
+            content_type="text/html",
+        ),
+    )
+    _add_page_scripts(page)
+    page.evaluate(
+        """
+        pickerUrl => {
+            document.dispatchEvent(new Event('DOMContentLoaded'));
+            window.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    status: 'success',
+                    formatted_row: {
+                        local_port: 'Ethernet1',
+                        remote_port: 'Ethernet2',
+                        remote_device: 'remote',
+                        cable_status: 'Connected',
+                        actions: `<button id="refreshed-picker" type="button"
+                                  data-cable-picker-url="${pickerUrl}">Pick remote end</button>`,
+                        can_create_cable: true
+                    }
+                })
+            });
+            handleCableChange(document.getElementById('member-select'), '7');
+        }
+        """,
+        picker_url,
+    )
+    page.wait_for_selector("#refreshed-picker")
+
+    assert page.evaluate("typeof window.htmx") == "undefined"
+    with page.expect_request("https://plugin.example.com/picker?*") as request_info:
+        page.locator("#refreshed-picker").click()
+
+    request = request_info.value
+    assert request.url == picker_url
+    assert request.headers.get("x-csrftoken") == "token"
+    page.wait_for_selector("#htmx-modal-content .modal-title")
+    assert page.locator("#htmx-modal").evaluate("node => node.classList.contains('show')")

@@ -1640,7 +1640,8 @@ class TestRemotePickerEndpoint:
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk])
             in formatted_row["actions"]
         )
-        assert 'hx-get="' in formatted_row["actions"]
+        assert 'data-cable-picker-url="' in formatted_row["actions"]
+        assert 'hx-get="' not in formatted_row["actions"]
 
         post_data = {
             "sync_one": "10",

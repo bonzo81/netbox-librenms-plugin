@@ -272,7 +272,7 @@ class _ScopedVLANReadGate:
     # This is required when another installed plugin has M2M tables outside the default flush list.
     available_apps=[app.name for app in apps.get_app_configs()],
 )
-def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
+def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed(request):
     """Verify deleting a grouped VLAN after the scope check skips it instead of raising a failed-update error."""
     from ipam.models import VLAN, VLANGroup
 
@@ -286,7 +286,16 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
 
     with connection.cursor() as cursor:
         cursor.execute("SHOW lock_timeout")
+        original_lock_timeout = cursor.fetchone()[0]
+        cursor.execute("SELECT set_config('lock_timeout', %s, false)", ["137ms"])
+        cursor.execute("SHOW lock_timeout")
         initial_lock_timeout = cursor.fetchone()[0]
+
+    def restore_original_lock_timeout():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('lock_timeout', %s, false)", [original_lock_timeout])
+
+    request.addfinalizer(restore_original_lock_timeout)
 
     read_done, resume = Event(), Event()
 
@@ -315,7 +324,7 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
         finally:
             resume.set()
             with connection.cursor() as cursor:
-                cursor.execute("SET lock_timeout = DEFAULT")
+                cursor.execute("SELECT set_config('lock_timeout', %s, false)", [initial_lock_timeout])
         recorded = syncing.result(timeout=20)
 
     with connection.cursor() as cursor:

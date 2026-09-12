@@ -38,7 +38,8 @@ ports_url, initial_devices (label-matched device prefill, may be empty).
     <input type="search" name="q" id="remote-picker-search" class="form-control" autocomplete="off"
            placeholder="Type to search devices…"
            hx-get="{{ search_url }}" hx-trigger="input changed delay:300ms, search"
-           hx-target="#remote-picker-devices" hx-swap="innerHTML">
+           hx-target="#remote-picker-devices" hx-swap="innerHTML"
+           hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
     {# Not a .list-group: Bootstrap rounds only its first/last children, so a highlighted #}
     {# middle item would sit square between rounded neighbours. Independent rounded items #}
     {# (flex + gap) keep the active highlight uniform wherever it lands. #}

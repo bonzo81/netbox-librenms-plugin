@@ -77,9 +77,7 @@ class LibreNMSCableTable(tables.Table):
                     class="btn btn-sm btn-outline-secondary"
                     title="Pick remote end"
                     aria-label="Pick remote end"
-                    hx-get="{{ record.picker_url }}"
-                    hx-target="#htmx-modal-content"
-                    hx-swap="innerHTML">
+                    data-cable-picker-url="{{ record.picker_url }}">
                 <i class="mdi mdi-connection"></i>
             </button>
         {% endif %}

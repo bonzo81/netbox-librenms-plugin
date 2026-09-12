@@ -2798,7 +2798,6 @@ function handleCableChange(select, value) {
                         console.warn(`Cable row missing data-col="${col}" cell — skipping update`);
                     }
                 }
-                const actionsCell = row.querySelector('td[data-col="actions"]');
                 if (selection) {
                     delete selection.dataset.verifyLocked;
                     delete selection.dataset.wasDisabled;
@@ -2823,9 +2822,6 @@ function handleCableChange(select, value) {
                     });
                     updateBulkActionButton();
                 }
-                if (typeof htmx !== 'undefined' && actionsCell) {
-                    htmx.process(actionsCell);
-                }
                 select._lastVerifiedMember = value;
                 restoreControls();
             } else {
@@ -2839,6 +2835,23 @@ function handleCableChange(select, value) {
             rollbackToLastVerified();
         });
 }
+
+// Picker controls can be replaced by the cable verification JSON response. Keep those controls
+// passive and delegate their request to the persistent HTMX loader in the cable tab.
+document.addEventListener('click', function (event) {
+    const button = event.target.closest('[data-cable-picker-url]');
+    if (!button || button.disabled) return;
+
+    const pickerUrl = button.dataset.cablePickerUrl;
+    const loader = button.closest('#cables')?.querySelector('[data-cable-picker-loader]');
+    if (!pickerUrl || !loader) return;
+
+    event.preventDefault();
+    loader.dispatchEvent(new CustomEvent('librenms:open-cable-picker', {
+        bubbles: true,
+        detail: { url: pickerUrl }
+    }));
+});
 
 /**
  * Handle VC member selection change for module verification.
@@ -3720,9 +3733,17 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Configure HTMX to include CSRF token in all requests
     document.body.addEventListener('htmx:configRequest', function (event) {
-        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+        const csrfToken = getCsrfToken();
+        if (event.detail.elt?.matches('[data-cable-picker-loader]')) {
+            const pickerUrl = event.detail.triggeringEvent?.detail?.url;
+            if (!pickerUrl || !csrfToken) {
+                event.preventDefault();
+                return;
+            }
+            event.detail.path = pickerUrl;
+        }
         if (csrfToken) {
-            event.detail.headers['X-CSRFToken'] = csrfToken.value;
+            event.detail.headers['X-CSRFToken'] = csrfToken;
         }
         // Install Selected: the checked rows live in the table OUTSIDE the form, and htmx's
         // own submit listener (attached to the form at ITS DOMContentLoaded processNode,

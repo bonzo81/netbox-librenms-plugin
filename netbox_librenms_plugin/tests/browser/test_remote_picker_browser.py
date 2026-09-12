@@ -110,6 +110,18 @@ def test_device_search_clears_the_selected_port_before_the_response(page):
         route.abort()
 
 
+def test_device_search_sends_the_form_csrf_token(page):
+    """The picker search must carry the token from the modal form."""
+    device = _device(1, "Device A")
+    page.route(f"{SEARCH_URL}*", lambda route: route.fulfill(body="", content_type="text/html"))
+    _load_picker(page, [device])
+
+    with page.expect_request(f"{SEARCH_URL}*") as search:
+        page.locator("#remote-picker-search").fill("Device B")
+
+    assert search.value.headers.get("x-csrftoken") == "test-csrf"
+
+
 def test_new_search_rejects_a_late_port_response(page):
     """A late port response must not restore the old device selection."""
     device_a = _device(1, "Device A")
