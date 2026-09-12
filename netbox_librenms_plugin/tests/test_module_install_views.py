@@ -13,6 +13,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
+from netbox_librenms_plugin.utils import module_inventory_binding_token
 
 pytestmark = pytest.mark.django_db
 
@@ -256,7 +257,12 @@ class TestUpdateModuleSerialView:
 
         request = make_request(
             "post",
-            {"module_id": str(module.pk), "ent_index": "11", "server_key": "default"},
+            {
+                "module_id": str(module.pk),
+                "ent_index": "11",
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(device.pk, "default", module.pk, 11),
+            },
             user=make_superuser(),
             path="/modules/",
         )

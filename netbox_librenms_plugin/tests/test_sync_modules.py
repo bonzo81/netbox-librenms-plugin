@@ -20,10 +20,10 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
     message_texts,
-    module_row_binding,
     post as view_post,
     trusted_module_inventory_payload,
 )
+from netbox_librenms_plugin.utils import module_inventory_binding_token
 
 
 @pytest.mark.django_db
@@ -155,6 +155,10 @@ def _view(view_class, request, live_librenms):
 
 def _post_request(data):
     return make_request("post", data, user=make_superuser(), path="/modules/")
+
+
+def _inventory_binding(device, module, ent_index, server_key="default"):
+    return module_inventory_binding_token(device.pk, server_key, module.pk, ent_index)
 
 
 def _inventory_item(index, model, name, *, parent=0, serial="", phys_class="module", **extra):
@@ -734,7 +738,14 @@ class TestInstallAndUpdateViews:
         bay = make_module_bay(device, "Serial Bay")
         module = install_module(device, bay.name, "SERIAL-CARD", serial="OLD")
         item = _inventory_item(530, module.module_type.model, bay.name, serial="NEW")
-        request = _post_request({"module_id": module.pk, "ent_index": 530, "server_key": "default"})
+        request = _post_request(
+            {
+                "module_id": module.pk,
+                "ent_index": 530,
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, module, 530),
+            }
+        )
         view = _view(UpdateModuleSerialView, request, live_librenms)
         seed_inventory(view, device, [item], librenms_id=53)
 
@@ -754,7 +765,13 @@ class TestInstallAndUpdateViews:
         module = install_module(device, bay.name, "CACHED-SERIAL-CARD", serial="OLD-SN")
         item = _inventory_item(560, module.module_type.model, bay.name, serial="LNMS-SN")
         request = _post_request(
-            {"module_id": module.pk, "ent_index": 560, "serial": "FORGED-SN", "server_key": "default"}
+            {
+                "module_id": module.pk,
+                "ent_index": 560,
+                "serial": "FORGED-SN",
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, module, 560),
+            }
         )
         view = _view(UpdateModuleSerialView, request, live_librenms)
         seed_inventory(view, device, [item], librenms_id=56)
@@ -765,6 +782,41 @@ class TestInstallAndUpdateViews:
         assert response.status_code == 302
         assert module.serial == "LNMS-SN"
         assert any("LNMS-SN" in text for text in message_texts(request, "success"))
+
+    def test_update_serial_rejects_a_row_bound_to_another_module(self, live_librenms):
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        device = make_device("view-serial-binding", librenms_cf={"default": 62})
+        expected_bay = make_module_bay(device, "Expected Serial Bay")
+        forged_bay = make_module_bay(device, "Forged Serial Bay")
+        expected = install_module(device, expected_bay.name, "BOUND-SERIAL-CARD", serial="EXPECTED-OLD")
+        forged = Module.objects.create(
+            device=device,
+            module_bay=forged_bay,
+            module_type=expected.module_type,
+            serial="FORGED-OLD",
+            status="active",
+        )
+        item = _inventory_item(620, expected.module_type.model, expected_bay.name, serial="ROW-SERIAL")
+        request = _post_request(
+            {
+                "module_id": forged.pk,
+                "ent_index": 620,
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, expected, 620),
+            }
+        )
+        view = _view(UpdateModuleSerialView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=62)
+
+        response = view_post(view, request, pk=device.pk)
+
+        forged.refresh_from_db()
+        assert response.status_code == 302
+        assert forged.serial == "FORGED-OLD"
+        assert "Inventory row does not match the selected module." in message_texts(request, "error")
 
     def test_refuses_an_oob_inventory_row(self, live_librenms):
         """OOB controller inventory is read-only, so its serial must never reach a host module."""
@@ -819,7 +871,14 @@ class TestInstallAndUpdateViews:
             _librenms_port_id=5540,
             _librenms_ifname=interface.name,
         )
-        request = _post_request({"module_id": module.pk, "ent_index": 540, "server_key": "default"})
+        request = _post_request(
+            {
+                "module_id": module.pk,
+                "ent_index": 540,
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, module, 540),
+            }
+        )
         view = _view(UpdateModuleInterfaceView, request, live_librenms)
         seed_inventory(view, device, [item], librenms_id=54)
 
@@ -830,6 +889,49 @@ class TestInstallAndUpdateViews:
         assert interface.module == module
         assert get_librenms_device_id(interface, "default", auto_save=False) == 5540
         assert any("Updated interface" in text for text in message_texts(request))
+
+    def test_update_interface_rejects_a_row_bound_to_another_module(self, live_librenms):
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("view-interface-binding", librenms_cf={"default": 63})
+        expected_bay = make_module_bay(device, "Expected Interface Bay")
+        forged_bay = make_module_bay(device, "Forged Interface Bay")
+        expected = install_module(device, expected_bay.name, "BOUND-INTERFACE-CARD")
+        forged = Module.objects.create(
+            device=device,
+            module_bay=forged_bay,
+            module_type=expected.module_type,
+            status="active",
+        )
+        interface = make_interface(device, "Ethernet63")
+        item = _inventory_item(
+            630,
+            expected.module_type.model,
+            expected_bay.name,
+            _librenms_port_id=5630,
+            _librenms_ifname=interface.name,
+        )
+        request = _post_request(
+            {
+                "module_id": forged.pk,
+                "ent_index": 630,
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, expected, 630),
+            }
+        )
+        view = _view(UpdateModuleInterfaceView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=63)
+
+        response = view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert response.status_code == 302
+        assert interface.module_id is None
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert "Inventory row does not match the selected module." in message_texts(request, "error")
 
     def test_update_module_interface_refuses_an_unresolved_ent_index(self, live_librenms):
         """Posted metadata carries no _source marker, so an unknown ent_index must not bind at all."""
@@ -1083,12 +1185,7 @@ class TestInstallAndUpdateViews:
                 "module_id": str(module.pk),
                 "server_key": "default",
                 "ent_index": "77",
-                "inventory_binding": module_row_binding(
-                    device,
-                    "update_module_interface",
-                    inventory_item,
-                    action_target={"module_id": module.pk},
-                ),
+                "inventory_binding": _inventory_binding(device, module, 77),
             },
             user=user,
             path="/modules/update-interface/",
@@ -1393,7 +1490,12 @@ class TestModulesActionResponse:
 
         response = client.post(
             url,
-            {"server_key": self.SERVER_KEY, "module_id": str(module.pk), "ent_index": "8201"},
+            {
+                "server_key": self.SERVER_KEY,
+                "module_id": str(module.pk),
+                "ent_index": "8201",
+                "inventory_binding": _inventory_binding(device, module, 8201, self.SERVER_KEY),
+            },
             HTTP_HX_REQUEST="true",
         )
 

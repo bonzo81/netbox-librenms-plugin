@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
+from netbox_librenms_plugin.utils import module_inventory_binding_token
 
 pytestmark = pytest.mark.django_db
 
@@ -215,6 +216,14 @@ class TestUpdateModuleInterfaceAdoption:
         )
 
     def _post(self, view_class, device, data, live_librenms, module=None):
+        data = data.copy()
+        if module is not None:
+            data["inventory_binding"] = module_inventory_binding_token(
+                device.pk,
+                data["server_key"],
+                module.pk,
+                data["ent_index"],
+            )
         request = make_request("post", data, user=make_superuser(), path="/modules/")
         view = view_class()
         view._librenms_api = live_librenms.api
@@ -287,7 +296,17 @@ class TestUpdateModuleInterfaceAdoption:
         user = grant(user, "change", Interface, constraints={"name": "Management1"})
         request = make_request(
             "post",
-            {"module_id": str(module.pk), "ent_index": str(ADOPTION_ENT_INDEX), "server_key": "default"},
+            {
+                "module_id": str(module.pk),
+                "ent_index": str(ADOPTION_ENT_INDEX),
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    module.pk,
+                    ADOPTION_ENT_INDEX,
+                ),
+            },
             user=user,
             path="/modules/",
         )
