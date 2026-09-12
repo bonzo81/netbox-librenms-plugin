@@ -1912,7 +1912,7 @@ def test_cable_refresh_reports_a_single_unconfigured_server_key(client, settings
     client.force_login(make_superuser("cache-cable-unconfigured-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
 
-    with patch("netbox_librenms_plugin.librenms_api.requests.get") as request:
+    with patch("netbox_librenms_plugin.librenms_api._session.get") as request:
         response = client.post(url, {"server_key": "removed"}, HTTP_HX_REQUEST="true")
 
     request.assert_not_called()
