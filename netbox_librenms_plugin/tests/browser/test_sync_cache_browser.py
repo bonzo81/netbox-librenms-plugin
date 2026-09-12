@@ -62,13 +62,17 @@ def _selection_row_markup(row):
         if row.get("companion")
         else ""
     )
+    hidden_fields = "".join(
+        f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">'
+        for name, value in row.get("hidden_fields", {}).items()
+    )
     # A port id is not always usable as a DOM id, so a row can name its own checkbox.
     dom_id = row.get("dom_id", row["port_id"])
     return (
         f"<tr {' '.join(attrs)}>"
         f'<td data-col="selection"><input type="checkbox" name="select" value="{esc(row["port_id"])}"'
         f' id="cb-{esc(dom_id)}"></td>'
-        f"<td>{row['name']}{companion}</td></tr>"
+        f"<td>{row['name']}{companion}{hidden_fields}</td></tr>"
     )
 
 
@@ -578,6 +582,38 @@ class TestCrossPageSelection:
 
         assert "4303" in _checked_values(page)
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
+
+    def test_restoring_a_selection_does_not_restore_stale_action_fields(self, page):
+        old_row = dict(
+            JUNOS_ROWS[0],
+            companion=True,
+            hidden_fields={
+                "csrfmiddlewaretoken": "old-csrf",
+                "module_id": "41",
+                "ent_index": "4303",
+                "inventory_binding": "old-binding",
+            },
+        )
+        _load_selection_page(page, [old_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1")
+        page.select_option('[name="device_selection_4303"]', "9")
+        page.check("#cb-4303")
+
+        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        new_row = dict(
+            old_row,
+            hidden_fields={
+                "csrfmiddlewaretoken": "new-csrf",
+                "module_id": "42",
+                "ent_index": "5303",
+                "inventory_binding": "new-binding",
+            },
+        )
+        _load_selection_page(page, [new_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1")
+
+        assert "4303" in _checked_values(page)
+        assert page.locator('[name="device_selection_4303"]').input_value() == "9"
+        for name, expected in new_row["hidden_fields"].items():
+            assert page.locator(f'[name="{name}"]').input_value() == expected
 
 
 def _selection_form_pairs(post_data):

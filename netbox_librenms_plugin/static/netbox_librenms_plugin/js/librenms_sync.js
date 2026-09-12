@@ -1573,11 +1573,21 @@ function writeStoredSelection(table, selection) {
 function _rowCompanionInputs(row) {
     const values = {};
     row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
-        if (input.name && input.name !== 'select') {
+        if (_isSelectionCompanionName(input.name)) {
             values[input.name] = input.value;
         }
     });
     return values;
+}
+
+/**
+ * Return whether a field belongs to the bulk selection rather than a row action form.
+ *
+ * @param {string} name - The submitted field name.
+ * @returns {boolean}
+ */
+function _isSelectionCompanionName(name) {
+    return Boolean(name) && (name.startsWith('device_selection_') || name.startsWith('vlan_group_'));
 }
 
 /**
@@ -1628,6 +1638,7 @@ function restoreTableSelection(table) {
         const companionInputs = (entry && entry.inputs) || {};
         if (row) {
             row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
+                if (!_isSelectionCompanionName(input.name)) return;
                 if (!Object.hasOwn(companionInputs, input.name)) return;
                 if (input.tomselect) {
                     input.tomselect.setValue(companionInputs[input.name], true);
@@ -1765,6 +1776,7 @@ function injectOffPageSelections(form) {
 
             const companions = (selection[rowKey] && selection[rowKey].inputs) || {};
             Object.keys(companions).forEach(function (name) {
+                if (!_isSelectionCompanionName(name)) return;
                 const companion = document.createElement('input');
                 companion.type = 'hidden';
                 companion.name = name;
@@ -3743,7 +3755,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 offPageSelectionKeys(table).forEach((rowKey) => {
                     params.append('select', rowKey);
                     const companions = (stored[rowKey] && stored[rowKey].inputs) || {};
-                    Object.keys(companions).forEach((name) => params.append(name, companions[name]));
+                    Object.keys(companions)
+                        .filter(_isSelectionCompanionName)
+                        .forEach((name) => params.append(name, companions[name]));
                 });
                 clearStoredSelection(table);
             }
