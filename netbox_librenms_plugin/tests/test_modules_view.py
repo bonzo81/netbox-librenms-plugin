@@ -5950,3 +5950,105 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
         assert rows[0]["module_bay_id"] == device.modulebays.get(name="Slot 1").pk
     else:
         assert rows[0]["status"] == "No Bay"
+
+
+@pytest.mark.django_db
+def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, settings):
+    """VC rows must use the attributed member's manufacturer rules and device serial."""
+    from dcim.models import Manufacturer, VirtualChassis
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    page_manufacturer = Manufacturer.objects.create(name="VC Page Vendor", slug="vc-page-vendor")
+    member_manufacturer = Manufacturer.objects.create(name="VC Member Vendor", slug="vc-member-vendor")
+    page = make_device_with_module_bays(
+        "vc-ignore-page",
+        ["Slot 1"],
+        manufacturer=page_manufacturer,
+        serial="PAGE-SERIAL",
+    )
+    member = make_device_with_module_bays(
+        "vc-ignore-member",
+        ["Slot 1"],
+        manufacturer=member_manufacturer,
+        serial="MEMBER-SERIAL",
+    )
+    virtual_chassis = VirtualChassis.objects.create(name="vc-ignore-rules", master=page)
+    for position, device in ((1, page), (2, member)):
+        device.virtual_chassis = virtual_chassis
+        device.vc_position = position
+        device.save(update_fields=["virtual_chassis", "vc_position"])
+
+    InventoryIgnoreRule.objects.filter(match_type=InventoryIgnoreRule.MATCH_SERIAL_DEVICE).delete()
+    InventoryIgnoreRule.objects.create(
+        name="Page-only rule",
+        match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+        pattern="Page policy item",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=page_manufacturer,
+    )
+    InventoryIgnoreRule.objects.create(
+        name="Member-only rule",
+        match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+        pattern="Member policy item",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=member_manufacturer,
+    )
+    InventoryIgnoreRule.objects.create(
+        name="Member serial rule",
+        match_type=InventoryIgnoreRule.MATCH_SERIAL_DEVICE,
+        pattern="",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=member_manufacturer,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 91,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Member policy item",
+            "entPhysicalModelName": "MEMBER-POLICY-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 92,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Page policy item",
+            "entPhysicalModelName": "PAGE-POLICY-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 93,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Member serial item",
+            "entPhysicalModelName": "MEMBER-SERIAL-MODEL",
+            "entPhysicalSerialNum": member.serial,
+            "entPhysicalContainedIn": 0,
+        },
+    ]
+    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
+    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
+    client.force_login(make_superuser("vc-ignore-rules-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    rows = list(response.context["module_sync"]["table"].data)
+    assert [row["name"] for row in rows] == ["Page policy item"]
+    assert rows[0]["selected_device_id"] == member.pk

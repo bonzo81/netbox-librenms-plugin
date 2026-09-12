@@ -1897,7 +1897,7 @@ def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings):
     def refuse(request_url, *args, **kwargs):
         raise AssertionError(f"an ambiguous selection must fetch nothing, got: {request_url}")
 
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=refuse):
+    with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=refuse):
         response = client.post(url, {"server_key": ["primary", "secondary"]}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
