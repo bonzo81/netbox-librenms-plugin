@@ -571,6 +571,24 @@ class TestCrossPageSelection:
         assert page.locator("#librenms-module-table-offpage-selection").count() == 0
         assert page.evaluate("Object.keys(readStoredSelection(document.querySelector('table'))).length") == 0
 
+    def test_verified_cable_fields_travel_with_their_off_page_row(self, page):
+        expected_fields = {
+            "expected_local_id_4303": "7401",
+            "expected_local_device_id_4303": "6401",
+            "expected_remote_id_4303": "7402",
+            "expected_remote_device_id_4303": "6402",
+        }
+        rows = [dict(JUNOS_ROWS[0], hidden_fields=expected_fields), JUNOS_ROWS[2]]
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.check("#cb-4303")
+
+        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+
+        submitted = dict(_selection_form_pairs(request_info.value.post_data))
+        assert {name: submitted.get(name) for name in expected_fields} == expected_fields
+
     def test_a_companion_input_is_restored_when_its_row_returns(self, page):
         rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
         _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
@@ -2856,6 +2874,114 @@ def _cable_row_html(*, with_actions_cell):
     """
 
 
+def test_selected_cable_verification_refreshes_off_page_companions(page):
+    """A verified member and cable snapshot must replace the checked row's stored values."""
+    first_page = f"""
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <div data-cable-verify-url="https://plugin.example.com/verify"
+             data-cable-origin-device-id="7">
+          <form method="post" action="{SELECTION_PAGE_URL}/submit">
+            <table id="librenms-cable-table"><tbody>
+              <tr data-interface="row-1">
+                <td data-col="selection">
+                  <input id="selected-cable" type="checkbox" name="select" value="row-1">
+                  <input type="hidden" name="expected_local_id_row-1" value="old-local">
+                  <input type="hidden" name="expected_local_device_id_row-1" value="old-local-device">
+                  <input type="hidden" name="expected_remote_id_row-1" value="old-remote">
+                  <input type="hidden" name="expected_remote_device_id_row-1" value="old-remote-device">
+                </td>
+                <td data-col="device_selection">
+                  <select id="member-select" name="device_selection_row-1"
+                          data-row-id="row-1" data-interface="row-1">
+                    <option value="7" selected>Member 7</option>
+                    <option value="9">Member 9</option>
+                  </select>
+                </td>
+                <td data-col="local_port">Ethernet1</td>
+                <td data-col="remote_port">Ethernet2</td>
+                <td data-col="remote_device">remote</td>
+                <td data-col="cable_status">Not connected</td>
+                <td data-col="actions"><button type="button">Sync</button></td>
+              </tr>
+            </tbody></table>
+          </form>
+        </div>
+        """
+    second_page = f"""
+        <form method="post" action="{SELECTION_PAGE_URL}/submit">
+          <table id="librenms-cable-table"><tbody>
+            <tr data-interface="other-row">
+              <td data-col="selection">
+                <input type="checkbox" name="select" value="other-row">
+              </td>
+            </tr>
+          </tbody></table>
+        </form>
+        """
+
+    def serve_selection_page(route):
+        body = second_page if "page=2" in route.request.url else first_page
+        route.fulfill(status=200, content_type="text/html", body=body)
+
+    page.route(f"{SELECTION_PAGE_URL}**", serve_selection_page)
+    page.goto(f"{SELECTION_PAGE_URL}?page=1")
+    _add_page_scripts(page)
+    page.check("#selected-cable")
+    stored_before_verify = page.evaluate(
+        "readStoredSelection(document.getElementById('librenms-cable-table'))['row-1']"
+    )
+    assert stored_before_verify["inputs"]["device_selection_row-1"] == "7"
+    assert stored_before_verify["inputs"]["expected_local_id_row-1"] == "old-local"
+    page.evaluate(
+        """() => {
+            const select = document.getElementById('member-select');
+            select.value = '9';
+            window.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    status: 'success',
+                    formatted_row: {
+                        local_port: 'Ethernet9',
+                        remote_port: 'Ethernet8',
+                        remote_device: 'new-remote',
+                        cable_status: 'Connected',
+                        actions: '<button type="button">Resync</button>',
+                        can_create_cable: true,
+                        expected_local_id: 'new-local',
+                        expected_local_device_id: 'new-local-device',
+                        expected_remote_id: 'new-remote',
+                        expected_remote_device_id: 'new-remote-device'
+                    }
+                })
+            });
+            handleCableChange(select, select.value);
+        }"""
+    )
+    page.wait_for_function("document.getElementById('member-select')._lastVerifiedMember === '9'")
+
+    page.goto(f"{SELECTION_PAGE_URL}?page=2")
+    _add_page_scripts(page)
+    page.evaluate("initializeCheckboxes()")
+    submitted = dict(
+        page.evaluate(
+            """() => {
+                const form = document.querySelector('form');
+                form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+                return Array.from(new FormData(form).entries());
+            }"""
+        )
+    )
+
+    assert submitted == {
+        "select": "row-1",
+        "device_selection_row-1": "9",
+        "expected_local_id_row-1": "new-local",
+        "expected_local_device_id_row-1": "new-local-device",
+        "expected_remote_id_row-1": "new-remote",
+        "expected_remote_device_id_row-1": "new-remote-device",
+    }
+
+
 def test_cable_verify_completes_for_a_row_rendered_without_its_actions_cell(page):
     """A row missing the actions cell must still complete the verify instead of erroring out."""
     page.set_content(_cable_row_html(with_actions_cell=False))
@@ -2986,4 +3112,4 @@ def test_refreshed_cable_picker_uses_the_persistent_htmx_loader(page):
     assert request.url == picker_url
     assert request.headers.get("x-csrftoken") == "token"
     page.wait_for_selector("#htmx-modal-content .modal-title")
-    assert page.locator("#htmx-modal").evaluate("node => node.classList.contains('show')")
+    expect(page.locator("#htmx-modal")).to_have_class(re.compile(r"(?:^|\s)show(?:\s|$)"))
