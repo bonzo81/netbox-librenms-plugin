@@ -10,13 +10,29 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/opengrep-bin.sh"
 
-targets=("$@")
+# An argument that names an existing path is a target; anything else is passed to opengrep
+# unchanged. This avoids restating opengrep's own flag table here, which would rot on every
+# release. The one ambiguity, an option VALUE that happens to name an existing path, does not
+# arise for the flags this repo uses.
+options=()
+targets=()
+for arg in "$@"; do
+  if [[ -e "$arg" ]]; then
+    targets+=("$arg")
+  else
+    options+=("$arg")
+  fi
+done
+
 if [[ ${#targets[@]} -eq 0 ]]; then
-  targets=("$repo_root/netbox_librenms_plugin")
+  # opengrep's default ignores skip test directories, so name the test files explicitly.
+  shopt -s globstar nullglob
+  targets=("$repo_root/netbox_librenms_plugin" "$repo_root"/netbox_librenms_plugin/tests/**/*.py)
 fi
 
 exec "$opengrep_bin" scan \
   --config "$repo_root/.opengrep/librenms-rules.yaml" \
   --taint-intrafile \
   --error \
-  "${targets[@]}"
+  "${options[@]}" \
+  -- "${targets[@]}"

@@ -1,8 +1,7 @@
 # opengrep ruleset
 
-Custom [opengrep](https://github.com/opengrep/opengrep) rules that encode this project's
-import-preview invariants as machine-checked gates, so the same class of defect stops coming back
-review after review.
+Custom [opengrep](https://github.com/opengrep/opengrep) rules enforce this project's import-preview
+invariants and coding guidelines.
 
 ## Why opengrep (and not ruff or a hand-written checker)
 
@@ -33,6 +32,7 @@ pre-push hook and the CI job.
 | `.opengrep/tests/*.py` | Annotated rule-test fixtures. |
 | `scripts/opengrep-scan.sh` | Scan the source tree. Pre-push hook and CI. Non-zero on any finding. |
 | `scripts/opengrep-test.sh` | Run the rule-tests against the ruleset. |
+| `.opengrep/test-scan.py` | Check scan options and explicit targets with the real executable. |
 | `scripts/opengrep-bin.sh` | Shared binary lookup, sourced by both scripts. |
 
 ## Rules
@@ -40,13 +40,52 @@ pre-push hook and the CI job.
 | Rule id | Severity | Catches |
 | --- | --- | --- |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
+| `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
+| `url-numeric-pk-converter` | error | A `path()` route uses `<str:pk>` or `<pk>`, including local string constants. |
+| `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
+| `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
+| `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
 
 ## Scope
 
-The scan covers production code, not tests: the rule sets `paths.exclude` for `**/tests/**` and
-`**/migrations/**`, and opengrep's own default ignores skip test directories too. The invariant is
-about what a user is shown, so a fixture that names an object is not a finding. The checker this
-replaced scanned tests as well and was clean there; both scopes report zero today.
+`import-disclosure` excludes tests and migrations. The requests rule covers
+`netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The two test-convention
+rules include only `netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
+in the scan target.
+
+Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
+targets into the package directory and explicit Python test files. Options alone keep these defaults.
+Explicit path targets replace them. Use `--` before paths that start with a dash.
+Options accept `--name=value` syntax. The wrapper also pairs the separate values of the
+options listed by `opengrep scan --help` in version 1.30.0.
+
+The test script stages fixtures in a flat temporary directory. In opengrep 1.30.0, `opengrep test`
+ignores rule `paths` filters. A path-scoped fixture still runs there. A flipped `ruleid:` annotation
+must fail with an unexpected finding on that line. Use separate scans at representative paths to
+verify path inclusion and exclusion; rule-tests alone do not test that scope.
+
+## Detection limits
+
+The requests rule checks selected HTTP methods and session constructors with an import binding
+in the same file. It accepts import aliases and imports from `requests.api`. It does not report
+parameters or local variables that shadow the library. It does not follow clients passed between
+functions. The package-wide ban keeps all HTTP in one client because rules cannot infer its destination.
+
+The URL rule checks `<str:pk>` and `<pk>` in literal routes and local string constants.
+It leaves `<str:id>` alone because external IDs can contain text. The `pk` name is a package
+convention, not proof of a numeric type. Imported constants and dynamically built routes are outside
+this check. Other converter names are outside this check.
+
+The assertion rule checks `self` calls against explicit unittest assertion API names.
+It allows custom names such as `assertResponseUnchanged`. It does not resolve the implementation
+of a method that shares a unittest API name. The Django rule detects direct imports or inheritance,
+including resolved aliases. It cannot see dynamic bases.
+
+The fuzzy API rule checks calls to `difflib.get_close_matches`, `SequenceMatcher` similarity ratios,
+and selected `fuzzywuzzy.fuzz` and `rapidfuzz.fuzz` scorers. Imports and diff rendering are allowed.
+Symbolic propagation covers simple local constructor bindings. Other method calls can invalidate
+those bindings. The rule does not track dynamically supplied scorers or prove exact-only selection.
+Runtime tests must cover the exact-only invariant.
 
 ## `--taint-intrafile` is required
 
@@ -59,6 +98,7 @@ per-function analysis. Without the flag those sites are missed.
 ```bash
 ./scripts/opengrep-scan.sh   # scan (same as the pre-push hook)
 ./scripts/opengrep-test.sh   # run the rule-tests
+python .opengrep/test-scan.py  # check scan argument handling
 ```
 
 Both find opengrep via `$OPENGREP_BIN`, then `PATH`, then `~/.local/opt/opengrep/bin`. Install it
@@ -83,7 +123,8 @@ above it.
 
 ## Adding a rule
 
-1. Add the rule to `.opengrep/librenms-rules.yaml`.
-2. Add fixture cases to `.opengrep/tests/<rule-id>.py` with the match / clean markers.
-3. `./scripts/opengrep-test.sh` — confirm it passes.
-4. `./scripts/opengrep-scan.sh` — confirm the tree is clean (or fix it).
+1. Add fixture cases to `.opengrep/tests/<rule-id>.py` with the match and clean markers.
+2. Run `./scripts/opengrep-test.sh`. Confirm it reports the expected missing findings.
+3. Add the rule to `.opengrep/librenms-rules.yaml`. Run the rule-tests again and confirm they pass.
+4. Flip one `ruleid:` marker to `ok:`. Confirm the rule-test reports that line, then restore it.
+5. Run `./scripts/opengrep-scan.sh`. Report any findings before changing production code.

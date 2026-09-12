@@ -499,6 +499,60 @@ def probe_cr10_walrus(result):
         result["warnings"].append(f"owner {owner.name}")
 
 
+# --- [flag] sum() preserves a singleton primary key
+def probe_cr11_sum_singleton(result):
+    owner = Device.objects.first()
+    leaked = sum([owner.pk])
+    # ruleid: import-disclosure
+    result["warnings"].append(f"conflict with device {leaked}")
+
+
+# --- [flag] A boolean count carries no identity. The rule reports this false positive
+#     because sum() is no longer sanitized.
+def probe_cr12_sum_boolean_count(result):
+    devices = Device.objects.filter(serial="x")
+    total = sum(d.status == "active" for d in devices)
+    # ruleid: import-disclosure
+    result["warnings"].append(f"total {total}")
+
+
+# --- [flag] Sanitizers must still report sinks inside their arguments or receivers.
+def probe_nested_sink_any(result):
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    any([result["warnings"].append(owner.name)])
+
+
+def probe_nested_sink_all(result):
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    all([result["warnings"].append(owner.name)])
+
+
+def probe_nested_sink_len(result):
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    len([result["warnings"].append(owner.name)])
+
+
+def probe_nested_sink_count(result):
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    Device.objects.filter(name=result["warnings"].append(owner.name)).count()
+
+
+def probe_nested_sink_exists(result):
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    Device.objects.filter(name=result["warnings"].append(owner.name)).exists()
+
+
+def probe_nested_sink_link_note(result):
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    _describe_link_note({"host_id": result["warnings"].append(owner.name)})
+
+
 # The one shape this rule does not report is a keyword argument read back out of a **kwargs
 # dict. See "Known limitation" in .opengrep/README.md; the reverse shape, a caller-side
 # **{...} unpacking, is covered by probe_unpack_kw above.

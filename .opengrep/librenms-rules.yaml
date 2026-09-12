@@ -1,4 +1,4 @@
-# Custom opengrep ruleset encoding this project's import-preview invariants. These run ON TOP OF
+# Custom opengrep ruleset encoding this project's coding guidelines. These run ON TOP OF
 # CodeRabbit's default opengrep packs: the file is intentionally NOT named opengrep.yml / semgrep.yml
 # at the repo root, so CodeRabbit does NOT treat it as its config (which would replace its default
 # ruleset). The local pre-push hook and the CI job enforce these rules instead.
@@ -44,16 +44,23 @@ rules:
       - pattern: $X.restrict(...)
       - pattern: restricted_queryset(...)
       - pattern: restrict_object_or_404(...)
-      # aggregates reduce an object to a value that carries no identity. Flagging a count would
-      # push real code into contortions, so taint follows objects, not every value from a query.
+      # Aggregates are exempted to keep real code workable, not because they provably erase
+      # identity: a contrived len(range(owner.pk)) still carries the pk. sum() is NOT exempt,
+      # because sum([owner.pk]) preserves it by accident rather than by contrivance.
       - pattern: $X.count()
+        exact: true
       - pattern: $X.exists()
+        exact: true
       - pattern: len(...)
-      - pattern: sum(...)
+        exact: true
       - pattern: all(...)
+        exact: true
       - pattern: any(...)
-      # returns one of three fixed link-status strings, never identity
+        exact: true
+      # The note may name the visible match's LibreNMS linkage ID. If the gate withholds the match,
+      # _block() in import_utils/disclosure.py replaces all warnings, including this note.
       - pattern: _describe_link_note(...)
+        exact: true
     pattern-sinks:
       # the validation dict's message lists
       - pattern: $R["warnings"].append($MSG)
@@ -85,3 +92,138 @@ rules:
       - patterns:
           - pattern: apply_merge_candidates(..., warning=$MSG, ...)
           - focus-metavariable: $MSG
+  - id: no-requests-outside-http-client
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This call uses an imported requests HTTP API outside librenms_api.py. The package
+      routes all HTTP through that shared client. This check covers selected requests calls
+      with an import binding in this file; it does not track clients passed between functions.
+    metadata:
+      category: security
+    paths:
+      include: ["**/netbox_librenms_plugin/**"]
+      exclude: ["**/netbox_librenms_plugin/librenms_api.py", "**/tests/**"]
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  import $REQUESTS
+                  ...
+              - metavariable-regex:
+                  metavariable: $REQUESTS
+                  regex: ^requests$
+              - pattern: $REQUESTS.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  import requests as $REQUESTS
+                  ...
+              - pattern: $REQUESTS.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests import $METHOD as $CALL
+                  ...
+              - pattern: $CALL(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests.api import $METHOD
+                  ...
+              - pattern: $METHOD(...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(get|head|options|post|put|patch|delete|request|Session|session)$
+  - id: url-numeric-pk-converter
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This path() route uses <str:pk> or <pk>. By package convention, name numeric primary
+      keys pk and use <int:pk>. This check covers literal routes and local string constants;
+      it does not infer identifier types or inspect dynamically built routes.
+    metadata:
+      category: security
+    patterns:
+      - pattern-either:
+          - pattern: path($ROUTE, ...)
+          - pattern: django.urls.path($ROUTE, ...)
+          - pattern: path(..., route=$ROUTE, ...)
+          - pattern: django.urls.path(..., route=$ROUTE, ...)
+      - metavariable-comparison:
+          metavariable: $ROUTE
+          comparison: re.match(".*<(str:)?pk>", $ROUTE)
+  - id: no-django-testcase-in-tests
+    languages: [python]
+    severity: WARNING
+    message: >-
+      This check detects direct Django TestCase imports or inheritance, not dynamic bases.
+      Use a plain pytest class and mark database tests with pytest.mark.django_db.
+    metadata:
+      category: maintainability
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    pattern-either:
+      - pattern: from django.test import TestCase
+      - pattern: from django.test.testcases import TestCase
+      - pattern: |
+          class $CLASS(..., django.test.TestCase, ...):
+            ...
+      - pattern: |
+          class $CLASS(..., django.test.testcases.TestCase, ...):
+            ...
+  - id: no-unittest-assertions
+    languages: [python]
+    severity: WARNING
+    message: >-
+      This test calls a self method with a unittest assertion API name. Use assert,
+      pytest.raises, pytest.warns or caplog as appropriate. This name check does not resolve
+      the method implementation; custom helpers with other names are allowed.
+    metadata:
+      category: maintainability
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern: self.$ASSERT(...)
+      - metavariable-regex:
+          metavariable: $ASSERT
+          regex: >-
+            (?x)^assert(?:
+              AlmostEqual|CountEqual|DictEqual|Equal|False|
+              Greater|GreaterEqual|In|Is|IsInstance|
+              IsNone|IsNot|IsNotNone|Less|LessEqual|
+              ListEqual|Logs|MultiLineEqual|NoLogs|NotAlmostEqual|
+              NotEqual|NotIn|NotIsInstance|NotRegex|Raises|
+              RaisesRegex|Regex|SequenceEqual|SetEqual|True|
+              TupleEqual|Warns|WarnsRegex|Equals|NotEquals|
+              AlmostEquals|NotAlmostEquals|RegexpMatches|NotRegexpMatches|RaisesRegexp|
+              StartsWith|NotStartsWith|EndsWith|NotEndsWith|HasAttr|
+              NotHasAttr|IsSubclass|NotIsSubclass
+            )$
+  - id: no-selected-fuzzy-apis
+    languages: [python]
+    severity: WARNING
+    message: >-
+      This call uses a selected API for approximate selection: difflib close matches or similarity
+      ratios, or a fuzzywuzzy/rapidfuzz fuzz scorer. Use exact lookups for sites, platforms,
+      device types and roles. This check detects selected APIs, not the exact-only invariant.
+      It follows direct constructors and propagated local bindings; intervening method calls
+      can hide a matcher. It cannot identify custom similarity functions or dynamic scorers.
+    metadata:
+      category: correctness
+    options:
+      symbolic_propagation: true
+    pattern-either:
+      - pattern: difflib.get_close_matches(...)
+      - patterns:
+          - pattern: difflib.SequenceMatcher(...).$RATIO(...)
+          - metavariable-regex:
+              metavariable: $RATIO
+              regex: ^(ratio|quick_ratio|real_quick_ratio)$
+      - patterns:
+          - pattern-either:
+              - pattern: fuzzywuzzy.fuzz.$SCORER(...)
+              - pattern: rapidfuzz.fuzz.$SCORER(...)
+          - metavariable-regex:
+              metavariable: $SCORER
+              regex: >-
+                (?x)^(ratio|partial_ratio|partial_ratio_alignment|token_sort_ratio|token_set_ratio|
+                partial_token_sort_ratio|partial_token_set_ratio|token_ratio|partial_token_ratio|
+                WRatio|QRatio|UWRatio|UQRatio)$

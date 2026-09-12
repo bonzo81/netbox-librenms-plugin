@@ -5,6 +5,7 @@ the viewer cannot see is still a real conflict that must block the import. Ident
 be withheld at DISPLAY time, so every test here drives a real view with a constrained grant.
 """
 
+import json
 import logging
 import os
 import subprocess
@@ -498,3 +499,69 @@ def test_the_rule_test_script_removes_its_staging_directory():
         # Precondition: the rule-tests really ran, so the staging directory really was created.
         assert result.returncode == 0, result.stdout or result.stderr
         assert list(Path(private_tmp).iterdir()) == [], "the staging directory outlived the run"
+
+
+def _scan(*args, expect=0):
+    """Run the scan script, skipping when opengrep is absent, and return its parsed JSON report."""
+    script = REPOSITORY_ROOT / "scripts" / "opengrep-scan.sh"
+    if not script.exists():
+        pytest.skip("opengrep scan script not present")
+    result = subprocess.run([str(script), *map(str, args)], capture_output=True, text=True)
+    if result.returncode == OPENGREP_NOT_INSTALLED:
+        pytest.skip("opengrep is not installed; see .opengrep/README.md")
+    assert result.returncode == expect, result.stdout or result.stderr
+    return json.loads(result.stdout)
+
+
+def _scanned(report):
+    return {Path(path).resolve() for path in report["paths"]["scanned"]}
+
+
+def test_an_option_only_scan_keeps_the_default_targets():
+    """`--json` is an option, not a target: passing it must not drop the test tree from the scan."""
+    tests = set((REPOSITORY_ROOT / "netbox_librenms_plugin" / "tests").rglob("*.py"))
+    # Precondition: there is a test tree to lose in the first place.
+    assert tests, "no test files found to scan"
+    scanned = _scanned(_scan("--json"))
+    assert not tests - scanned, f"the option-only scan omitted {len(tests - scanned)} test files"
+
+
+def test_an_explicit_target_replaces_the_defaults():
+    """A caller that names a target scans that target alone, whichever side of the option it sits."""
+    target = sorted((REPOSITORY_ROOT / "netbox_librenms_plugin" / "tests").rglob("*.py"))[0]
+    for args in (("--json", target), (target, "--json")):
+        assert _scanned(_scan(*args)) == {target}, args
+
+
+def test_each_rule_applies_to_its_declared_paths(tmp_path):
+    """The path scoping is the rules' real boundary, so pin it against a staged tree, not fixtures."""
+    http_call = "import requests\nrequests.get(url)\n"
+    sources = {
+        # Flagged: a direct HTTP call outside the client.
+        "netbox_librenms_plugin/worker.py": http_call,
+        # Clean: the client itself is the one place allowed to make them.
+        "netbox_librenms_plugin/librenms_api.py": http_call,
+        # Clean: outside the package entirely.
+        "elsewhere/worker.py": http_call,
+        # Clean: `requests` here is a parameter, not the library.
+        "netbox_librenms_plugin/lookup.py": "def lookup(requests, key):\n    return requests.get(key)\n",
+        # Flagged twice: the test-tree rules apply here and the HTTP rule does not.
+        "netbox_librenms_plugin/tests/test_worker.py": (
+            http_call + "from django.test import TestCase\n"
+            "class TestWorker:\n    def check(self):\n        self.assertEqual(1, 1)\n"
+        ),
+    }
+    for name, source in sources.items():
+        staged = tmp_path / name
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text(source)
+
+    report = _scan("--json", *[tmp_path / name for name in sources], expect=1)
+    found = {
+        (Path(f["path"]).relative_to(tmp_path).as_posix(), f["check_id"].split(".")[-1]) for f in report["results"]
+    }
+    assert found == {
+        ("netbox_librenms_plugin/worker.py", "no-requests-outside-http-client"),
+        ("netbox_librenms_plugin/tests/test_worker.py", "no-django-testcase-in-tests"),
+        ("netbox_librenms_plugin/tests/test_worker.py", "no-unittest-assertions"),
+    }, found
