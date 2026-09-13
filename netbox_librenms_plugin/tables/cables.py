@@ -97,6 +97,7 @@ class LibreNMSCableTable(tables.Table):
             *args: Positional table arguments (the row data).
             device: The page device, used for the virtual-chassis member selector.
             **kwargs: Keyword table arguments.
+
         """
         self.device = device
         super().__init__(*args, **kwargs)
@@ -237,6 +238,7 @@ class VCCableTable(LibreNMSCableTable):
 
         Returns:
             int: The matched member's id, or the table device's id when no member matches.
+
         """
         match = re.match(r"^[A-Za-z]+(\d+)", port_name or "")
         if match:

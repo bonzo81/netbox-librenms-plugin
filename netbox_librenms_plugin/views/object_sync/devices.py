@@ -556,6 +556,7 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 
         Returns:
             str: The rendered VLAN cell HTML.
+
         """
         from django.utils.safestring import mark_safe
 

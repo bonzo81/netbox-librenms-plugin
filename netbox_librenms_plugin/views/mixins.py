@@ -35,6 +35,7 @@ def parse_request_json(request):
     Returns:
         tuple[dict | None, JsonResponse | None]: The parsed object and no error response,
             or no data and a 400 error response.
+
     """
     try:
         data = json.loads(request.body)
@@ -61,6 +62,7 @@ def extract_cached_ports(cached, cache_key=None):
 
     Returns:
         dict | None: The cached payload with a list of dict port rows, or None.
+
     """
     # ``is_list_of_dicts`` is the same shape check the VLAN/interface read-paths use: ports must
     # be a list whose every row is a dict (an empty list is valid — a device with no ports).
@@ -86,6 +88,7 @@ def validated_referer(request):
 
     Returns:
         str | None: The validated Referer, or None when validation fails.
+
     """
     referrer = request.META.get("HTTP_REFERER")
     if referrer and url_has_allowed_host_and_scheme(
@@ -109,6 +112,7 @@ def _get_safe_redirect_url(request):
 
     Returns:
         str: The validated Referer, current request path, or root fallback.
+
     """
     if referrer := validated_referer(request):
         return referrer
@@ -140,6 +144,7 @@ def _safe_redirect_response(request):
 
     Returns:
         HttpResponse: An HTMX ``HX-Redirect`` response or a standard redirect response.
+
     """
     target = _get_safe_redirect_url(request)
     is_htmx = bool(request.headers.get("HX-Request"))
@@ -173,6 +178,7 @@ def resolve_configured_server_key(server_key):
 
     Returns:
         str | None: *server_key* when it names a configured server, otherwise None.
+
     """
     if not isinstance(server_key, str) or not server_key:
         return None
@@ -198,6 +204,7 @@ def redirect_with_server_key(request, url, server_key):
     Returns:
         HttpResponseRedirect: Redirect to *url*, with the validated ``server_key`` query param when
             it passes the open-redirect barrier.
+
     """
     if server_key:
         sep = "&" if "?" in url else "?"
@@ -235,6 +242,7 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
 
         Returns:
             None if permitted, or appropriate response if denied
+
         """
         if not self.has_write_permission():
             if getattr(self, "request", None) is None:
@@ -254,6 +262,7 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
 
         Returns:
             None if permitted, or JsonResponse with 403 status if denied
+
         """
         from django.http import JsonResponse
 
@@ -318,6 +327,7 @@ def relock_scoped_row(model, **lookup):
 
     Returns:
         The locked instance, or None when the row is gone.
+
     """
     # order_by() drops the model ordering, which can traverse a nullable FK (VLAN orders by
     # site/group): PostgreSQL refuses FOR UPDATE over the nullable side of the resulting outer
@@ -339,6 +349,7 @@ class NetBoxObjectPermissionMixin:
                 ('change', Interface),
             ],
         }
+
     """
 
     required_object_permissions = {}
@@ -352,6 +363,7 @@ class NetBoxObjectPermissionMixin:
 
         Returns:
             tuple: (has_all: bool, missing: list[str])
+
         """
         requirements = self.required_object_permissions.get(method, [])
         missing = [get_permission_for_model(model, action) for action, model in requirements]
@@ -376,6 +388,7 @@ class NetBoxObjectPermissionMixin:
 
         Returns:
             None if permitted, or appropriate response if denied
+
         """
         has_perms, missing = self.check_object_permissions(method)
         if not has_perms:
@@ -397,6 +410,7 @@ class NetBoxObjectPermissionMixin:
 
         Returns:
             None if permitted, or JsonResponse with 403 status if denied
+
         """
         from django.http import JsonResponse
 
@@ -424,6 +438,7 @@ class NetBoxObjectPermissionMixin:
 
         Returns:
             A queryset filtered to the objects the request user may perform *action* on.
+
         """
         return model.objects.restrict(self.request.user, action)
 
@@ -445,6 +460,7 @@ class NetBoxObjectPermissionMixin:
 
         Returns:
             The resolved object the user is permitted to access.
+
         """
         queryset = self.restricted_queryset(model, action)
         if select_related:
@@ -464,6 +480,7 @@ class NetBoxObjectPermissionMixin:
 
         Returns:
             None if permitted, or appropriate error response if denied
+
         """
         if error := self.require_write_permission():
             return error
@@ -478,6 +495,7 @@ class NetBoxObjectPermissionMixin:
 
         Returns:
             None if permitted, or JsonResponse with 403 status if denied
+
         """
         if error := self.require_write_permission_json():
             return error
@@ -498,6 +516,7 @@ class LibreNMSAPIMixin:
     Properties:
         librenms_api (LibreNMSAPI): A property that returns the LibreNMSAPI instance,
                                     creating it if it doesn't exist.
+
     """
 
     def __init__(self, *args, **kwargs):
@@ -515,6 +534,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             LibreNMSAPI: An instance of the LibreNMSAPI class.
+
         """
         if self._librenms_api is None:
             # The LibreNMSAPI will automatically use the selected server
@@ -562,6 +582,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             str | None: The active server key, or ``None`` when the client can't be constructed.
+
         """
         try:
             return self.librenms_api.server_key
@@ -584,6 +605,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             str | None: The validated posted key, or the degrading active-server key.
+
         """
         requested_server_key = data.get("server_key")
         if isinstance(requested_server_key, str) and requested_server_key in LibreNMSAPI.get_available_servers():
@@ -608,6 +630,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             str: The validated posted key, or the active-server key.
+
         """
         requested_server_key = (data.get("server_key") or "").strip()
         if requested_server_key and requested_server_key in LibreNMSAPI.get_available_servers():
@@ -631,6 +654,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             str | None: The validated posted key, the active-server key, or ``None``.
+
         """
         try:
             return self.resolve_posted_server_key(data)
@@ -652,6 +676,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             tuple[bool, dict | None]: ``(success, device_info)`` from ``get_device_info``.
+
         """
         return self.librenms_api.get_device_info(librenms_id, use_cache=False)
 
@@ -668,6 +693,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             str: The bound client's resolved server key, or ``"default"``.
+
         """
         return getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
 
@@ -693,6 +719,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             HttpResponse: The rendered partial.
+
         """
         from netbox_librenms_plugin.utils import build_migrated_context
 
@@ -720,6 +747,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             str | None: The resolved server key, or ``None`` when the selection is unusable.
+
         """
         getlist = getattr(data, "getlist", None)
         values = getlist("server_key") if callable(getlist) else None
@@ -745,6 +773,7 @@ class LibreNMSAPIMixin:
             str | None: The resolved server key, or None when the posted key is
                 unknown/misconfigured (stale page or tampered request) so the caller can surface a
                 fragment error instead of an unhandled 500.
+
         """
         from netbox_librenms_plugin.librenms_api import build_librenms_api
 
@@ -790,6 +819,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             str: A resolved server key to scope the cache read/write and the re-render to.
+
         """
         return self.rebind_api_for_server(server_key) or self.rebind_api_for_server(None) or self.active_server_key
 
@@ -815,6 +845,7 @@ class LibreNMSAPIMixin:
                 non-blank server that no longer resolves (deleted/misconfigured); a caller that
                 wants to short-circuit can render an empty table scoped to ``scoped_key`` rather
                 than fall back to the default server's cached data.
+
         """
         if server_key is None:
             server_key = request.GET.get("server_key") or ""
@@ -838,6 +869,7 @@ class LibreNMSAPIMixin:
 
         Returns:
             dict: Server information including display name and URL
+
         """
         try:
             # Get the current server key
@@ -923,6 +955,7 @@ class SyncSubjectClaimMixin:
 
         Returns:
             The key from :func:`sync_subject_key`, or None when the URL names no synchronization subject.
+
         """
         from netbox_librenms_plugin.sync_cache import sync_subject_key
 
@@ -969,6 +1002,7 @@ class SyncSubjectClaimMixin:
 
         Returns:
             HttpResponse: The response from the next dispatch implementation.
+
         """
         from netbox_librenms_plugin.sync_cache import claim_sync_subjects
 
@@ -990,6 +1024,7 @@ class CacheMixin(SyncSubjectClaimMixin):
             obj: The object to cache data for
             data_type: Type of data being cached ('ports', 'links', 'inventory', etc.)
             server_key: Optional LibreNMS server key for namespacing per-server data
+
         """
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
@@ -1015,6 +1050,7 @@ class CacheMixin(SyncSubjectClaimMixin):
 
         Returns:
             str: The cache key for the device and server.
+
         """
         from netbox_librenms_plugin.sync_cache import sync_vlan_overrides_key
 
@@ -1061,6 +1097,7 @@ class VlanAssignmentMixin:
 
         Returns:
             List of VLANGroup objects, deduplicated and sorted by name
+
         """
         from dcim.models import Location, Rack, Region, Site, SiteGroup
         from ipam.models import VLANGroup
@@ -1140,6 +1177,7 @@ class VlanAssignmentMixin:
                 - vid_group_to_vlan: {(vid, group_id): vlan}, unique per-group lookup.
                 - vid_to_vlans: {vid: [vlan, ...]}, all VLANs with that VID.
                 - vid_name_to_vlan: {(vid, name): vlan}, VID and name lookup.
+
         """
         from ipam.models import VLAN
 
@@ -1216,6 +1254,7 @@ class VlanAssignmentMixin:
             lookup_maps (dict): The VLAN lookup maps for the row's device.
             device (Device): The device used for scope-specific group selection.
             vlan_group_overrides (dict | None): Optional apply-to-all selections keyed by VID.
+
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         untagged_vid = port.get("untagged_vlan")
@@ -1308,6 +1347,7 @@ class VlanAssignmentMixin:
         Args:
             port (dict): The port record to update.
             lookup_maps (dict): The VLAN lookup maps used to find missing VIDs.
+
         """
         vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
         missing_vlans = []
@@ -1342,6 +1382,7 @@ class VlanAssignmentMixin:
 
         Returns:
             VLANGroup or None if no clear winner (e.g., multiple groups at same priority level)
+
         """
         from dcim.models import Location, Rack, Region, Site, SiteGroup
         from django.contrib.contenttypes.models import ContentType
@@ -1427,6 +1468,7 @@ class VlanAssignmentMixin:
 
         Returns:
             list: The object and all parents up to the root, or an empty list for None.
+
         """
         ancestors = []
         current = obj
@@ -1446,6 +1488,7 @@ class VlanAssignmentMixin:
 
         Returns:
             QuerySet of VLANGroup objects
+
         """
         from django.contrib.contenttypes.models import ContentType
         from ipam.models import VLANGroup
@@ -1472,6 +1515,7 @@ class VlanAssignmentMixin:
 
         Returns:
             VLAN object or None
+
         """
         vid_group_to_vlan = lookup_maps.get("vid_group_to_vlan", {})
         vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
@@ -1512,6 +1556,7 @@ class VlanAssignmentMixin:
                 - tagged_set: list of VLAN objects
                 - missing_vlans: list of VIDs not found in NetBox
                 - changed: bool, True when the mode, the untagged VLAN or the tagged VLANs were written
+
         """
         # Support both dict (per-VLAN) and string/int/None (single group) for backward compat
         if not isinstance(vlan_group_map, dict):

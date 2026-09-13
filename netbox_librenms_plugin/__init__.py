@@ -35,6 +35,7 @@ class LibreNMSSyncConfig(PluginConfig):
         Raises:
             ImproperlyConfigured: If the server configuration is empty, has an invalid type, or omits a
                 required setting.
+
         """
         super().ready()
 
@@ -105,6 +106,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         sender (AppConfig): The application configuration that sent the post-migrate signal.
         **kwargs (dict[str, object]): The post-migrate signal arguments. The ``using`` value selects the
             database alias.
+
     """
     # Track per-alias execution so each database alias is bootstrapped exactly once.
     db_alias = kwargs.get("using") or "default"

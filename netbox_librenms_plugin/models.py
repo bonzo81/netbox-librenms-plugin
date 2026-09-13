@@ -55,6 +55,7 @@ def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> No
     Raises:
         re.error: If the replacement is invalid.
         IndexError: If the replacement is invalid.
+
     """
     n = compiled.groups
     if n == 0:
@@ -1275,6 +1276,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
 
         Returns:
             QuerySet | None: The rows to read, or None when the OS admits none.
+
         """
         if device_os is None:
             return cls.objects.all()
@@ -1303,6 +1305,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
 
         Returns:
             list[re.Pattern]: The compiled patterns that apply to the specified OS.
+
         """
         queryset = cls._patterns_for_os_queryset(device_os)
         if queryset is None:
@@ -1336,6 +1339,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
 
         Returns:
             list: The compiled regexes that apply to this OS.
+
         """
         queryset = cls._patterns_for_os_queryset(device_os)
         # "No row for this OS" is not the same answer as "this OS has a row saying it has no SAP

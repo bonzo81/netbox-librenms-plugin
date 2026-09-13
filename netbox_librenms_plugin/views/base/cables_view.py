@@ -74,6 +74,7 @@ def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
     Returns:
         Q: A combined lookup matching any stored form of the id (matches nothing for
             a bool *value*).
+
     """
     # Match nothing for values that can't be a valid librenms_id. Reject bools (an int subclass)
     # and any non-int/str type up front: int() would truncate a float like 1.9 to 1 and match the
@@ -162,6 +163,7 @@ def _extract_cached_links(cached, cache_key=None):
 
     Returns:
         list | None: The list of (dict) link rows, or None if the entry is malformed.
+
     """
     if not isinstance(cached, dict) or not isinstance(cached.get("links"), list):
         if cache_key is not None:
@@ -256,6 +258,7 @@ class BaseCableTableView(
 
         Returns:
             Device | None: The viewable sync owner, or None when it is out of scope.
+
         """
         sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
         if not self._object_is_viewable(sync_device):
@@ -629,6 +632,7 @@ class BaseCableTableView(
 
         Returns:
             tuple[dict, dict]: Maps from port IDs to displayed names and alternate names.
+
         """
         name_map = {}
         alt_map = {}
@@ -668,6 +672,7 @@ class BaseCableTableView(
 
         Returns:
             list[dict]: Table rows tagged with the source.
+
         """
         rows = []
         for link in links:
@@ -725,6 +730,7 @@ class BaseCableTableView(
 
         Returns:
             bool: True when an OOB controller is linked, otherwise False.
+
         """
         oob = get_librenms_oob(lookup_device, server_key=server_key)
         if not oob:
@@ -996,6 +1002,7 @@ class BaseCableTableView(
 
         Returns:
             ConsoleServerPort | None: The resolved serial port for a serial row, or None.
+
         """
         # Merged OOB-controller rows are context-only: their local port lives on the
         # CONTROLLER, not the host, so a shared name (or colliding stored librenms_id)
@@ -1148,6 +1155,7 @@ class BaseCableTableView(
 
         Returns:
             dict: The cable row with its status and sync affordance.
+
         """
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
@@ -1291,6 +1299,7 @@ class BaseCableTableView(
 
         Returns:
             dict: The serial cable row with its status and sync affordance.
+
         """
         csp_id = link.get("netbox_local_interface_id")
         link["can_create_cable"] = False
@@ -1367,6 +1376,7 @@ class BaseCableTableView(
 
         Returns:
             None
+
         """
         csp_id = link.get("netbox_local_interface_id")
         # No resolved local end -> nothing to resolve a remote against (call sites gate on the
@@ -1538,6 +1548,7 @@ class BaseCableTableView(
 
         Returns:
             bool: True when the row is fully resolved; False to fall through (mismatch).
+
         """
         visible_console_port_ids = (remote_context or {}).get("visible_console_port_ids")
         far_cp = next(
@@ -1618,6 +1629,7 @@ class BaseCableTableView(
             csp: The row's resolved (and cabled) local ConsoleServerPort.
             path: An already-computed ``csp.trace()`` result to reuse (avoids re-tracing).
             visible_ids: Optional visible object IDs grouped by model.
+
         """
         if path is None:
             path = csp.trace()
@@ -1669,6 +1681,7 @@ class BaseCableTableView(
             target_cp: The ConsolePort the remote should resolve to.
             manual (bool): Mark the row as manually picked (rendered as a hint in the table).
             remote_context: Optional preloaded port, cable, and trace visibility data.
+
         """
         link["netbox_remote_device_id"] = target_cp.device_id
         # Show the picked device's real name (display-only key: the raw ``remote_device`` label
@@ -1750,6 +1763,7 @@ class BaseCableTableView(
             link (dict): The enriched cable row, mutated in place.
             obj: The page device (URL scope for the picker endpoint).
             server_key: The active LibreNMS server key, carried in the picker URL.
+
         """
         if (
             not self.has_write_permission()
@@ -2100,7 +2114,7 @@ class BaseCableTableView(
         raise NotImplementedError
 
     def _prepare_context(self, request, obj, fetch_fresh=False, server_key=None):  # noqa: C901
-        """Helper method to prepare the context data for cable sync views."""
+        """Prepare the context data for cable sync views."""
         table = None
         cache_expiry = None
         # Scoped to the POST-resolved server when provided; else the degrading resolver.
@@ -2752,6 +2766,7 @@ class CableRemotePickerView(BaseCableTableView):
                 render and the POST round-trip. Without that, the stale query-string key round-trips
                 back on POST, misses ``_cache_state`` again, and triggers a SECOND live LibreNMS
                 fetch that this first refetch already made unnecessary.
+
         """
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 

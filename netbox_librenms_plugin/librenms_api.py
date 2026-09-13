@@ -87,6 +87,7 @@ def build_librenms_api(server_key):
     Returns:
         LibreNMSAPI | None: A client for *server_key*, or None when the key is
             unknown or the server is misconfigured.
+
     """
     try:
         return LibreNMSAPI(server_key=server_key)
@@ -124,6 +125,7 @@ class LibreNMSAPI:
 
         Returns:
             bool: True if the configuration is a usable server mapping.
+
         """
         return isinstance(config, dict) and bool(config.get("librenms_url")) and bool(config.get("api_token"))
 
@@ -133,6 +135,7 @@ class LibreNMSAPI:
 
         Args:
             server_key: Key for specific server configuration. If None, uses selected server or default.
+
         """
         # Track whether the caller explicitly requested a specific server. A key auto-resolved
         # from LibreNMSSettings.selected_server is NOT explicit, so a stale stored key falls back
@@ -241,6 +244,7 @@ class LibreNMSAPI:
 
         Returns:
             dict: System information if successful, error dict if failed
+
         """
         try:
             response = requests.get(
@@ -307,6 +311,7 @@ class LibreNMSAPI:
 
         Returns:
             dict: Dictionary of server keys and their display names
+
         """
         servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
 
@@ -354,6 +359,7 @@ class LibreNMSAPI:
 
         Returns:
             int: LibreNMS ID if found in the custom field or cache, None otherwise
+
         """
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
@@ -391,6 +397,7 @@ class LibreNMSAPI:
 
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
+
         """
         librenms_id = self.get_stored_librenms_id(obj)
         if librenms_id is not None:
@@ -439,6 +446,7 @@ class LibreNMSAPI:
 
         Returns:
             int | None: The coerced id, or None if it can't be coerced.
+
         """
         from netbox_librenms_plugin.utils import coerce_librenms_id
 
@@ -456,6 +464,7 @@ class LibreNMSAPI:
 
         Returns:
             str: Cache key
+
         """
         object_type = obj._meta.model_name
         object_id = obj.pk
@@ -477,6 +486,7 @@ class LibreNMSAPI:
 
         Returns:
             None
+
         """
         from dcim.models import Device
         from virtualization.models import VirtualMachine
@@ -545,6 +555,7 @@ class LibreNMSAPI:
 
         Retruns:
             int: LibreNMS device ID if found, None otherwise
+
         """
         try:
             response = requests.get(
@@ -568,6 +579,7 @@ class LibreNMSAPI:
 
         Returns:
             int: LibreNMS device ID if found, None otherwise
+
         """
         try:
             response = requests.get(
@@ -602,6 +614,7 @@ class LibreNMSAPI:
             tuple: ``(success, data)``. On success, ``data`` is the device dictionary. For an
                 absent device or a cache-only miss, ``data`` is ``None``. For a transport failure
                 or another non-2xx response, ``data`` is a :class:`LibreNMSLookupError`.
+
         """
         cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
         if use_cache or cache_only:
@@ -668,6 +681,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: dict)
+
         """
         try:
             params = {
@@ -707,6 +721,7 @@ class LibreNMSAPI:
             tuple: (success: bool, data: list[dict] | str)
                 On success: list of {high_port_id, low_port_id, high_ifIndex, low_ifIndex} dicts
                 On failure: error string
+
         """
         try:
             response = requests.get(
@@ -826,6 +841,7 @@ class LibreNMSAPI:
                 'lag_members':    {member_port_id: aggregate_port_id}
                 'sub_interfaces': {child_port_id: parent_port_id}
                 'bridge_members': {member_port_id: bridge_port_id}
+
         """
         from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS
         from netbox_librenms_plugin.utils import normalize_librenms_port_id
@@ -1134,6 +1150,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, message: str)
+
         """
         payload = {
             "hostname": data["hostname"],
@@ -1195,6 +1212,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple (success: bool, message: str)
+
         """
         try:
             response = requests.patch(
@@ -1228,6 +1246,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: dict)
+
         """
         try:
             response = requests.get(
@@ -1262,6 +1281,7 @@ class LibreNMSAPI:
 
         Return:
             tuple: (success: bool, message: str)
+
         """
         try:
             response = requests.post(
@@ -1301,6 +1321,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, message: str)
+
         """
         try:
             encoded_location_name = urllib.parse.quote(location_name, safe="")
@@ -1333,6 +1354,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: dict)
+
         """
         try:
             response = requests.get(
@@ -1368,6 +1390,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: dict)
+
         """
         try:
             response = requests.get(
@@ -1408,6 +1431,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: dict)
+
         """
         try:
             response = requests.get(
@@ -1445,6 +1469,7 @@ class LibreNMSAPI:
                 "entPhysicalModelName": "EX4300-48P",
                 ...
             }
+
         """
         try:
             response = requests.get(
@@ -1493,6 +1518,7 @@ class LibreNMSAPI:
                 "wavelength": 1301,
                 ...
             }
+
         """
         try:
             response = requests.get(
@@ -1543,6 +1569,7 @@ class LibreNMSAPI:
                 "group_name": "test",
                 "descr": "test group"
             }
+
         """
         try:
             response = requests.get(
@@ -1585,6 +1612,7 @@ class LibreNMSAPI:
         Example:
             >>> api.get_inventory_filtered(22, ent_physical_class='chassis', ent_physical_contained_in=1)
             (True, [{'entPhysicalClass': 'chassis', ...}, ...])
+
         """
         logger.debug(
             f"get_inventory_filtered: device={device_id}, "
@@ -1693,6 +1721,7 @@ class LibreNMSAPI:
                 "icon": "cisco.svg",
                 ...
             }
+
         """
         try:
             params = {}
@@ -1765,6 +1794,7 @@ class LibreNMSAPI:
                 "vlan_type": "ethernet",
                 "vlan_state": 1
             }
+
         """
         try:
             response = requests.get(
@@ -1828,6 +1858,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: list of sensor dicts or error string)
+
         """
         if sensor_types is None:
             from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
@@ -1850,6 +1881,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: list of serial sensor dicts or error string)
+
         """
         from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
 
@@ -1978,6 +2010,7 @@ class LibreNMSAPI:
                     {"vlan": 50, "untagged": 0, "state": "forwarding"}
                 ]
             }
+
         """
         try:
             response = requests.get(
@@ -2028,6 +2061,7 @@ class LibreNMSAPI:
                 - mode: 'access' | 'tagged' | None
                 - untagged_vlan: int | None
                 - tagged_vlans: list[int]
+
         """
         port_id = port_data.get("port_id")
         if_name = port_data.get("ifName", "")

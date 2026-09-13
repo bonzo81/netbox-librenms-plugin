@@ -49,6 +49,7 @@ def get_serial_sensor_type_patterns() -> dict:
 
     Returns:
         dict: sensor_type -> local ConsoleServerPort name pattern.
+
     """
     from netbox_librenms_plugin.models import SerialSensorTypePattern
 
@@ -88,6 +89,7 @@ def parse_port_number(sensor_index: str | None) -> int | None:
 
     Returns:
         int | None: The trailing integer, or None when there is no trailing number.
+
     """
     m = _INDEX_SUFFIX_RE.search(str(sensor_index or ""))
     if m is None:
@@ -113,6 +115,7 @@ def strip_status_suffix(descr: str) -> str:
 
     Returns:
         str: The description with a trailing " Status" removed, else unchanged.
+
     """
     if descr.endswith(" Status"):
         return descr[:-7]
@@ -154,6 +157,7 @@ def map_sensors_to_serial_links(
 
     Returns:
         List of link-row dicts sorted by port number (ascending).
+
     """
     # Fail closed on a non-list top-level payload (None or another non-iterable from a malformed
     # LibreNMS response) before iterating — otherwise the sync path crashes here instead of

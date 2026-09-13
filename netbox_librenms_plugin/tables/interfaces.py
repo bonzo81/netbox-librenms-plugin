@@ -187,6 +187,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             SafeString: The rendered VLAN summary and controls.
+
         """
         untagged = record.get("untagged_vlan")
         tagged = record.get("tagged_vlans", [])
@@ -399,6 +400,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             tuple: (display_value, css_class)
+
         """
         display_value = "Enabled" if enabled else "Disabled"
 
@@ -453,6 +455,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             SafeString: The coloured ``<span>`` markup for the port_id.
+
         """
         if not record.get("exists_in_netbox"):
             return format_html('<span class="text-danger">{}</span>', value)
@@ -488,6 +491,7 @@ class LibreNMSInterfaceTable(tables.Table):
         Returns:
             SafeString: The stacked relationship markup, or empty when neither LAG nor
                 parent applies.
+
         """
         parts = []
 
@@ -556,6 +560,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             list[Device]: The chassis members available to this table.
+
         """
         device = self.device
         if device is None or not getattr(device, "virtual_chassis", None):
@@ -580,6 +585,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             dict[int, Device]: The chassis members keyed by virtual chassis position.
+
         """
         return {member.vc_position: member for member in self._vc_members if member.vc_position is not None}
 
@@ -601,6 +607,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             int | str: The owning object's ID, or an empty string when no device is available.
+
         """
         nb_iface = record.get("netbox_interface")
         if nb_iface is not None and getattr(nb_iface, "device_id", None):
@@ -653,6 +660,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             SafeString: The pill markup (plus a sync button when applicable).
+
         """
         # Colour + icon read at a glance; the text is the tooltip. Map hoisted to the module-level
         # _RELATIONSHIP_STATUS_MAP so it isn't rebuilt on every call.
@@ -755,6 +763,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             True if MAC exists on interface.
+
         """
         if not netbox_interface:
             return False
@@ -826,6 +835,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         Returns:
             InterfaceTypeMapping | None: The exact or type-only mapping, if one exists.
+
         """
         if getattr(self, "_interface_type_mapping_cache", None) is None:
             cache = {}
@@ -965,6 +975,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
 
         Returns:
             SafeString: The HTML select element with the available member options.
+
         """
         # Reuse the per-render member prefetch (see _vc_members) so the dropdown doesn't re-query
         # the chassis members for every row (N+1 on a large chassis).

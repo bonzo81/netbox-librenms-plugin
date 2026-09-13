@@ -211,6 +211,7 @@ def sync_job_status(request, job_pk):
 
     Returns:
         JsonResponse with updated status
+
     """
     try:
         job = Job.objects.get(pk=job_pk, user=request.user, name__in=_LIBRENMS_JOB_NAMES)

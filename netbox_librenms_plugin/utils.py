@@ -601,6 +601,7 @@ def get_cable_sync_settings(*, lock=False):
 
     Returns:
         LibreNMSSettings: The saved settings row, or an unsaved instance with field defaults.
+
     """
     from netbox_librenms_plugin.models import LibreNMSSettings
 
@@ -653,6 +654,7 @@ def get_librenms_cable_tag(*, create=True, sync_settings=None):
 
     Returns:
         extras.models.Tag: The (existing or newly created) provenance tag.
+
     """
     from extras.models import Tag
 
@@ -738,6 +740,7 @@ def classify_cable_action(local_term, remote_term, provenance_tag=_PROVENANCE_TA
         dict: ``{"action": str, "to_remove": [Cable, ...], "cable": Cable | None}`` where
             ``to_remove`` lists the cables an overwrite would delete and ``cable`` is the existing
             desired-connection cable (for the noop / tag_only cases), else ``None``.
+
     """
     local_cable = local_term.cable
     remote_cable = remote_term.cable
@@ -779,6 +782,7 @@ def cable_far_terminations(cable, near_termination) -> list:
     Returns:
         list: The other side's terminations (``b_terminations`` when *near_termination* is on
             the A side, else ``a_terminations``).
+
     """
     # Serial table enrichment prefetches the generic CableTermination rows and their concrete
     # objects for the whole page. Use that cache when present. The a_terminations/b_terminations
@@ -823,6 +827,7 @@ def cable_path_reaches(
 
     Returns:
         bool: True when the traced path's far end matches either criterion.
+
     """
     if path is None:
         path = termination.trace()
@@ -855,6 +860,7 @@ def _object_is_visible(obj, user, cache=None) -> bool:
 
     Returns:
         bool: Whether the user may view the object.
+
     """
     if user is None:
         return False
@@ -919,6 +925,7 @@ def render_cable_trace(cable, user=None) -> list:
         list[dict]: One ``{"near": str, "cable": str | None, "far": str}`` entry per traced
             segment, in order from the trace origin (labels read ``Device: Port``). Empty when no
             cable termination supports tracing.
+
     """
     terminations = [*cable.a_terminations, *cable.b_terminations]
     origin = next((termination for termination in terminations if callable(getattr(termination, "trace", None))), None)

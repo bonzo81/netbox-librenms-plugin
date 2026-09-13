@@ -56,6 +56,7 @@ def _termination_topology_columns():
     Returns:
         tuple[tuple[str, ...], tuple[str, ...]]: Columns for ``order_by()`` and for
             ``values_list()``, in the order the fingerprint hashes them.
+
     """
     present = {field.name for field in CableTermination._meta.get_fields()}
     connector = ("connector",) if "connector" in present else ()
@@ -105,6 +106,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         Returns:
             Tag | None: The configured provenance tag, or None when creation is disabled and it
                 does not exist.
+
         """
         sync_settings = sync_settings or self._get_cable_sync_settings()
         if not getattr(self, "_cable_provenance_tag_resolved", False):
@@ -129,6 +131,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Returns:
             list[dict] | None: The selected interface entries, or None when no interfaces are selected.
+
         """
         selected_interfaces = []
         sync_one = request.POST.get("sync_one")
@@ -168,6 +171,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Returns:
             list[dict] | None: Enriched link rows, or None when the cache is unavailable.
+
         """
         self._cable_row_identity_error = False
         self._cable_source_permission_error = False
@@ -221,6 +225,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Returns:
             True on success, False on failure.
+
         """
         try:
             # Cable + provenance stamp succeed or fail together: a tags.add failure after
@@ -273,6 +278,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             dict: A result with ``status`` in ``{valid, overwritten, tagged, duplicate, conflict,
                 denied, invalid}`` plus ``interface``; conflicts also carry ``port_id`` and
                 ``trace`` (and are stamped with the resolved ``device_id`` by the caller).
+
         """
         with transaction.atomic():
             locked_terms = self._lock_cable_terminations(
@@ -605,6 +611,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Returns:
             bool: True when cable sync can continue.
+
         """
         if getattr(self, "_cable_source_permission_error", False):
             messages.error(
@@ -649,6 +656,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         Returns:
             tuple: ``(link_data, result)`` — exactly one is not None. *result* carries the
                 status of a row that cannot be synced at all.
+
         """
         row_id = interface.get("row_id", "")
         matching_rows = [link for link in cached_links if link.get("row_id") == row_id]
@@ -769,6 +777,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Returns:
             dict: The resolved terminations or a status result.
+
         """
         display_name = link_data.get("local_port") or interface.get("row_id", "")
         if link_data.get("_source") == "serial":
@@ -874,6 +883,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Returns:
             dict[str, list[str]]: The interface names grouped by synchronization result.
+
         """
         results = {
             "valid": [],
@@ -1017,6 +1027,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         Returns:
             HttpResponse: The partial render or full-page redirect response.
+
         """
         # htmx always sends "HX-Request: true"; match the exact value (mirrors modules.py) so a
         # non-htmx POST — or a test's mock request whose headers aren't a real dict — falls through
