@@ -215,6 +215,61 @@ class TestCableSyncSettingsTab:
         assert settings.cable_sync_tag == "old-provenance"
         assert (intruder.name, intruder.color) == ("renamed-provenance", "0000ff")
 
+    def test_missing_managed_tag_is_reserved_before_settings_change(self):
+        """A settings row must not name a provenance Tag that the plugin does not own."""
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.forms import CableSyncSettingsForm
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "missing-managed-provenance"
+        settings.save(update_fields=["cable_sync_tag"])
+        Tag.objects.filter(name=settings.cable_sync_tag).delete()
+        form = CableSyncSettingsForm(
+            data={
+                "cable_sync_tag": "reserved-managed-provenance",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=settings,
+            user=make_superuser("settings-reserve-tag-user"),
+        )
+        assert form.is_valid(), form.errors
+
+        saved = form.save()
+
+        tag = Tag.objects.get(name=saved.cable_sync_tag)
+        assert tag.color == saved.cable_sync_tag_color
+
+    def test_missing_managed_tag_creation_requires_tag_permission(self):
+        """Plugin settings permission must not authorize creation of a global Tag."""
+        from django.core.exceptions import PermissionDenied
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.forms import CableSyncSettingsForm
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "missing-managed-tag-without-permission"
+        settings.save(update_fields=["cable_sync_tag"])
+        form = CableSyncSettingsForm(
+            data={
+                "cable_sync_tag": "forbidden-managed-tag",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=settings,
+            user=make_user_with_perms("settings-no-tag-add", []),
+        )
+        assert form.is_valid(), form.errors
+
+        with pytest.raises(PermissionDenied, match="permission to create the cable provenance tag"):
+            form.save()
+
+        settings.refresh_from_db()
+        assert settings.cable_sync_tag == "missing-managed-tag-without-permission"
+        assert not Tag.objects.filter(name="forbidden-managed-tag").exists()
+
     def test_blank_tag_name_is_rejected_and_nothing_persists(self, client):
         """A blank provenance tag would slugify to '' and break the ownership get_or_create — the form must reject it (whitespace-only strips to '' → required-field error) and the stored settings must keep their previous value."""
         client.force_login(make_superuser())

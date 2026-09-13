@@ -49,19 +49,20 @@ from .models import (
     PortStackLagPattern,
     SerialSensorTypePattern,
 )
-from .utils import normalize_cable_tag_slug
+from .utils import _free_cable_tag_slug, normalize_cable_tag_slug
 
 logger = logging.getLogger(__name__)
 
 
 def _get_librenms_server_choices():
     """
-    Helper function to get server choices from plugin configuration.
+    Return server choices from the plugin configuration.
 
     Shared between ServerConfigForm and other forms that need server selection.
 
     Returns:
         list[tuple[str, str]]: The configured server values and display labels.
+
     """
     choices = []
 
@@ -100,6 +101,7 @@ def _get_librenms_poller_group_choices(server_key=None):
 
     Returns:
         list[tuple[str, str]]: The (value, label) choices for the poller group field.
+
     """
     from django.core.cache import cache
 
@@ -252,6 +254,7 @@ class ImportSettingsForm(NetBoxModelForm):
 
         Raises:
             forms.ValidationError: If the pattern has an invalid placeholder or format.
+
         """
         pattern = self.cleaned_data.get("vc_member_name_pattern")
 
@@ -401,7 +404,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
 
     @transaction.atomic
     def save(self, commit=True):
-        """Persist settings and update the existing provenance Tag in place."""
+        """Persist settings and reserve or update the provenance Tag."""
         from django.core.exceptions import PermissionDenied
         from extras.models import Tag
 
@@ -422,12 +425,25 @@ class CableSyncSettingsForm(NetBoxModelForm):
             # The old provenance tag is gone and an unrelated tag took the target name after
             # clean_cable_sync_tag ran, so the settings must not adopt it.
             raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."})
-        if tag is not None:
+        new_color = self.cleaned_data["cable_sync_tag_color"]
+        if tag is None:
+            if self.user is not None and not self.user.has_perm("extras.add_tag"):
+                raise PermissionDenied("You do not have permission to create the cable provenance tag.")
+            slug = _free_cable_tag_slug(normalize_cable_tag_slug(new_tag_name))
+            try:
+                # Keep the insert in a savepoint so an integrity error does not poison the outer
+                # transaction before the form converts it into a field error.
+                with transaction.atomic():
+                    Tag.objects.create(name=new_tag_name, slug=slug, color=new_color)
+            except IntegrityError as exc:
+                # A concurrent insert can take either the unique name or the selected free slug.
+                # Do not adopt that row because this settings form did not create it.
+                raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
+        else:
             update_fields = []
             if tag.name != new_tag_name:
                 tag.name = new_tag_name
                 update_fields.append("name")
-            new_color = self.cleaned_data["cable_sync_tag_color"]
             if tag.color != new_color:
                 tag.color = new_color
                 update_fields.append("color")
@@ -1637,6 +1653,7 @@ class DeviceImportConfigForm(forms.Form):
                 suggested_site: Pre-selected site
                 suggested_device_type: Pre-selected device type
                 suggested_role: Pre-selected device role
+
         """
         # Extract custom kwargs
         libre_device = kwargs.pop("libre_device", {})
