@@ -356,9 +356,9 @@ def _count_quiet02(values):
     return len(values)
 
 
-# --- [quiet] a helper that returns a scoped object stays quiet
+# --- [flag] a permission-scoped helper outside the disclosure gate is not a sanitizer
 def probe_quiet03(result, user):
-    # ok: import-disclosure
+    # ruleid: import-disclosure
     result["warnings"].append(f"in scope {_allowed_quiet03(user).name}")
 
 
@@ -367,10 +367,10 @@ def _allowed_quiet03(user):
     return Device.objects.restrict(user, "view").filter(serial="x").first()
 
 
-# --- [quiet] an inline scoped query names an object the viewer may see
+# --- [flag] an inline scoped query outside the disclosure gate is not a sanitizer
 def probe_quiet04(result, user, serial):
     from dcim.models import Device
-    # ok: import-disclosure
+    # ruleid: import-disclosure
     result["warnings"].append(
         f"in scope {Device.objects.restrict(user, 'view').filter(serial=serial).first().name}"
     )
@@ -384,12 +384,25 @@ def probe_quiet05(result, view, serial):
     result["warnings"].append(f"in scope: {allowed.name}")
 
 
-# --- [quiet] a scoped manager call
+# --- [flag] a scoped manager call outside the disclosure gate is not a sanitizer
 def probe_quiet06(result, user, serial):
     from dcim.models import Device
     allowed = Device.objects.restrict(user, "view").filter(serial=serial).first()
-    # ok: import-disclosure
+    # ruleid: import-disclosure
     result["warnings"].append(f"in scope: {allowed.name}")
+
+
+# --- [quiet] the disclosure gate scopes identity to its viewer and an approved action
+class ViewerScope:
+    def __init__(self, user):
+        self._user = user
+
+    def probe(self, result):
+        from dcim.models import Device
+
+        allowed = Device.objects.restrict(self._user, "view").first()
+        # ok: import-disclosure
+        result["warnings"].append(f"in scope: {allowed.name}")
 
 
 # --- [flag] a local function cannot impersonate the view permission helper
@@ -460,7 +473,7 @@ class ShadowedModel:
 
 def probe_shadowed_model_manager(result):
     owner = ShadowedModel.objects.restrict()
-    # ok: import-disclosure
+    # ruleid: import-disclosure
     result["warnings"].append(f"owner {owner.name}")
 
 
@@ -698,6 +711,13 @@ def probe_cr12_sum_boolean_count(result):
     total = sum(d.status == "active" for d in devices)
     # ruleid: import-disclosure
     result["warnings"].append(f"total {total}")
+
+
+# --- [flag] a query scoped to a different user does not authorize disclosure to the viewer
+def probe_cr13_different_user(result, viewer, privileged_user):
+    owner = Device.objects.restrict(privileged_user, "view").first()
+    # ruleid: import-disclosure
+    result["warnings"].append(f"owner {owner.name}")
 
 
 # --- [flag] Sanitizers must still report sinks inside their arguments or receivers.

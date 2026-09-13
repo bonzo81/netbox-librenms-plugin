@@ -33,7 +33,7 @@ def scope_bulk_collisions(collisions: list[dict], user) -> list[dict]:
     Redact collision targets the requesting user cannot see.
 
     Scope comes from :func:`visible_pks`, so this and the import-preview gate share one rule for
-    what counts as "may see" (see ``DISCLOSURE_ACTIONS`` in :mod:`disclosure`).
+    what counts as "may see" (see ``ViewerScope.prefetch`` in :mod:`disclosure`).
     """
     models = models_by_name()
     visible_pks_by_model: dict[str, set[int]] = {}
@@ -77,6 +77,7 @@ def _model_name_of(obj) -> str:
 
     Returns:
         str: The lowercase model name.
+
     """
     meta = getattr(obj, "_meta", None)
     model_name = getattr(meta, "model_name", None)
@@ -111,6 +112,7 @@ def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str | None, str,
         list[tuple[int, str | None, str, str]]: ``(nb_device_pk, nb_device_name, role,
             model_name)`` candidates. Each of the (at most five) sources emits a distinct
             role, so no intra-row de-duplication is needed.
+
     """
     from netbox_librenms_plugin.utils import coerce_positive_int
 
@@ -193,6 +195,7 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
                         ...
                     ],
                 }
+
     """
     from netbox_librenms_plugin.utils import coerce_librenms_id
 

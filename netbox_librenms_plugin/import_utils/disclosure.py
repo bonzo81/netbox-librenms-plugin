@@ -24,12 +24,6 @@ from netbox_librenms_plugin.import_validation_helpers import (
 # disclosure paths cannot drift into different labels.
 RESTRICTED_OBJECT_LABEL = "restricted NetBox object"
 
-# A user who may CHANGE an object already reads every field of it through NetBox's edit form, so
-# both grants count as "may see". Requiring "view" alone would withhold the identity of the very
-# object an action view had just resolved through its own ``change`` scope: the plugin's
-# conflict-action views authorize with ``change`` and never ask for ``view``.
-DISCLOSURE_ACTIONS = ("view", "change")
-
 OUT_OF_SCOPE_MATCH_MESSAGE = (
     "This LibreNMS device matches an existing NetBox object outside your view scope. "
     "Ask an administrator to resolve it before importing."
@@ -86,11 +80,17 @@ class ViewerScope:
             # An unknown model cannot be scope-checked, so nothing about it may be named.
             return
         names = self._names.setdefault(model_name, {})
-        for action in DISCLOSURE_ACTIONS:
+        # A user who may change an object already reads its fields through NetBox's edit form.
+        # Keep these actions explicit because the disclosure lint rule recognizes only this gate.
+        scoped_queries = (
+            model.objects.restrict(self._user, "view"),
+            model.objects.restrict(self._user, "change"),
+        )
+        for scoped_query in scoped_queries:
             remaining = missing - names.keys()
             if not remaining:
                 break
-            names.update(model.objects.restrict(self._user, action).filter(pk__in=remaining).values_list("pk", "name"))
+            names.update(scoped_query.filter(pk__in=remaining).values_list("pk", "name"))
 
     def visible(self, model_name: str, pks) -> set:
         """Return the subset of *pks* this viewer may see."""
@@ -143,6 +143,7 @@ def scope_validation_disclosures(validations, user) -> None:
         validations: Validation dicts from :func:`validate_device_for_import`. Anything that is
             not a dict is ignored, so callers can pass a row's ``.get("_validation")`` directly.
         user: The requesting user whose view scope decides what may be named.
+
     """
     rows = [validation for validation in validations if isinstance(validation, dict)]
     if not rows:

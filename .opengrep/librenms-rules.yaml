@@ -42,10 +42,20 @@ rules:
       # a match an unrestricted search already bound into the validation dict
       - pattern: $V["existing_device"]
     pattern-sanitizers:
-      # A permission-scoped lookup may name its object: that is the display gate doing its job.
-      # Only trust the NetBox manager shape. The companion rule below rejects local definitions
-      # and assignments that can impersonate this method.
-      - pattern: $MODEL.objects.restrict(...)
+      # Only ViewerScope may convert an unrestricted match into displayable identity. Bind the
+      # sanitizer to its requesting user and the two disclosure actions. A restrict() call for a
+      # different user, action, or code path does not authorize the current response.
+      - patterns:
+          - pattern-inside: |
+              class ViewerScope:
+                ...
+          - pattern: $MODEL.objects.restrict(self._user, "view")
+        exact: true
+      - patterns:
+          - pattern-inside: |
+              class ViewerScope:
+                ...
+          - pattern: $MODEL.objects.restrict(self._user, "change")
         exact: true
       # Aggregates are exempted to keep real code workable, not because they provably erase
       # identity: a contrived len(range(owner.pk)) still carries the pk. sum() is NOT exempt,
