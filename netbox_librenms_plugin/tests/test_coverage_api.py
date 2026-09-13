@@ -202,15 +202,25 @@ class TestTestConnectionErrors:
 class TestGetAvailableServersLegacy:
     """get_available_servers on the pre-multi-server config shape."""
 
-    def test_legacy_config_no_servers(self, settings):
+    @pytest.mark.parametrize("scheme", ["http", "https"])
+    def test_legacy_config_no_servers(self, settings, scheme):
         """With no servers mapping, a complete legacy pair is offered under the default key."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        configure_legacy(settings, "https://legacy.example.com")
+        legacy_url = f"{scheme}://legacy.example.com"
+        configure_legacy(settings, legacy_url)
 
         result = LibreNMSAPI.get_available_servers()
 
-        assert result == {"default": "Default Server (https://legacy.example.com)"}
+        assert result == {"default": f"Default Server ({legacy_url})"}
+
+    def test_malformed_legacy_url_returns_no_server(self, settings):
+        """Legacy mode does not offer a URL that the API client cannot bind."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        configure_legacy(settings, "not-a-valid-url")
+
+        assert LibreNMSAPI.get_available_servers() == {}
 
     @pytest.mark.parametrize(
         ("url", "token"),
