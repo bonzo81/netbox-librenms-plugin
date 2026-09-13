@@ -342,7 +342,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 sync_settings,
             )
 
-    def _lock_cable_terminations(
+    def _lock_cable_terminations(  # noqa: C901
         self,
         local_term,
         remote_term,
@@ -1067,7 +1067,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             context["close_modal"] = True
         return view.render_sync_partial(request, obj, resolved_key, {"cable_sync": context})
 
-    def display_sync_results(self, request, results):
+    def display_sync_results(self, request, results):  # noqa: C901
         """Display flash messages summarizing the cable sync results."""
         if results["missing_remote"]:
             messages.error(

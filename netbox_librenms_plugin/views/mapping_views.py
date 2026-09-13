@@ -86,9 +86,7 @@ from netbox_librenms_plugin.views.mixins import (
 
 
 class InterfaceTypeMappingListView(LibreNMSGenericPermissionMixin, generic.ObjectListView):
-    """
-    Provides a view for listing all `InterfaceTypeMapping` objects.
-    """
+    """Provides a view for listing all `InterfaceTypeMapping` objects."""
 
     queryset = InterfaceTypeMapping.objects.all()
     table = InterfaceTypeMappingTable
@@ -98,9 +96,7 @@ class InterfaceTypeMappingListView(LibreNMSGenericPermissionMixin, generic.Objec
 
 
 class InterfaceTypeMappingCreateView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
-    """
-    Provides a view for creating a new `InterfaceTypeMapping` object.
-    """
+    """Provides a view for creating a new `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
     form = InterfaceTypeMappingForm
@@ -109,7 +105,8 @@ class InterfaceTypeMappingCreateView(LibreNMSGenericWritePermissionMixin, generi
 @register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
 class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
     """
-    Provides a view for bulk importing `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
+    Import `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
+
     Supports three import methods: direct import, file upload, and data file.
     """
 
@@ -118,43 +115,33 @@ class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, ge
 
 
 class InterfaceTypeMappingView(LibreNMSGenericPermissionMixin, generic.ObjectView):
-    """
-    Provides a view for displaying details of a specific `InterfaceTypeMapping` object.
-    """
+    """Provides a view for displaying details of a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
 
 
 class InterfaceTypeMappingEditView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
-    """
-    Provides a view for editing a specific `InterfaceTypeMapping` object.
-    """
+    """Provides a view for editing a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
     form = InterfaceTypeMappingForm
 
 
 class InterfaceTypeMappingDeleteView(LibreNMSGenericWritePermissionMixin, generic.ObjectDeleteView):
-    """
-    Provides a view for deleting a specific `InterfaceTypeMapping` object.
-    """
+    """Provides a view for deleting a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
 
 
 class InterfaceTypeMappingBulkDeleteView(LibreNMSGenericWritePermissionMixin, generic.BulkDeleteView):
-    """
-    Provides a view for deleting multiple `InterfaceTypeMapping` objects.
-    """
+    """Provides a view for deleting multiple `InterfaceTypeMapping` objects."""
 
     queryset = InterfaceTypeMapping.objects.all()
     table = InterfaceTypeMappingTable
 
 
 class InterfaceTypeMappingChangeLogView(LibreNMSGenericPermissionMixin, generic.ObjectChangeLogView):
-    """
-    Provides a view for displaying the change log of a specific `InterfaceTypeMapping` object.
-    """
+    """Provides a view for displaying the change log of a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
 

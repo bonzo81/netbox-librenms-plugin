@@ -34,7 +34,7 @@ def _trim_python_whitespace(expression):
 
 
 def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> None:
-    """
+    r"""
     Verify that *replacement* is a valid back-reference template for *compiled*.
 
     ``re.sub(pattern, replacement, test_string)`` only evaluates group references
@@ -77,10 +77,7 @@ class FullCleanOnSaveMixin:
 
 
 class LibreNMSSettings(models.Model):
-    """
-    Model to store LibreNMS plugin settings, specifically which server to use
-    when multiple servers are configured.
-    """
+    """Store the selected LibreNMS server and plugin settings."""
 
     selected_server = models.CharField(
         max_length=100,
@@ -363,7 +360,7 @@ class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
 
 
 class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
-    """
+    r"""
     Map LibreNMS inventory names to NetBox module bay names.
 
     Used when LibreNMS inventory names don't match NetBox bay names exactly.
@@ -486,7 +483,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
 
 
 class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
-    """
+    r"""
     Regex-based string normalization applied before matching lookups.
 
     Generic building block: a single rule engine handles normalization
@@ -842,7 +839,8 @@ LOCATION_MAPPING_TARGETS = {
 
 
 class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
-    """Map a parsed LibreNMS location value to a NetBox organisation object.
+    """
+    Map a parsed LibreNMS location value to a NetBox organisation object.
 
     The LibreNMS ``location`` field is a single free-text string. Users describe
     its structure with a parse pattern which yields tokens for
@@ -932,7 +930,8 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
             self._validate_no_scoped_collision()
 
     def _validate_no_scoped_collision(self):
-        """Reject a location/rack alias that already maps to another object in the same site.
+        """
+        Reject a location/rack alias that already maps to another object in the same site.
 
         Parent-site scoping only disambiguates duplicates across *different* sites;
         two aliases resolving within one site leave resolution with no tiebreak.
@@ -1180,7 +1179,7 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
 
 
 class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
-    """
+    r"""
     Map a LibreNMS OS name to regexes that classify port-stack interfaces.
 
     Used as fallback when a port's ifType is not 'ieee8023adLag'.

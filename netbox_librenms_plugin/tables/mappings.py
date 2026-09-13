@@ -18,9 +18,7 @@ from netbox_librenms_plugin.models import (
 
 
 class InterfaceTypeMappingTable(NetBoxTable):
-    """
-    Table for displaying InterfaceTypeMapping data.
-    """
+    """Table for displaying InterfaceTypeMapping data."""
 
     librenms_type = tables.Column(verbose_name="LibreNMS Type")
     librenms_speed = tables.Column(verbose_name="LibreNMS Speed (Kbps)")

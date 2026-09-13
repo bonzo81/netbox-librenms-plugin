@@ -1838,7 +1838,7 @@ class LibreNMSAPI:
             return True, []
         return self._fetch_serial_port_sensors(device_id, sensor_types=serial_types)
 
-    def _fetch_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:
+    def _fetch_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:  # noqa: C901
         """
         Fetch the serial-port sensors of one device from the instance-wide sensor table.
 

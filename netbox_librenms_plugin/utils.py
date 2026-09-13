@@ -732,6 +732,7 @@ def classify_cable_action(local_term, remote_term, provenance_tag=_PROVENANCE_TA
     Args:
         local_term: The near-side termination (ConsoleServerPort / Interface).
         remote_term: The far-side termination (ConsolePort / Interface).
+        provenance_tag: Optional tag used to identify cables managed by this plugin.
 
     Returns:
         dict: ``{"action": str, "to_remove": [Cable, ...], "cable": Cable | None}`` where
@@ -912,6 +913,7 @@ def render_cable_trace(cable, user=None) -> list:
 
     Args:
         cable: The NetBox ``Cable`` whose end-to-end path is rendered.
+        user: Optional user whose object scope controls labels in the rendered trace.
 
     Returns:
         list[dict]: One ``{"near": str, "cable": str | None, "far": str}`` entry per traced

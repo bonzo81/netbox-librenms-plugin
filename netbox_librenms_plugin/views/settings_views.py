@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
     """
-    View for managing plugin settings including server selection and import options.
+    Manage plugin settings, server selection, and import options.
+
     Uses three separate forms for cleaner validation and separation of concerns.
     """
 
@@ -154,7 +155,8 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
 
 class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
     """
-    HTMX view to test LibreNMS server connection.
+    Test a LibreNMS server connection through HTMX.
+
     Returns HTML fragment instead of JSON for HTMX compatibility.
     """
 

@@ -28,7 +28,8 @@ def _render_template(template_name, context):
 
 
 def _wait_for_route(page, predicate, timeout=5_000):
-    """Wait until a held route has reached its handler.
+    """
+    Wait until a held route has reached its handler.
 
     ``expect_request`` resolves on the request event, which Playwright dispatches independently
     of the ``page.route`` handler, so the handler may not have appended its route yet.

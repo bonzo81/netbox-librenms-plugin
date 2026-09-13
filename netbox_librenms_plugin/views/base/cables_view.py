@@ -214,9 +214,7 @@ class BaseCableTableView(
     CacheMixin,
     View,
 ):
-    """
-    Base view for synchronizing cable information from LibreNMS.
-    """
+    """Base view for synchronizing cable information from LibreNMS."""
 
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
@@ -352,7 +350,7 @@ class BaseCableTableView(
         match = matches[0]
         return (match if match.pk in visible_ids else None), True
 
-    def _build_normal_link_context(self, links, obj, server_key):
+    def _build_normal_link_context(self, links, obj, server_key):  # noqa: C901
         """Load normal LLDP/CDP resolution and permission candidates once per snapshot."""
         normal_links = [link for link in links if link.get("_source") != "serial"]
         if not normal_links:
@@ -923,7 +921,7 @@ class BaseCableTableView(
         return links_data
 
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None, queryset=None):
-        """Try to find device in NetBox first by librenms_id custom field, then by name"""
+        """Try to find device in NetBox first by librenms_id custom field, then by name."""
         if server_key is None:
             server_key = self._render_server_key()
         queryset = queryset if queryset is not None else Device.objects.all()
@@ -1074,7 +1072,7 @@ class BaseCableTableView(
                 link["netbox_local_device_id"] = interface.device_id
 
     def enrich_remote_port(self, link, device, server_key=None, normal_context=None):
-        """Add remote port URL if device and interface exist in NetBox"""
+        """Add remote port URL if device and interface exist in NetBox."""
         remote_port = link.get("remote_port")
         if isinstance(remote_port, str) and remote_port:
             netbox_remote_interface = None
@@ -1329,7 +1327,7 @@ class BaseCableTableView(
             link["cable_status"] = "No Cable"
         return link
 
-    def enrich_serial_remote(self, link, claimed_cp_ids=None, csp=None, remote_context=None):
+    def enrich_serial_remote(self, link, claimed_cp_ids=None, csp=None, remote_context=None):  # noqa: C901
         """
         Resolve the remote ConsolePort for a serial row using the Avocent label.
 
@@ -1365,6 +1363,7 @@ class BaseCableTableView(
                 "duplicate" while a genuinely free port stays uncabled.
             csp: The ConsoleServerPort already loaded for this row (reused when it matches the
                 resolved id, saving a re-fetch by pk).
+            remote_context: Optional preloaded device, port, cable, and trace visibility data.
 
         Returns:
             None
@@ -1535,6 +1534,7 @@ class BaseCableTableView(
             link (dict): The serial cable-sync row, mutated in place.
             csp: The row's resolved (and cabled) local ConsoleServerPort.
             device: The label-matched NetBox device.
+            remote_context: Optional preloaded port, cable, and trace visibility data.
 
         Returns:
             bool: True when the row is fully resolved; False to fall through (mismatch).
@@ -1617,6 +1617,7 @@ class BaseCableTableView(
             link (dict): The serial cable-sync row, mutated in place.
             csp: The row's resolved (and cabled) local ConsoleServerPort.
             path: An already-computed ``csp.trace()`` result to reuse (avoids re-tracing).
+            visible_ids: Optional visible object IDs grouped by model.
         """
         if path is None:
             path = csp.trace()
@@ -1667,6 +1668,7 @@ class BaseCableTableView(
             csp: The row's resolved local ConsoleServerPort.
             target_cp: The ConsolePort the remote should resolve to.
             manual (bool): Mark the row as manually picked (rendered as a hint in the table).
+            remote_context: Optional preloaded port, cable, and trace visibility data.
         """
         link["netbox_remote_device_id"] = target_cp.device_id
         # Show the picked device's real name (display-only key: the raw ``remote_device`` label
@@ -1889,7 +1891,7 @@ class BaseCableTableView(
         }
 
     def process_remote_device(self, link, remote_hostname, remote_device_id, server_key=None, normal_context=None):
-        """Process remote device data and add remote device URL if device exists in NetBox"""
+        """Process remote device data and add remote device URL if device exists in NetBox."""
         if normal_context is not None:
             device = normal_context["remote_device_by_link"].get(id(link))
             found = device is not None
@@ -2097,7 +2099,7 @@ class BaseCableTableView(
         """Return the cable table for *data*; concrete subclasses choose the table class."""
         raise NotImplementedError
 
-    def _prepare_context(self, request, obj, fetch_fresh=False, server_key=None):
+    def _prepare_context(self, request, obj, fetch_fresh=False, server_key=None):  # noqa: C901
         """Helper method to prepare the context data for cable sync views."""
         table = None
         cache_expiry = None
@@ -2381,7 +2383,7 @@ class SingleCableVerifyView(BaseCableTableView):
     # device id and read back that device's rendered cable/topology rows.
     required_object_permissions = {"POST": [("view", Device)]}
 
-    def post(self, request):
+    def post(self, request):  # noqa: C901
         data, err = parse_request_json(request)
         if err:
             return err
