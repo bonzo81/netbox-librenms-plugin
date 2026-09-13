@@ -380,7 +380,7 @@ def _unwrap_recorded_response(value):
     """Return the JSON body from a recording response value."""
     if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
         return value[1]
-    return value
+    return unwrap_response(value)[1]
 
 
 class LibreNMSStubServer(MockLibreNMSServer):
