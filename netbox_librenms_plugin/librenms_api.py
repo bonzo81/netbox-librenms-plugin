@@ -125,7 +125,8 @@ class LibreNMSUnreachable(Exception):
 
 
 class _TokenScopedSession(requests.Session):
-    """Keep ``X-Auth-Token`` on the host the request was addressed to.
+    """
+    Keep ``X-Auth-Token`` on the host the request was addressed to.
 
     ``requests`` drops only ``Authorization`` when a redirect crosses hosts and forwards every
     other header, so a LibreNMS that redirects elsewhere would hand the API token to whatever
