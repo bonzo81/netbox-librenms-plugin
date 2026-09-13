@@ -19,7 +19,7 @@
           "device_id": 1000,
           "hostname": "device-stack01",
           "sysName": "device-stack01",
-          "hardware": "WS-C3750X-48P",
+          "hardware": "MODEL-8d129e",
           "os": "os-901310",
           "serial": "SN-a1b2c3",
           "ip": "192.0.2.10",

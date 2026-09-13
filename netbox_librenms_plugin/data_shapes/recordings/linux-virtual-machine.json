@@ -18,7 +18,7 @@
           "sysName": "device-vm0001",
           "display": "device-vm0001",
           "ip": "192.0.2.200",
-          "hardware": "KVM Virtual Machine",
+          "hardware": "MODEL-91bf2d",
           "version": "stub-linux-1",
           "features": "virtual",
           "location_id": 1,

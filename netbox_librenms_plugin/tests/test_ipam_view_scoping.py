@@ -127,6 +127,23 @@ class TestInterfacesTabIpamScoping:
         assert context["hidden_ipam_permissions"] == []
         assert group.name in _table_html(context["table"])
 
+    def test_a_constrained_ipam_grant_marks_the_interface_scope_incomplete(self, settings):
+        """A partial object grant must show the same incomplete-scope warning as the VLAN tab."""
+        from ipam.models import VLAN, VLANGroup
+
+        server_key = configure_default_librenms_server(settings)
+        device = make_device("iface-tab-constrained")
+        group, vlan = _site_group_with_vlan(device, "iface-tab-constrained")
+        VLANGroup.objects.create(name="iface-tab-hidden", slug="iface-tab-hidden")
+        user = make_user_with_perms("iface-tab-constrained-user", [("view", type(device))], plugin_write=False)
+        user = grant(user, "view", VLANGroup, constraints={"pk": group.pk})
+        user = grant(user, "view", VLAN, constraints={"pk": vlan.pk})
+
+        context = self._context(user, device, server_key)
+
+        assert context["hidden_ipam_permissions"] == [], "precondition: the permission-name check must pass"
+        assert context["vlan_scope_incomplete"] is True
+
 
 def _table_html(table):
     """Render every cell of a bound table so a leaked group name is visible to an assertion."""

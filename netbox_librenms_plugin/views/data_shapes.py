@@ -55,6 +55,7 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return self._error(request, device, "Selected LibreNMS server is no longer configured.")
 
         sync_device = get_librenms_sync_device(device, server_key=server_key) or device
+        sync_device = self.restrict_object_or_404(Device, pk=sync_device.pk)
         librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
         if lookup_error is not None:
             return self._error(request, device, self.scoped_lookup_message(lookup_error))

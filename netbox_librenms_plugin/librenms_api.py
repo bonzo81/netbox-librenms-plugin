@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 import math
 import urllib.parse
@@ -25,6 +26,24 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 HTTP_NOT_FOUND = 404
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_api_url_transport(url):
+    """Reject API URLs that would send credentials over a remote cleartext connection."""
+    if not isinstance(url, str):
+        raise ValueError("LibreNMS API URLs must use HTTPS, except for HTTP loopback addresses.")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https" and parsed.hostname:
+        return
+    if parsed.scheme == "http" and parsed.hostname:
+        if parsed.hostname == "localhost":
+            return
+        try:
+            if ipaddress.ip_address(parsed.hostname).is_loopback:
+                return
+        except ValueError:
+            pass
+    raise ValueError("LibreNMS API URLs must use HTTPS, except for HTTP loopback addresses.")
 
 
 class LibreNMSIDConflictError(ValueError):
@@ -148,7 +167,13 @@ class LibreNMSAPI:
             bool: True if the configuration is a usable server mapping.
 
         """
-        return isinstance(config, dict) and bool(config.get("librenms_url")) and bool(config.get("api_token"))
+        if not isinstance(config, dict) or not config.get("librenms_url") or not config.get("api_token"):
+            return False
+        try:
+            _validate_api_url_transport(config["librenms_url"])
+        except (TypeError, ValueError):
+            return False
+        return True
 
     def __init__(self, server_key=None):
         """
@@ -256,6 +281,7 @@ class LibreNMSAPI:
 
         if not self.librenms_url or not self.api_token:
             raise ValueError(f"LibreNMS URL or API token is not configured for server '{server_key}'.")
+        _validate_api_url_transport(self.librenms_url)
 
         self.headers = {"X-Auth-Token": self.api_token}
 
@@ -399,7 +425,7 @@ class LibreNMSAPI:
 
     def get_librenms_id(self, obj):
         """
-        Return the object's configured or discovered LibreNMS ID.
+        Resolve a LibreNMS device ID for a NetBox object.
 
         Args:
             obj: NetBox object with a librenms_id custom field or discovery identity.

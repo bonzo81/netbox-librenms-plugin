@@ -25,12 +25,13 @@ def _helper_line_ranges(tree):
 
 
 def _reads_one_raw_server_key(call):
+    arguments = [*call.args, *(keyword.value for keyword in call.keywords)]
     return any(
         isinstance(arg, ast.Call)
         and isinstance(arg.func, ast.Attribute)
         and arg.func.attr == "get"
         and any(isinstance(const, ast.Constant) and const.value == "server_key" for const in arg.args)
-        for arg in call.args
+        for arg in arguments
     )
 
 
@@ -56,3 +57,15 @@ def test_no_view_rebinds_from_a_single_raw_server_key_value():
     ]
 
     assert offenders == []
+
+
+def test_keyword_argument_raw_server_key_read_is_detected():
+    """A keyword call must not bypass the repeated-value server-key contract."""
+    tree = ast.parse(
+        """
+def view(request):
+    self.rebind_api_for_server(server_key=request.GET.get("server_key"))
+"""
+    )
+
+    assert list(_loose_rebind_lines(tree)) == [3]

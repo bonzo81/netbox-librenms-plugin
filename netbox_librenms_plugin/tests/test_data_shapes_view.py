@@ -392,6 +392,46 @@ def test_capture_view_denies_device_outside_users_object_scope(recording_server)
 
 
 @pytest.mark.django_db
+def test_capture_view_denies_a_hidden_virtual_chassis_sync_owner(recording_server):
+    """A visible VC member must not expose capture data owned by a hidden member."""
+    from core.models import ObjectType
+    from dcim.models import Device
+    from django.http import Http404
+    from users.models import ObjectPermission
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    visible = make_device("capture-visible-member")
+    hidden = make_device(
+        "capture-hidden-owner",
+        librenms_cf={"test": {"id": 1000, "oob": {"id": 1001, "type": "oob"}}},
+    )
+    make_virtual_chassis("capture-scoped-vc", visible, hidden)
+    user = get_user_model().objects.create_user(username="capture-vc-viewer", password="x")
+    permission = ObjectPermission.objects.create(
+        name="view-capture-page-member",
+        actions=["view"],
+        constraints={"name": visible.name},
+    )
+    permission.object_types.set([ObjectType.objects.get_for_model(Device)])
+    permission.users.set([user])
+    user = get_user_model().objects.get(pk=user.pk)
+    request = RequestFactory().get("/?server_key=test")
+    request.user = user
+    servers_config = {
+        "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
+    }
+
+    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
+        mock_cfg.side_effect = lambda plugin, key, *args, **kwargs: (
+            servers_config if key == "servers" else _real_get_plugin_config(plugin, key, *args, **kwargs)
+        )
+        with pytest.raises(Http404):
+            _view_with_api(api).get(request, device_id=visible.pk)
+
+
+@pytest.mark.django_db
 def test_capture_view_salts_every_capture_freshly(recording_server):
     """The contributor publishes this file, so the pseudonyms must not be a plain hash of low-entropy values: a fresh per-capture salt makes two captures of the SAME device produce different pseudonyms (dictionary-hashing a candidate hostname no longer confirms it)."""
     import re

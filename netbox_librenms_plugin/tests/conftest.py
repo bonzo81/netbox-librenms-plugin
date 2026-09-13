@@ -277,7 +277,6 @@ def _restore_migration_seeded_rows(request):
 @pytest.fixture(scope="session", autouse=True)
 def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
     """Restore data-migration seeds before and after a reused-database run."""
-
     from django.db import connection
 
     # Pure test runs do not switch the connection to an isolated test database.
@@ -819,7 +818,7 @@ def mock_plugins_config_multi_server_mapping():
                 },
                 "mock-dev": {
                     "display_name": "Mock",
-                    "librenms_url": "http://mock.example.com",
+                    "librenms_url": "https://mock.example.com",
                 },
             }
         }

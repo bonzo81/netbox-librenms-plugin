@@ -6037,6 +6037,15 @@ def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, setting
             "entPhysicalSerialNum": member.serial,
             "entPhysicalContainedIn": 0,
         },
+        {
+            "entPhysicalIndex": 94,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "OOB Member policy item",
+            "entPhysicalModelName": "OOB-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+            "_source": "oob",
+        },
     ]
     payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
     cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
@@ -6050,5 +6059,6 @@ def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, setting
 
     assert response.status_code == 200
     rows = list(response.context["module_sync"]["table"].data)
-    assert [row["name"] for row in rows] == ["Page policy item"]
-    assert rows[0]["selected_device_id"] == member.pk
+    assert {row["name"] for row in rows} == {"OOB Member policy item", "Page policy item"}
+    assert next(row for row in rows if row["name"] == "OOB Member policy item")["status"] == "OOB"
+    assert next(row for row in rows if row["name"] == "Page policy item")["selected_device_id"] == member.pk

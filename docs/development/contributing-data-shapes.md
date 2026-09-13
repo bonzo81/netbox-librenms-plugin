@@ -30,15 +30,16 @@ The plugin never submits on your behalf — you stay in control of what leaves y
 `netbox_librenms_plugin/data_shapes/anonymize.py` applies field-aware rules so the shape stays
 test-useful while losing identifying detail:
 
-- **Preserved verbatim** — the logic-bearing fields the tests read: `ifType`, port
+- **Preserved verbatim:** the logic-bearing fields the tests read: `ifType`, port
   ids, `entPhysicalClass` / `entPhysicalIndex` / `entPhysicalContainedIn` /
-  `entPhysicalParentRelPos`, VLANs, transceiver optics.
-- **Pseudonymized deterministically** — serials, hostnames, model SKUs and the `os` become
-  `SN-…` / `device-…` / `MODEL-…` / `os-…` tokens. The mapping is stable, so cross-references
-  (a device serial that equals a stack member's serial — how the master is identified) still
-  match. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
+  `entPhysicalParentRelPos`, VLANs, transceiver optics, and public module SKUs in
+  `entPhysicalModelName` and transceiver `model` fields.
+- **Pseudonymized deterministically:** serials, hostnames, the device `hardware` chassis SKU,
+  and the `os` become `SN-…` / `device-…` / `MODEL-…` / `os-…` tokens. The mapping is stable,
+  so cross-references (a device serial that equals a stack member's serial, which identifies
+  the master) still match. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
   sub-units, channels) keep their shape while custom/free-form names become `iface-…` tokens.
-- **Scrubbed** — IPs → documentation ranges, MACs → a synthetic `02:00:00` block, lat/lng →
+- **Scrubbed:** IPs → documentation ranges, MACs → a synthetic `02:00:00` block, lat/lng →
   null, location → `Lab`, free-text (`ifAlias`, `sysContact`, `sysDescr`, …) → empty.
 
 `find_pii()` is a regex safety-net that flags any IP/MAC/email the field rules missed. The capture

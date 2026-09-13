@@ -661,6 +661,26 @@ def test_capture_snapshots_os_scoped_lag_patterns():
 
 
 @pytest.mark.django_db
+def test_capture_omits_an_empty_lag_pattern():
+    """A database-level blank must not become a regex that classifies every port as a LAG."""
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    PortStackLagPattern.objects.bulk_create([PortStackLagPattern(librenms_os="captest-empty-lag", lag_name_pattern="")])
+    api = _StubApi(
+        {
+            "devices/77": (200, {"status": "ok", "devices": [{"device_id": 77, "os": "captest-empty-lag"}]}),
+            "inventory/77": (200, {"status": "ok", "inventory": []}),
+            "inventory/77/all": (200, {"status": "ok", "inventory": []}),
+            "devices/77/ports": (200, {"status": "ok", "ports": []}),
+            "devices/77/port_stack": (200, {"status": "ok", "mappings": []}),
+            "devices/77/transceivers": (200, {"status": "ok", "transceivers": []}),
+        }
+    )
+
+    assert capture_device_recording(api, 77)["lag_patterns"] == {}
+
+
+@pytest.mark.django_db
 def test_capture_snapshots_the_os_sap_pattern_and_omits_a_blank_one():
     """A replay without the SAP rule resolves a service access point as a LAG member, so the rule travels with the recording exactly as the LAG pattern does."""
     from netbox_librenms_plugin.models import PortStackLagPattern
@@ -798,7 +818,7 @@ class TestRecordedResponseEnvelope:
         assert any(STATUS_KEY in error for error in errors), errors
 
     def test_a_recorded_list_body_passes_validation(self):
-        """capture stores a 2xx list body bare, so validation must not refuse it as a framing."""
+        """Capture stores a 2xx list body bare, so validation must not refuse it as a framing."""
         from netbox_librenms_plugin.data_shapes.envelope import wrap_response
         from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
 

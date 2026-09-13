@@ -13,6 +13,7 @@ This is the maintainer/CI entry point for the capture→anonymize→replay pipel
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 from django.core.management.base import BaseCommand, CommandError
 
@@ -99,9 +100,12 @@ class Command(BaseCommand):
         manifest = build_manifest(recordings)
         # Write atomically (tmp + replace): a direct write_text truncates the shipped manifest
         # first, so a crash mid-write would make novelty classification unavailable until a rebuild.
-        tmp_path = recordings_store.MANIFEST_PATH.with_name(recordings_store.MANIFEST_PATH.name + ".tmp")
-        tmp_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        tmp_path.replace(recordings_store.MANIFEST_PATH)
+        tmp_path = recordings_store.MANIFEST_PATH.with_name(f".{recordings_store.MANIFEST_PATH.name}.{uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(json.dumps(manifest, indent=2) + "\n")
+            tmp_path.replace(recordings_store.MANIFEST_PATH)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         self.stdout.write(
             self.style.SUCCESS(f"Wrote {len(manifest)} signature(s) to {recordings_store.MANIFEST_PATH}.")
         )

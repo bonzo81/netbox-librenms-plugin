@@ -43,7 +43,7 @@ class BaseInterfaceTableView(
     VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View
 ):
     """
-    Fetch LibreNMS interface data and generate table data.
+    Base view for fetching interface data from LibreNMS and generating table data.
 
     Includes VLAN enrichment for interface VLAN sync functionality.
     """
@@ -127,7 +127,7 @@ class BaseInterfaceTableView(
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """
-        Return the table class used to render interface data.
+        Return the table class to use for rendering interface data.
 
         Can be overridden by subclasses to use different tables.
 
@@ -566,7 +566,7 @@ class BaseInterfaceTableView(
                 None.
             fresh_data: Optional in-memory ports snapshot to render from instead of
                 the cache.
-            sync_device: Optional device that owns the selected LibreNMS synchronization data.
+            sync_device: Device that owns the LibreNMS identity and cache entry.
 
         Returns:
             dict: The template context (object, table, vlan_groups, server_key,
@@ -647,6 +647,7 @@ class BaseInterfaceTableView(
         vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices, user=vlan_scope_user)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
         hidden_ipam_permissions = self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user)
+        vlan_scope_incomplete = self.vlan_scope_is_incomplete(vlan_scope_devices, vlan_scope_user)
         vlan_groups_by_device = {
             device.pk: self.filter_vlan_groups_for_device(vlan_groups, device) for device in vlan_scope_devices
         }
@@ -905,6 +906,7 @@ class BaseInterfaceTableView(
             "oob_incomplete": oob_incomplete,
             "relationship_data_incomplete": relationship_data_incomplete,
             "hidden_ipam_permissions": hidden_ipam_permissions,
+            "vlan_scope_incomplete": vlan_scope_incomplete,
         }
 
     @staticmethod

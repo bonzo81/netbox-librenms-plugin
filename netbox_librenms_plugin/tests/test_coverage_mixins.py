@@ -21,7 +21,7 @@ from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, co
 def server_entry(key, *, display_name=None):
     """Return a usable server mapping, so build_librenms_api() binds a client for *key*."""
     return {
-        "librenms_url": f"http://{key}.librenms.test",
+        "librenms_url": f"https://{key}.librenms.test",
         "api_token": f"token-{key}",
         "display_name": display_name or key.title(),
     }
@@ -352,7 +352,7 @@ class TestLibreNMSAPIMixinGetContextData:
 
         assert ctx["foo"] == "bar"
         assert ctx["num"] == 42
-        assert ctx["librenms_server_info"]["url"] == "http://default.librenms.test"
+        assert ctx["librenms_server_info"]["url"] == "https://default.librenms.test"
 
     def test_get_context_data_empty_kwargs_still_adds_server_info(self, settings):
         """Server info is added even when the fallback context starts empty."""
@@ -1277,8 +1277,8 @@ class TestRebindApiForServerOrDefault:
     _CONFIG = {
         "netbox_librenms_plugin": {
             "servers": {
-                "prod-a": {"librenms_url": "http://a.example", "api_token": "tok-a"},
-                "prod-b": {"librenms_url": "http://b.example", "api_token": "tok-b"},
+                "prod-a": {"librenms_url": "https://a.example", "api_token": "tok-a"},
+                "prod-b": {"librenms_url": "https://b.example", "api_token": "tok-b"},
             }
         }
     }

@@ -8,14 +8,13 @@ from django.core.cache import cache
 from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
-from ..utils import normalize_inventory_serial, normalize_serial, preload_normalization_rules
+from ..utils import find_devices_by_serial, normalize_inventory_serial, normalize_serial, preload_normalization_rules
 
 logger = logging.getLogger(__name__)
 
 
 def empty_virtual_chassis_data() -> dict:
     """Public helper for callers that need a blank VC payload."""
-
     return {
         "is_stack": False,
         "member_count": 0,
@@ -26,7 +25,6 @@ def empty_virtual_chassis_data() -> dict:
 
 def _clone_virtual_chassis_data(data: dict | None) -> dict:
     """Return a defensive copy of cached VC data to avoid shared references."""
-
     if not data:
         return empty_virtual_chassis_data()
 
@@ -61,7 +59,6 @@ def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
 
 def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False) -> dict:
     """Fetch (and cache) virtual chassis data for a LibreNMS device."""
-
     if not api or device_id is None:
         return empty_virtual_chassis_data()
 
@@ -129,9 +126,10 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
     logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
 
 
-def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:
+def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:  # noqa: C901
     """
-    Detect if device is a stack/Virtual Chassis by analyzing ENTITY-MIB inventory.
+    Detect a stack or Virtual Chassis from ENTITY-MIB inventory.
+
     Vendor-agnostic using standard hierarchical structure.
 
     Args:
@@ -425,7 +423,7 @@ def _sync_module_bay_counter(device: Device) -> None:
         )
 
 
-def create_virtual_chassis_with_members(
+def create_virtual_chassis_with_members(  # noqa: C901
     master_device: Device, members_info: list, libre_device: dict, server_key: str | None = None
 ) -> VirtualChassis:
     """
@@ -438,6 +436,7 @@ def create_virtual_chassis_with_members(
         master_device: The imported device (becomes VC master)
         members_info: List of member dicts from VC detection
         libre_device: Original LibreNMS device data
+        server_key: LibreNMS server key stored with the created members.
 
     Returns:
         VirtualChassis: The created virtual chassis instance
@@ -453,7 +452,6 @@ def create_virtual_chassis_with_members(
             {'serial': 'ABC124', 'position': 1, 'model': 'C9300-48U', 'name': 'Switch 2'}
         ]
     """
-
     # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
     # not in-memory model fields.
     original_master_name = master_device.name
@@ -562,7 +560,7 @@ def create_virtual_chassis_with_members(
                 )
 
                 # Check for duplicate serial
-                if serial and Device.objects.filter(serial=serial).exists():
+                if serial and find_devices_by_serial(serial, limit=1):
                     logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
                     continue
 

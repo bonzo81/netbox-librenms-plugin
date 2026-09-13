@@ -190,13 +190,12 @@ class TestTestConnectionErrors:
         assert "timeout" in result["message"].lower()
 
     def test_unexpected_request_error_is_reported(self, settings):
-        """A malformed server URL reaches the generic request setup error handler."""
-        api = api_for(settings, "invalid-url")
+        """A malformed server URL fails before a client can send credentials."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        result = api.test_connection()
-
-        assert result["error"] is True
-        assert "unexpected error" in result["message"].lower()
+        configure_servers(settings, {"default": {"librenms_url": "invalid-url", "api_token": "test-token"}})
+        with pytest.raises(ValueError, match="HTTPS"):
+            LibreNMSAPI(server_key="default")
 
 
 @pytest.mark.django_db

@@ -231,7 +231,7 @@ def _check_ignore_rules(  # noqa: C901
 
 class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
-    Synchronize module and inventory data from LibreNMS.
+    Base view for synchronizing module/inventory data from LibreNMS.
 
     Fetches inventory, matches against NetBox module bays and module types,
     and renders a comparison table.
@@ -864,6 +864,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         default_context = policy_for(obj)
         item_contexts = {}
         for item in inventory_data:
+            if item.get("_source") == OOB_INVENTORY_SOURCE:
+                item_contexts[id(item)] = {
+                    **default_context,
+                    "selected_device": obj,
+                    "resolution_source": OOB_INVENTORY_SOURCE,
+                }
+                continue
             selected_device, resolution_source = self._infer_vc_member_for_item(obj, item, index_map, vc_members)
             policy = policy_for(selected_device)
             item_contexts[id(item)] = {
@@ -938,6 +945,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             device_serial (str): The NetBox device serial.
             transparent_indices (set): Physical indices for transparent parents.
             ignore_cache (dict): Cached ignore actions keyed by physical index.
+            ignore_contexts (dict | None): Per-item ignore policies for attributed VC members.
 
         Returns:
             list: The top-level inventory items for the sync table.
@@ -2345,7 +2353,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _fpc_slot_matches(candidate_name, bay):
         """
-        Validate a regex-matched bay against a positional FPC descriptor.
+        Validate a matched bay against a positional FPC descriptor.
 
         Returns True if the descriptor has no FPC reference, or if the bay's parent
         module slot position matches the FPC number in the descriptor. Prevents
@@ -2707,7 +2715,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             scope_preserved (bool): Whether the bay scope came from an unmatched ancestor.
             scope_empty_installed_bays (bool): Whether the installed parent type has
                 no bay templates.
-            normalized_serial: Optional serial that was normalized for the selected device.
+            normalized_serial (str | None): Serial already normalized for the selected manufacturer.
 
         Returns:
             dict: The table row for the inventory item.
@@ -2986,7 +2994,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _derive_bay_template_suggestion(item):
         """
-        Derive Add Bay Template values from a LibreNMS inventory item.
+        Derive an Add Bay Template suggestion from a LibreNMS inventory item.
 
         - ``name``: the LibreNMS item name as-is (the user can edit before
           submit).  Falls back to a class-derived placeholder when the name
@@ -3046,7 +3054,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         holder_hint=None,
     ):
         """
-        Explain how to complete the NetBox model when bay matching produces "No Bay".
+        Explain the missing NetBox model data when bay matching produces "No Bay".
 
         Distinguishes:
           - empty scope due to an uninstalled ancestor -> install the ancestor
@@ -3381,7 +3389,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _suggest_bay_mapping_from_descr_trail(item, candidate_names, item_name, item_class):
         r"""
-        Derive a final ModuleBayMapping suggestion from ``entPhysicalDescr``.
+        Derive a ModuleBayMapping suggestion from ``entPhysicalDescr``.
 
         Useful for vendors that report the model string in entPhysicalName
         and the human-readable position in entPhysicalDescr (e.g. Juniper
@@ -3749,7 +3757,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Args:
             table_data (list): The table rows to check and update.
             index_map (dict | None): Inventory items by entPhysicalIndex, for ancestry checks.
-            obj: The page device whose install scope limits relevant conflicts.
+            obj (Device | None): Device whose VC membership bounds valid conflicts.
 
         """
         from dcim.models import Module

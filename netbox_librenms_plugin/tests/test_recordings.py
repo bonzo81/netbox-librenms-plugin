@@ -11,6 +11,9 @@ the plugin-config lookup and the VC member-name pattern (a DB read) are stubbed,
 so these tests need no database.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from io import StringIO
+from threading import Barrier
 from unittest.mock import patch
 
 import pytest
@@ -217,22 +220,36 @@ def test_bundled_recording_carries_no_residual_pii(recording):
     assert find_pii(recording) == []
 
 
-@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
-def test_bundled_recording_has_no_public_asn(recording):
-    """A committed recording must not leak a public BGP ASN — bgpLocalAs is identifying, so it must be anonymized into the private 64512-65534 range (find_pii() is string-only and won't catch an int ASN)."""
+def _assert_recording_has_no_public_asn(recording):
+    """Reject integer BGP ASNs outside the private 16-bit range."""
     from netbox_librenms_plugin.data_shapes.anonymize import BGP_KEYS
 
     def _walk(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
-                if k in BGP_KEYS and isinstance(v, int) and not isinstance(v, bool) and v != 0:
-                    assert 64512 <= v <= 65534, f"{k}={v} is a public ASN; anonymize it to the private range"
+                asn = int(v) if isinstance(v, str) and v.isdigit() else v
+                if k in BGP_KEYS and isinstance(asn, int) and not isinstance(asn, bool) and asn != 0:
+                    assert 64512 <= asn <= 65534, f"{k}={v} is a public ASN; anonymize it to the private range"
                 _walk(v)
         elif isinstance(obj, list):
             for item in obj:
                 _walk(item)
 
     _walk(recording.get("responses", {}))
+
+
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_recording_has_no_public_asn(recording):
+    """A committed recording must anonymize identifying BGP ASNs into the private range."""
+    _assert_recording_has_no_public_asn(recording)
+
+
+def test_bundled_recording_guard_rejects_a_digit_string_asn():
+    """A JSON string must not bypass the same ASN range check as an integer."""
+    recording = {"responses": {"GET /example": {"bgpLocalAs": "64496"}}}
+
+    with pytest.raises(AssertionError, match="public ASN"):
+        _assert_recording_has_no_public_asn(recording)
 
 
 # OUIs that shipped verbatim in the corpus before the anonymizer masked them. 36965 is 0x009065
@@ -252,6 +269,7 @@ def test_bundled_recording_has_anonymized_vendor_metadata(recording):
     import re
 
     mfg_re = re.compile(r"^MFG-[0-9a-f]{6}$")
+    model_re = re.compile(r"^MODEL-[0-9a-f]{6}$")
     leaked = []
 
     def _walk(obj):
@@ -260,6 +278,10 @@ def test_bundled_recording_has_anonymized_vendor_metadata(recording):
                 if k == "icon" and isinstance(v, str) and v and v != "images/os/generic.svg":
                     leaked.append((k, v))
                 if k in ("entPhysicalMfgName", "vendor") and isinstance(v, str) and v and not mfg_re.match(v):
+                    leaked.append((k, v))
+                if k == "hardware" and isinstance(v, str) and v and not model_re.match(v):
+                    leaked.append((k, v))
+                if k == "entPhysicalModelName" and isinstance(v, str) and v.startswith("MODEL-"):
                     leaked.append((k, v))
                 # The OUI is the IEEE manufacturer prefix; a registered one names the vendor even
                 # when the vendor field is null. Masked values are < 2**24 like real ones, so this
@@ -333,6 +355,30 @@ def test_manifest_is_in_sync_with_bundled_recordings():
 
     expected = build_manifest(recordings_store.load_bundled_recordings())
     assert recordings_store.load_manifest() == expected, "run: manage.py librenms_recordings --rebuild-manifest"
+
+
+def test_concurrent_manifest_rebuilds_do_not_share_a_temporary_file(monkeypatch, tmp_path):
+    """Two rebuild commands must each replace their own completed temporary file."""
+    from netbox_librenms_plugin.data_shapes import recordings_store
+    from netbox_librenms_plugin.management.commands.librenms_recordings import Command
+
+    manifest_path = tmp_path / "manifest.json"
+    original_replace = type(manifest_path).replace
+    writers_ready = Barrier(2)
+
+    def synchronized_replace(path, target):
+        if path.name == "manifest.json.tmp":
+            writers_ready.wait(timeout=5)
+        return original_replace(path, target)
+
+    monkeypatch.setattr(type(manifest_path), "replace", synchronized_replace)
+    with patch.object(recordings_store, "MANIFEST_PATH", manifest_path):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(Command(stdout=StringIO())._rebuild_manifest) for _ in range(2)]
+            for future in futures:
+                future.result(timeout=10)
+
+    assert manifest_path.exists()
 
 
 def test_load_manifest_fails_when_file_is_unreadable(tmp_path):

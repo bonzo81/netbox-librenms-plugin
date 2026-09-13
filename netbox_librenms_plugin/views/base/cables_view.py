@@ -1459,7 +1459,7 @@ class BaseCableTableView(
                 "duplicate" while a genuinely free port stays uncabled.
             csp: The ConsoleServerPort already loaded for this row (reused when it matches the
                 resolved id, saving a re-fetch by pk).
-            remote_context: Optional preloaded device, port, cable, and trace visibility data.
+            remote_context (dict | None): Preloaded visibility and trace data for remote objects.
 
         Returns:
             None
@@ -1642,7 +1642,7 @@ class BaseCableTableView(
             link (dict): The serial cable-sync row, mutated in place.
             csp: The row's resolved (and cabled) local ConsoleServerPort.
             device: The label-matched NetBox device.
-            remote_context: Optional preloaded port, cable, and trace visibility data.
+            remote_context (dict | None): Preloaded visibility and trace data for remote objects.
 
         Returns:
             bool: True when the row is fully resolved; False to fall through (mismatch).
@@ -1726,8 +1726,7 @@ class BaseCableTableView(
             link (dict): The serial cable-sync row, mutated in place.
             csp: The row's resolved (and cabled) local ConsoleServerPort.
             path: An already-computed ``csp.trace()`` result to reuse (avoids re-tracing).
-            visible_ids: Optional visible object IDs grouped by model.
-
+            visible_ids (dict | None): Visible object IDs grouped by model.
         """
         if path is None:
             path = csp.trace()
@@ -1778,8 +1777,7 @@ class BaseCableTableView(
             csp: The row's resolved local ConsoleServerPort.
             target_cp: The ConsolePort the remote should resolve to.
             manual (bool): Mark the row as manually picked (rendered as a hint in the table).
-            remote_context: Optional preloaded port, cable, and trace visibility data.
-
+            remote_context (dict | None): Preloaded visibility and trace data for remote objects.
         """
         link["netbox_remote_device_id"] = target_cp.device_id
         # Show the picked device's real name (display-only key: the raw ``remote_device`` label
@@ -2870,7 +2868,7 @@ class CableRemotePickerView(BaseCableTableView):
         local_name = row.get("local_port")
         if not isinstance(local_name, str) or not local_name:
             return False
-        if source != "serial":
+        if source != SERIAL_INVENTORY_SOURCE:
             owner = get_virtual_chassis_member(obj, local_name)
             if owner is None or not self.restricted_queryset(Device).filter(pk=owner.pk).exists():
                 return False

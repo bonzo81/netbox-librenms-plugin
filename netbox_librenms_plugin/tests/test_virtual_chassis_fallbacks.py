@@ -395,6 +395,28 @@ class TestCreateVirtualChassisWithMembers:
         assert "Device with serial 'TAKEN2' already exists" in caplog.text
         assert "Created 0 members but expected 1" in caplog.text
 
+    def test_a_member_serial_matches_a_padded_stored_value(self, caplog):
+        """Legacy padding in NetBox must not permit a duplicate normalized member serial."""
+        from dcim.models import Device
+        from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        _name_pattern()
+        master = make_device("vc-padded-serial", serial="MASTER-PADDED")
+        existing = make_device("vc-padded-serial-elsewhere", serial="placeholder")
+        Device.objects.filter(pk=existing.pk).update(serial=" PADDED-MEMBER ")
+        members_info = [
+            {"serial": "MASTER-PADDED", "position": 1, "name": "Switch 1", "is_master": True},
+            {"serial": "PADDED-MEMBER", "position": 2, "name": "Switch 2"},
+        ]
+
+        with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
+            vc = create_virtual_chassis_with_members(master, members_info, {"device_id": 8004})
+
+        assert sorted(vc.members.values_list("name", flat=True)) == ["vc-padded-serial-M1"]
+        assert not Device.objects.filter(serial="PADDED-MEMBER").exists()
+        assert "Device with serial 'PADDED-MEMBER' already exists" in caplog.text
+
     def test_a_member_name_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
