@@ -13,7 +13,11 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
-from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+from netbox_librenms_plugin.utils import (
+    module_inventory_binding_token,
+    module_inventory_row_digest,
+    module_inventory_snapshot_digest,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -158,7 +162,18 @@ class TestInstallBranchView:
 
         request = make_request(
             "post",
-            {"parent_index": "10", "server_key": "default"},
+            {
+                "parent_index": "10",
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_branch",
+                    {"parent_index": 10},
+                    10,
+                    module_inventory_snapshot_digest(rows),
+                ),
+            },
             user=make_superuser(),
             path="/modules/",
         )
@@ -186,7 +201,18 @@ class TestInstallBranchView:
 
         request = make_request(
             "post",
-            {"parent_index": "10", "server_key": "default"},
+            {
+                "parent_index": "10",
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_branch",
+                    {"parent_index": 10},
+                    10,
+                    module_inventory_snapshot_digest(rows),
+                ),
+            },
             user=make_superuser(),
             path="/modules/",
         )
