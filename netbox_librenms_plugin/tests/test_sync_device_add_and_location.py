@@ -7,13 +7,6 @@ on every restack.
 """
 
 import pytest
-from django.contrib import messages
-from django.contrib.messages import get_messages
-from django.urls import reverse
-
-from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
-from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 
 SERVER_KEY = "default"
@@ -22,6 +15,9 @@ SERVER_KEY = "default"
 @pytest.fixture
 def librenms_server(settings, monkeypatch):
     """Point the plugin at a loopback LibreNMS that answers the poller-group lookup."""
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+    from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     with librenms_mock_server() as server:
@@ -42,6 +38,9 @@ def librenms_server(settings, monkeypatch):
 
 def _messages(response, level=None):
     """Read the flash messages the real view queued on the request."""
+    from django.contrib import messages
+    from django.contrib.messages import get_messages
+
     wanted = None if level is None else getattr(messages, level.upper())
     return [
         str(message) for message in get_messages(response.wsgi_request) if wanted is None or message.level == wanted
@@ -61,10 +60,14 @@ def _record_route(server, path, method):
 
 
 def _add_url(obj):
+    from django.urls import reverse
+
     return reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[obj.pk])
 
 
 def _location_url(device):
+    from django.urls import reverse
+
     return reverse("plugins:netbox_librenms_plugin:update_device_location", args=[device.pk])
 
 
@@ -85,6 +88,7 @@ class TestAddDeviceObjectResolution:
 
     def test_unknown_object_type_resolves_to_no_object(self, librenms_server):
         """An object_type the view does not serve resolves to None instead of a Device."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
@@ -104,6 +108,8 @@ class TestAddDevicePollerGroup:
     def test_numeric_poller_group_is_sent_as_an_integer(self, client, librenms_server):
         """A selected poller group reaches LibreNMS as an int, not the posted string."""
         from dcim.models import Device
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         device = make_device("add-device-poller-int")
         librenms_server.register(
@@ -122,6 +128,8 @@ class TestAddDevicePollerGroup:
     def test_non_numeric_poller_group_is_dropped_instead_of_failing_the_add(self, client, librenms_server):
         """A poller group id LibreNMS reports as non-numeric is omitted, and the add still runs."""
         from dcim.models import Device
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         device = make_device("add-device-poller-text")
         librenms_server.register(
@@ -145,6 +153,8 @@ class TestAddDeviceUnknownSNMPVersion:
     def test_unknown_snmp_version_is_reported_without_calling_librenms(self, client, librenms_server):
         """A version that is neither v1/v2c nor v3 stops before the add request."""
         from dcim.models import Device
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         device = make_device("add-device-unknown-snmp")
         received = _record_route(librenms_server, "/api/v0/devices", "POST")
@@ -173,6 +183,9 @@ class TestUpdateDeviceLocationBranches:
 
     def test_missing_device_view_permission_blocks_the_location_write(self, client, librenms_server):
         """A plugin writer without dcim.view_device never reaches the LibreNMS PATCH."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
         device = make_device("location-update-denied", librenms_cf={SERVER_KEY: 77})
         received = _record_route(librenms_server, "/api/v0/devices/77", "PATCH")
         client.force_login(make_user_with_perms("location-update-denied-user", []))
@@ -189,6 +202,8 @@ class TestUpdateDeviceLocationBranches:
 
     def test_repeated_server_keys_refuse_the_location_write(self, client, librenms_server, settings):
         """Two configured server keys stop the request before the LibreNMS PATCH."""
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
+
         second_key = "secondary"
         servers = settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]
         configure_librenms_servers(settings, {**servers, second_key: dict(servers[SERVER_KEY])})
@@ -205,6 +220,8 @@ class TestUpdateDeviceLocationBranches:
 
     def test_librenms_refusal_is_reported_as_an_error(self, client, librenms_server):
         """A LibreNMS error body becomes the failure message, not a success toast."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+
         device = make_device("location-update-failure", librenms_cf={SERVER_KEY: 88})
         librenms_server.register(
             "/api/v0/devices/88",
