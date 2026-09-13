@@ -338,10 +338,28 @@ class TestVLANSynchronization:
             {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3093"},
         )
 
-        assert updated.status_code == 302
+        assert updated.status_code == 200
+        assert b"Confirm VLAN changes" in updated.content
+        vlan.refresh_from_db()
+        assert vlan.name == "Old Name"
+
+        conflict = updated.context["conflicts"][0]
+        confirmed = client.post(
+            url,
+            {
+                "server_key": SERVER_KEY,
+                "action": "create_vlans",
+                "confirm_conflicts": "1",
+                "force_conflict": "3093",
+                "select": "3093",
+                "conflict_intent": conflict["intent"],
+            },
+        )
+
+        assert confirmed.status_code == 302
         vlan.refresh_from_db()
         assert vlan.name == "Application Servers"
-        assert _response_messages(updated, "success") == ["VLANs synced: 1 updated."]
+        assert _response_messages(confirmed, "success") == ["VLANs synced: 1 updated."]
 
     def test_missing_snapshot_fails_without_creating_a_vlan(self, client, live_librenms):
         device = make_device("vlan-cache-miss", librenms_cf={SERVER_KEY: {"id": 92}})

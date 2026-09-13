@@ -146,7 +146,7 @@ class TestRefreshDropsAVanishedLink:
         assert "Device role must be manually selected before import" in validation["issues"]
         assert validation["can_import"] is False
 
-    def test_a_vm_row_loses_its_stale_cluster_selection(self):
+    def test_a_vm_row_loses_its_stale_cluster_and_falls_back_to_site(self):
         from netbox_librenms_plugin.tests.conftest import make_cluster
 
         vm = make_vm("vanished-vm")
@@ -160,7 +160,13 @@ class TestRefreshDropsAVanishedLink:
         assert validation["existing_device"] is None
         assert validation["cluster"]["found"] is False
         assert validation["cluster"]["available_clusters"] == [cluster]
-        assert "Cluster must be manually selected before importing as VM" in validation["issues"]
+        assert validation["vm_placement"] == {
+            "method": "site",
+            "found": True,
+            "host_device": None,
+        }
+        assert validation["issues"] == []
+        assert validation["can_import"] is True
 
 
 class TestRefreshFailsClosedOnADatabaseError:
