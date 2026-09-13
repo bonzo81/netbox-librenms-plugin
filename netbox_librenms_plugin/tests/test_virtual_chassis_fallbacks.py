@@ -379,6 +379,31 @@ class TestCreateVirtualChassisWithMembers:
         assert Device.objects.filter(virtual_chassis=vc, serial="BCFB9793").count() == 1
         assert Device.objects.filter(virtual_chassis=vc).count() == 2
 
+    def test_placeholder_serial_master_slot_is_not_counted_as_a_missing_member(self, caplog):
+        """A manufacturer rule can normalize a master-slot placeholder serial to blank."""
+        from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        _name_pattern()
+        master = make_device("vc-placeholder-count", serial="MASTER-COUNT")
+        NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^PLACEHOLDER()$",
+            replacement=r"\1",
+            manufacturer=master.device_type.manufacturer,
+        )
+        members = [
+            {"serial": "MASTER-COUNT", "position": 1, "name": "Master", "is_master": True},
+            {"serial": "PLACEHOLDER", "position": 1, "name": "Master placeholder"},
+            {"serial": "IGNORED-MASTER", "position": 2, "name": "Marked master", "is_master": True},
+        ]
+
+        with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
+            create_virtual_chassis_with_members(master, members, {"device_id": 8104})
+
+        assert "Created 0 members but expected 1" not in caplog.text
+
     def test_a_member_serial_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members

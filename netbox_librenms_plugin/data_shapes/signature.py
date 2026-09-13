@@ -14,6 +14,7 @@ from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
 from netbox_librenms_plugin.data_shapes.ports import (
     compile_lag_patterns,
+    name_matches_lag_pattern,
     port_has_vlan,
     port_is_lag,
     port_names,
@@ -164,7 +165,16 @@ def compute_shape_signature(recording):
     ports = _ports(recording)
     compiled_lag_patterns = compile_lag_patterns(recording)
     lag_ports = [p for p in ports if port_is_lag(p, compiled_lag_patterns)]
-    lag_port_names = [name for p in lag_ports for name in port_names(p)]
+    lag_port_names = []
+    for port in lag_ports:
+        names = port_names(port)
+        if port.get("ifType") == "ieee8023adLag":
+            if names:
+                lag_port_names.append(names[0])
+            continue
+        matching_name = next((name for name in names if name_matches_lag_pattern(name, compiled_lag_patterns)), None)
+        if matching_name is not None:
+            lag_port_names.append(matching_name)
     # name_prefix is the LAG naming CONVENTION. Strip a trailing sub-unit (".N") BEFORE the aggregate
     # number so a first LAG port of "ae1.0" yields "ae" (like "ae2.0"), not "ae1." — the arbitrary
     # aggregate number is not a structural difference between two ae<N>.<unit> devices.

@@ -91,6 +91,31 @@ def test_signature_lag_present_via_configured_pattern():
     assert sig["lag"]["name_prefix"] == "Po"
 
 
+def test_pattern_lag_prefix_comes_from_the_matching_name():
+    """A pattern-only LAG must not fingerprint an unrelated ifName label."""
+    recording = {
+        "schema_version": 1,
+        "name": "pattern-lag-ifdescr",
+        "device_id": 1,
+        "lag_patterns": {"example-os": r"^Bundle-Ether\d+$"},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [
+                    {
+                        "port_id": 1,
+                        "ifName": "operator-label",
+                        "ifDescr": "Bundle-Ether42",
+                        "ifType": "propVirtual",
+                    }
+                ],
+            }
+        },
+    }
+
+    assert compute_shape_signature(recording)["lag"]["name_prefix"] == "Bundle-Ether"
+
+
 def test_signature_hardens_untrusted_lag_patterns():
     """`--validate` ingests community-submitted recordings, so compute_shape_signature must not crash on a non-string lag_patterns value and must bound the name it feeds to an untrusted regex (ReDoS)."""
     # (1) A non-string pattern raises TypeError (not re.error) on re.compile; it must be skipped,

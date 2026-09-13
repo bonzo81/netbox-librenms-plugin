@@ -363,7 +363,7 @@ class TestIpamPermissionNotice:
     """The swapped content fragments carry the notice, and only when data is hidden."""
 
     @staticmethod
-    def _render(template, key, hidden):
+    def _render(template, key, hidden, *, scope_incomplete=False):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -379,6 +379,7 @@ class TestIpamPermissionNotice:
             "server_key": "default",
             "cache_expiry": None,
             "hidden_ipam_permissions": [VLAN_GROUP_PERM, VLAN_PERM] if hidden else [],
+            "vlan_scope_incomplete": scope_incomplete,
         }
         return render_to_string(
             f"netbox_librenms_plugin/{template}",
@@ -413,3 +414,15 @@ class TestIpamPermissionNotice:
         assert NOTICE_TEXT not in html
         assert VLAN_PERM not in html
         assert VLAN_GROUP_PERM not in html
+
+    @pytest.mark.parametrize(
+        ("template", "key"),
+        [
+            ("_interface_sync_content.html", "interface_sync"),
+            ("_vlan_sync_content.html", "vlan_sync"),
+        ],
+    )
+    def test_the_notice_reports_an_incomplete_object_scope(self, template, key):
+        html = self._render(template, key, hidden=False, scope_incomplete=True)
+
+        assert NOTICE_TEXT in html

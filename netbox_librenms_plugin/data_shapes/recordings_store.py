@@ -122,7 +122,7 @@ def recording_schema_errors(recording):
         # other legitimate use, so a half-written one is a broken recording, not a body.
         malformed = sorted(key for key, value in responses.items() if is_malformed_status_envelope(value))
         if malformed:
-            errors.append(f"responses carry {STATUS_KEY} without a body: {malformed}")
+            errors.append(f"responses carry an invalid {STATUS_KEY} envelope: {malformed}")
     expected = recording.get("expected")
     if "expected" in recording:
         if not isinstance(expected, dict) or not expected:

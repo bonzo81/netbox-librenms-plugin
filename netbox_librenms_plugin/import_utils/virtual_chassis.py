@@ -605,20 +605,21 @@ def create_virtual_chassis_with_members(  # noqa: C901
                 )
                 members_created += 1
 
-            # Validate member count — exclude master-slot entries with blank serials
-            expected_members = len(
-                [
-                    m
-                    for m in members_info
-                    if not (_member_serial(m.get("serial")) and _member_serial(m.get("serial")) == _master_serial)
-                    and not (
-                        not _norm_serial(m.get("serial"))
-                        and m.get("position") is not None
-                        and master_device.vc_position is not None
-                        and _safe_pos(m["position"]) == master_device.vc_position
-                    )
-                ]
-            )
+            # Validate the member count after excluding entries that identify the master.
+            def is_expected_member(member):
+                if member.get("is_master"):
+                    return False
+                serial = _member_serial(member.get("serial"))
+                if serial and serial == _master_serial:
+                    return False
+                return not (
+                    not serial
+                    and member.get("position") is not None
+                    and master_device.vc_position is not None
+                    and _safe_pos(member["position"]) == master_device.vc_position
+                )
+
+            expected_members = sum(is_expected_member(member) for member in members_info)
             if members_created < expected_members:
                 logger.warning(
                     f"Created {members_created} members but expected {expected_members}. "

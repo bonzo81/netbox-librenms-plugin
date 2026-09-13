@@ -863,10 +863,11 @@ def test_a_list_body_survives_a_real_replay(recording_server):
     assert body == [1, {"value": "x"}]
 
 
-def test_an_envelope_shaped_body_is_not_mistaken_for_a_status():
-    """Both keys are required, so a body carrying only the reserved key stays a body."""
+def test_a_body_cannot_claim_the_reserved_status_key():
+    """A mapping with the reserved key must satisfy the status-envelope contract."""
     from netbox_librenms_plugin.data_shapes.envelope import STATUS_KEY, unwrap_response
 
     body = {STATUS_KEY: 404, "status": "ok", "ports": []}
 
-    assert unwrap_response(body) == (200, body)
+    with pytest.raises(ValueError, match="status envelope"):
+        unwrap_response(body)

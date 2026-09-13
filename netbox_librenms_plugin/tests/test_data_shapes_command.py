@@ -163,7 +163,7 @@ def test_rebuild_manifest_writes_atomically(tmp_path, monkeypatch):
     # The previous manifest survived intact right up to the atomic swap.
     assert [e["name"] for e in json.loads(seen["target_before"])] == ["old"]
     # No leftover temp file, and the final manifest is the rebuilt one.
-    assert not (rec_dir / "manifest.json.tmp").exists()
+    assert not list(rec_dir.glob(".manifest.json.*.tmp"))
     assert [e["name"] for e in json.loads(manifest_path.read_text())] == ["cisco-stackwise-3member"]
 
 

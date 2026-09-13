@@ -31,12 +31,12 @@ def is_status_envelope(value):
 
 def is_malformed_status_envelope(value):
     """
-    Return whether *value* carries the reserved status key without a body.
+    Return whether *value* carries the reserved status key without a valid envelope.
 
-    A complete envelope always has both keys. A half-written one would otherwise read as a
-    successful body that happens to contain the reserved key.
+    A complete envelope has a non-Boolean integer status and a body. Any other use of the
+    reserved key would otherwise read as a successful response body.
     """
-    return isinstance(value, dict) and _is_int(value.get(STATUS_KEY)) and BODY_KEY not in value
+    return isinstance(value, dict) and STATUS_KEY in value and not is_status_envelope(value)
 
 
 def wrap_response(status, body):
@@ -54,4 +54,6 @@ def unwrap_response(value):
     """
     if is_status_envelope(value):
         return value[STATUS_KEY], value.get(BODY_KEY)
+    if is_malformed_status_envelope(value):
+        raise ValueError("Malformed recorded response status envelope.")
     return 200, value

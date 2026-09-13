@@ -70,6 +70,25 @@ def test_recording_schema_errors_rejects_bool_int_fields():
     assert any("device_id must be an integer" in e for e in errors)
 
 
+@pytest.mark.parametrize("status", [True, False, "404", None, 404.0])
+def test_recording_schema_errors_rejects_malformed_status_envelopes(status):
+    """A present status marker must be a non-Boolean integer in a complete envelope."""
+    from netbox_librenms_plugin.data_shapes.envelope import BODY_KEY, STATUS_KEY, unwrap_response
+    from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+    response = {STATUS_KEY: status, BODY_KEY: {"status": "error"}}
+    recording = {
+        "schema_version": 1,
+        "name": "malformed-status-envelope",
+        "device_id": 1,
+        "responses": {"GET /api/v0/devices/1": response},
+    }
+
+    assert any(STATUS_KEY in error for error in recording_schema_errors(recording))
+    with pytest.raises(ValueError, match="status envelope"):
+        unwrap_response(response)
+
+
 @pytest.mark.parametrize(
     "expected",
     [
