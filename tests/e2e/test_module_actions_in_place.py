@@ -28,6 +28,7 @@ repo-root conftest and the coverage addopts have to stay out of the way):
 
 import json
 import os
+from uuid import uuid4
 
 import pytest
 
@@ -47,7 +48,7 @@ from playwright.sync_api import expect  # noqa: E402  (import after the opt-in s
 SERVER_KEY = os.environ.get("E2E_STUB_SERVER_KEY", "stub")
 STUB_DEVICE_ID = int(os.environ.get("E2E_STUB_DEVICE_ID", "1"))
 
-DEVICE_NAME = "e2e-modules-stub"
+DEVICE_NAME = f"e2e-modules-stub-{uuid4().hex}"
 MANUFACTURER_SLUG = "e2e-modules-mfg"
 DEVICE_TYPE_MODEL = "E2E-MODULES-DT"
 SITE_SLUG = "e2e-modules-site"
@@ -115,11 +116,14 @@ created["site"] = [site.pk, was_created]
 role, was_created = DeviceRole.objects.get_or_create(slug="{ROLE_SLUG}", defaults={{"name": "E2E Modules Role"}})
 created["role"] = [role.pk, was_created]
 
-device, was_created = Device.objects.get_or_create(
+device = Device.objects.create(
     name="{DEVICE_NAME}",
-    defaults={{"device_type": device_type, "role": role, "site": site, "status": "active"}},
+    device_type=device_type,
+    role=role,
+    site=site,
+    status="active",
 )
-created["device"] = [device.pk, was_created]
+created["device"] = [device.pk, True]
 
 set_librenms_device_id(device, {STUB_DEVICE_ID}, "{SERVER_KEY}")
 device.save()

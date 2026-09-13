@@ -112,6 +112,16 @@ def test_no_test_module_registers_a_session_wide_plugin():
     )
 
 
+def test_module_actions_e2e_creates_a_test_owned_device():
+    """The E2E setup must not mutate or clean up a pre-existing device."""
+    source = (REPOSITORY_ROOT / "tests/e2e/test_module_actions_in_place.py").read_text()
+
+    assert 'DEVICE_NAME = f"e2e-modules-stub-{uuid4().hex}"' in source
+    assert "device = Device.objects.create(" in source
+    assert "device, was_created = Device.objects.get_or_create(" not in source
+    assert 'created["device"] = [device.pk, True]' in source
+
+
 # Import root -> the distribution name that provides it.
 THIRD_PARTY_TEST_IMPORT_ROOTS = {
     "django": "django",

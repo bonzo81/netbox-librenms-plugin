@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import requests
+import yaml
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tests.conftest import make_recording_api
@@ -35,6 +36,17 @@ def test_devcontainer_stub_keeps_import_cache_enabled():
     plugin_config = runpy.run_path(config_path)["PLUGINS_CONFIG"]["netbox_librenms_plugin"]
 
     assert plugin_config["servers"]["stub"]["cache_timeout"] > 0
+
+
+def test_devcontainer_preserves_both_no_proxy_spellings():
+    """Keep lowercase-only exclusions when the stub bypass is appended."""
+    repository_root = Path(__file__).resolve().parents[2]
+    devcontainer = json.loads((repository_root / ".devcontainer/devcontainer.json").read_text())
+    compose = yaml.safe_load((repository_root / ".devcontainer/docker-compose.yml").read_text())
+
+    for name in ("NO_PROXY", "no_proxy"):
+        assert devcontainer["containerEnv"][name] == ("${localEnv:NO_PROXY},${localEnv:no_proxy},librenms-stub")
+        assert compose["services"]["devcontainer"]["environment"][name] == ("${NO_PROXY:-},${no_proxy:-},librenms-stub")
 
 
 def _has_docker_compose():
@@ -310,6 +322,25 @@ def test_stub_refuses_a_recording_without_a_device_response():
 
     with pytest.raises(ValueError, match="no usable"):
         LibreNMSStubServer(recordings=[recording], api_token=TOKEN)
+
+
+def test_stub_decodes_a_tagged_success_envelope_for_derived_routes():
+    """The stub and recording loader must share the tagged-envelope contract."""
+    from netbox_librenms_plugin.data_shapes.envelope import BODY_KEY, STATUS_KEY
+
+    recording = _location_recording(4243, "Lab")
+    route = "GET /api/v0/devices/4243"
+    body = recording["responses"][route]
+    recording["responses"][route] = {STATUS_KEY: 200, BODY_KEY: body}
+
+    server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
+    try:
+        response = _request(server, "GET", "/api/v0/devices/4243")
+
+        assert response.status_code == 200
+        assert response.json()["devices"][0]["location"] == "Lab"
+    finally:
+        server.stop()
 
 
 def test_stub_derives_the_oob_controller_device_from_the_recorded_host_pair():

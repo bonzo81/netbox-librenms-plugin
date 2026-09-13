@@ -27,8 +27,8 @@ services:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       http_proxy: ${HTTP_PROXY:-}
       https_proxy: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-},librenms-stub
-      no_proxy: ${NO_PROXY:-},librenms-stub
+      NO_PROXY: ${NO_PROXY:-},${no_proxy:-},librenms-stub
+      no_proxy: ${NO_PROXY:-},${no_proxy:-},librenms-stub
       LIBRENMS_STUB_TOKEN: ${LIBRENMS_STUB_TOKEN:-dev-stub-token}
       REQUESTS_CA_BUNDLE: ${REQUESTS_CA_BUNDLE:-}
       SSL_CERT_FILE: ${SSL_CERT_FILE:-}
