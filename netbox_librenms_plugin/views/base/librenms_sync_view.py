@@ -1,14 +1,21 @@
+import dataclasses
 import re
+from dataclasses import asdict
 
 from django.conf import settings as django_settings
 from django.contrib import messages
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.server_selection import (
+    ServerSelectionState,
+    build_server_mappings,
+    resolve_object_server,
+)
 from netbox_librenms_plugin.sync_cache import (
     TAB_SPECS,
     SyncCacheConsistency,
@@ -18,7 +25,6 @@ from netbox_librenms_plugin.sync_cache import (
     sync_cache_browser_contract,
 )
 from netbox_librenms_plugin.utils import (
-    coerce_librenms_id,
     find_matching_platform,
     get_interface_name_field,
     get_librenms_device_id,
@@ -27,7 +33,6 @@ from netbox_librenms_plugin.utils import (
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     resolve_naming_preferences,
-    resolve_server_mapping_display_id,
     save_user_pref,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
@@ -42,9 +47,7 @@ INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
 class BaseLibreNMSSyncView(
     LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, generic.ObjectListView
 ):
-    """
-    Base view for LibreNMS sync information.
-    """
+    """Base view for LibreNMS sync information."""
 
     queryset = None  # Will be set in subclasses
     model = None  # Will be set in subclasses
@@ -63,12 +66,39 @@ class BaseLibreNMSSyncView(
         """Handle GET request for the LibreNMS sync view."""
         obj = self.get_object(pk)
 
+        bound_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None)
+        selection = resolve_object_server(
+            obj,
+            request.GET.get("server_key"),
+            installation_default_key=bound_server_key,
+        )
+        self._server_selection = selection
+        if (
+            selection.state == ServerSelectionState.RESOLVED
+            and selection.requested_key is None
+            and selection.active_key
+            and selection.active_key != selection.installation_default_key
+        ):
+            query = request.GET.copy()
+            query["server_key"] = selection.active_key
+            return redirect(f"{request.path}?{query.urlencode()}")
+        if selection.state != ServerSelectionState.RESOLVED:
+            return self._render_server_selection_blocked(request, obj, selection)
+
         # Scope the page header (device info, VC inventory serials, active-server highlight) to the
         # same ?server_key the embedded tabs rebind to. Without this the orchestrator reads the
         # session/default server while a ?server_key load renders the tab tables for another server
         # — an internally inconsistent page. A blank/absent key keeps the session/default client, so
         # single-server and default renders are unchanged.
-        _scoped_key, unresolved = self.resolve_get_render_server_key(request)
+        if selection.state == ServerSelectionState.RESOLVED and selection.active_key:
+            from netbox_librenms_plugin.librenms_api import build_librenms_api
+
+            bound_api = getattr(self, "_librenms_api", None)
+            if bound_api is None or bound_api.server_key != selection.active_key:
+                self._librenms_api = build_librenms_api(selection.active_key)
+            _scoped_key, unresolved = selection.active_key, self._librenms_api is None
+        else:
+            _scoped_key, unresolved = self.resolve_get_render_server_key(request)
         # Stash the resolved render key so get_context_data builds the migrated-mode banner under
         # the SAME namespace as the header/tabs. On the unresolved (stale ?server_key) path the
         # rebind declines and self.librenms_api.server_key falls back to "default" — using that for
@@ -131,7 +161,10 @@ class BaseLibreNMSSyncView(
         # server's mapping onto a page whose header/tabs are failing closed for the gone server.
         self._server_key_unresolved = unresolved
 
-        if unresolved:
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        migrated_context = build_migrated_context(obj, _scoped_key)
+        if unresolved or migrated_context["migrated_to_marker"]:
             # ?server_key named a server that no longer resolves; the rebind declined and left the
             # default/session client bound. Fail closed — render the header with no mapping rather
             # than attributing the default server's librenms_id to the requested (gone) server. The
@@ -141,11 +174,60 @@ class BaseLibreNMSSyncView(
             # Get librenms_id using the determined lookup device. Normalise to a positive int
             # or None at the source so every downstream `is not None` check (has_librenms_id,
             # get_device_info, etc.) can rely on the invariant without re-validating.
-            self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(librenms_lookup_device))
+            self.librenms_id, self._librenms_id_lookup_error = self.resolve_librenms_id(librenms_lookup_device)
 
         context = self.get_context_data(request, obj)
 
         return render(request, self.template_name, context)
+
+    def _can_manage_server_preference(self, selection):
+        """Check plugin write and object change scope for the mapping owner."""
+        if not selection or not selection.has_multiple_usable_mappings or not self.has_write_permission():
+            return False
+        owner = selection.mapping_owner
+        return self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).exists()
+
+    def _render_server_selection_blocked(self, request, obj, selection):
+        """Render the object page shell without constructing or querying an API client."""
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        applicable_tabs = SyncCacheConsistency(obj).applicable_tabs()
+        applicable_tab_names = {tab.value for tab in applicable_tabs}
+        requested_tab = request.GET.get("tab") or SyncTab.INTERFACES.value
+        active_sync_tab = requested_tab if requested_tab in applicable_tab_names else SyncTab.INTERFACES.value
+        mapping_owner = selection.mapping_owner
+        self._librenms_lookup_device = mapping_owner
+        self._server_key_unresolved = True
+        self._scoped_render_server_key = selection.active_key
+        self.librenms_id = None
+        return render(
+            request,
+            self.template_name,
+            {
+                "object": obj,
+                "tab": self.tab,
+                "active_sync_tab": active_sync_tab,
+                "server_key": selection.active_key,
+                "all_server_mappings": selection.mappings,
+                "server_selection_state": selection.state,
+                "server_selection_error": selection.error,
+                "server_selection_warning": selection.warning,
+                "server_selection_active_name": selection.active_display_name,
+                "server_selection_preferred_key": selection.preferred_key,
+                "server_selection_has_usable_mapping": selection.has_usable_mapping,
+                "can_manage_server_preference": self._can_manage_server_preference(selection),
+                "server_selection_blocked": True,
+                "has_librenms_id": False,
+                "found_in_librenms": False,
+                "librenms_device_details": {},
+                "platform_info": {},
+                "has_write_permission": self.has_write_permission(),
+                "lookup_device_pk": mapping_owner.pk,
+                "lookup_device_model_name": mapping_owner._meta.model_name,
+                "object_model_name": obj._meta.model_name,
+                **build_migrated_context(obj, selection.active_key),
+            },
+        )
 
     def get_context_data(self, request, obj):
         """Get the context data for the LibreNMS sync view."""
@@ -264,6 +346,7 @@ class BaseLibreNMSSyncView(
         )
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
         show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
+        selection = getattr(self, "_server_selection", None)
 
         context.update(
             {
@@ -301,9 +384,19 @@ class BaseLibreNMSSyncView(
                 "vc_inventory_serials": librenms_info["librenms_device_details"].get("vc_inventory_serials", []),
                 "manufacturers": manufacturers,
                 # Same safe accessor as "server_key" above — only the is_active highlight needs it.
-                "all_server_mappings": self._build_all_server_mappings(
-                    _lookup_device, self._scoped_render_server_key or self.active_server_key
+                "all_server_mappings": (
+                    selection.mappings
+                    if selection is not None
+                    else self._build_all_server_mappings(
+                        _lookup_device, self._scoped_render_server_key or self.active_server_key
+                    )
                 ),
+                "server_selection_state": selection.state if selection is not None else None,
+                "server_selection_error": selection.error if selection is not None else None,
+                "server_selection_warning": selection.warning if selection is not None else None,
+                "server_selection_active_name": selection.active_display_name if selection is not None else None,
+                "server_selection_preferred_key": selection.preferred_key if selection is not None else None,
+                "can_manage_server_preference": self._can_manage_server_preference(selection),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # Lookup device may differ from object (e.g. VC master vs member).
@@ -396,6 +489,7 @@ class BaseLibreNMSSyncView(
         * ``device_url``    – direct URL to the device page on that server (or ``None``).
         * ``is_configured`` – True when the server key exists in current plugin config.
         * ``is_active``     – True when this is the currently active server.
+        * ``is_selectable`` – True when the user can switch the page to that server.
         * ``is_oob_only``   – True when the mapping was surfaced via an OOB-only linkage
           (no host ``id``, only a nested ``oob.id``).
 
@@ -409,66 +503,16 @@ class BaseLibreNMSSyncView(
         Returns:
             list[dict] or None: The server mappings, or None when no mapping information is available.
         """
-        cf_value = obj.custom_field_data.get("librenms_id")
-        if not isinstance(cf_value, dict) or not cf_value:
-            return None
-
         plugins_cfg = getattr(django_settings, "PLUGINS_CONFIG", {}).get("netbox_librenms_plugin", {})
-        servers_config = plugins_cfg.get("servers") or {}
-        if not isinstance(servers_config, dict):
-            servers_config = {}
-
-        result = []
-        for sk, did in cf_value.items():
-            # Resolve the display id (host id, else the nested OOB controller id for an OOB-only
-            # entry) and whether it came from that OOB fallback. Shared with the import-validation
-            # modal (actions.DeviceValidationDetailsView._build_id_server_info) so both agree on
-            # which servers a device is linked to; the bool/str/positive coercion and the OOB
-            # fallback live in one place. A None result (migrated-only / corrupt entry) is skipped.
-            did, is_oob_only = resolve_server_mapping_display_id(did)
-            if did is None:
-                continue
-            srv_cfg = servers_config.get(sk)
-            # Legacy single-server config: "default" key with no matching servers entry —
-            # fall back to root-level librenms_url/display_name in plugins_cfg.
-            if srv_cfg is None and sk == "default":
-                legacy_url = plugins_cfg.get("librenms_url")
-                if legacy_url:
-                    srv_cfg = {
-                        "librenms_url": legacy_url,
-                        "display_name": plugins_cfg.get("display_name") or f"Default Server ({legacy_url})",
-                    }
-            is_configured = srv_cfg is not None
-            # Treat malformed (non-dict) server config entries as unconfigured
-            if srv_cfg is not None and not isinstance(srv_cfg, dict):
-                srv_cfg = None
-                is_configured = False
-            librenms_url = srv_cfg.get("librenms_url") if srv_cfg else None
-            display_name = (srv_cfg.get("display_name") or sk) if srv_cfg else sk
-            device_url = f"{librenms_url}/device/device={did}/" if librenms_url else None
-            result.append(
-                {
-                    "server_key": sk,
-                    "display_name": display_name,
-                    "librenms_url": librenms_url,
-                    "device_id": did,
-                    "device_url": device_url,
-                    "is_configured": is_configured,
-                    "is_active": sk == active_server_key,
-                    "is_oob_only": is_oob_only,
-                }
-            )
-
-        # Sort: active first, then configured, then orphaned
-        result.sort(key=lambda e: 0 if e["is_active"] else (1 if e["is_configured"] else 2))
-        return result or None
+        mappings = build_server_mappings(obj, active_server_key, plugin_config=plugins_cfg)
+        return [asdict(mapping) for mapping in mappings] or None
 
     def get_librenms_device_info(self, obj, request=None, *, cache_only=False):
         """Get the LibreNMS device information for the given object."""
         found_in_librenms = False
         mismatched_device = False
         device_info_unavailable = False
-        lookup_error = None
+        lookup_error = getattr(self, "_librenms_id_lookup_error", None)
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
@@ -619,6 +663,14 @@ class BaseLibreNMSSyncView(
                     mismatched_device = True
 
                 librenms_device_details["netbox_dns_name"] = netbox_dns_name or "-"
+
+        if lookup_error is not None:
+            device_info_unavailable = True
+
+        if lookup_error is not None:
+            # The template renders .message directly, so scope the conflict owner's name in here
+            # rather than leaving every render site to remember it.
+            lookup_error = dataclasses.replace(lookup_error, message=self.scoped_lookup_message(lookup_error))
 
         return {
             "found_in_librenms": found_in_librenms,

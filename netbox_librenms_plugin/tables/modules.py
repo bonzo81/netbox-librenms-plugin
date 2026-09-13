@@ -241,7 +241,8 @@ class LibreNMSModuleTable(tables.Table):
 
     @staticmethod
     def _unmatched_bay_html(record):
-        """Report where this row's serial already sits in NetBox, when bay matching found nothing.
+        """
+        Report where this row's serial already sits in NetBox, when bay matching found nothing.
 
         A failed bay match does not mean the part is absent. The serial may already name an
         installed module, and saying only "No matching bay" hides that from the operator who
@@ -360,7 +361,7 @@ class LibreNMSModuleTable(tables.Table):
             "Serial Mismatch": "bg-danger text-white",
             "Name Conflict": "bg-warning text-dark",
             "Type Mismatch": "bg-warning text-dark",
-            "Integrated": "bg-light text-muted border",
+            "Integrated": "bg-body-secondary text-body border",
         }
         badge_class = badge_classes.get(value, "bg-secondary text-white")
         warning = record.get("model_warning")
@@ -539,7 +540,7 @@ class LibreNMSModuleTable(tables.Table):
             label,
         )
 
-    def render_actions(self, value, record):
+    def render_actions(self, value, record):  # noqa: C901
         """Render install button for matched modules and install branch for parents."""
         if not self.device:
             return ""
@@ -562,6 +563,7 @@ class LibreNMSModuleTable(tables.Table):
                     # #module-sync-content; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
@@ -604,6 +606,7 @@ class LibreNMSModuleTable(tables.Table):
                     # #module-sync-content; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
@@ -631,6 +634,7 @@ class LibreNMSModuleTable(tables.Table):
                     # #module-sync-content; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
@@ -663,6 +667,7 @@ class LibreNMSModuleTable(tables.Table):
                     # #module-sync-content; method/action keep it working without JS.
                     '<form method="post" action="{}" hx-post="{}"'
                     ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
                     ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
@@ -706,20 +711,26 @@ class LibreNMSModuleTable(tables.Table):
             preview_url = reverse(
                 "plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": self.device.pk}
             )
+            preview_params = urlencode(
+                {
+                    "module_id": record["installed_module_id"],
+                    "ent_index": record.get("ent_physical_index", ""),
+                    "server_key": self.server_key or "",
+                    "selected_device_id": record.get("selected_device_id") or self.device.pk,
+                }
+            )
             buttons.append(
                 format_html(
-                    '<button type="button" class="btn btn-sm btn-danger ms-1 module-replace-btn"'
-                    ' data-module-id="{}" data-ent-index="{}" data-server-key="{}"'
-                    ' data-selected-device-id="{}"'
-                    ' data-preview-url="{}"'
+                    # hx-get: the preview carries hx- forms, so it must arrive through an HTMX swap to bind.
+                    '<button type="button" class="btn btn-sm btn-danger ms-1"'
+                    ' hx-get="{}?{}"'
+                    ' hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"'
                     ' title="Replace module — opens comparison dialog">'
                     '<i class="mdi mdi-swap-horizontal"></i> Replace'
                     "</button>",
-                    record["installed_module_id"],
-                    record.get("ent_physical_index", ""),
-                    self.server_key or "",
-                    record.get("selected_device_id") or self.device.pk,
                     preview_url,
+                    preview_params,
                 )
             )
 
@@ -770,6 +781,7 @@ class LibreNMSModuleTable(tables.Table):
                         # into #module-sync-content; method/action keep it working without JS.
                         '<form method="post" action="{}" hx-post="{}"'
                         ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                        ' hx-sync="#module-sync-content:drop"'
                         ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                         '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                         '<input type="hidden" name="server_key" value="{}">'

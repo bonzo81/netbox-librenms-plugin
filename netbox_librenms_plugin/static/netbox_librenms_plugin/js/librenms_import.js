@@ -425,6 +425,10 @@
         const messageEl = document.getElementById('filter-progress-message');
         const cancelBtn = document.getElementById('cancel-filter-btn');
         const filterModal = document.getElementById('filter-processing-modal');
+        const activeServerKey = new URLSearchParams(originalFilters).get('server_key');
+        const activeServerUrl = activeServerKey
+            ? `${baseUrl}?server_key=${encodeURIComponent(activeServerKey)}`
+            : baseUrl;
 
         // Get CSRF token from cookie or form (needed for cancel and status sync)
         let csrfToken = getCookie('csrftoken');
@@ -537,7 +541,7 @@
                                             }
 
                                             setTimeout(() => {
-                                                window.location.href = baseUrl;
+                                                window.location.href = activeServerUrl;
                                             }, JOB_CANCEL_REDIRECT_MS);
                                         } else {
                                             throw new Error(`Sync failed: ${syncRes.status}`);
@@ -555,7 +559,7 @@
                                     }
 
                                     setTimeout(() => {
-                                        window.location.href = baseUrl;
+                                        window.location.href = activeServerUrl;
                                     }, JOB_CANCEL_ERROR_REDIRECT_MS);
                                 });
                         } else {
@@ -584,7 +588,7 @@
                                 hideModal(filterModal);
                             }
 
-                            setTimeout(() => window.location.href = baseUrl, 1000);
+                            setTimeout(() => window.location.href = activeServerUrl, 1000);
                         }
                     })
                     .catch(err => {
@@ -677,7 +681,7 @@
                             hideModal(filterModal);
                         }
 
-                        setTimeout(() => window.location.href = baseUrl, 100);
+                        setTimeout(() => window.location.href = activeServerUrl, 100);
                     } else if (statusValue === 'failed') {
                         pollingStopped = true;
                         if (filterModal) {
@@ -688,7 +692,7 @@
                         if (errorMsg) {
                             alert('Error: ' + errorMsg);
                         }
-                        setTimeout(() => window.location.href = baseUrl, 100);
+                        setTimeout(() => window.location.href = activeServerUrl, 100);
                     } else if (statusValue === 'errored') {
                         pollingStopped = true;
                         if (filterModal) {
@@ -697,7 +701,7 @@
 
                         const errorMsg = data.data?.error || 'Job encountered an error. Please try again.';
                         alert('Error: ' + errorMsg);
-                        setTimeout(() => window.location.href = baseUrl, 100);
+                        setTimeout(() => window.location.href = activeServerUrl, 100);
                     } else if (statusValue === 'queued' || statusValue === 'started' || statusValue === 'deferred' || statusValue === 'scheduled') {
                         // Continue polling (job still in progress)
                         setTimeout(poll, POLL_INTERVAL_MS);

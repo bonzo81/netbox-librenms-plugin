@@ -41,12 +41,11 @@ logger = logging.getLogger(__name__)
 
 
 class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
-    """
-    Base view for synchronizing IP address information from LibreNMS.
-    """
+    """Base view for synchronizing IP address information from LibreNMS."""
 
     partial_template_name = "netbox_librenms_plugin/_ipaddress_sync_content.html"
     interface_name_field = None
+    _fetch_error_message = None
 
     def get_object(self, pk):
         return self.restrict_object_or_404(self.model, pk=pk)
@@ -56,9 +55,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         # Coerce before the HTTP call: a poisoned cached id (e.g. True or a
         # non-numeric string) must fail closed here rather than reach the
         # LibreNMS device-ip endpoint, where it would build a malformed URL.
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(obj))
+        self.librenms_id, lookup_error = self.resolve_librenms_id(obj)
         if self.librenms_id is None:
-            return False, "Device not found in LibreNMS"
+            if lookup_error is None:
+                return False, "Device not found in LibreNMS"
+            return False, self.scoped_lookup_message(lookup_error)
         return self.librenms_api.get_device_ips(self.librenms_id)
 
     def enrich_ip_data(self, ip_data, obj, interface_name_field, mgmt_ip="", server_key=None, port_data_cache=None):
@@ -278,7 +279,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         }
 
     def _get_port_info(self, port_id, port_data_cache, interface_name_field):
-        """Get port info from LibreNMS with caching to minimize API calls"""
+        """Get port info from LibreNMS with caching to minimize API calls."""
         if port_id not in port_data_cache:
             success, port_data = self.librenms_api.get_port_by_id(port_id)
             # A truthy success can still carry a malformed payload: port_data=None ("port" in
@@ -292,7 +293,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         return port_data_cache[port_id]
 
     def _create_base_ip_entry(self, ip_entry, obj, vrfs):
-        """Create the base data structure for an IP entry"""
+        """Create the base data structure for an IP entry."""
         parsed = parse_librenms_ip_entry(ip_entry)
         ip_address = str(parsed.ip)
         prefix_length = parsed.network.prefixlen
@@ -329,7 +330,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         )
 
     def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
-        """Add information for IP addresses that exist in NetBox"""
+        """Add information for IP addresses that exist in NetBox."""
         enriched_ip["ip_url"] = ip_address.get_absolute_url()
         enriched_ip["netbox_ip_id"] = ip_address.pk
         enriched_ip["original_vrf_id"] = ip_address.vrf_id
@@ -377,7 +378,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         )
         return table
 
-    def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False, server_key=None):
+    def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False, server_key=None):  # noqa: C901
         """Helper method to prepare the context data for IP address sync views."""
         table = None
         cache_expiry = None
@@ -408,6 +409,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             return True
 
         if fetch_fresh:
+            self._fetch_error_message = None
             success, ip_data = self.get_ip_addresses(obj)
 
             # Bail out on a failed *or malformed* fetch instead of enriching an error payload
@@ -416,6 +418,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # enrich_ip_data() silently drop every row and caches that empty snapshot as
             # complete, so treat it as a fetch failure.
             if not success or not isinstance(ip_data, list) or any(not _valid_ip_row(item) for item in ip_data):
+                if not success and self.librenms_id is None and isinstance(ip_data, str):
+                    self._fetch_error_message = ip_data
                 # Purge any prior valid snapshot so this fail-closed actually takes effect: without
                 # it, a bad-but-successful refresh leaves the previous rows in cache and the next GET
                 # serves them as stale until the TTL expires.
@@ -672,7 +676,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # _prepare_context(fetch_fresh=True) only returns None when the live
             # LibreNMS fetch failed (a genuine empty result yields a context with an
             # empty table). Report the failure rather than a misleading "no data".
-            messages.error(request, "Failed to fetch IP addresses from LibreNMS; see server logs for details.")
+            messages.error(
+                request,
+                self._fetch_error_message or "Failed to fetch IP addresses from LibreNMS; see server logs for details.",
+            )
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.IP_ADDRESSES,
                 server_key,
@@ -721,9 +728,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
 
 class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionMixin, CacheMixin, View):
-    """
-    View for verifying single IP address data with different VRF.
-    """
+    """View for verifying single IP address data with different VRF."""
 
     # Read-only verify endpoint: require object-view permission (mirrors the interface/module/
     # cable verify views). Without it any user with mere plugin-view rights could POST an
@@ -851,9 +856,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         return row, row.get("vrf_id"), row.get("port_id")
 
     def _find_existing_ip(self, address_no_mask, prefix_len, vrf_id=None):
-        """
-        Find existing IP address in NetBox, optionally with specific VRF.
-        """
+        """Find existing IP address in NetBox, optionally with specific VRF."""
         ip_with_mask = str(parse_address_with_prefix(address_no_mask, prefix_len))
 
         matches = list(IPAddress.objects.filter(address=ip_with_mask).order_by("pk"))
@@ -870,9 +873,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         return True, False, matches[0].get_absolute_url() if len(matches) == 1 else None
 
     def _determine_status(self, exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id):
-        """
-        Determine the status of an IP address based on existence and VRF.
-        """
+        """Determine the status of an IP address based on existence and VRF."""
         if exists_any_vrf:
             # IP exists in NetBox
             if exists_specific_vrf:
@@ -886,10 +887,8 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             else:
                 return "sync"
 
-    def post(self, request):
-        """
-        POST request to return json response with formatted IP address status.
-        """
+    def post(self, request):  # noqa: C901
+        """POST request to return json response with formatted IP address status."""
         # Parse the (caller-supplied) body first — this reads no object data — so the permission
         # gate can target the model the request actually addresses. _get_object() resolves a Device
         # OR a VirtualMachine, so a static Device-only gate would let a user with only

@@ -5279,6 +5279,55 @@ class TestModulesActionResponse:
             Module.objects.create(device=other, module_bay=other_bay, module_type=module_type, serial="ACTION-1")
         return device, module
 
+    @pytest.mark.parametrize(
+        ("conflict", "expected_action"),
+        [(False, "update-module-serial"), (True, "move-module")],
+        ids=["update_serial_only", "move"],
+    )
+    def test_the_mismatch_preview_answers_a_whole_modal_of_bound_forms(
+        self, client, settings, conflict, expected_action
+    ):
+        """The preview now fills #htmx-modal-content, so it must carry the header the JS used to build."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        self._configure_server(settings)
+        suffix = "move" if conflict else "serial"
+        device, module = self._seed_serial_mismatch(suffix, conflict=conflict, librenms_id=9210 + int(conflict))
+        client.force_login(make_superuser(f"modules-preview-{suffix}-user"))
+        url = reverse("plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": device.pk})
+
+        response = client.get(
+            url,
+            {
+                "module_id": str(module.pk),
+                "ent_index": "8201",
+                "server_key": self.SERVER_KEY,
+                "selected_device_id": str(device.pk),
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.content.decode()
+        # The shell owns id="htmx-modal-label"; a second copy here would duplicate the id.
+        assert 'id="htmx-modal-label"' not in body
+        assert 'class="modal-title"' in body
+        assert "closeHtmxModal()" in body
+        assert 'class="modal-body"' in body
+        forms = open_tags(body, "form")
+        # Both branches render the replace form plus the one the conflict state selects.
+        assert len(forms) == 2
+        assert any(expected_action in form["action"] for form in forms)
+        assert any("replace-module" in form["action"] for form in forms)
+        for form in forms:
+            # The forms are swapped into the modal, so their own target must be the module tab;
+            # the view's HX-Retarget stays the safety net for a classic post.
+            assert form["hx-target"] == "#module-sync-content"
+            assert form["hx-swap"] == "innerHTML"
+            assert form["hx-sync"] == "#module-sync-content:drop"
+
 
 class TestAddBayTemplateViewWiring:
     """AddBayTemplateView must have the right mixins and target kinds."""
@@ -7351,3 +7400,102 @@ def test_replace_action_requires_a_source_inventory_index(index):
         table.render_actions(None, {"can_replace": True, "installed_module_id": 55, "ent_physical_index": index})
     )
     assert ("Replace" in html) is (index == 200)
+
+
+def test_integrated_module_badge_tracks_the_active_theme():
+    """The parent label must use paired theme colors rather than a fixed light surface."""
+    from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+    table = LibreNMSModuleTable([])
+    html = str(table.render_status("Integrated", {"status": "Integrated", "integrated_in_name": "Carrier 1"}))
+    assert "Integrated in Carrier 1" in html
+    assert "bg-body-secondary" in html
+    assert "text-body" in html
+    assert "bg-light" not in html
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("oob_index,oob_parent", [(-500, 0), (1, -500)])
+def test_refresh_drops_out_of_spec_oob_inventory(settings, librenms_server, oob_index, oob_parent):
+    """A negative OOB index fails closed to a host-only snapshot instead of shifting onto main."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.utils import set_librenms_oob
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_librenms_servers(
+        settings, {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}}
+    )
+    device = make_device("signed-inventory", librenms_cf={"default": 777})
+    set_librenms_oob(device, 999, "default", oob_type="idrac9")
+    device.save(update_fields=["custom_field_data"])
+    # RFC 2737 defines entPhysicalIndex as 1..2147483647. The main index 1500 is the value a
+    # negative OOB index would land on once the old single-term offset shifted it.
+    for device_id, index, parent, name in ((777, 1500, 0, "Main card"), (999, oob_index, oob_parent, "OOB card")):
+        librenms_server.register(
+            f"/api/v0/inventory/{device_id}/all",
+            {
+                "status": "ok",
+                "inventory": [
+                    {
+                        "entPhysicalIndex": index,
+                        "entPhysicalContainedIn": parent,
+                        "entPhysicalName": name,
+                        "entPhysicalClass": "module",
+                        "entPhysicalModelName": "TEST-CARD",
+                        "entPhysicalSerialNum": name,
+                    }
+                ],
+            },
+        )
+    librenms_server.register("/api/v0/devices/777/transceivers", {"status": "ok", "transceivers": []})
+    librenms_server.register("/api/v0/devices/777/ports", {"status": "ok", "ports": []})
+    view = DeviceModuleTableView()
+    response = _post(view, make_request("post", {"server_key": "default"}), pk=device.pk)
+
+    assert response.status_code == 200
+    # The OOB payload is refused, so the refresh is incomplete and caches no snapshot. Merging it
+    # would have shifted the OOB row onto the main index 1500.
+    assert cache.get(view.get_cache_key(device, "inventory", server_key="default")) is None
+    assert b"OOB controller inventory fetch failed" in response.content
+
+
+@pytest.mark.django_db
+def test_refresh_rejects_a_negative_main_inventory_index(settings, librenms_server):
+    """A negative index in the MAIN inventory fails the refresh instead of caching a bad snapshot."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_librenms_servers(
+        settings, {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}}
+    )
+    device = make_device("signed-main-inventory", librenms_cf={"default": 778})
+    librenms_server.register(
+        "/api/v0/inventory/778/all",
+        {
+            "status": "ok",
+            "inventory": [
+                {
+                    "entPhysicalIndex": -1,
+                    "entPhysicalContainedIn": 0,
+                    "entPhysicalName": "Main card",
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": "TEST-CARD",
+                    "entPhysicalSerialNum": "Main card",
+                }
+            ],
+        },
+    )
+    librenms_server.register("/api/v0/devices/778/transceivers", {"status": "ok", "transceivers": []})
+    librenms_server.register("/api/v0/devices/778/ports", {"status": "ok", "ports": []})
+    view = DeviceModuleTableView()
+    response = _post(view, make_request("post", {"server_key": "default"}), pk=device.pk)
+
+    assert response.status_code == 200
+    assert cache.get(view.get_cache_key(device, "inventory", server_key="default")) is None
+    assert b"Failed to fetch inventory from LibreNMS" in response.content

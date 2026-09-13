@@ -29,7 +29,7 @@ Include Virtual Chassis Detection
 : When checked, analyzes device inventory to detect stackable switches and chassis. This adds processing time but provides helpful information about multi-member devices. See [Virtual Chassis](../usage_tips/virtual_chassis.md) for details.
 
 Clear cache before search
-: Forces the plugin to fetch fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance.
+: Forces the plugin to fetch fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for the configured cache timeout to improve performance.
 
 Exclude Existing Devices
 : When checked, hides devices that already exist in NetBox. By default, all devices are shown including those already imported.
@@ -86,10 +86,13 @@ Run as background job
 : Enabled by default. Runs searches asynchronously, allowing you to track progress and cancel operations. Recommended for most use cases, especially with Virtual Chassis detection or large device sets. See [Background Jobs & Caching](background_jobs.md) for details.
 
 Clear cache before search
-: Forces fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance. See [Background Jobs & Caching](background_jobs.md) for caching details.
+: Forces fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for the configured cache timeout to improve performance. See [Background Jobs & Caching](background_jobs.md) for caching details.
 
 ## Saved Cached Searches
-The import page displays all your recent searches at the top, showing which filter combinations, that are still found in the cache. Each cached search shows the filters used, device count, and time remaining before expiration.  Click any cached search to instantly reload those results without re-running filters. This is particularly useful when switching between different filter combinations.
+
+The import page displays active searches from every configured LibreNMS server at the top. Each entry includes a server label, filters, device count, and time remaining. Identical filters on different servers remain separate.
+
+Click an entry to activate its server and reload only that server's results. The link retains its filters, naming options, and Virtual Chassis detection state. **Clear** keeps all cached searches and the active server. **Clear cache before search** refreshes only the active server and filter combination.
 
 ## Next Steps
 
