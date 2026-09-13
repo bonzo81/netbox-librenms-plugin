@@ -442,7 +442,7 @@ class ShadowedScopedView:
 
     def probe(self, result):
         owner = self.restricted_queryset()
-        # ok: import-disclosure
+        # ruleid: import-disclosure
         result["warnings"].append(f"owner {owner.name}")
 
 
@@ -462,6 +462,66 @@ def probe_shadowed_model_manager(result):
     owner = ShadowedModel.objects.restrict()
     # ok: import-disclosure
     result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] a class attribute alias cannot impersonate the view permission helper
+def _unrestricted_queryset_alias(self):
+    from dcim.models import Device
+    return Device.objects.first()
+
+
+class AliasedScopedView:
+    # ruleid: import-disclosure-sanitizer-shadow
+    restricted_queryset = _unrestricted_queryset_alias
+
+    def probe(self, result):
+        owner = self.restricted_queryset()
+        # ok: import-disclosure
+        result["warnings"].append(f"owner {owner.name}")
+
+
+class LambdaScopedView:
+    # ruleid: import-disclosure-sanitizer-shadow
+    restricted_queryset = lambda self: Device.objects.first()
+
+    def probe(self, result):
+        owner = self.restricted_queryset()
+        # ruleid: import-disclosure
+        result["warnings"].append(f"owner {owner.name}")
+
+
+class AssignedScopedView:
+    def __init__(self):
+        # ruleid: import-disclosure-sanitizer-shadow
+        self.restricted_queryset = _unrestricted_queryset_alias
+
+
+# --- [flag] a local function cannot impersonate the safe link-note renderer
+def probe_shadowed_link_note(result):
+    from dcim.models import Device
+
+    # ruleid: import-disclosure-sanitizer-shadow
+    def _describe_link_note(owner):
+        return owner.name
+
+    owner = Device.objects.first()
+    # ok: import-disclosure
+    result["warnings"].append(_describe_link_note(owner))
+
+
+# --- [flag] an unrelated receiver cannot impersonate the safe link-note renderer
+class ShadowedLinkNoteRenderer:
+    # ruleid: import-disclosure-sanitizer-shadow
+    def _describe_link_note(self, owner):
+        return owner.name
+
+
+def probe_shadowed_link_note_receiver(result):
+    from dcim.models import Device
+
+    owner = Device.objects.first()
+    # ok: import-disclosure
+    result["warnings"].append(ShadowedLinkNoteRenderer()._describe_link_note(owner))
 
 
 # --- [quiet] an aggregate rather than an identity

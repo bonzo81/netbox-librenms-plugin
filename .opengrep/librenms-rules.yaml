@@ -43,13 +43,9 @@ rules:
       - pattern: $V["existing_device"]
     pattern-sanitizers:
       # A permission-scoped lookup may name its object: that is the display gate doing its job.
-      # Keep each shape narrower than its method name. The companion rule below rejects local
-      # overrides of the two `self` helpers and of the manager method.
+      # Only trust the NetBox manager shape. The companion rule below rejects local definitions
+      # and assignments that can impersonate this method.
       - pattern: $MODEL.objects.restrict(...)
-        exact: true
-      - pattern: self.restricted_queryset(...)
-        exact: true
-      - pattern: self.restrict_object_or_404(...)
         exact: true
       # Aggregates are exempted to keep real code workable, not because they provably erase
       # identity: a contrived len(range(owner.pk)) still carries the pk. sum() is NOT exempt,
@@ -66,7 +62,9 @@ rules:
         exact: true
       # The note may name the visible match's LibreNMS linkage ID. If the gate withholds the match,
       # _block() in import_utils/disclosure.py replaces all warnings, including this note.
-      - pattern: _describe_link_note(...)
+      - patterns:
+          - pattern: _describe_link_note(...)
+          - pattern-not: $RECEIVER._describe_link_note(...)
         exact: true
     pattern-sinks:
       # the validation dict's message lists
@@ -103,8 +101,8 @@ rules:
     languages: [python]
     severity: ERROR
     message: >-
-      This definition shadows a permission API trusted by the import-disclosure taint rule.
-      Rename it so an unrestricted lookup cannot impersonate a disclosure sanitizer.
+      This binding shadows a disclosure-scoping API name. Rename it so an unrestricted lookup
+      cannot impersonate a disclosure sanitizer or obscure a taint flow.
     metadata:
       category: security
       confidence: HIGH
@@ -115,24 +113,45 @@ rules:
         - "**/tests/**"
         - "**/migrations/**"
     pattern-either:
-      - pattern: |
-          def restrict(...):
-            ...
-      - pattern: |
-          def restricted_queryset(...):
-            ...
-      - pattern: |
-          def restrict_object_or_404(...):
-            ...
-      - pattern: |
-          async def restrict(...):
-            ...
-      - pattern: |
-          async def restricted_queryset(...):
-            ...
-      - pattern: |
-          async def restrict_object_or_404(...):
-            ...
+      - patterns:
+          - pattern: |
+              def $SANITIZER(...):
+                ...
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: |
+              async def $SANITIZER(...):
+                ...
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: $SANITIZER = $VALUE
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: $RECEIVER.$SANITIZER = $VALUE
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: "$SANITIZER: $TYPE = $VALUE"
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: "$RECEIVER.$SANITIZER: $TYPE = $VALUE"
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: ($SANITIZER := $VALUE)
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
   - id: no-requests-outside-http-client
     languages: [python]
     severity: ERROR

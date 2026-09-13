@@ -147,6 +147,8 @@ def _describe_existing_librenms_link(obj, server_key):
     return info
 
 
+# This is the canonical fixed-wording helper trusted by the import-disclosure rule.
+# nosemgrep: import-disclosure-sanitizer-shadow
 def _describe_link_note(existing_link):
     """
     Return a human-readable phrase describing an existing LibreNMS link.

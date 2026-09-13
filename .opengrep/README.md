@@ -57,8 +57,9 @@ unchecked until that review.
 
 ## Scope
 
-`import-disclosure` and its sanitizer-shadow guard exclude tests and migrations. The two canonical
-view-helper definitions carry explicit suppressions that mark them as the trust anchors. The requests rule covers
+`import-disclosure` and its sanitizer-shadow guard exclude tests and migrations. Canonical helper
+definitions carry explicit suppressions. All other local bindings of these names are blocked. The
+requests rule covers
 `netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The two test-convention
 rules include only `netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
 in the scan target.
@@ -96,8 +97,9 @@ Symbolic propagation covers simple local constructor bindings. Other method call
 those bindings. The rule does not track dynamically supplied scorers or prove exact-only selection.
 Runtime tests must cover the exact-only invariant.
 
-The disclosure rule accepts only manager calls through `.objects` and view-helper calls through a
-receiver. Its companion rule rejects local definitions that can shadow those trusted spellings.
+The disclosure rule accepts only manager calls through `.objects` and the canonical fixed-wording
+link-note helper. Its companion rule rejects local definitions and assignments that can shadow the
+trusted spellings.
 
 ## `--taint-intrafile` is required
 
