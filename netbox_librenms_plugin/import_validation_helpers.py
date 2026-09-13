@@ -180,7 +180,8 @@ def apply_oob_detection_result(
     serial_role_choice_available: bool,
     warnings: "list | None" = None,
 ) -> None:
-    """Apply OOB/promote-to-host serial detection results to the validation dict.
+    """
+    Apply OOB/promote-to-host serial detection results to the validation dict.
 
     Call this after computing all OOB/promote-to-host flags from the LibreNMS
     and NetBox data.  All mutations to ``result["oob_candidate"]``,
@@ -224,7 +225,8 @@ def apply_merge_candidates(
     oob_named: dict,
     warning: str,
 ) -> None:
-    """Apply merge-candidates detection results to the validation dict.
+    """
+    Apply merge-candidates detection results to the validation dict.
 
     Called when the hostname-matched and serial-matched NetBox devices are
     different objects and at least one already has a LibreNMS linkage,

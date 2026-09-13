@@ -94,7 +94,8 @@ class DeviceImportTable(tables.Table):
     name = "DeviceImportTable"  # Required by NetBox table utilities
 
     def __init__(self, *args, user, **kwargs):
-        """Initialize table with cached querysets, scope each row's matches, and apply sorting.
+        """
+        Initialize table with cached querysets, scope each row's matches, and apply sorting.
 
         ``user`` is keyword-only and required: every row renders the identity of NetBox objects
         found by unrestricted conflict searches, so the table cannot be built without knowing whose

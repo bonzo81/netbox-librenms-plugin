@@ -29,7 +29,8 @@ _MERGE_SLOT_ROLES = {"host_named": "merge_host_named", "oob_named": "merge_oob_n
 
 
 def scope_bulk_collisions(collisions: list[dict], user) -> list[dict]:
-    """Redact collision targets the requesting user cannot see.
+    """
+    Redact collision targets the requesting user cannot see.
 
     Scope comes from :func:`visible_pks`, so this and the import-preview gate share one rule for
     what counts as "may see" (see ``DISCLOSURE_ACTIONS`` in :mod:`disclosure`).

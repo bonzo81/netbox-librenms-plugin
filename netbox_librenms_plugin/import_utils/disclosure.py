@@ -99,7 +99,8 @@ class ViewerScope:
         return pks & self._names.get(model_name, {}).keys()
 
     def can_see(self, model_name: str, pk) -> bool:
-        """Whether this viewer may see the object at *pk*.
+        """
+        Whether this viewer may see the object at *pk*.
 
         Separate from :meth:`name_of` because a NetBox Device may legitimately have no name, and a
         visible-but-unnamed object must not read as withheld.
