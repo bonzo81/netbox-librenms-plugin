@@ -166,6 +166,40 @@ class TestTrailingSlashResilience:
         assert response.status_code == 404, response.status_code
 
 
+class TestMappingBulkImportViewsAreRegistered:
+    """
+    Every mapping bulk-import view must be in NetBox's model-view registry.
+
+    An explicit urls.py entry keeps the endpoint reachable, so a missing
+    @register_model_view is invisible to a URL test: only the registry drives NetBox's
+    model URL and UI integration. Ten of the eleven views carried the decorator and one
+    did not, so assert the whole class rather than the one instance.
+    """
+
+    def test_every_bulk_import_view_is_registered(self):
+        import inspect
+
+        from netbox.registry import registry
+
+        from netbox_librenms_plugin.views import mapping_views
+
+        views = [
+            (name, obj)
+            for name, obj in inspect.getmembers(mapping_views, inspect.isclass)
+            if name.endswith("BulkImportView") and obj.__module__ == mapping_views.__name__
+        ]
+        assert views, "no bulk-import views found — the discovery above stopped matching"
+
+        registered = registry["views"]["netbox_librenms_plugin"]
+
+        def registered_names(model):
+            # Each entry is a list of {"name": ..., "view": ..., ...} records.
+            return {entry["name"] for entry in registered.get(model._meta.model_name, [])}
+
+        missing = [name for name, view in views if "bulk_import" not in registered_names(view.queryset.model)]
+        assert not missing, f"bulk-import views missing @register_model_view: {missing}"
+
+
 class TestCacheMixinWiring:
     """Views that cache LibreNMS data must have CacheMixin and expose get_cache_key."""
 
@@ -1629,16 +1663,21 @@ class TestInstallRefusesADuplicateSerial:
         """
         Drive a real InstallModuleView POST for a cached row carrying `serial`.
 
-        Both the posted field and the cached row carry the serial: this branch reads it from the
-        POST, and branches above take it from the selected cached inventory row.
+        The action resolves the serial from the exact cached inventory row bound to the form.
         """
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
+        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         view = InstallModuleView()
         view._librenms_api = MagicMock(server_key="default")
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": serial,
+        }
         request = make_request(
             "post",
             {
@@ -1647,6 +1686,14 @@ class TestInstallRefusesADuplicateSerial:
                 "serial": serial,
                 "module_bay_id": str(empty_bay.pk),
                 "module_type_id": str(module_type.pk),
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": empty_bay.pk, "module_type_id": module_type.pk},
+                    100,
+                    module_inventory_row_digest(inventory_item),
+                ),
             },
             user=user or make_superuser(f"dupserial-{empty_bay.pk}"),
             path="/x/",
@@ -1657,13 +1704,7 @@ class TestInstallRefusesADuplicateSerial:
             cache_key,
             trusted_module_inventory_payload(
                 device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": module_type.model,
-                        "entPhysicalSerialNum": serial,
-                    }
-                ],
+                [inventory_item],
             ),
         )
         try:
@@ -2246,8 +2287,14 @@ class TestGatedViewsRefuseOutOfScopeObjects:
     def test_module_serial_update_refuses_a_module_outside_the_grant(self):
         """UpdateModuleSerialView writes the serial of a module whose pk comes from the POST, filtered only by device."""
         from dcim.models import Device, Module
+        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            message_texts,
+            trusted_module_inventory_payload,
+        )
+        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         page_device = make_device("scope-modserial-page")
@@ -2269,13 +2316,45 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         view = UpdateModuleSerialView()
         request = self._request(
             user,
-            {"server_key": "default", "module_id": str(module.pk), "serial": "HIJACKED"},
+            {"server_key": "default", "module_id": str(module.pk), "ent_index": "4001"},
         )
         view.setup(request)
-        view.post(request, pk=page_device.pk)
+        # The serial now comes from the cached row, so the snapshot has to carry it for the grant
+        # filter to be the only thing that stops the write. Derive the namespace the view resolves
+        # rather than naming a server: the configured set differs between environments.
+        server_key = view.resolve_posted_server_key_or_none(request.POST)
+        assert server_key is not None, "this test needs a resolvable server namespace"
+        inventory_item = {"entPhysicalIndex": 4001, "entPhysicalSerialNum": "HIJACKED"}
+        post_data = request.POST.copy()
+        post_data["inventory_binding"] = module_inventory_binding_token(
+            page_device.pk,
+            server_key,
+            "update_module_serial",
+            {"module_id": module.pk},
+            4001,
+            module_inventory_row_digest(inventory_item),
+        )
+        request.POST = post_data
+        cache_key = view.get_cache_key(page_device, "inventory", server_key=server_key)
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                page_device,
+                [inventory_item],
+                server_key=server_key,
+                librenms_id=901,
+            ),
+            timeout=300,
+        )
+        try:
+            view.post(request, pk=page_device.pk)
+        finally:
+            cache.delete(cache_key)
 
         module.refresh_from_db()
         assert module.serial == "ORIGINAL"
+        # Names the reason, so a row the view never resolved cannot pass this test.
+        assert "Module no longer exists." in message_texts(request, "error")
 
     def test_module_replace_refuses_to_delete_the_target_outside_the_delete_grant(self):
         """Replace deletes its target, so change access alone must not authorize the operation."""
@@ -2350,6 +2429,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
         device = make_device("scope-replace-conflict")
@@ -2382,20 +2462,33 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         )
         view = ReplaceModuleView()
         view._librenms_api = MagicMock(server_key="default")
-        request = self._request(user, {"module_id": str(target.pk), "ent_index": "100"})
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": hidden.serial,
+        }
+        request = self._request(
+            user,
+            {
+                "module_id": str(target.pk),
+                "ent_index": "100",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "replace_module",
+                    {"module_id": target.pk},
+                    100,
+                    module_inventory_row_digest(inventory_item),
+                ),
+            },
+        )
         view.setup(request)
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
             trusted_module_inventory_payload(
                 device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": module_type.model,
-                        "entPhysicalSerialNum": hidden.serial,
-                    }
-                ],
+                [inventory_item],
             ),
         )
         try:
@@ -2491,6 +2584,42 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         # Bounces on "Site not found" before any LibreNMS call, so no API stub is needed.
         assert view.get_site_by_pk(out_of_scope.pk) is None
         assert view.get_site_by_pk(in_scope.pk) == in_scope  # the grant DOES still resolve
+
+    def test_serial_cable_sync_refuses_console_ports_outside_the_grant(self):
+        """SyncCablesView cables the console ports named by the cached link row, so those reads are scoped too."""
+        from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
+
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, csps, _ = make_serial_device("scope-serialcable-acs", csp_names=["ttyS1"])
+        router, _, cps = make_serial_device("scope-serialcable-r", cp_names=["console-A"])
+        csp, cp = csps[0], cps[0]
+
+        # The grant covers the devices but NOT the console ports the row names.
+        user = self._user(
+            "scope-serialcable",
+            [
+                (Device, "view", None),
+                (ConsoleServerPort, "change", {"name": "no-such-port"}),
+                (ConsolePort, "change", {"name": "no-such-port"}),
+                (Cable, "add", None),
+                (Cable, "change", None),
+            ],
+        )
+        view = SyncCablesView()
+        view.setup(self._request(user, {"server_key": "default"}))
+
+        link_data = {
+            "_source": "serial",
+            "local_port": "ttyS1",
+            "netbox_local_interface_id": csp.pk,
+            "netbox_remote_interface_id": cp.pk,
+        }
+        result = view.handle_cable_creation(link_data, {"local_port_id": "ttyS1"})
+
+        assert result["status"] == "invalid"
+        assert not Cable.objects.filter(terminations__termination_id=csp.pk).exists()
 
     def test_oob_interface_reuse_refuses_an_interface_outside_the_grant(self):
         """AddAsOOBView reuses an interface whose pk comes from the OOB form, filtered only by device."""
