@@ -57,9 +57,9 @@ After import, devices appear in NetBox with a comment indicating they were impor
 
 ## Multi-Server Support
 
-If your NetBox installation is configured with multiple LibreNMS servers, the import feature automatically uses the currently selected server from Plugin Settings.
+If your NetBox installation is configured with multiple LibreNMS servers, the import page starts on the installation default from Plugin Settings. You can select another configured server for the current import workflow without changing that default.
 
-All imported devices are linked to the server used during import, allowing you to maintain devices from multiple LibreNMS instances in a single NetBox installation.
+Changing the server clears the current filters and results. All searches, background jobs, validation actions, and imported devices remain linked to the active server.
 
 ## Next Steps
 

@@ -1,13 +1,14 @@
 import logging
+from urllib.parse import urlencode
 
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
-from django.core.exceptions import ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 from django.db import IntegrityError, transaction
 from django.utils.text import slugify
 
 from django.http import HttpResponse
-from django.shortcuts import redirect
+from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
@@ -16,6 +17,15 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.models import PlatformMapping
+from netbox_librenms_plugin.server_mappings import (
+    PREFERRED_SERVER_FIELD,
+    iter_server_mapping_entries,
+    require_server_key,
+    with_preferred_server,
+    without_server_mapping,
+)
+from netbox_librenms_plugin.server_selection import build_server_mappings
+from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     find_by_librenms_id,
@@ -38,6 +48,74 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
+SYNC_OBJECT_TYPES = ("device", "vm")
+
+
+def _normalize_sync_object_type(value):
+    """Return the canonical sync object type, or None when it is not supported."""
+    if value == "virtualmachine":
+        value = "vm"
+    return value if value in SYNC_OBJECT_TYPES else None
+
+
+def _sync_model(object_type):
+    """Return the model that owns the LibreNMS mapping for one object type."""
+    return VirtualMachine if object_type == "vm" else Device
+
+
+def _sync_url_name(object_type):
+    """Return the sync-page URL name for one object type."""
+    if object_type == "vm":
+        return "plugins:netbox_librenms_plugin:vm_librenms_sync"
+    return "plugins:netbox_librenms_plugin:device_librenms_sync"
+
+
+def _validated_sync_tab(request):
+    """Return the submitted sync tab when it is one of the supported resources."""
+    submitted_tab = request.POST.get("tab")
+    return submitted_tab if submitted_tab in {tab.value for tab in SyncTab} else None
+
+
+def _validated_active_server_key(request, field="active_server_key"):
+    """Return a safe server key for preserving the active sync-page context."""
+    submitted_key = request.POST.get(field, "").strip()
+    if not submitted_key:
+        return None
+    try:
+        return require_server_key(submitted_key)
+    except ValueError:
+        return None
+
+
+def _server_mapping_redirect(object_type, pk, active_server_key=None, active_sync_tab=None):
+    """Redirect a sync-page action to its validated object sync context."""
+    url = reverse(_sync_url_name(object_type), kwargs={"pk": pk})
+    query = {}
+    if active_sync_tab:
+        query["tab"] = active_sync_tab
+    if active_server_key:
+        query["server_key"] = active_server_key
+    if query:
+        url = f"{url}?{urlencode(query)}"
+    return redirect(url)
+
+
+def _write_failure_message(exc, action, written_field):
+    """Describe a failed single-field write, naming the fields that actually failed validation."""
+    errors = getattr(exc, "message_dict", None)
+    if not errors:
+        return f"Failed to {action}: {exc}"
+    detail = "; ".join(f"{field}: {' '.join(texts)}" for field, texts in sorted(errors.items()))
+    # full_clean() validates the whole object, so the failure can sit on a field this write never
+    # touched. Name that field rather than report the raw dict, which reads as though the write
+    # needed it. Whether the write caused the failure is not knowable from the error keys alone:
+    # a custom validator can add any key, so the wording states what failed, never when it broke.
+    elsewhere = [field for field in errors if field not in (written_field, NON_FIELD_ERRORS)]
+    if elsewhere and len(elsewhere) == len(errors):
+        return f"Cannot {action}: validation fails on {detail} Resolve that, then retry."
+    return f"Failed to {action}: {detail}"
+
+
 def _device_sync_redirect(request, pk, server_key):
     """
     Redirect to the device sync tab, carrying the already-resolved ``server_key``.
@@ -48,6 +126,14 @@ def _device_sync_redirect(request, pk, server_key):
     from ``rebind_api_for_server`` (not a raw POST value), so it is reflected directly; a None key
     (a stale/removed server) redirects to the bare tab. ``redirect_with_server_key`` still gates the
     final URL on the open-redirect barrier (CWE-601).
+
+    Args:
+        request (HttpRequest): The current HTTP request.
+        pk (int): The NetBox device primary key.
+        server_key (str | None): The resolved LibreNMS server key.
+
+    Returns:
+        HttpResponseRedirect: The redirect to the device sync tab.
     """
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
     return redirect_with_server_key(request, url, server_key)
@@ -87,7 +173,11 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 if sync_device:
                     librenms_lookup_device = sync_device
 
-        self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(librenms_lookup_device)
+
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -138,8 +228,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.name = old_name
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update device name to '{resolved_name}': {error_msg}")
+            messages.error(request, _write_failure_message(e, f"update device name to '{resolved_name}'", "name"))
             return _device_sync_redirect(request, pk, server_key)
 
         messages.success(request, f"Device name updated from '{old_name}' to '{resolved_name}'")
@@ -171,7 +260,11 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
+
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -196,8 +289,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.serial = old_serial
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update serial to '{serial}': {error_msg}")
+            messages.error(request, _write_failure_message(e, f"update serial to '{serial}'", "serial"))
             return _device_sync_redirect(request, pk, server_key)
 
         if old_serial:
@@ -235,7 +327,11 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
+
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -277,8 +373,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.device_type = old_device_type
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update device type to '{device_type}': {error_msg}")
+            messages.error(request, _write_failure_message(e, f"update device type to '{device_type}'", "device_type"))
             return _device_sync_redirect(request, pk, server_key)
 
         messages.success(
@@ -313,7 +408,11 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
+
+        if lookup_error is not None:
+            messages.error(request, lookup_error.message)
+            return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -356,8 +455,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.platform = old_platform
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update platform to '{platform}': {error_msg}")
+            messages.error(request, _write_failure_message(e, f"update platform to '{platform}'", "platform"))
             return _device_sync_redirect(request, pk, server_key)
 
         if old_platform:
@@ -381,7 +479,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         ],
     }
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         """Create a new platform (or reuse an existing one) and assign it to the device."""
         # Read inputs before the permission check so required perms can adapt:
         # reusing an existing platform needs no "add Platform" permission, and the
@@ -542,7 +640,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 )
                 messages.error(
                     request,
-                    f"Device (pk={pk}) validation failed: {error_msg}",
+                    _write_failure_message(e, f"assign platform '{platform}' to device (pk={pk})", "platform"),
                 )
                 return self._sync_redirect(
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
@@ -699,10 +797,14 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             return error
 
         device = self.restrict_object_or_404(Device, "change", pk=pk)
+        # The modal posts the tab's server scope, so return the user to that same server and tab
+        # instead of the session/default one.
+        active_server_key = _validated_active_server_key(request, "server_key")
+        active_sync_tab = _validated_sync_tab(request)
 
         if not device.virtual_chassis:
             messages.error(request, "Device is not part of a virtual chassis")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
         assignments_made = 0
         errors = []
@@ -734,8 +836,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                     member.save()
                 except (ValidationError, IntegrityError) as e:
                     member.serial = old_serial
-                    error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-                    errors.append(f"Failed to set serial on {member.name}: {error_msg}")
+                    errors.append(_write_failure_message(e, f"set serial on {member.name}", "serial"))
                     counter += 1
                     continue
 
@@ -761,7 +862,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         if assignments_made == 0 and not errors:
             messages.info(request, "No serial assignments were made")
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
 
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -773,13 +874,8 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
     def _get_object(self, object_type, pk):
         """Return the Device or VirtualMachine for the given pk."""
-        model = VirtualMachine if object_type == "vm" else Device
+        model = _sync_model(object_type)
         return self.restrict_object_or_404(model, "change", pk=pk), model
-
-    def _sync_url_name(self, object_type):
-        if object_type == "vm":
-            return "plugins:netbox_librenms_plugin:vm_librenms_sync"
-        return "plugins:netbox_librenms_plugin:device_librenms_sync"
 
     def _normalize_librenms_mapping(self, value):
         if isinstance(value, bool):
@@ -792,29 +888,34 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
     def post(self, request, pk):
         # Scope required permissions to the specific model being modified before checking.
-        object_type = request.POST.get("object_type", "device")
-        if object_type == "virtualmachine":
-            object_type = "vm"
-        if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
-        target_model = VirtualMachine if object_type == "vm" else Device
+        raw_object_type = request.POST.get("object_type", "device")
+        object_type = _normalize_sync_object_type(raw_object_type)
+        if object_type is None:
+            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
+        target_model = _sync_model(object_type)
         self.required_object_permissions = {"POST": [("change", target_model)]}
 
         if error := self.require_all_permissions("POST"):
             return error
 
+        active_sync_tab = _validated_sync_tab(request)
+        active_server_key = _validated_active_server_key(request)
         obj, model = self._get_object(object_type, pk)
-        sync_url = self._sync_url_name(object_type)
         server_key = request.POST.get("server_key", "").strip()
 
         if not server_key:
             messages.error(request, "No server_key provided.")
-            return redirect(sync_url, pk=pk)
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        try:
+            server_key = require_server_key(server_key)
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
         cf_value = self._normalize_librenms_mapping(obj.custom_field_data.get("librenms_id"))
         if not isinstance(cf_value, dict) or server_key not in cf_value:
             messages.warning(request, f"No mapping found for server '{server_key}'.")
-            return redirect(sync_url, pk=pk)
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
         # Refuse to remove mappings for servers that are still configured in the plugin.
         # Only orphaned (unconfigured) mappings may be removed via this endpoint.
@@ -836,25 +937,31 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 f"Cannot remove mapping for configured server '{server_key}'. "
                 "Remove the server from plugin configuration first, then retry.",
             )
-            return redirect(sync_url, pk=pk)
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
         with transaction.atomic():
             try:
                 obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
-                return redirect(sync_url, pk=pk)
+                return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
             cf = self._normalize_librenms_mapping(obj_locked.custom_field_data.get("librenms_id"))
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"
             )
             if isinstance(cf, dict) and server_key in cf and not _is_protected:
-                del cf[server_key]
-                obj_locked.custom_field_data["librenms_id"] = cf if cf else None
+                cf = without_server_mapping(cf, server_key)
+                obj_locked.custom_field_data["librenms_id"] = cf
+                usable_count = sum(mapping.is_selectable for mapping in build_server_mappings(obj_locked))
+                if usable_count <= 1:
+                    cf.pop(PREFERRED_SERVER_FIELD, None)
+                obj_locked.custom_field_data["librenms_id"] = cf if any(iter_server_mapping_entries(cf)) else None
                 try:
-                    obj_locked.full_clean()
-                    obj_locked.save()
+                    obj_locked.clean_fields(
+                        exclude={field.name for field in obj_locked._meta.fields if field.name != "custom_field_data"}
+                    )
+                    obj_locked.save(update_fields=["custom_field_data"])
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
@@ -862,17 +969,85 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                         "Validation error removing LibreNMS mapping for server %r: %s", server_key, error_msg
                     )
                     messages.error(request, f"Validation error removing LibreNMS mapping: {error_msg}")
-                    return redirect(sync_url, pk=pk)
+                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 except Exception as exc:
                     transaction.set_rollback(True)
                     logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
                     messages.error(request, f"Unexpected error removing LibreNMS mapping: {exc}")
-                    return redirect(sync_url, pk=pk)
+                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:
                 messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
 
-        return redirect(sync_url, pk=pk)
+        return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+
+
+class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Store the preferred server on a Device or VirtualMachine mapping owner."""
+
+    required_object_permissions = {
+        "POST": [("change", Device), ("change", VirtualMachine)],
+    }
+
+    def _redirect(self, object_type, pk, active_server_key=None, active_sync_tab=None):
+        return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+
+    def post(self, request, pk):
+        raw_object_type = request.POST.get("object_type", "device")
+        object_type = _normalize_sync_object_type(raw_object_type)
+        if object_type is None:
+            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
+
+        model = _sync_model(object_type)
+        self.required_object_permissions = {"POST": [("change", model)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        active_sync_tab = _validated_sync_tab(request)
+        try:
+            requested_key = require_server_key(request.POST.get("server_key", ""))
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            # The later branches keep the user's server context; this one must too, or a
+            # malformed submission drops a non-default page back to the default server.
+            return self._redirect(object_type, pk, _validated_active_server_key(request), active_sync_tab)
+        submitted_active_key = request.POST.get("active_server_key", "").strip() or None
+
+        with transaction.atomic():
+            owner = get_object_or_404(
+                self.restricted_queryset(model, "change").select_for_update(of=("self",)),
+                pk=pk,
+            )
+            raw_mapping = owner.custom_field_data.get("librenms_id")
+            mappings = build_server_mappings(owner)
+            selectable_keys = {mapping.server_key for mapping in mappings if mapping.is_selectable}
+            active_server_key = submitted_active_key if submitted_active_key in selectable_keys else None
+            if len(selectable_keys) <= 1:
+                messages.error(request, "A preferred server requires at least two usable object mappings.")
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+            if requested_key not in selectable_keys:
+                messages.error(request, "The preferred server is not a usable mapping for this object.")
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+
+            owner.custom_field_data["librenms_id"] = with_preferred_server(raw_mapping, requested_key)
+            try:
+                owner.clean_fields(
+                    exclude={field.name for field in owner._meta.fields if field.name != "custom_field_data"}
+                )
+                owner.save(update_fields=["custom_field_data"])
+            except ValidationError as exc:
+                transaction.set_rollback(True)
+                error = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+                messages.error(request, f"Validation error changing preferred server: {error}")
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+            except Exception:
+                transaction.set_rollback(True)
+                logger.exception("Could not save the preferred LibreNMS server %r", requested_key)
+                messages.error(request, "Could not change the preferred LibreNMS server. Try again.")
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+
+        messages.success(request, f"Preferred LibreNMS server changed to '{requested_key}'.")
+        return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
 
 class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -888,12 +1063,11 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     }
 
     def _get_model_and_object(self, object_type, pk):
-        model = VirtualMachine if object_type == "vm" else Device
+        model = _sync_model(object_type)
         return model, self.restrict_object_or_404(model, "change", pk=pk)
 
     def _sync_url(self, object_type, pk):
-        name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
-        url = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": pk})
+        url = reverse(_sync_url_name(object_type), kwargs={"pk": pk})
         # Propagate the active multi-server server_key so redirects land on the server the user was
         # working in. Source it here (re-match against the trusted config, with a bound-API
         # fallback), then delegate the redirect to the shared redirect_with_server_key — like the
@@ -921,14 +1095,13 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             server_key = resolve_configured_server_key(fallback)
         return redirect_with_server_key(request, url, server_key)
 
-    def post(self, request, pk):
-        object_type = request.POST.get("object_type", "device")
-        if object_type == "virtualmachine":
-            object_type = "vm"
-        if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
+    def post(self, request, pk):  # noqa: C901
+        raw_object_type = request.POST.get("object_type", "device")
+        object_type = _normalize_sync_object_type(raw_object_type)
+        if object_type is None:
+            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
 
-        target_model = VirtualMachine if object_type == "vm" else Device
+        target_model = _sync_model(object_type)
         self.required_object_permissions = {"POST": [("change", target_model)]}
         if error := self.require_all_permissions("POST"):
             return error
@@ -1027,8 +1200,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 locked.save()
             except ValidationError as exc:
                 transaction.set_rollback(True)
-                error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-                messages.error(request, f"Failed to save converted librenms_id: {error_msg}")
+                messages.error(request, _write_failure_message(exc, "save converted librenms_id", "custom_field_data"))
                 return self._sync_url(object_type, pk)
             except Exception as exc:
                 transaction.set_rollback(True)

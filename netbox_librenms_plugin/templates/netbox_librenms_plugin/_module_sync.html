@@ -16,6 +16,7 @@
                     {% if model_name == "device" %}
                         <button type="button" hx-post="{% url 'plugins:netbox_librenms_plugin:device_module_sync' pk=object.pk %}"
                                 hx-target="#module-sync-content"
+                                hx-sync="#module-sync-content:drop"
                                 class="btn btn-outline-primary">
                             Refresh Modules
                         </button>

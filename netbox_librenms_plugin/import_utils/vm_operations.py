@@ -8,6 +8,7 @@ from django.utils import timezone
 from virtualization.models import Cluster
 
 from ..librenms_api import LibreNMSAPI
+from ..utils import lock_librenms_id_assignment
 from .bulk_import import _is_job_cancelled
 from .device_operations import _determine_device_name, fetch_device_with_cache, validate_device_for_import
 from .permissions import require_permissions
@@ -31,6 +32,8 @@ def create_vm_from_librenms(
         validation: Validation result from validate_device_for_import with import_as_vm=True
         use_sysname: If True, prefer sysName; if False, use hostname
         server_key: LibreNMS server key used to store the librenms_id custom field
+        strip_domain: If True, remove the domain suffix from the VM name.
+        role: Optional NetBox device role. The validated role is used when this is None.
 
     Returns:
         Created VirtualMachine instance
@@ -81,6 +84,15 @@ def create_vm_from_librenms(
     # Create the VM and assign its LibreNMS ID atomically so a failure in
     # set_librenms_device_id never leaves a VM without a mapping.
     with transaction.atomic():
+        _locked_owner, conflict = lock_librenms_id_assignment(librenms_device_id, server_key)
+        if conflict is not None:
+            object_label = "VM" if isinstance(conflict, VirtualMachine) else "device"
+            # The claim search is unrestricted and this helper takes no user, so it cannot check
+            # who may see the owner. Naming it here would disclose an object outside the caller's
+            # scope; the permission-checked callers name it through _visible_conflict_label().
+            raise ValueError(
+                f"VM cannot be imported: LibreNMS ID {librenms_device_id} is already assigned to another {object_label}"
+            )
         vm = VirtualMachine.objects.create(
             name=vm_name,
             cluster=cluster,

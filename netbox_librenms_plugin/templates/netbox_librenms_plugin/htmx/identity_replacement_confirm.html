@@ -1,0 +1,53 @@
+{# Same-server identity replacement: shown when an action would overwrite a different host ID. #}
+<div id="htmx-modal-content" hx-swap-oob="innerHTML">
+<div class="modal-header">
+  <h5 class="modal-title text-danger">
+    <i class="mdi mdi-swap-horizontal-bold"></i>
+    Replace the LibreNMS identity on {{ server_display_name }}?
+  </h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<div class="modal-body">
+  <div class="alert alert-danger mb-3">
+    <i class="mdi mdi-alert-octagon me-1"></i>
+    <strong>{{ object_name }}</strong> is already linked to a different LibreNMS host on this
+    server. <em>{{ action_label }}</em> was blocked and nothing has changed yet.
+  </div>
+
+  <div class="border border-danger rounded-3 p-3 mb-3">
+    <dl class="row mb-0">
+      <dt class="col-sm-4">NetBox {{ object_label }}</dt>
+      <dd class="col-sm-8">{{ object_name }}</dd>
+      <dt class="col-sm-4">Active server</dt>
+      <dd class="col-sm-8">{{ server_display_name }} <span class="text-muted small">({{ server_key }})</span></dd>
+      <dt class="col-sm-4">Current host ID</dt>
+      <dd class="col-sm-8"><span class="badge bg-secondary text-white">{{ current_host_id }}</span></dd>
+      <dt class="col-sm-4">Proposed host ID</dt>
+      <dd class="col-sm-8"><span class="badge bg-danger text-white">{{ proposed_host_id }}</span></dd>
+    </dl>
+  </div>
+
+  <div class="alert alert-info mb-0 small">
+    <i class="mdi mdi-information-outline me-1"></i>
+    Replacing changes only this server's mapping entry: its out-of-band link, every other server
+    mapping, and the preferred server are kept. The rest of <em>{{ action_label }}</em> still runs,
+    so it can also update the name, serial, or device type from LibreNMS. Confirm only if
+    {{ object_name }} really is LibreNMS host {{ proposed_host_id }} on {{ server_display_name }}.
+  </div>
+</div>
+<div class="modal-footer">
+  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+    <i class="mdi mdi-close"></i> Cancel
+  </button>
+  {# The signed intent carries every field the confirming request needs, so it reads none back. #}
+  <form hx-post="{{ confirm_url }}" hx-swap="none">
+    {% csrf_token %}
+    <input type="hidden" name="{{ intent_field }}" value="{{ intent_token }}">
+    <input type="hidden" name="use-sysname-toggle" value="{{ use_sysname|yesno:'on,off' }}">
+    <input type="hidden" name="strip-domain-toggle" value="{{ strip_domain|yesno:'on,off' }}">
+    <button type="submit" class="btn btn-danger">
+      <i class="mdi mdi-swap-horizontal-bold"></i> Replace host ID {{ current_host_id }} with {{ proposed_host_id }}
+    </button>
+  </form>
+</div>
+</div>

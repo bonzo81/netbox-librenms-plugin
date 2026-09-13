@@ -1,320 +1,320 @@
-"""Coverage tests for netbox_librenms_plugin.import_utils.cache module."""
+"""Coverage for import cache behavior through Django's configured cache."""
 
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+from django.core.cache import cache
 
 
-class TestGetLocationChoicesCacheKey:
-    """Tests for get_location_choices_cache_key (line 14)."""
+@pytest.fixture
+def server_key():
+    """Give each concurrently running test an isolated cache namespace."""
+    return f"cache-test-{uuid4().hex}"
 
-    def test_returns_correct_format(self):
-        from netbox_librenms_plugin.import_utils.cache import get_location_choices_cache_key
 
-        result = get_location_choices_cache_key("default")
-        assert result == "librenms_locations_choices:default"
+def _metadata(server_key, cached_at, filters, **overrides):
+    metadata = {
+        "server_key": server_key,
+        "cache_timeout": 300,
+        "cached_at": cached_at,
+        "filters": filters,
+        "vc_enabled": False,
+        "use_sysname": True,
+        "strip_domain": False,
+        "device_count": 1,
+    }
+    metadata.update(overrides)
+    return metadata
 
-    def test_different_server_keys(self):
-        from netbox_librenms_plugin.import_utils.cache import get_location_choices_cache_key
+
+def _store_indexed_search(server_key, metadata, *, cache_key=None):
+    from netbox_librenms_plugin.import_utils.cache import get_cache_index_key
+
+    cache_key = cache_key or f"cached-search:{uuid4().hex}"
+    cache.set(cache_key, metadata, timeout=3600)
+    cache.set(get_cache_index_key(server_key), [cache_key], timeout=3600)
+    return cache_key
+
+
+class TestCacheKeyContracts:
+    def test_location_and_index_keys_are_scoped_to_the_server(self):
+        from netbox_librenms_plugin.import_utils.cache import (
+            get_cache_index_key,
+            get_location_choices_cache_key,
+        )
 
         assert get_location_choices_cache_key("primary") == "librenms_locations_choices:primary"
         assert get_location_choices_cache_key("secondary") == "librenms_locations_choices:secondary"
+        assert get_cache_index_key("primary") == "librenms_cache_index_primary"
+
+    def test_metadata_key_is_deterministic_across_filter_order(self):
+        from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
+
+        first = get_cache_metadata_key("default", {"location": "NYC", "type": "network"}, True)
+        reordered = get_cache_metadata_key("default", {"type": "network", "location": "NYC"}, True)
+
+        assert first == reordered
+
+    def test_metadata_key_distinguishes_values_servers_and_naming_options(self):
+        from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
+
+        baseline = get_cache_metadata_key("primary", {"location": "NYC"}, False)
+
+        assert baseline != get_cache_metadata_key("primary", {"location": "LON"}, False)
+        assert baseline != get_cache_metadata_key("secondary", {"location": "NYC"}, False)
+        assert baseline != get_cache_metadata_key("primary", {"location": "NYC"}, True)
+        assert baseline != get_cache_metadata_key("primary", {"location": "NYC"}, False, use_sysname=False)
+        assert baseline != get_cache_metadata_key("primary", {"location": "NYC"}, False, strip_domain=True)
+
+    def test_none_filters_are_excluded_but_valid_falsy_values_are_preserved(self):
+        from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
+
+        without_optional = get_cache_metadata_key("default", {"location": "NYC"}, False)
+        with_none = get_cache_metadata_key("default", {"location": "NYC", "type": None}, False)
+        with_zero = get_cache_metadata_key("default", {"location": "NYC", "type": 0}, False)
+        with_false = get_cache_metadata_key("default", {"location": "NYC", "type": False}, False)
+
+        assert with_none == without_optional
+        assert with_zero != without_optional
+        assert with_false != without_optional
+
+    def test_validated_device_key_tracks_device_and_virtual_chassis_mode(self):
+        from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
+
+        baseline = get_validated_device_cache_key("default", {"type": "network"}, 42, False)
+        same = get_validated_device_cache_key("default", {"type": "network"}, 42, False)
+
+        assert baseline == same
+        assert baseline != get_validated_device_cache_key("default", {"type": "network"}, 43, False)
+        assert baseline != get_validated_device_cache_key("default", {"type": "network"}, 42, True)
+        assert baseline.endswith("_42_novc_sysname=True_strip=False")
+
+    def test_import_device_key_includes_the_server_and_device(self):
+        from netbox_librenms_plugin.import_utils.cache import (
+            get_import_device_cache_key,
+            get_import_search_cache_key,
+        )
+
+        assert get_import_device_cache_key(42, "primary") == "import_device_data_primary_42"
+        assert get_import_search_cache_key("primary", {"location": "42"}, {"hostname": "edge"}).startswith(
+            "librenms_devices_import_primary_"
+        )
 
 
 class TestGetActiveCachedSearches:
-    """Tests for get_active_cached_searches (lines 52-131)."""
+    def test_missing_or_empty_index_returns_no_searches(self, server_key):
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
 
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_empty_cache_index_returns_empty_list(self, mock_cache):
+        assert get_active_cached_searches(server_key) == []
+
+        cache.set(get_cache_index_key(server_key), [], timeout=3600)
+
+        assert get_active_cached_searches(server_key) == []
+
+    def test_active_entry_returns_remaining_time_and_an_independent_display_copy(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
 
-        mock_cache.get.return_value = []
-        result = get_active_cached_searches("default")
-        assert result == []
+        filters = {"hostname": "edge"}
+        stored_timestamp = datetime.now(timezone.utc).isoformat()
+        cache_key = _store_indexed_search(
+            server_key,
+            _metadata(server_key, stored_timestamp, filters),
+        )
 
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_none_cache_index_returns_empty_list(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
+        result = get_active_cached_searches(server_key)
 
-        # cache.get(cache_index_key, []) returns [] when cache misses
-        mock_cache.get.side_effect = lambda key, default=None: default if "cache_index" in key else None
-        result = get_active_cached_searches("default")
-        assert result == []
-
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_entry_with_remaining_time_is_returned(self, mock_cache):
-        from datetime import datetime, timezone
-
-        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
-
-        now = datetime.now(timezone.utc)
-        cached_at = now.isoformat()
-
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["some_cache_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            if key == "some_cache_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": cached_at,
-                    "filters": {},
-                }
-            return default
-
-        mock_cache.get.side_effect = mock_get
-
-        result = get_active_cached_searches("default")
         assert len(result) == 1
-        assert result[0]["remaining_seconds"] > 0
-        assert result[0]["cache_key"] == "some_cache_key"
+        assert result[0]["cache_key"] == cache_key
+        assert result[0]["cached_at"] == stored_timestamp
+        assert 0 < result[0]["remaining_seconds"] <= 300
+        assert result[0]["display_filters"] == {"hostname": "edge"}
+        assert result[0]["display_filters"] is not result[0]["filters"]
+
+    def test_location_and_type_filters_use_cached_display_names(self, server_key):
+        from netbox_librenms_plugin.import_utils.cache import (
+            get_active_cached_searches,
+            get_location_choices_cache_key,
+        )
+
+        cache.set(
+            get_location_choices_cache_key(server_key),
+            [("42", "Amsterdam DC"), ("99", "London DC")],
+            timeout=3600,
+        )
+        _store_indexed_search(
+            server_key,
+            _metadata(
+                server_key,
+                datetime.now(timezone.utc).isoformat(),
+                {"location": "42", "type": "network"},
+            ),
+        )
+
+        result = get_active_cached_searches(server_key)
+
+        assert result[0]["display_filters"] == {"location": "Amsterdam DC", "type": "Network"}
+
+    def test_expired_entry_is_removed_from_the_real_index(self, server_key):
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
+
+        _store_indexed_search(
+            server_key,
+            _metadata(server_key, datetime.fromtimestamp(0, timezone.utc).isoformat(), {"hostname": "edge"}),
+        )
+
+        assert get_active_cached_searches(server_key) == []
+        assert cache.get(get_cache_index_key(server_key)) == []
+
+    @pytest.mark.parametrize(
+        "invalid_metadata",
+        [
+            None,
+            "not-a-mapping",
+            {},
+            {"server_key": "another-server"},
+            {"server_key": "placeholder", "filters": {"hostname": "edge"}},
+        ],
+    )
+    def test_missing_or_invalid_metadata_is_removed_from_the_index(self, server_key, invalid_metadata):
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
+
+        cache_key = f"invalid-search:{uuid4().hex}"
+        if invalid_metadata is not None:
+            if isinstance(invalid_metadata, dict) and invalid_metadata.get("server_key") == "placeholder":
+                invalid_metadata = {**invalid_metadata, "server_key": server_key}
+            cache.set(cache_key, invalid_metadata, timeout=3600)
+        cache.set(get_cache_index_key(server_key), [cache_key], timeout=3600)
+
+        assert get_active_cached_searches(server_key) == []
+        assert cache.get(get_cache_index_key(server_key)) == []
+
+    def test_complete_metadata_without_filters_stays_in_the_index(self, server_key):
+        """A search whose filters clean to {} is still a real cached search."""
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
+
+        cache_key = _store_indexed_search(
+            server_key,
+            _metadata(server_key, datetime.now(timezone.utc).isoformat(), {}),
+        )
+
+        result = get_active_cached_searches(server_key)
+
+        assert [search["cache_key"] for search in result] == [cache_key]
         assert result[0]["display_filters"] == {}
+        assert cache.get(get_cache_index_key(server_key)) == [cache_key]
 
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_expired_entry_is_cleaned_up(self, mock_cache):
-        from datetime import datetime, timezone
-
+    def test_naive_future_timestamp_is_treated_as_utc(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
 
-        # Cached at epoch (way in the past)
-        old_time = datetime.fromtimestamp(0, timezone.utc).isoformat()
+        _store_indexed_search(
+            server_key,
+            _metadata(
+                server_key,
+                "2099-01-01T12:00:00",
+                {"hostname": "future-edge"},
+                cache_timeout=99_999_999_999,
+            ),
+        )
 
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["expired_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            if key == "expired_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": old_time,
-                    "filters": {},
-                }
-            return default
+        result = get_active_cached_searches(server_key)
 
-        mock_cache.get.side_effect = mock_get
-
-        result = get_active_cached_searches("default")
-        # Expired entries should NOT be in results
-        assert result == []
-        # Cache index should be updated to remove expired keys
-        mock_cache.set.assert_called_once()
-        call_args = mock_cache.set.call_args
-        assert "cache_index" in call_args[0][0]
-        assert call_args[0][1] == []
-
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_location_id_enriched_from_cache(self, mock_cache):
-        from datetime import datetime, timezone
-
-        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
-
-        now = datetime.now(timezone.utc)
-        cached_at = now.isoformat()
-
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["search_key"]
-            if key == "librenms_locations_choices:default":
-                return [("42", "New York DC"), ("99", "London DC")]
-            if key == "search_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": cached_at,
-                    "filters": {"location": "42"},
-                }
-            return default
-
-        mock_cache.get.side_effect = mock_get
-
-        result = get_active_cached_searches("default")
-        assert len(result) == 1
-        assert result[0]["display_filters"]["location"] == "New York DC"
-
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_type_code_enriched_to_display_name(self, mock_cache):
-        from datetime import datetime, timezone
-
-        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
-
-        now = datetime.now(timezone.utc)
-        cached_at = now.isoformat()
-
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["search_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            if key == "search_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": cached_at,
-                    "filters": {"type": "network"},
-                }
-            return default
-
-        mock_cache.get.side_effect = mock_get
-
-        result = get_active_cached_searches("default")
-        assert len(result) == 1
-        assert result[0]["display_filters"]["type"] == "Network"
-
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_missing_filters_key_falls_back_to_empty_dict(self, mock_cache):
-        from datetime import datetime, timezone
-
-        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
-
-        now = datetime.now(timezone.utc)
-        cached_at = now.isoformat()
-
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["search_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            if key == "search_key":
-                # No 'filters' key
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": cached_at,
-                }
-            return default
-
-        mock_cache.get.side_effect = mock_get
-
-        result = get_active_cached_searches("default")
-        assert len(result) == 1
-        assert result[0]["display_filters"] == {}
-
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_timezone_naive_cached_at_normalized_to_utc(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
-
-        # naive datetime string (no tzinfo)
-        naive_ts = "2099-01-01T12:00:00"
-
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["search_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            if key == "search_key":
-                return {
-                    "cache_timeout": 99999999,
-                    "cached_at": naive_ts,
-                    "filters": {},
-                }
-            return default
-
-        mock_cache.get.side_effect = mock_get
-
-        result = get_active_cached_searches("default")
-        # Should not raise; remaining_seconds should be > 0
         assert len(result) == 1
         assert result[0]["remaining_seconds"] > 0
 
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_malformed_cached_at_falls_back_to_epoch(self, mock_cache):
+    def test_datetime_timestamp_is_used_without_string_parsing(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
 
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["search_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            if key == "search_key":
-                return {
-                    "cache_timeout": 300,
-                    "cached_at": "NOT_A_VALID_DATETIME",
-                    "filters": {},
-                }
-            return default
+        stored_datetime = datetime.now(timezone.utc)
+        _store_indexed_search(
+            server_key,
+            _metadata(server_key, stored_datetime, {"hostname": "datetime-edge"}),
+        )
 
-        mock_cache.get.side_effect = mock_get
+        result = get_active_cached_searches(server_key)
 
-        # malformed cached_at → epoch → expired → empty result
-        result = get_active_cached_searches("default")
-        assert result == []
+        assert result[0]["cached_at"] == stored_datetime.isoformat()
+        assert result[0]["display_filters"] == {"hostname": "datetime-edge"}
 
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_metadata_none_skipped(self, mock_cache):
-        """Cache key in index but metadata is None → skip."""
+    def test_datetime_timestamp_renders_as_iso_8601(self, server_key):
+        """The cached-search timestamp must be safe for JavaScript date parsing."""
+        from django.template.loader import render_to_string
+
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches_for_servers
+
+        stored_datetime = datetime.now(timezone.utc)
+        _store_indexed_search(
+            server_key,
+            _metadata(server_key, stored_datetime, {"hostname": "datetime-edge"}),
+        )
+
+        cached_searches = get_active_cached_searches_for_servers({server_key: "Primary"})
+        output = render_to_string(
+            "netbox_librenms_plugin/inc/_cached_search_links.html",
+            {"cached_searches": cached_searches},
+        )
+
+        assert f'data-cache-timestamp="{stored_datetime.isoformat()}"' in output
+
+    @pytest.mark.parametrize("cached_at", ["NOT_A_VALID_DATETIME", [], {}])
+    def test_malformed_timestamp_expires_without_raising(self, server_key, cached_at):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
 
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["gone_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            # metadata expired from cache
-            return default
+        _store_indexed_search(
+            server_key,
+            _metadata(server_key, cached_at, {"hostname": "edge"}),
+        )
 
-        mock_cache.get.side_effect = mock_get
+        assert get_active_cached_searches(server_key) == []
 
-        result = get_active_cached_searches("default")
-        assert result == []
-        # Should update index to remove the gone key
-        mock_cache.set.assert_called_once()
-
-    @patch("netbox_librenms_plugin.import_utils.cache.cache")
-    def test_results_sorted_by_cached_at_most_recent_first(self, mock_cache):
-        from datetime import datetime, timedelta, timezone
-
-        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
+    def test_results_are_sorted_most_recent_first(self, server_key):
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
 
         now = datetime.now(timezone.utc)
-        older = (now - timedelta(seconds=60)).isoformat()
-        newer = now.isoformat()
+        older_key = f"older-search:{uuid4().hex}"
+        newer_key = f"newer-search:{uuid4().hex}"
+        cache.set(
+            older_key,
+            _metadata(server_key, (now - timedelta(seconds=60)).isoformat(), {"hostname": "older-edge"}),
+            timeout=3600,
+        )
+        cache.set(
+            newer_key,
+            _metadata(server_key, now.isoformat(), {"hostname": "newer-edge"}),
+            timeout=3600,
+        )
+        cache.set(get_cache_index_key(server_key), [older_key, newer_key], timeout=3600)
 
-        def mock_get(key, default=None):
-            if "cache_index" in key:
-                return ["older_key", "newer_key"]
-            if "librenms_locations_choices" in key:
-                return None
-            if key == "older_key":
-                return {"cache_timeout": 300, "cached_at": older, "filters": {}}
-            if key == "newer_key":
-                return {"cache_timeout": 300, "cached_at": newer, "filters": {}}
-            return default
+        result = get_active_cached_searches(server_key)
 
-        mock_cache.get.side_effect = mock_get
+        assert [search["display_filters"]["hostname"] for search in result] == ["newer-edge", "older-edge"]
 
-        result = get_active_cached_searches("default")
-        assert len(result) == 2
-        assert result[0]["cached_at"] >= result[1]["cached_at"]
+    def test_multiple_servers_keep_namespaces_and_labels_separate(self):
+        from netbox_librenms_plugin.import_utils.cache import (
+            get_active_cached_searches_for_servers,
+            get_cache_index_key,
+        )
 
+        first_server = f"primary-{uuid4().hex}"
+        second_server = f"secondary-{uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        for key, hostname, age in (
+            (first_server, "primary-edge", 30),
+            (second_server, "secondary-edge", 0),
+        ):
+            cache_key = f"server-search:{uuid4().hex}"
+            cache.set(
+                cache_key,
+                _metadata(key, (now - timedelta(seconds=age)).isoformat(), {"hostname": hostname}),
+                timeout=3600,
+            )
+            cache.set(get_cache_index_key(key), [cache_key], timeout=3600)
 
-class TestGetCacheMetadataKeyDeterminism:
-    """Tests that get_cache_metadata_key is deterministic."""
+        result = get_active_cached_searches_for_servers(
+            {first_server: "Primary LibreNMS", second_server: "Secondary LibreNMS"}
+        )
 
-    def test_different_filter_values_produce_different_keys(self):
-        """Different filter values should produce different cache keys."""
-        from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
-
-        key1 = get_cache_metadata_key("default", {"location": "NYC"}, False)
-        key2 = get_cache_metadata_key("default", {"location": "LON"}, False)
-        assert key1 != key2
-
-    def test_same_filters_produce_same_key(self):
-        """Same filters in any insertion order should produce the same cache key."""
-        from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
-
-        key1 = get_cache_metadata_key("default", {"location": "NYC", "type": "network"}, True)
-        key2 = get_cache_metadata_key("default", {"type": "network", "location": "NYC"}, True)
-        assert key1 == key2
-
-    def test_none_values_excluded_from_hash(self):
-        """None filter values should be excluded and produce same key as absent."""
-        from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
-
-        key_with_none = get_cache_metadata_key("default", {"location": "NYC", "type": None}, False)
-        key_without = get_cache_metadata_key("default", {"location": "NYC"}, False)
-        assert key_with_none == key_without
-
-    def test_different_server_keys_produce_different_keys(self):
-        """Different server keys should produce different cache metadata keys."""
-        from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
-
-        key1 = get_cache_metadata_key("production", {"location": "NYC"}, False)
-        key2 = get_cache_metadata_key("staging", {"location": "NYC"}, False)
-        assert key1 != key2
+        assert [(search["server_display_name"], search["display_filters"]["hostname"]) for search in result] == [
+            ("Secondary LibreNMS", "secondary-edge"),
+            ("Primary LibreNMS", "primary-edge"),
+        ]

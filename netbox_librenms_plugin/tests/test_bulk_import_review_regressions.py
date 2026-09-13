@@ -13,6 +13,18 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, m
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, post
 
 
+@pytest.fixture(autouse=True)
+def _configured_default_server(monkeypatch):
+    """Give these import regressions one explicit usable server."""
+    from netbox_librenms_plugin.server_selection import LibreNMSAPI
+
+    monkeypatch.setattr(
+        LibreNMSAPI,
+        "get_available_servers",
+        classmethod(lambda _cls: {"default": "Default"}),
+    )
+
+
 class _LibreNMSBoundary:
     """Real-shape stand-in for the external LibreNMS HTTP boundary."""
 
@@ -103,7 +115,7 @@ def test_collision_response_redacts_target_outside_view_scope(view_name):
     _cache_rows(rows)
     api = _LibreNMSBoundary(rows)
     request = make_request(
-        data={"select": ["96001", "96002"]},
+        data={"select": ["96001", "96002"], "server_key": "default"},
         user=user,
         path="/bulk-import/",
         HTTP_HX_REQUEST="true",
@@ -164,12 +176,7 @@ def test_collision_scope_handles_virtual_machines_with_real_permissions():
 
 @pytest.mark.django_db
 def test_background_collision_gate_uses_job_user_scope(monkeypatch):
-    """The real job runner scopes collision details and blocks device and VM imports.
-
-    The batch collides on two targets, one of them outside the job user's view grant. Only the
-    visible pk may appear: an unscoped resolution would name the hidden target as well, so the
-    scoping is what the pk list pins.
-    """
+    """Verify the real job runner blocks device and VM imports without exposing targets outside the user's view scope."""
     from core.models import Job
     from dcim.models import Device
     from virtualization.models import VirtualMachine
@@ -243,7 +250,7 @@ def test_unresolved_warning_does_not_claim_an_existing_row_imported(monkeypatch)
     api = _LibreNMSBoundary(rows)
     monkeypatch.setattr(bulk_import_module, "LibreNMSAPI", lambda server_key=None: api)
     request = make_request(
-        data={"select": ["96101", "96102"]},
+        data={"select": ["96101", "96102"], "server_key": "default"},
         user=make_superuser("bulk-result-superuser"),
         path="/bulk-import/",
         HTTP_HX_REQUEST="true",

@@ -24,12 +24,14 @@ from ..utils import (
     cached_row_matches,
     coerce_librenms_id,
     find_by_librenms_id,
+    find_devices_by_serial,
     find_matching_location,
     find_matching_platform,
     find_matching_site,
     get_librenms_device_id,
     get_librenms_oob,
     is_legacy_librenms_id,
+    lock_librenms_id_assignment,
     match_librenms_hardware_to_device_type,
     normalize_serial,
     parse_location_for_import,
@@ -171,13 +173,13 @@ def _describe_link_note(existing_link):
 
 def resolve_device_by_host_ip(primary_ip):
     """
-    Resolve the unique NetBox device whose interface or oob_ip carries a host address.
+    Resolve the unique NetBox Device or VirtualMachine that carries a host address.
 
     Scans EVERY ``IPAddress`` row sharing ``primary_ip`` as its host address (duplicate
-    net_host rows are possible) across both the interface-assignment path and the ``oob_ip``
-    direct-FK path, so a genuine collision fails closed instead of binding to whichever
-    duplicate row sorts first. An IP can be a device's ``oob_ip`` while assigned to no
-    interface, so the assigned_object scan alone would miss an OOB-only link.
+    net_host rows are possible) across Device interfaces, VM interfaces, and the Device
+    ``oob_ip`` direct-FK path. A genuine collision fails closed instead of binding to
+    whichever duplicate row sorts first. An IP can be a Device's ``oob_ip`` while assigned
+    to no interface, so the assigned-object scan alone would miss an OOB-only link.
 
     Shared by :func:`validate_device_for_import` and ``bulk_import._refresh_existing_device``
     so the two paths can't drift on which device a management IP resolves to.
@@ -186,11 +188,11 @@ def resolve_device_by_host_ip(primary_ip):
         primary_ip: The management IP (host form) to resolve.
 
     Returns:
-        tuple: ``(device | None, ambiguous: bool, matching_ips: QuerySet)``.
-            ``device`` is the single matching device, or ``None`` when none or more than one
-            match; ``ambiguous`` is ``True`` only when >1 distinct device shares the address
-            (the caller must block the import); ``matching_ips`` is the net_host queryset so
-            callers can reuse it (e.g. for the ``oob_ip`` membership check).
+        tuple: ``(object | None, ambiguous: bool, matching_ips: QuerySet)``.
+            ``object`` is the single matching Device or VirtualMachine, or ``None`` when none
+            or more than one match. ``ambiguous`` is ``True`` only when more than one distinct
+            object shares the address. ``matching_ips`` is the net_host queryset so callers
+            can reuse it for the Device ``oob_ip`` membership check.
 
     Raises:
         ValueError: When *primary_ip* is not a parseable host address. Callers catch it and
@@ -204,21 +206,23 @@ def resolve_device_by_host_ip(primary_ip):
     # prefetch_related on the assigned_object GenericForeignKey resolves every duplicate net_host
     # row's interface in one bulk pass instead of a per-row content-type lookup (small N, but free).
     matching_ips = IPAddress.objects.filter(address__net_host=canonical_host).prefetch_related("assigned_object")
-    candidate_devices = {}
+    candidates = {}
     matching_exists = False
     for existing_ip in matching_ips:
         matching_exists = True
         assigned = getattr(existing_ip, "assigned_object", None)
-        dev = getattr(assigned, "device", None) if assigned else None
-        if dev:
-            candidate_devices[dev.pk] = dev
+        candidate = None
+        if assigned is not None:
+            candidate = getattr(assigned, "device", None) or getattr(assigned, "virtual_machine", None)
+        if candidate is not None:
+            candidates[(candidate._meta.label_lower, candidate.pk)] = candidate
     if matching_exists:
         for oob_device in Device.objects.filter(oob_ip__in=matching_ips):
-            candidate_devices[oob_device.pk] = oob_device
-    if len(candidate_devices) > 1:
+            candidates[(oob_device._meta.label_lower, oob_device.pk)] = oob_device
+    if len(candidates) > 1:
         return None, True, matching_ips
-    if candidate_devices:
-        return next(iter(candidate_devices.values())), False, matching_ips
+    if candidates:
+        return next(iter(candidates.values())), False, matching_ips
     return None, False, matching_ips
 
 
@@ -395,7 +399,8 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
 
 
 def _detect_serial_match_role(existing_by_serial, existing_link, hostname, serial, libre_device, server_key):
-    """Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
+    """
+    Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
 
     Pure decision step for the serial-match branch of :func:`validate_device_for_import`:
     reads NetBox/LibreNMS state but does **not** mutate ``result``. Computes whether the
@@ -405,12 +410,16 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     ``promote_to_host``, ``serial_role_choice_available``, ``warnings``).
 
     Args:
-        existing_by_serial: the NetBox Device matched by serial.
-        existing_link: ``_describe_existing_librenms_link`` dict for *existing_by_serial*.
-        hostname: the incoming LibreNMS hostname (already resolved).
-        serial: the incoming serial (for warning text only).
-        libre_device: the raw LibreNMS device payload.
-        server_key: active LibreNMS server key.
+        existing_by_serial (Device): The NetBox Device matched by serial.
+        existing_link (dict | None): The ``_describe_existing_librenms_link`` result for
+            *existing_by_serial*.
+        hostname (str): The incoming LibreNMS hostname (already resolved).
+        serial (str): The incoming serial (for warning text only).
+        libre_device (dict): The raw LibreNMS device payload.
+        server_key (str): The active LibreNMS server key.
+
+    Returns:
+        dict: The keyword arguments for :func:`apply_oob_detection_result`.
     """
     # Compute both possible roles for the incoming LibreNMS device against
     # the existing NetBox device, then pick a heuristic default. The UI
@@ -551,7 +560,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
-def validate_device_for_import(
+def validate_device_for_import(  # noqa: C901
     libre_device: dict,
     import_as_vm: bool = False,
     api: "LibreNMSAPI" = None,
@@ -579,12 +588,14 @@ def validate_device_for_import(
         libre_device: Device data from LibreNMS
         import_as_vm: If True, validate for VM import instead of device import
         api: Optional LibreNMSAPI instance for virtual chassis detection
+        server_key: LibreNMS server key for stored identifiers and API data.
         include_vc_detection: Skip VC detection when False to speed up bulk operations
         collision_only: Return after existing-object and collision-candidate matching. This skips
             site, device type, role, platform, rack, and virtual-chassis import prerequisites.
         force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS
         use_sysname: If True, prefer sysName over hostname (matches import behaviour)
         strip_domain: If True, strip domain suffix from device name
+        preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -1027,7 +1038,7 @@ def validate_device_for_import(
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101).
-                    serial_matches = list(Device.objects.filter(serial=serial)[:2])
+                    serial_matches = find_devices_by_serial(serial)
                     if len(serial_matches) > 1:
                         # Device.serial is not unique in NetBox, so several rows already share it.
                         # Binding to an arbitrary one is wrong, and importing anyway would mint YET
@@ -1250,14 +1261,14 @@ def validate_device_for_import(
             except Exception:  # pragma: no cover - defensive: never break validation
                 logger.exception("merge-candidate detection failed")
 
-            # Check by primary IP (weaker match, IP could be reassigned) - only for devices
+            # Check by primary IP (weaker match, IP could be reassigned).
             if not result["existing_device"]:
                 primary_ip = libre_device.get("ip")
-                if primary_ip and not import_as_vm:
+                if primary_ip:
                     # Shared resolver: scans every net_host row across the interface-assignment and
                     # oob_ip-FK paths and fails closed on >1 distinct device (mirrors
                     # _refresh_existing_device in bulk_import.py via the same helper).
-                    device, ip_ambiguous, matching_ips = resolve_device_by_host_ip(primary_ip)
+                    matched_object, ip_ambiguous, matching_ips = resolve_device_by_host_ip(primary_ip)
                     if ip_ambiguous:
                         # Duplicate net_host rows point at >1 distinct NetBox device — binding to
                         # an arbitrary one could re-home the import to the wrong device, so fail
@@ -1279,7 +1290,19 @@ def validate_device_for_import(
                         # new-import validation below doesn't append unrelated site/role/device-type
                         # blockers to a row that's already blocked on the duplicate-IP ambiguity.
                         return result
-                    elif device:
+                    elif isinstance(matched_object, VirtualMachine):
+                        result["existing_device"] = matched_object
+                        result["existing_match_type"] = "primary_ip"
+                        result["import_as_vm"] = True
+                        result["existing_librenms_link"] = _describe_existing_librenms_link(matched_object, server_key)
+                        link_note = _describe_link_note(result["existing_librenms_link"])
+                        result["warnings"].append(
+                            f"IP address {primary_ip} already assigned to VM '{matched_object.name}' ({link_note})"
+                        )
+                        result["can_import"] = False
+                    elif matched_object:
+                        device = matched_object
+                        result["import_as_vm"] = False
                         # Surface any existing host/OOB linkage so the import UI renders the
                         # correct row state (the librenms_id / serial branches do the same;
                         # without this an already-linked device shows as "not linked" here).
@@ -1639,7 +1662,7 @@ def validate_device_for_import(
         return result
 
 
-def import_single_device(
+def import_single_device(  # noqa: C901
     device_id: int,
     server_key: str = None,
     validation: dict = None,
@@ -1802,6 +1825,20 @@ def import_single_device(
 
         # Create device in NetBox
         with transaction.atomic():
+            _locked_owner, conflict = lock_librenms_id_assignment(device_id, api.server_key)
+            if conflict is not None:
+                from virtualization.models import VirtualMachine
+
+                object_label = "VM" if isinstance(conflict, VirtualMachine) else "device"
+                return {
+                    "success": False,
+                    "device": None,
+                    "message": "",
+                    # Unrestricted claim search and no user here, so the owner stays unnamed.
+                    "error": (f"LibreNMS ID {device_id} is already assigned to another {object_label}"),
+                    "synced": {},
+                }
+
             # Use pre-computed resolved_name from validation when available so the
             # created device name matches exactly what was displayed in the import UI.
             # Only fall back to recomputing from sync_options when no validation exists.

@@ -27,7 +27,7 @@ All background jobs appear in NetBox's **Jobs** interface, where you can view st
 
 ## Caching
 
-The import table caches data for 5 minutes to reduce load times and minimize API calls to LibreNMS. Cache keys are unique per filter combination.
+The import table caches data for the configured cache timeout to reduce load times and minimize API calls to LibreNMS. Cache keys are unique per LibreNMS server and filter combination.
 
 ### What Gets Cached
 
@@ -43,7 +43,7 @@ The cache includes both LibreNMS device data AND NetBox reference data used in t
 - Available VM clusters (for VM imports)
 - Available racks for each site (filtered by the device's matched site)
 
-This means if you add a new role, create a new rack, or add a new cluster in NetBox, those changes won't appear in the import table dropdowns until you clear the cache or wait for it to expire (5 minutes).
+This means if you add a new role, create a new rack, or add a new cluster in NetBox, those changes won't appear in the import table dropdowns until you clear the cache or wait for it to expire (the configured cache timeout).
 
 ### Controlling Cache
 
@@ -67,10 +67,10 @@ The search form includes a "Clear cache before search" checkbox:
 
 ### Active Cached Searches
 
-The import page displays all your recent searches at the top, showing which filter combinations, that are still found in the cache. Each cached search shows the filters used, device count, and time remaining before expiration.
+The import page displays active searches from every configured LibreNMS server at the top. Each cached search shows its server, filters, device count, and time remaining before expiration. Searches with identical filters remain separate when they belong to different servers.
 
-Click any cached search to instantly reload those results without re-running filters or Virtual Chassis detection. This is particularly useful when switching between different filter combinations.
+Click a cached search to activate its server and reload its results without re-running filters or Virtual Chassis detection. The link restores the filters, naming options, and Virtual Chassis detection state that created the search.
 
-Cached searches expire after 5 minutes of inactivity (or what you set as the cache timeout). The countdown timer shows how long each search remains available.
+Cached searches expire after the configured cache timeout. The countdown timer shows how long each search remains available. Searches for removed servers do not appear.
 
-The "Clear cache before search" option only clears the cache for the specific filter combination you're searching—other cached searches remain available.
+The **Clear** action removes the current filters and results. It keeps the active server and does not remove cached searches. The **Clear cache before search** option refreshes only the active server and filter combination. Cached searches from other servers remain available.

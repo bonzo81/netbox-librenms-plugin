@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+from collections.abc import Mapping
 
 from django.core.cache import cache
 
@@ -16,6 +17,12 @@ def _build_filter_hash(filters: dict) -> str:
     Removes None values (preserves valid falsy values like 0 and False),
     sorts by key, and returns the first 16 hex characters of the SHA-256
     digest of the JSON-serialized result.
+
+    Args:
+        filters (dict): The filter values to hash.
+
+    Returns:
+        str: The first 16 hexadecimal characters of the stable SHA-256 digest.
     """
     return hashlib.sha256(
         json.dumps({k: v for k, v in filters.items() if v is not None}, sort_keys=True, separators=(",", ":")).encode()
@@ -25,6 +32,11 @@ def _build_filter_hash(filters: dict) -> str:
 def get_location_choices_cache_key(server_key: str) -> str:
     """Return the cache key for LibreNMS location choices for a given server."""
     return f"librenms_locations_choices:{server_key}"
+
+
+def get_cache_index_key(server_key: str) -> str:
+    """Return the cached-search index key for a LibreNMS server."""
+    return f"librenms_cache_index_{server_key}"
 
 
 def get_cache_metadata_key(
@@ -51,6 +63,28 @@ def get_cache_metadata_key(
     return f"librenms_filter_cache_metadata_{server_key}_{filter_hash}_{vc_enabled}_sysname={use_sysname}_strip={strip_domain}"
 
 
+def _is_valid_cached_search_metadata(metadata, server_key: str) -> bool:
+    """Return whether metadata contains the complete state needed for a cached-search link."""
+    if not isinstance(metadata, dict) or metadata.get("server_key") != server_key:
+        return False
+
+    cache_timeout = metadata.get("cache_timeout")
+    device_count = metadata.get("device_count")
+    return (
+        bool(metadata.get("cached_at"))
+        and isinstance(cache_timeout, (int, float))
+        and not isinstance(cache_timeout, bool)
+        and cache_timeout > 0
+        and isinstance(metadata.get("filters"), dict)
+        and isinstance(metadata.get("vc_enabled"), bool)
+        and isinstance(metadata.get("use_sysname"), bool)
+        and isinstance(metadata.get("strip_domain"), bool)
+        and isinstance(device_count, int)
+        and not isinstance(device_count, bool)
+        and device_count > 0
+    )
+
+
 def get_active_cached_searches(server_key: str) -> list[dict]:
     """
     Retrieve all active cached searches for a server and enrich with display-friendly values.
@@ -66,7 +100,7 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
     """
     from datetime import datetime, timezone
 
-    cache_index_key = f"librenms_cache_index_{server_key}"
+    cache_index_key = get_cache_index_key(server_key)
     cache_index = cache.get(cache_index_key, [])
 
     active_searches = []
@@ -97,7 +131,8 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
 
     for cache_key in cache_index:
         metadata = cache.get(cache_key)
-        if metadata:
+        if _is_valid_cached_search_metadata(metadata, server_key):
+            metadata = metadata.copy()
             # Cache still exists, calculate time remaining
             cache_timeout = metadata.get("cache_timeout", 300)
             now = datetime.now(timezone.utc)
@@ -123,20 +158,18 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
                 metadata["cache_key"] = cache_key
                 # Store numeric sort key so the final sort is unambiguous
                 metadata["cached_at_ts"] = cached_at.timestamp()
+                # The template hands this value to JavaScript, so it must be an ISO-8601 string.
+                metadata["cached_at"] = cached_at.isoformat()
 
                 # Enrich filters with human-readable display values
-                if "filters" in metadata:
-                    display_filters = metadata["filters"].copy()
-                    # Convert location ID to location name
-                    if "location" in display_filters and display_filters["location"] in location_choices:
-                        display_filters["location"] = location_choices[display_filters["location"]]
-                    # Convert type code to display name
-                    if "type" in display_filters and display_filters["type"] in type_choices:
-                        display_filters["type"] = type_choices[display_filters["type"]]
-                    metadata["display_filters"] = display_filters
-                else:
-                    # Fallback if filters key missing
-                    metadata["display_filters"] = {}
+                display_filters = metadata["filters"].copy()
+                # Convert location ID to location name
+                if "location" in display_filters and display_filters["location"] in location_choices:
+                    display_filters["location"] = location_choices[display_filters["location"]]
+                # Convert type code to display name
+                if "type" in display_filters and display_filters["type"] in type_choices:
+                    display_filters["type"] = type_choices[display_filters["type"]]
+                metadata["display_filters"] = display_filters
 
                 active_searches.append(metadata)
                 valid_cache_keys.append(cache_key)
@@ -148,6 +181,22 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
     # Sort by most recent first
     active_searches.sort(key=lambda x: x.get("cached_at_ts", 0.0), reverse=True)
 
+    return active_searches
+
+
+def get_active_cached_searches_for_servers(servers: Mapping[str, str]) -> list[dict]:
+    """Return active cached searches from configured servers without merging namespaces."""
+    active_searches = []
+    for server_key, display_name in servers.items():
+        for search in get_active_cached_searches(server_key):
+            active_searches.append(
+                {
+                    **search,
+                    "server_key": server_key,
+                    "server_display_name": display_name,
+                }
+            )
+    active_searches.sort(key=lambda search: search.get("cached_at_ts", 0.0), reverse=True)
     return active_searches
 
 

@@ -22,7 +22,8 @@
 <form id="install-selected-form" method="post"
     action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
     hx-post="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
-    hx-target="#module-sync-content" hx-swap="innerHTML" hx-disabled-elt="find button">
+    hx-target="#module-sync-content" hx-swap="innerHTML"
+    hx-sync="#module-sync-content:drop" hx-disabled-elt="find button">
     {% csrf_token %}
     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
     <div class="noprint mb-3">

@@ -42,7 +42,8 @@ class BaseInterfaceTableView(
     VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View
 ):
     """
-    Base view for fetching interface data from LibreNMS and generating table data.
+    Fetch LibreNMS interface data and generate table data.
+
     Includes VLAN enrichment for interface VLAN sync functionality.
     """
 
@@ -118,14 +119,15 @@ class BaseInterfaceTableView(
         return redirect_with_server_key(request, url, server_key)
 
     def get_select_related_field(self, obj):
-        """Determine the appropriate select_related field based on object type"""
+        """Determine the appropriate select_related field based on object type."""
         if self.model.__name__.lower() == "virtualmachine":
             return "virtual_machine"
         return "device"
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """
-        Returns the table class to use for rendering interface data.
+        Return the table class used to render interface data.
+
         Can be overridden by subclasses to use different tables.
 
         Args:
@@ -196,7 +198,7 @@ class BaseInterfaceTableView(
             "librenms_id_counts": librenms_id_counts,
         }
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         """Handle POST request to fetch and cache LibreNMS interface data for an object."""
         obj = self.get_object(pk)
 
@@ -249,10 +251,13 @@ class BaseInterfaceTableView(
         # is already invalidated, so the missing-id path can't leave stale interface data behind.
         # coerce_librenms_id fails closed on a bool/zero/negative/garbage custom-field value (a
         # stored ``True`` would otherwise become id ``1`` and fetch a stranger's ports).
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(lookup_device))
+        self.librenms_id, lookup_error = self.resolve_librenms_id(lookup_device)
 
         if self.librenms_id is None:
-            messages.error(request, "Device not found in LibreNMS.")
+            messages.error(
+                request,
+                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
+            )
             return self._failure_redirect(request, obj, _server_key)
 
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
@@ -528,7 +533,7 @@ class BaseInterfaceTableView(
             enriched.append(port)
         return enriched
 
-    def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None, sync_device=None):
+    def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None, sync_device=None):  # noqa: C901
         """
         Build the context data for the interface sync view.
 
@@ -551,6 +556,7 @@ class BaseInterfaceTableView(
                 None.
             fresh_data: Optional in-memory ports snapshot to render from instead of
                 the cache.
+            sync_device: Optional device that owns the selected LibreNMS synchronization data.
 
         Returns:
             dict: The template context (object, table, vlan_groups, server_key,

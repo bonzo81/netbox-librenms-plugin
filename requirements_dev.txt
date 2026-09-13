@@ -4,6 +4,6 @@ playwright>=1.58
 PyYAML
 pytest
 pytest-cov>=7.1.0
-pytest-django
+pytest-django>=4.6.0
 pytest-xdist>=3.8
 requests

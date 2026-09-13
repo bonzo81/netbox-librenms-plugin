@@ -62,10 +62,7 @@ OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
 def _modules_redirect_response(request, sync_url, server_key=None):
     """
-    Return a redirect back to the modules tab: ``HX-Redirect`` for an HTMX post, else a Django redirect.
-
-    The module actions answer their HTMX posts through :func:`_modules_action_response`
-    instead, so only classic posts reach the Django redirect from those views.
+    Return a Django redirect back to the modules tab for a classic (non-HTMX) form post.
 
     These module sync actions are server-scoped, so the follow-up page must stay on
     the server whose cache namespace this request just mutated/read. The active
@@ -74,13 +71,12 @@ def _modules_redirect_response(request, sync_url, server_key=None):
     keeps the server context without each caller having to thread it through.
 
     Args:
-        request: The current HTTP request (HTMX header + server_key source).
+        request: The current HTTP request (server_key source).
         sync_url (str): The base sync URL to redirect to.
         server_key: The active LibreNMS server key; read from the request when None.
 
     Returns:
-        HttpResponse: An HTMX ``HX-Redirect`` response, or a Django redirect for a
-            classic post.
+        HttpResponse: A Django redirect to the modules tab.
     """
     if server_key is None:
         server_key = request.POST.get("server_key") or request.GET.get("server_key") or ""
@@ -88,10 +84,6 @@ def _modules_redirect_response(request, sync_url, server_key=None):
     if server_key:
         target += f"&server_key={quote_plus(str(server_key))}"
     target += "#librenms-module-table"
-    if request.headers.get("HX-Request") == "true":
-        response = HttpResponse(status=204)
-        response["HX-Redirect"] = target
-        return apply_request_cache_transition(request, response)
     return apply_request_cache_transition(request, redirect(target))
 
 
@@ -179,7 +171,8 @@ def _extract_inventory_list(cached_payload):
 
 
 def _lock_page_device_serials(page_device):
-    """Serialise serial checks for one sync page, before any row lock is taken.
+    """
+    Serialise serial checks for one sync page, before any row lock is taken.
 
     Must be the FIRST lock in the transaction. A bulk install holds one transaction across its
     whole loop, so acquiring this after a bay lock lets a bulk run holding the advisory lock wait
@@ -192,7 +185,8 @@ def _lock_page_device_serials(page_device):
 
 
 def _module_already_on_device(device, serial, *, exclude_pk=None):
-    """Return the Module already holding ``serial`` on ``device``, or None.
+    """
+    Return the Module already holding ``serial`` on ``device``, or None.
 
     Identity is device-scoped on purpose. A serial is evidence about one physical part, and
     vendors reuse a serial across unrelated parts, so a match on another device must not block a
@@ -713,7 +707,7 @@ def _format_vc_adjustment_summary(adjustments):
     return ", ".join(parts)
 
 
-def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
+def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):  # noqa: C901
     """
     Bind LibreNMS ``port_id`` to the best matching NetBox interface.
 
@@ -876,7 +870,7 @@ def _record_bind_outcome(bind_result, result, skipped):
 class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
         self.required_object_permissions = {
@@ -1437,7 +1431,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         }
 
     @staticmethod
-    def _find_parent_module_id(item, index_map, device_bays, exact_mappings, regex_mappings):
+    def _find_parent_module_id(item, index_map, device_bays, exact_mappings, regex_mappings):  # noqa: C901
         """
         Find the NetBox module ID for the installed parent of this inventory item.
 
@@ -1667,7 +1661,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     items with no bay or no type are silently skipped (same behaviour as branch).
     """
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
         self.required_object_permissions = {
@@ -1906,7 +1900,7 @@ class UpdateModuleInterfaceView(
 ):
     """Associate a matching NetBox interface with an already-installed module."""
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         from dcim.models import Device, Interface, Module
 
         self.required_object_permissions = {"POST": [("view", Device), ("view", Module), ("change", Interface)]}
@@ -2220,7 +2214,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
     from cached LibreNMS inventory data.
     """
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType  # noqa: F401
 
         self.required_object_permissions = {
@@ -2608,8 +2602,7 @@ class AddBayTemplateView(
     View,
 ):
     """
-    Create a missing ModuleBayTemplate on a Device Type or Module Type so the
-    user can install a sub-component without leaving the modules sync tab.
+    Create a missing ModuleBayTemplate on a Device Type or Module Type.
 
     GET renders a pre-filled modal fragment that targets ``#htmx-modal-content``;
     POST creates the bay template and returns the user to the modules tab.
@@ -2639,8 +2632,7 @@ class AddBayTemplateView(
     @staticmethod
     def _instantiate_template_on_existing(bay_template, target_kind, target):
         """
-        Materialise the just-saved ``ModuleBayTemplate`` onto every existing
-        device/module of ``target`` so the resolver can match it immediately.
+        Materialize a saved ``ModuleBayTemplate`` on every existing target instance.
 
         NetBox auto-creates bays from templates only when a Device/Module is
         first created. A template added later is invisible to existing
@@ -2682,10 +2674,8 @@ class AddBayTemplateView(
 
     @staticmethod
     def _derive_mapping_pattern(librenms_name, netbox_name):
-        """
-        Derive a regex ``ModuleBayMapping`` rule that maps ``librenms_name``
-        to ``netbox_name`` and naturally covers every sibling bay sharing
-        the same LibreNMS-side literal skeleton.
+        r"""
+        Derive a regex ``ModuleBayMapping`` rule from two example names.
 
         Both names are tokenised into alternating literal and digit-run
         segments. Each *distinct* digit value on the LibreNMS side becomes
@@ -2999,7 +2989,7 @@ class AddBayTemplateView(
         }
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         if request.POST.get("mode") == "map_existing":
             return self._map_existing_bay(request, pk)
 
