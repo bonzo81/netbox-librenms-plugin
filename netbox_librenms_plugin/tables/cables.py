@@ -210,7 +210,8 @@ class VCCableTable(LibreNMSCableTable):
         self._disable_serial_rows_owned_outside_the_chassis(args[0] if args else kwargs.get("data") or [])
 
     def _disable_serial_rows_owned_outside_the_chassis(self, rows):
-        """Take serial rows out of play when their owning device is not selectable.
+        """
+        Take serial rows out of play when their owning device is not selectable.
 
         The sync view matches the submitted device against the ConsoleServerPort's own device and
         rejects a mismatch, so a row whose owner is missing from the member set can never be
