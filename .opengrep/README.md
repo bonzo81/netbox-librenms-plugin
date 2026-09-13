@@ -48,6 +48,7 @@ unchecked until that review.
 | Rule id | Severity | Catches |
 | --- | --- | --- |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
+| `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
 | `url-numeric-pk-converter` | error | A `path()` route uses `<str:pk>` or `<pk>`, including local string constants. |
 | `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
@@ -56,7 +57,8 @@ unchecked until that review.
 
 ## Scope
 
-`import-disclosure` excludes tests and migrations. The requests rule covers
+`import-disclosure` and its sanitizer-shadow guard exclude tests and migrations. The two canonical
+view-helper definitions carry explicit suppressions that mark them as the trust anchors. The requests rule covers
 `netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The two test-convention
 rules include only `netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
 in the scan target.
@@ -93,6 +95,9 @@ and selected `fuzzywuzzy.fuzz` and `rapidfuzz.fuzz` scorers. Imports and diff re
 Symbolic propagation covers simple local constructor bindings. Other method calls can invalidate
 those bindings. The rule does not track dynamically supplied scorers or prove exact-only selection.
 Runtime tests must cover the exact-only invariant.
+
+The disclosure rule accepts only manager calls through `.objects` and view-helper calls through a
+receiver. Its companion rule rejects local definitions that can shadow those trusted spellings.
 
 ## `--taint-intrafile` is required
 

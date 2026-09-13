@@ -42,12 +42,14 @@ rules:
       # a match an unrestricted search already bound into the validation dict
       - pattern: $V["existing_device"]
     pattern-sanitizers:
-      # a permission-scoped lookup may name its object: that is the display gate doing its job
-      - pattern: $X.restrict(...)
+      # A permission-scoped lookup may name its object: that is the display gate doing its job.
+      # Keep each shape narrower than its method name. The companion rule below rejects local
+      # overrides of the two `self` helpers and of the manager method.
+      - pattern: $MODEL.objects.restrict(...)
         exact: true
-      - pattern: restricted_queryset(...)
+      - pattern: self.restricted_queryset(...)
         exact: true
-      - pattern: restrict_object_or_404(...)
+      - pattern: self.restrict_object_or_404(...)
         exact: true
       # Aggregates are exempted to keep real code workable, not because they provably erase
       # identity: a contrived len(range(owner.pk)) still carries the pk. sum() is NOT exempt,
@@ -97,6 +99,40 @@ rules:
       - patterns:
           - pattern: apply_merge_candidates(..., warning=$MSG, ...)
           - focus-metavariable: $MSG
+  - id: import-disclosure-sanitizer-shadow
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This definition shadows a permission API trusted by the import-disclosure taint rule.
+      Rename it so an unrestricted lookup cannot impersonate a disclosure sanitizer.
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe:
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    pattern-either:
+      - pattern: |
+          def restrict(...):
+            ...
+      - pattern: |
+          def restricted_queryset(...):
+            ...
+      - pattern: |
+          def restrict_object_or_404(...):
+            ...
+      - pattern: |
+          async def restrict(...):
+            ...
+      - pattern: |
+          async def restricted_queryset(...):
+            ...
+      - pattern: |
+          async def restrict_object_or_404(...):
+            ...
   - id: no-requests-outside-http-client
     languages: [python]
     severity: ERROR

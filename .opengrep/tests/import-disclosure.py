@@ -392,6 +392,78 @@ def probe_quiet06(result, user, serial):
     result["warnings"].append(f"in scope: {allowed.name}")
 
 
+# --- [flag] a local function cannot impersonate the view permission helper
+def probe_shadowed_queryset(result):
+    from dcim.models import Device
+
+    # ruleid: import-disclosure-sanitizer-shadow
+    def restricted_queryset():
+        return Device.objects.first()
+
+    owner = restricted_queryset()
+    # ruleid: import-disclosure
+    result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] a local method cannot impersonate the manager permission API
+def probe_shadowed_manager(result):
+    from dcim.models import Device
+
+    class LocalManager:
+        # ruleid: import-disclosure-sanitizer-shadow
+        def restrict(self):
+            return Device.objects.first()
+
+    owner = LocalManager().restrict()
+    # ok: import-disclosure
+    result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] a local method cannot impersonate the object permission helper
+def probe_shadowed_object_lookup(result):
+    from dcim.models import Device
+
+    class LocalView:
+        # ruleid: import-disclosure-sanitizer-shadow
+        def restrict_object_or_404(self):
+            return Device.objects.first()
+
+    owner = LocalView().restrict_object_or_404()
+    # ok: import-disclosure
+    result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] a self method with a trusted spelling is rejected at its definition
+class ShadowedScopedView:
+    # ruleid: import-disclosure-sanitizer-shadow
+    def restricted_queryset(self):
+        from dcim.models import Device
+        return Device.objects.first()
+
+    def probe(self, result):
+        owner = self.restricted_queryset()
+        # ok: import-disclosure
+        result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] a local model-like manager is rejected at its trusted method definition
+class ShadowedModelManager:
+    # ruleid: import-disclosure-sanitizer-shadow
+    def restrict(self):
+        from dcim.models import Device
+        return Device.objects.first()
+
+
+class ShadowedModel:
+    objects = ShadowedModelManager()
+
+
+def probe_shadowed_model_manager(result):
+    owner = ShadowedModel.objects.restrict()
+    # ok: import-disclosure
+    result["warnings"].append(f"owner {owner.name}")
+
+
 # --- [quiet] an aggregate rather than an identity
 def probe_quiet07(result, serial):
     from dcim.models import Device
