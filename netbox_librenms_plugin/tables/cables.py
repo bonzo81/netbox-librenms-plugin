@@ -13,13 +13,11 @@ from netbox_librenms_plugin.utils import (
 )
 
 # Static trusted markup for the "Serial" console-port badge. The leading space is intentional.
-SERIAL_BADGE_HTML = ' <span class="badge bg-teal text-white ms-1" title="Serial console port">Serial</span>'
+SERIAL_BADGE_HTML = ' <span class="badge bg-teal text-dark ms-1" title="Serial console port">Serial</span>'
 
 
 class LibreNMSCableTable(tables.Table):
-    """
-    Table for displaying LibreNMS cable data.
-    """
+    """Table for displaying LibreNMS cable data."""
 
     selection = ToggleColumn(
         accessor="row_id",
@@ -184,9 +182,7 @@ class LibreNMSCableTable(tables.Table):
 
 
 class VCCableTable(LibreNMSCableTable):
-    """
-    Table for displaying LibreNMS cable data for Virtual Chassis devices.
-    """
+    """Table for displaying LibreNMS cable data for Virtual Chassis devices."""
 
     device_selection = tables.Column(
         verbose_name="Virtual Chassis Member",

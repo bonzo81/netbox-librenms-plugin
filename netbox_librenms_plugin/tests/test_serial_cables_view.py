@@ -268,6 +268,7 @@ class TestCableTableSerialRendering:
         record = {"_source": "serial", "local_port_url": None, "is_configured": True}
         html = str(table.render_local_port("ttyS7", record))
         assert "Serial" in html
+        assert 'class="badge bg-teal text-dark ms-1"' in html
         assert "OOB" not in html
 
     def test_manual_pick_icon_shown(self):

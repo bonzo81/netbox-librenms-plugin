@@ -356,8 +356,6 @@ def test_locked_local_owner_must_still_belong_to_the_page_virtual_chassis():
 
 def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together():
     """A stale settings form must rename the Tag selected by the current locked row."""
-    from queue import Queue
-
     from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
 
@@ -369,6 +367,8 @@ def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together()
     tag = get_librenms_cable_tag(sync_settings=settings)
     users = [get_user_model().objects.create_superuser(f"concurrent-tag-{index}", "", "pw") for index in range(2)]
     worker_pids = Queue()
+    first_has_settings_lock = Queue()
+    release_first = Queue()
 
     forms = []
     for user, name in zip(users, ("managed-first", "managed-second"), strict=True):
@@ -384,27 +384,49 @@ def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together()
         assert form.is_valid(), form.errors
         forms.append(form)
 
-    def rename_tag(form):
+    def rename_tag(form, *, pause_after_settings_lock=False):
         close_old_connections()
         try:
             connection.ensure_connection()
             worker_pids.put(connection.connection.info.backend_pid)
-            form.save()
+
+            def pause_first_worker(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                normalized_sql = sql.lower()
+                if (
+                    pause_after_settings_lock
+                    and "netbox_librenms_plugin_librenmssettings" in normalized_sql
+                    and "for update" in normalized_sql
+                ):
+                    first_has_settings_lock.put(True)
+                    release_first.get(timeout=5)
+                return result
+
+            with connection.execute_wrapper(pause_first_worker):
+                form.save()
             return True
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
         with transaction.atomic():
             LibreNMSSettings.objects.select_for_update().get(pk=settings.pk)
-            first = executor.submit(rename_tag, forms[0])
+            first = executor.submit(rename_tag, forms[0], pause_after_settings_lock=True)
             first_pid = worker_pids.get(timeout=5)
             _wait_until_blocked(first_pid, first)
-            second = executor.submit(rename_tag, forms[1])
-            worker_pids.get(timeout=5)
 
+        assert first_has_settings_lock.get(timeout=5) is True
+        second = executor.submit(rename_tag, forms[1])
+        second_pid = worker_pids.get(timeout=5)
+        _wait_until_blocked(second_pid, second)
+        release_first.put(True)
         assert first.result(timeout=10) is True
         assert second.result(timeout=10) is True
+    finally:
+        if release_first.empty():
+            release_first.put(True)
+        executor.shutdown(wait=True)
 
     settings.refresh_from_db()
     tag.refresh_from_db()
