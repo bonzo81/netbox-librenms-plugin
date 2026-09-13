@@ -2095,6 +2095,23 @@ class TestBulkImportDevicesViewErrorPaths:
         )
         assert view_message_texts(request, "error") == ["Invalid device identifier supplied"]
 
+    def test_invalid_import_detail_is_not_returned(self, settings, librenms_server):
+        """A rejected import plan must not expose its internal reason in the HTMX response."""
+        server_key = "bulk-errors-private-intent"
+        view = self._make_view(settings, librenms_server, server_key)
+        request = make_view_request(
+            "post",
+            {"server_key": server_key, "select": ["1"], "object_type_1": "unsupported-object-type"},
+            user=make_view_user("bulk-errors-private-intent-user", []),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 400
+        assert response.content == b"Invalid import selection"
+        assert b"Invalid selection for object_type_1" not in response.content
+
 
 class TestDeviceConflictActionViewVMGuard:
     """Tests for the DeviceConflictActionView VM action guard."""
@@ -3716,7 +3733,7 @@ class TestBulkImportDevicesMorePaths:
             response = post_view(view, request)
 
         assert response.status_code == 400
-        assert response.content == b"Invalid selection for cluster_1."
+        assert response.content == b"Invalid import selection"
         assert set(VirtualMachine.objects.values_list("pk", flat=True)) == before
 
     @pytest.mark.parametrize(

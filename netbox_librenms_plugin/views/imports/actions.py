@@ -1379,9 +1379,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             import_plans = [parse_import_row_plan(request.POST, device_id) for device_id in parsed_ids]
         except InvalidImportIntent as exc:
             logger.warning("Rejecting invalid import plan: %s", exc)
+            public_message = "Invalid import selection"
             if is_htmx:
-                return HttpResponse(str(exc), status=400)
-            messages.error(request, str(exc))
+                return HttpResponse(public_message, status=400)
+            messages.error(request, public_message)
             return redirect(active_import_url)
 
         device_ids_to_import, manual_mappings_per_device, vm_imports = partition_import_plans(import_plans)

@@ -479,7 +479,7 @@ def test_device_target_rejects_forged_vm_placement(client, settings):
     )
 
     assert response.status_code == 400
-    assert b"Device imports cannot include virtual-machine placement" in response.content
+    assert response.content == b"Invalid import selection"
     assert not Device.objects.filter(name="vm-forged-placement.example.test").exists()
     assert not VirtualMachine.objects.filter(name="vm-forged-placement.example.test").exists()
 
