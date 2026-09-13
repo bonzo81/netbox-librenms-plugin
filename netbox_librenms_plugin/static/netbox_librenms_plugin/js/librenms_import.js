@@ -345,20 +345,6 @@
     }
 
     /**
-     * Return the intended NetBox name for one source value.
-     *
-     * @param {string} value - LibreNMS hostname or sysName
-     * @param {boolean} stripDomain - Whether to remove a DNS suffix
-     * @returns {string} Name shown in the focused import table
-     */
-    function importDisplayName(value, stripDomain) {
-        if (!stripDomain || !value.includes('.')) return value;
-        const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(value);
-        const isIpv6 = value.includes(':');
-        return isIpv4 || isIpv6 ? value : value.split('.')[0];
-    }
-
-    /**
      * Update names and the compact settings summary without refetching the result set.
      */
     function updateImportNameDisplay() {
@@ -369,17 +355,16 @@
         if (!sysname || !strip) return;
 
         const sourceKey = sysname.checked ? 'sysname' : 'hostname';
-        const fallbackKey = sysname.checked ? 'hostname' : 'sysname';
         const sourceLabel = sysname.checked ? 'sysName' : 'hostname';
         document.querySelectorAll('[data-import-name]').forEach((nameElement) => {
             const row = nameElement.closest('tr');
-            const sourceValue = nameElement.dataset[sourceKey] || nameElement.dataset[fallbackKey]
-                || `device-${row?.dataset.deviceId || 'unknown'}`;
-            nameElement.textContent = importDisplayName(sourceValue, strip.checked);
-            const source = nameElement.dataset[sourceKey] ? sourceLabel : (sysname.checked ? 'hostname' : 'sysName');
+            const variants = JSON.parse(nameElement.dataset.importNameVariants);
+            const variantKey = `${sourceKey}_${strip.checked ? 'stripped' : 'full'}`;
+            const variant = variants[variantKey];
+            nameElement.textContent = variant.name;
             const sourceElement = row?.querySelector('[data-import-name-source]');
             if (sourceElement) {
-                sourceElement.textContent = `From ${source}${strip.checked ? ', domain removed' : ''}`;
+                sourceElement.textContent = `From ${variant.source}${strip.checked ? ', domain removed' : ''}`;
             }
         });
 

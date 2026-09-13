@@ -752,18 +752,16 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
 
 def _reassert_new_import_blockers(validation: dict) -> None:
     """
-    Re-add the create-time role/cluster blocker for unmatched rows.
+    Re-add the create-time role or VM-placement blocker for unmatched rows.
 
     ``validate_device_for_import()`` attaches this blocker to unmatched rows. When a
     refresh drops a cached match (or never had one) and the fresh lookup finds
     nothing, the row is back in the "new import" path.
     ``recalculate_validation_status()`` recomputes can_import purely from the issues
-    list, so without re-adding this blocker a row that still has no role/cluster
+    list, so without re-adding this blocker a row that still has no role or VM placement
     selected could flip back to importable and then fail at import time.
 
-    Guarded by the selection state (found/role/cluster), so a row where the user
-    *has* picked a role/cluster — which sets found=True and removed the issue — is
-    left importable.
+    Guarded by the selection state, so a row where the user completed setup stays importable.
 
     Args:
         validation (dict): The import-row validation dict, mutated in place.
@@ -772,9 +770,9 @@ def _reassert_new_import_blockers(validation: dict) -> None:
         None
     """
     if validation.get("import_as_vm"):
-        cluster = validation.get("cluster") or {}
-        if not cluster.get("found") and not cluster.get("cluster"):
-            msg = "Cluster must be manually selected before importing as VM"
+        placement = validation.get("vm_placement") or {}
+        if not placement.get("found"):
+            msg = "VM placement requires a matching site, selected cluster, or selected host device"
             if msg not in validation.setdefault("issues", []):
                 validation["issues"].append(msg)
     else:
@@ -840,11 +838,13 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     if not validation.get("import_as_vm"):
                         reset_device_role(validation)
                     else:
-                        # VM rows are gated on cluster, not role: a dropped match must also clear
-                        # the stale cluster selection (preserving available_clusters), or
-                        # _reassert_new_import_blockers() sees found/cluster still set and lets
-                        # the row re-enter the new-import path without a fresh cluster choice.
+                        # Drop stale placement objects and return to matched-site placement.
                         reset_cluster(validation)
+                        validation["vm_placement"] = {
+                            "method": "site",
+                            "found": bool(validation.get("site", {}).get("found")),
+                            "host_device": None,
+                        }
                     # Fail-closed: this branch drops the vanished-link match and recomputes
                     # readiness, then falls through to the fresh lookup that would normally re-add
                     # the create-time role/cluster blocker. But the fresh lookup early-returns when
@@ -877,10 +877,13 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 if not validation.get("import_as_vm"):
                     reset_device_role(validation)
                 else:
-                    # Mirror the stale-match branch: a deleted cached VM match must drop the
-                    # stale cluster selection (keeping available_clusters) so the row returns to
-                    # the same create-time state as a brand-new VM import row.
+                    # Drop stale placement objects and return to matched-site placement.
                     reset_cluster(validation)
+                    validation["vm_placement"] = {
+                        "method": "site",
+                        "found": bool(validation.get("site", {}).get("found")),
+                        "host_device": None,
+                    }
                 # Same fail-closed reasoning as the vanished-link branch above: re-assert the
                 # create-time blocker before recompute so a deleted-match row can't stay importable
                 # if the fresh lookup early-returns (libre_device None) or its except swallows.
@@ -1153,15 +1156,15 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # Determine actual model from the found object, not from import_as_vm flag
             actual_is_vm = found_as_cross_model != import_as_vm  # XOR: cross flips the flag
             validation["import_as_vm"] = actual_is_vm  # Update so future refreshes query correct model
-            # A row that was previously unmatched can carry create-time blockers — "Device role
-            # must be manually selected" and/or "Cluster must be manually selected" — that
+            # A row that was previously unmatched can carry create-time blockers for its role or
+            # VM placement that
             # validate_device_for_import() only adds when there's no existing_device. Now that
             # the row resolves to an existing object, none of those apply (and a cross-model
             # match can carry the *other* model's blocker). Drop both before recalculating so a
             # stale message doesn't linger in the UI; the row stays force-blocked as an existing
             # match regardless. The VM path previously cleared neither.
             remove_validation_issue(validation, "role")
-            remove_validation_issue(validation, "cluster")
+            remove_validation_issue(validation, "VM placement")
             # A cached new-import row can also carry "No matching site found…" / "No matching
             # device type found…" create-time blockers (device_operations.py). They don't apply
             # to a now-resolved existing match either, so clear them too or the validation detail
@@ -1185,7 +1188,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["is_ready"] = False
         else:
             # No existing match at all — the row is a genuine new import. If a cached match was
-            # just cleared above, its create-time role/cluster blocker was lost; re-add it so the
+            # just cleared above, its create-time role/placement blocker was lost; re-add it so the
             # row can't flip to importable while still missing a required selection.
             _reassert_new_import_blockers(validation)
             recalculate_validation_status(validation, is_vm=import_as_vm)

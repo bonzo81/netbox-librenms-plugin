@@ -310,7 +310,7 @@ class TestBulkImportVms:
         )
 
         result = bulk_import_vms(
-            {6204: {"cluster_id": cluster.pk, "device_role_id": role.pk}},
+            {6204: {"placement": "cluster", "cluster_id": cluster.pk, "device_role_id": role.pk}},
             api,
             sync_options={"use_sysname": False, "strip_domain": True},
             user=_vm_writer("live"),
@@ -334,7 +334,7 @@ class TestBulkImportVms:
         cluster = make_cluster("bulk-prefetched-cluster")
 
         result = bulk_import_vms(
-            {6205: {"cluster_id": cluster.pk}},
+            {6205: {"placement": "cluster", "cluster_id": cluster.pk}},
             api,
             libre_devices_cache={6205: _payload(6205, hostname="prefetched-vm")},
             user=_vm_writer("prefetched"),
@@ -351,7 +351,7 @@ class TestBulkImportVms:
         cluster_id = missing_pk(Cluster)
 
         result = bulk_import_vms(
-            {6206: {"cluster_id": cluster_id}},
+            {6206: {"placement": "cluster", "cluster_id": cluster_id}},
             api,
             libre_devices_cache={6206: _payload(6206)},
             user=_vm_writer("missing-cluster"),
@@ -372,7 +372,7 @@ class TestBulkImportVms:
         role_id = missing_pk(DeviceRole)
 
         result = bulk_import_vms(
-            {6207: {"cluster_id": cluster.pk, "device_role_id": role_id}},
+            {6207: {"placement": "cluster", "cluster_id": cluster.pk, "device_role_id": role_id}},
             api,
             libre_devices_cache={6207: _payload(6207)},
             user=_vm_writer("missing-role"),
@@ -381,7 +381,7 @@ class TestBulkImportVms:
         assert result["failed"] == [{"device_id": 6207, "error": f"Selected role (id={role_id}) no longer exists"}]
         assert not VirtualMachine.objects.filter(name="vm-6207.example.test").exists()
 
-    def test_missing_manual_cluster_stays_a_validation_failure(self, librenms_api):
+    def test_missing_placement_method_stays_a_validation_failure(self, librenms_api):
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         api, _server = librenms_api
@@ -396,7 +396,7 @@ class TestBulkImportVms:
         assert result["success"] == []
         assert len(result["failed"]) == 1
         assert result["failed"][0]["device_id"] == 6208
-        assert "Cluster must be manually selected" in result["failed"][0]["error"]
+        assert "valid virtual-machine placement method" in result["failed"][0]["error"]
 
     def test_one_bad_row_does_not_stop_later_real_imports(self, librenms_api):
         from virtualization.models import Cluster
@@ -412,8 +412,8 @@ class TestBulkImportVms:
 
         result = bulk_import_vms(
             {
-                6209: {"cluster_id": absent_cluster_id},
-                6210: {"cluster_id": cluster.pk},
+                6209: {"placement": "cluster", "cluster_id": absent_cluster_id},
+                6210: {"placement": "cluster", "cluster_id": cluster.pk},
             },
             api,
             libre_devices_cache=payloads,

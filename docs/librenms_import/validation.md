@@ -31,7 +31,8 @@ Region is inherited from the resolved Site because NetBox does not assign a regi
 
 ### Import as Virtual Machine
 
-- **Cluster** (required) - Must be selected manually
+- **Placement** (required) - Use the Site matched from the LibreNMS location, select a Cluster, or select a host Device. A host that belongs to a cluster also assigns that cluster to the virtual machine, as required by NetBox.
+- **Device Role** (optional) - Can be selected manually
 - **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mapping_rules.md#platform-mappings). The same **Create Platform** modal is available if needed.
 
 ## Virtual Chassis Detection

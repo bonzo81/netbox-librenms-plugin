@@ -657,6 +657,7 @@ class TestValidateDeviceForImport:
             "device_type",
             "device_role",
             "cluster",
+            "vm_placement",
             "platform",
             "rack",
             "location",
@@ -723,17 +724,18 @@ class TestValidateDeviceForImport:
         assert result["cluster"]["found"] is True
         assert result["is_ready"] is False
 
-    def test_new_vm_skips_device_fields_and_requires_a_cluster(self):
+    def test_new_vm_skips_device_fields_and_requires_valid_placement(self):
         cluster = make_cluster("Validation available cluster")
 
         result = self._validate(_device_payload(5403), import_as_vm=True)
 
         assert result["import_as_vm"] is True
-        assert result["site"]["found"] is True
+        assert result["site"]["found"] is False
         assert result["device_type"]["found"] is True
         assert result["device_role"]["found"] is True
         assert cluster in result["cluster"]["available_clusters"]
-        assert any("Cluster must be manually selected" in issue for issue in result["issues"])
+        assert result["vm_placement"] == {"method": "site", "found": False, "host_device": None}
+        assert any("VM placement" in issue for issue in result["issues"])
 
     def test_device_id_match_forces_device_mode_and_surfaces_link(self):
         device = make_device("validation-linked", librenms_cf={SERVER_KEY: 5404})

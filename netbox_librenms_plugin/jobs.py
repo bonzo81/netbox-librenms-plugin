@@ -172,11 +172,9 @@ class ImportDevicesJob(JobRunner):
 
     def run(
         self,
-        device_ids,
-        vm_imports,
+        import_plans,
         server_key=None,
         sync_options=None,
-        manual_mappings_per_device=None,
         libre_devices_cache=None,
         **kwargs,
     ):
@@ -184,14 +182,12 @@ class ImportDevicesJob(JobRunner):
         Execute device/VM imports in background.
 
         Args:
-            device_ids: List of LibreNMS device IDs to import as Devices
-            vm_imports: Dict mapping device_id to cluster/role info for VM imports
-            server_key: Exact configured LibreNMS server key, or None for a legacy queued job
+            import_plans: Serialized explicit Device and virtual-machine row plans.
+            server_key: Exact configured LibreNMS server key, or None for a legacy queued job.
             sync_options: Dict with sync_interfaces, sync_cables,
-                use_sysname, strip_domain, and vc_detection_enabled
-            manual_mappings_per_device: Dict mapping device_id to manual_mappings dict
-            libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
-            **kwargs: Additional job parameters
+                use_sysname, strip_domain, and vc_detection_enabled.
+            libre_devices_cache: Optional dict mapping device_id to pre-fetched device data.
+            **kwargs: Additional job parameters.
         """
         from netbox_librenms_plugin.import_utils import (
             bulk_import_devices_shared,
@@ -201,6 +197,10 @@ class ImportDevicesJob(JobRunner):
             required_import_permissions,
         )
         from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
+        from netbox_librenms_plugin.import_plan import deserialize_import_plans, partition_import_plans
+
+        plans = deserialize_import_plans(import_plans)
+        device_ids, manual_mappings_per_device, vm_imports = partition_import_plans(plans)
 
         total_count = len(device_ids) + len(vm_imports)
         self.logger.info(f"Starting LibreNMS import job for {total_count} devices/VMs")

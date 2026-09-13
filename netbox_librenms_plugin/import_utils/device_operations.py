@@ -583,22 +583,22 @@ def validate_device_for_import(  # noqa: C901
     Performs comprehensive validation:
     - Checks if device already exists in NetBox
     - Validates required prerequisites (Site, DeviceType, DeviceRole for devices)
-      OR (Cluster for VMs)
+      or placement (matched Site, selected Cluster, or selected host Device) for VMs
     - Provides smart matching for missing objects
     - Detects virtual chassis/stack configuration (if API provided)
     - Returns detailed validation status
 
     Args:
-        libre_device: Device data from LibreNMS
-        import_as_vm: If True, validate for VM import instead of device import
-        api: Optional LibreNMSAPI instance for virtual chassis detection
+        libre_device: Device data from LibreNMS.
+        import_as_vm: If True, validate for VM import instead of Device import.
+        api: Optional LibreNMSAPI instance for virtual chassis detection.
         server_key: LibreNMS server key for stored identifiers and API data.
-        include_vc_detection: Skip VC detection when False to speed up bulk operations
+        include_vc_detection: Skip VC detection when False to speed up bulk operations.
         collision_only: Return after existing-object and collision-candidate matching. This skips
             site, device type, role, platform, rack, and virtual-chassis import prerequisites.
-        force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS
-        use_sysname: If True, prefer sysName over hostname (matches import behaviour)
-        strip_domain: If True, strip domain suffix from device name
+        force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS.
+        use_sysname: If True, prefer sysName over hostname (matches import behavior).
+        strip_domain: If True, strip domain suffix from device name.
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
 
     Returns:
@@ -634,7 +634,7 @@ def validate_device_for_import(  # noqa: C901
                 'virtual_chassis': dict,  # VC detection state, empty_virtual_chassis_data() shape
                 'issues': List[str],  # Blocking issues
                 'warnings': List[str],  # Non-blocking warnings
-                'site': {  # Only for devices
+                'site': {  # Device site or VM matched-site placement
                     'found': bool,
                     'site': Site or None,
                     'match_type': str,  # 'exact' or None
@@ -650,15 +650,20 @@ def validate_device_for_import(  # noqa: C901
                     'match_type': str,  # 'exact' or None
                     'suggestions': List[dict]  # Device types for user selection
                 },
-                'device_role': {  # Only for devices
-                    'found': bool,  # Always False - requires manual selection
+                'device_role': {
+                    'found': bool,  # False until manually selected for a new Device
                     'role': DeviceRole or None,
                     'available_roles': List[DeviceRole]  # All roles for user selection
                 },
-                'cluster': {  # Only for VMs
-                    'found': bool,  # Always False - requires manual selection
+                'cluster': {  # Selected or host-derived VM cluster
+                    'found': bool,
                     'cluster': Cluster or None,
                     'available_clusters': List[Cluster]  # All clusters for user selection
+                },
+                'vm_placement': {
+                    'method': str,  # 'site', 'cluster', or 'host'
+                    'found': bool,
+                    'host_device': Device or None
                 },
                 'platform': {
                     'found': bool,
@@ -742,6 +747,11 @@ def validate_device_for_import(  # noqa: C901
             "found": False,
             "cluster": None,
             "available_clusters": [],
+        },
+        "vm_placement": {
+            "method": "site",
+            "found": False,
+            "host_device": None,
         },
         "platform": {"found": False, "platform": None, "match_type": None},
         "rack": {
@@ -1377,7 +1387,7 @@ def validate_device_for_import(  # noqa: C901
 
         # An ambiguous librenms_id (matches >1 NetBox record) is the terminal blocker for this
         # row — the user must resolve the duplicate id. Don't run the new-import site/device_type/
-        # role/cluster validation below: with existing_device fail-closed to None, it would pile
+        # role/placement validation below: with existing_device fail-closed to None, it would pile
         # unrelated "must select ..." blockers onto a row whose real problem is the ambiguous id
         # (mirrors bulk_import.py treating ambiguity as the terminal state). existing_match_type
         # is already "ambiguous_librenms_id" (set by _flag_ambiguous_librenms_id).
@@ -1388,6 +1398,14 @@ def validate_device_for_import(  # noqa: C901
 
         if collision_only:
             return result
+
+        # Site placement is valid for both Devices and virtual machines. Resolve it before the
+        # type-specific branches so a VM can use its LibreNMS location without a cluster.
+        location = libre_device.get("location", "")
+        parsed_location = parse_location_for_import(location)
+        site_token = parsed_location.get("site") or ""
+        site_match = find_matching_site(site_token)
+        result["site"] = site_match
 
         # Validate based on import type (Device or VM)
         if import_as_vm:
@@ -1404,23 +1422,18 @@ def validate_device_for_import(  # noqa: C901
 
         if import_as_vm:
             if not result.get("existing_device"):
-                # 2. For NEW VMs: Validate Cluster (required) - Must be manually selected
-                result["cluster"]["found"] = False
-                result["issues"].append("Cluster must be manually selected before importing as VM")
+                result["vm_placement"].update(method="site", found=site_match["found"])
+                if not site_match["found"]:
+                    result["issues"].append(
+                        "VM placement requires a matching site, selected cluster, or selected host device"
+                    )
 
             # Skip device-specific validations for all VMs (new and existing)
-            result["site"]["found"] = True  # Not required for VMs
             result["device_type"]["found"] = True  # Not required for VMs
             result["device_role"]["found"] = True  # Not required for VMs
 
         else:
             # 2. For Devices: Validate Site (required)
-            location = libre_device.get("location", "")
-            parsed_location = parse_location_for_import(location)
-            site_token = parsed_location.get("site") or ""
-            site_match = find_matching_site(site_token)
-            result["site"] = site_match
-
             if not site_match["found"]:
                 if not result.get("existing_device"):
                     result["issues"].append(f"No matching site found for location: '{location}'")
@@ -1638,8 +1651,7 @@ def validate_device_for_import(  # noqa: C901
             result["can_import"] = len(result["issues"]) == 0
 
             if import_as_vm:
-                # For VMs: only cluster is required
-                result["is_ready"] = result["can_import"] and result["cluster"]["found"]
+                result["is_ready"] = result["can_import"] and result["vm_placement"]["found"]
             else:
                 # For Devices: site, device_type, and device_role are required
                 result["is_ready"] = (

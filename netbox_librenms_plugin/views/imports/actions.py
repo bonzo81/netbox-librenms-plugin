@@ -46,11 +46,24 @@ from netbox_librenms_plugin.import_utils import (
     update_vc_member_suggested_names,
     validate_device_for_import,
 )
+from netbox_librenms_plugin.import_plan import (
+    ClusterPlacement,
+    DeviceTarget,
+    HostPlacement,
+    ImportRowIntent,
+    InvalidImportIntent,
+    MatchedSitePlacement,
+    VMPlacementMethod,
+    partition_import_plans,
+    parse_import_row_intent,
+    parse_import_row_plan,
+    serialize_import_plans,
+)
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
+    apply_host_to_validation,
     apply_rack_to_validation,
     apply_role_to_validation,
-    extract_device_selections,
     fetch_model_by_id,
     merge_candidate_pks,
 )
@@ -736,15 +749,15 @@ class DeviceImportHelperMixin:
 
     def get_validated_device_with_selections(
         self, device_id: int, request, *, libre_device: dict | None = None
-    ) -> tuple[dict | None, dict | None, dict]:
+    ) -> tuple[dict | None, dict | None, ImportRowIntent]:
         """
         Get LibreNMS device, validate it, and apply user selections.
 
         Consolidates the common pattern across all device import update views.
 
         Args:
-            device_id: LibreNMS device ID
-            request: Django request object
+            device_id: LibreNMS device ID.
+            request: Django request object.
             libre_device: Optional pre-fetched LibreNMS device data. The LibreNMS side is
                 invariant within a single request, so the post-commit re-validation after a
                 promote/merge can pass the device fetched earlier to skip a redundant
@@ -752,8 +765,8 @@ class DeviceImportHelperMixin:
                 is still re-run so the refreshed row reflects the just-committed state.
 
         Returns:
-            Tuple of (libre_device, validation, selections)
-            Returns (None, None, selections) if device not found
+            tuple: The LibreNMS device, validation, and parsed intent. The first two
+                values are None when the device is not found.
         """
         # Reuse a caller-supplied device, else use cached device data from the table load
         # (both eliminate redundant API calls).
@@ -761,12 +774,24 @@ class DeviceImportHelperMixin:
             libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
         if not libre_device:
-            return None, None, extract_device_selections(request, device_id)
+            return (
+                None,
+                None,
+                parse_import_row_intent(
+                    request.POST if request.method == "POST" else request.GET,
+                    device_id,
+                ),
+            )
 
         validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
         return libre_device, validation, selections
 
-    def validate_and_apply_selections(self, device_id: int, request, libre_device: dict) -> tuple[dict, dict]:
+    def validate_and_apply_selections(
+        self,
+        device_id: int,
+        request,
+        libre_device: dict,
+    ) -> tuple[dict, ImportRowIntent]:
         """
         Validate an already-fetched LibreNMS device and apply user selections.
 
@@ -783,11 +808,11 @@ class DeviceImportHelperMixin:
             libre_device (dict): Already-fetched LibreNMS device dict.
 
         Returns:
-            tuple[dict, dict]: The (validation, selections) pair.
+            tuple[dict, ImportRowIntent]: The validation and parsed row intent.
         """
-        selections = extract_device_selections(request, device_id)
-        cluster_id = selections["cluster_id"]
-        requested_vm = bool(cluster_id)
+        data = request.POST if request.method == "POST" else request.GET
+        intent = parse_import_row_intent(data, device_id)
+        requested_vm = intent.is_vm
 
         # VC detection runs for every non-VM import: role/rack changes and detail views need
         # VC context (served from cache when already fetched), so it's gated purely on not-a-VM.
@@ -824,26 +849,27 @@ class DeviceImportHelperMixin:
                 server_key=self.librenms_api.server_key,
             )
 
-        # Apply user selections (cluster, role, rack) to validation
-        _apply_user_selections_to_validation(validation, selections, is_vm)
+        # Apply user selections without deriving the target model from placement values.
+        _apply_import_intent_to_validation(validation, intent, is_vm=is_vm, user=request.user)
+        validation["_import_intent"] = intent
 
         # Last, so nothing downstream re-adds identity or re-enables a row this viewer may not see.
         scope_validation_disclosure(validation, request.user)
 
-        return validation, selections
+        return validation, intent
 
-    def render_device_row(self, request, libre_device: dict, validation: dict, selections: dict):
+    def render_device_row(self, request, libre_device: dict, validation: dict, intent: ImportRowIntent):
         """
         Render device import table row with updated validation.
 
         Args:
-            request: Django request object
-            libre_device: LibreNMS device data
-            validation: Updated validation dict
-            selections: User selections dict with cluster_id, role_id, rack_id
+            request: Django request object.
+            libre_device: LibreNMS device data.
+            validation: Updated validation dict.
+            intent: Explicit import-row intent.
 
         Returns:
-            HttpResponse with rendered device row
+            HttpResponse: The rendered device row.
         """
         libre_device["_validation"] = validation
         table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key, user=request.user)
@@ -851,9 +877,14 @@ class DeviceImportHelperMixin:
         context = {
             "record": libre_device,
             "table": table,
-            "cluster_id": selections["cluster_id"],
-            "role_id": selections["role_id"],
-            "rack_id": selections["rack_id"],
+            "cluster_id": intent.cluster_id,
+            "role_id": intent.role_id,
+            "rack_id": intent.rack_id,
+            "host_device_id": intent.host_device_id,
+            "object_type": intent.object_type.value,
+            "vm_placement_method": (
+                intent.vm_placement_method.value if intent.vm_placement_method is not None else None
+            ),
         }
 
         return _attach_messages_oob(
@@ -906,53 +937,102 @@ class DeviceImportHelperMixin:
         return _attach_messages_oob(response, request)
 
 
-def _apply_user_selections_to_validation(
+def _set_missing_vm_placement(validation: dict, method: VMPlacementMethod, issue: str) -> None:
+    """Set an incomplete VM placement and keep the row non-executable."""
+    validation["vm_placement"] = {
+        "method": method.value,
+        "found": False,
+        "host_device": None,
+    }
+    validation["issues"] = [item for item in validation["issues"] if "VM placement" not in item]
+    validation["issues"].append(issue)
+    from netbox_librenms_plugin.import_validation_helpers import recalculate_validation_status
+
+    recalculate_validation_status(validation, is_vm=True)
+
+
+def _apply_import_intent_to_validation(
     validation: dict,
-    selections: dict,
+    intent: ImportRowIntent,
     is_vm: bool,
+    user,
 ) -> None:
     """
-    Apply user-selected cluster, role, and rack to validation dict.
+    Apply an explicit import-row intent to a validation dict.
 
     This helper consolidates the logic shared across DeviceValidationDetailsView,
     DeviceRoleUpdateView, DeviceClusterUpdateView, and DeviceRackUpdateView.
+    It mutates validation in place with the placement, role, and rack selections.
 
     Args:
-        validation: Validation dict from validate_device_for_import()
-        selections: Dict with keys: cluster_id, role_id, rack_id
-        is_vm: True if importing as VM, False for device
-
-    Modifies validation dict in-place by applying cluster/role/rack selections.
+        validation: Validation dict from ``validate_device_for_import()``.
+        intent: Parsed row state with an explicit object type and placement method.
+        is_vm: True if importing as a VM. False if importing as a Device.
+        user: Requesting user used to scope host Device selection.
     """
-    from dcim.models import DeviceRole, Rack
+    from dcim.models import Device, DeviceRole, Rack
     from virtualization.models import Cluster
 
-    cluster_id = selections.get("cluster_id")
-    role_id = selections.get("role_id")
-    rack_id = selections.get("rack_id")
-
     if is_vm:
-        # Handle cluster selection (VM only)
-        if cluster_id:
-            cluster = fetch_model_by_id(Cluster, cluster_id)
+        method = intent.vm_placement_method or VMPlacementMethod.SITE
+        if method is VMPlacementMethod.SITE:
+            placement_found = bool(validation.get("site", {}).get("found"))
+            validation["vm_placement"] = {
+                "method": method.value,
+                "found": placement_found,
+                "host_device": None,
+            }
+            if placement_found:
+                validation["issues"] = [item for item in validation["issues"] if "VM placement" not in item]
+            else:
+                _set_missing_vm_placement(
+                    validation,
+                    method,
+                    "VM placement requires a LibreNMS location that matches a NetBox site",
+                )
+        elif method is VMPlacementMethod.CLUSTER:
+            cluster = fetch_model_by_id(Cluster, intent.cluster_id)
             if cluster:
                 apply_cluster_to_validation(validation, cluster)
+            else:
+                _set_missing_vm_placement(
+                    validation,
+                    method,
+                    "VM placement requires a selected cluster",
+                )
+        else:
+            host_device = None
+            if intent.host_device_id:
+                host_device = (
+                    Device.objects.restrict(user, "view")
+                    .select_related("cluster")
+                    .filter(pk=intent.host_device_id)
+                    .first()
+                )
+            if host_device:
+                apply_host_to_validation(validation, host_device)
+            else:
+                _set_missing_vm_placement(
+                    validation,
+                    method,
+                    "VM placement requires a selected host device",
+                )
 
         # Handle role selection for VM
-        if role_id:
-            role = fetch_model_by_id(DeviceRole, role_id)
+        if intent.role_id:
+            role = fetch_model_by_id(DeviceRole, intent.role_id)
             if role:
                 apply_role_to_validation(validation, role, is_vm=True)
     else:
         # Handle role selection for device
-        if role_id:
-            role = fetch_model_by_id(DeviceRole, role_id)
+        if intent.role_id:
+            role = fetch_model_by_id(DeviceRole, intent.role_id)
             if role:
                 apply_role_to_validation(validation, role, is_vm=False)
 
         # Handle rack selection (device only, optional)
-        if rack_id:
-            rack = fetch_model_by_id(Rack, rack_id)
+        if intent.rack_id:
+            rack = fetch_model_by_id(Rack, intent.rack_id)
             if rack:
                 apply_rack_to_validation(validation, rack)
 
@@ -1009,11 +1089,12 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 errors.append(f"Device ID {device_id} not found in LibreNMS")
                 continue
 
-            selections = extract_device_selections(request, device_id)
-            cluster_id = selections["cluster_id"]
-            role_id = selections["role_id"]
-            rack_id = selections["rack_id"]
-            is_vm = bool(cluster_id)
+            try:
+                plan = parse_import_row_plan(request.POST, device_id)
+            except InvalidImportIntent as exc:
+                errors.append(str(exc))
+                continue
+            is_vm = plan.is_vm
 
             validation = validate_device_for_import(
                 libre_device,
@@ -1026,10 +1107,6 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # detect VC membership so stack members are visible before import.
                 include_vc_detection=True,
             )
-            # Recompute is_vm from validation result — the function may have
-            # detected an existing VM via hostname/IP lookup
-            is_vm = bool(validation.get("import_as_vm"))
-
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
             validation["_vc_detection_enabled"] = vc_detection_enabled
@@ -1044,13 +1121,50 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             from dcim.models import DeviceRole, Rack
             from virtualization.models import Cluster
 
+            target = plan.target
+            role_id = target.role_id
             role = fetch_model_by_id(DeviceRole, role_id) if role_id else None
-            cluster = fetch_model_by_id(Cluster, cluster_id) if cluster_id else None
-            rack = fetch_model_by_id(Rack, rack_id) if rack_id else None
+            rack = None
+            cluster = None
+            host_device = None
+            placement_method = None
+            if isinstance(target, DeviceTarget):
+                rack = fetch_model_by_id(Rack, target.rack_id) if target.rack_id else None
+            else:
+                placement_method = (
+                    "site"
+                    if isinstance(target.placement, MatchedSitePlacement)
+                    else "cluster"
+                    if isinstance(target.placement, ClusterPlacement)
+                    else "host"
+                )
+                if isinstance(target.placement, ClusterPlacement):
+                    cluster = fetch_model_by_id(Cluster, target.placement.cluster_id)
+                elif isinstance(target.placement, HostPlacement):
+                    from dcim.models import Device
+
+                    host_device = (
+                        Device.objects.restrict(request.user, "view")
+                        .select_related("cluster")
+                        .filter(pk=target.placement.host_device_id)
+                        .first()
+                    )
+
+                if isinstance(target.placement, MatchedSitePlacement) and not validation.get("site", {}).get("found"):
+                    errors.append(f"Device ID {device_id} has no matching NetBox site for VM placement")
+                    continue
+                if isinstance(target.placement, ClusterPlacement) and cluster is None:
+                    errors.append(f"Device ID {device_id} has an unavailable cluster selection")
+                    continue
+                if isinstance(target.placement, HostPlacement) and host_device is None:
+                    errors.append(f"Device ID {device_id} has an unavailable host-device selection")
+                    continue
 
             if is_vm:
                 if cluster:
                     apply_cluster_to_validation(validation, cluster)
+                elif host_device:
+                    apply_host_to_validation(validation, host_device)
 
                 if role:
                     apply_role_to_validation(validation, role, is_vm=True)
@@ -1068,8 +1182,12 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     "validation": validation,
                     "role": role,
                     "cluster": cluster,
+                    "site": validation.get("site", {}).get("site") if placement_method == "site" else None,
+                    "host_device": host_device,
                     "rack": rack,
                     "is_vm": is_vm,
+                    "object_type": "virtualmachine" if is_vm else "device",
+                    "placement_method": placement_method,
                 }
             )
 
@@ -1225,75 +1343,16 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "strip_domain": strip_domain,
         }
 
-        manual_mappings_per_device: dict[int, dict[str, int]] = {}
-        vm_imports: dict[int, dict[str, int]] = {}  # Track which devices to import as VMs
+        try:
+            import_plans = [parse_import_row_plan(request.POST, device_id) for device_id in parsed_ids]
+        except InvalidImportIntent as exc:
+            logger.warning("Rejecting invalid import plan: %s", exc)
+            if is_htmx:
+                return HttpResponse(str(exc), status=400)
+            messages.error(request, str(exc))
+            return redirect(active_import_url)
 
-        for device_id in parsed_ids:
-            mappings = {}
-            cluster_value = request.POST.get(f"cluster_{device_id}")
-
-            # If cluster is selected, this is a VM import
-            if cluster_value:
-                cluster_id = coerce_model_pk(cluster_value)
-                if cluster_id is None:
-                    # Fail closed. Falling through would leave the row out of vm_imports and
-                    # import it as a plain Device with the requested cluster discarded, and it
-                    # would swap the required permission from add_virtualmachine to add_device.
-                    logger.warning(
-                        "Rejecting invalid cluster id '%s' for VM import of device %s",
-                        cluster_value,
-                        device_id,
-                    )
-                    if is_htmx:
-                        return HttpResponse("Invalid cluster or role selection", status=400)
-                    messages.error(request, "Invalid cluster or role selection supplied")
-                    return redirect(active_import_url)
-                vm_imports[device_id] = {"cluster_id": cluster_id}
-                # VMs can also have roles. A bad role only drops the role: the VM is still
-                # created under the cluster the user picked, so the object type does not change.
-                role_value = request.POST.get(f"role_{device_id}")
-                if role_value:
-                    role_id = coerce_model_pk(role_value)
-                    if role_id is not None:
-                        vm_imports[device_id]["device_role_id"] = role_id
-                    else:
-                        logger.warning(
-                            "Ignoring invalid role id '%s' for VM import of device %s",
-                            role_value,
-                            device_id,
-                        )
-                continue  # Skip device-specific mappings for VMs
-
-            # Device import mappings
-            role_value = request.POST.get(f"role_{device_id}")
-            if role_value:
-                role_id = coerce_model_pk(role_value)
-                if role_id is not None:
-                    mappings["device_role_id"] = role_id
-                else:
-                    logger.warning(
-                        "Ignoring invalid role id '%s' for device %s",
-                        role_value,
-                        device_id,
-                    )
-
-            rack_value = request.POST.get(f"rack_{device_id}")
-            if rack_value:
-                rack_id = coerce_model_pk(rack_value)
-                if rack_id is not None:
-                    mappings["rack_id"] = rack_id
-                else:
-                    logger.warning(
-                        "Ignoring invalid rack id '%s' for device %s",
-                        rack_value,
-                        device_id,
-                    )
-
-            if mappings:
-                manual_mappings_per_device[device_id] = mappings
-
-        # Separate device IDs into device imports vs VM imports
-        device_ids_to_import = [d for d in parsed_ids if d not in vm_imports]
+        device_ids_to_import, manual_mappings_per_device, vm_imports = partition_import_plans(import_plans)
         vm_ids_to_import = list(vm_imports.keys())
 
         # Authorize the model add/change perms BEFORE the background dispatch and the collision
@@ -1349,11 +1408,9 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # Enqueue background job
                 job = ImportDevicesJob.enqueue(
                     user=request.user,
-                    device_ids=device_ids_to_import,
-                    vm_imports=vm_imports,
+                    import_plans=serialize_import_plans(import_plans),
                     server_key=self.librenms_api.server_key,
                     sync_options=sync_options,
-                    manual_mappings_per_device=manual_mappings_per_device,
                     libre_devices_cache=libre_devices_cache,
                 )
 
@@ -1904,58 +1961,35 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         return result or None
 
 
-class DeviceRoleUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
-    """HTMX view to update a table row when a role is selected."""
+class DeviceImportPlanUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+    """Refresh an import row after any explicit intent control changes."""
 
     def post(self, request, device_id):
-        """Update the table row after a device role selection change."""
-        # Pin the client to the import page's server (the selects post it via hx-vals)
-        # before get_validated_device_with_selections routes through the lazy client —
-        # otherwise a global server switch mid-session re-validates and caches the WRONG
-        # server's device under this row. Mirrors the sibling import endpoints.
+        """Revalidate and render the row from its complete submitted intent."""
         if err := _rebind_or_htmx_error(self, request):
             return err
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        try:
+            libre_device, validation, intent = self.get_validated_device_with_selections(device_id, request)
+        except InvalidImportIntent as exc:
+            return _htmx_error_response(str(exc))
 
         if not libre_device:
             return _htmx_error_response("Device not found")
 
-        return self.render_device_row(request, libre_device, validation, selections)
+        return self.render_device_row(request, libre_device, validation, intent)
 
 
-class DeviceClusterUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
-    """HTMX view to update a table row when a cluster is selected/deselected."""
-
-    def post(self, request, device_id):
-        """Update the table row after a cluster selection change."""
-        # Pin to the import page's server before any lookup (see DeviceRoleUpdateView).
-        if err := _rebind_or_htmx_error(self, request):
-            return err
-
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
-
-        if not libre_device:
-            return _htmx_error_response("Device not found")
-
-        return self.render_device_row(request, libre_device, validation, selections)
+class DeviceRoleUpdateView(DeviceImportPlanUpdateView):
+    """Keep the former role-refresh route as an import-row refresh alias."""
 
 
-class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
-    """HTMX view to update a table row when a rack is selected."""
+class DeviceClusterUpdateView(DeviceImportPlanUpdateView):
+    """Keep the former cluster-refresh route as an import-row refresh alias."""
 
-    def post(self, request, device_id):
-        """Update the table row after a rack selection change."""
-        # Pin to the import page's server before any lookup (see DeviceRoleUpdateView).
-        if err := _rebind_or_htmx_error(self, request):
-            return err
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
-
-        if not libre_device:
-            return _htmx_error_response("Device not found")
-
-        return self.render_device_row(request, libre_device, validation, selections)
+class DeviceRackUpdateView(DeviceImportPlanUpdateView):
+    """Keep the former rack-refresh route as an import-row refresh alias."""
 
 
 class DeviceConflictActionView(
@@ -2566,8 +2600,10 @@ class CreatePlatformFromImportView(
                     selected_manufacturer_pk = device_type.manufacturer_id
 
         htmx_include = (
+            f"[name=object_type_{device_id}], [name=vm_placement_{device_id}], "
             f"[name=role_{device_id}], [name=rack_{device_id}], "
-            f"[name=cluster_{device_id}], #use-sysname-toggle, #strip-domain-toggle"
+            f"[name=cluster_{device_id}], [name=host_device_{device_id}], "
+            "#use-sysname-toggle, #strip-domain-toggle"
         )
 
         return render(

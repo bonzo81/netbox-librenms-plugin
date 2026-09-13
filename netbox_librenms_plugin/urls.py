@@ -38,6 +38,7 @@ from .views import (
     DeviceCableTableView,
     DeviceClusterUpdateView,
     DeviceConflictActionView,
+    DeviceImportPlanUpdateView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
@@ -469,6 +470,11 @@ urlpatterns = [
         "device-import/vc-details/<int:device_id>/",
         DeviceVCDetailsView.as_view(),
         name="device_vc_details",
+    ),
+    path(
+        "device-import/plan-update/<int:device_id>/",
+        DeviceImportPlanUpdateView.as_view(),
+        name="device_import_plan_update",
     ),
     path(
         "device-import/role-update/<int:device_id>/",

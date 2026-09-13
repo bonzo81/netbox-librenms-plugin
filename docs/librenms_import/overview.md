@@ -13,7 +13,7 @@ The import workflow consists of three main steps:
 2. **[Review & Validate](validation.md)** - Validate import readiness and configure missing NetBox objects
 3. **[Import](import_settings.md)** - Configure import settings and create devices in NetBox
 
-The plugin validates all required NetBox objects (Site, Device Type, Device Role) before allowing import.
+The plugin validates the required NetBox objects for the selected target type before allowing import.
 
 ## Key Features
 
@@ -24,7 +24,7 @@ The plugin validates all required NetBox objects (Site, Device Type, Device Role
 : Automatic matching for Sites, Device Types, and Platforms based on LibreNMS data. Clear indicators for what's missing.
 
 **Device or VM**
-: Import as physical Devices (requires Site, Device Type, Role) or Virtual Machines (requires Cluster).
+: Import as physical Devices (requires Site, Device Type, and Role) or Virtual Machines. A new virtual machine can use its matched Site, a selected Cluster, or a selected host Device for placement.
 
 **Virtual Chassis Support**
 : Automatic detection and creation of Virtual Chassis objects for stackable switches.

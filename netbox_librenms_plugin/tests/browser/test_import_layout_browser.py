@@ -1,5 +1,6 @@
 """Browser checks for the focused device-import table layout."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -73,3 +74,39 @@ def test_all_optional_columns_fit_the_import_results_card(page, viewport_width):
     action_box = actions.bounding_box()
     group_box = action_group.bounding_box()
     assert group_box["x"] + group_box["width"] <= action_box["x"] + action_box["width"]
+
+
+@pytest.mark.parametrize(
+    ("sysname", "expected_name", "expected_source"),
+    [
+        ("999.1.2.3", "999", "From sysName, domain removed"),
+        (".example.test", "device-42", "From fallback name, domain removed"),
+    ],
+)
+def test_import_name_preview_matches_backend_resolution(page, sysname, expected_name, expected_source):
+    """The live preview must use the same resolved names as the importer."""
+    variants = {
+        "sysname_full": {"name": sysname, "source": "sysName"},
+        "sysname_stripped": {
+            "name": expected_name,
+            "source": expected_source.removeprefix("From ").removesuffix(", domain removed"),
+        },
+    }
+    page.set_content(
+        f"""
+        <input id="use-sysname-toggle-cb" type="checkbox" checked>
+        <input id="strip-domain-toggle-cb" type="checkbox" checked>
+        <table><tbody><tr data-device-id="42">
+          <td>
+            <strong data-import-name data-import-name-variants='{json.dumps(variants)}'>
+              server-rendered-name
+            </strong>
+            <div data-import-name-source>server-rendered-source</div>
+          </td>
+        </tr></tbody></table>
+        """
+    )
+    page.add_script_tag(path=ASSET_ROOT / "js" / "librenms_import.js")
+
+    assert page.locator("[data-import-name]").text_content() == expected_name
+    assert page.locator("[data-import-name-source]").text_content() == expected_source

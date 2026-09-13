@@ -471,11 +471,14 @@ def test_synchronous_import_search_and_cache_are_scoped_to_the_active_server(cli
     assert b"secondary-edge" not in responses["primary"].content
     assert b"secondary-edge" in responses["secondary"].content
     assert b"primary-edge" not in responses["secondary"].content
-    assert f'hx-get="{validation_url}?server_key=secondary"'.encode() in responses["secondary"].content
+    secondary_html = responses["secondary"].content.decode()
+    details_start = secondary_html.index(f'hx-get="{validation_url}?')
+    details_url = secondary_html[details_start : secondary_html.index('"', details_start + 8)]
+    assert "server_key=secondary" in details_url
+    assert "object_type_46102=device" in details_url
     assert confirmation_response.status_code == 200
     assert b'id="bulk-import-confirm-form"' in confirmation_response.content
     assert b'<input type="hidden" name="server_key" value="secondary">' in confirmation_response.content
-    secondary_html = responses["secondary"].content.decode()
     cached_search_start = secondary_html.index('id="cached-searches-collapse"')
     cached_searches_html = secondary_html[cached_search_start : secondary_html.index("</div>", cached_search_start)]
     assert cached_searches_html.count("data-cached-server-key=") == 2
@@ -916,8 +919,7 @@ def test_queued_job_rejects_a_server_key_that_is_no_longer_configured(settings, 
             )
         else:
             ImportDevicesJob(job).run(
-                device_ids=[],
-                vm_imports={},
+                import_plans=[],
                 server_key="default",
             )
 

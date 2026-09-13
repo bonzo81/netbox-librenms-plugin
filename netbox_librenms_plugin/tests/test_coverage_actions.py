@@ -805,7 +805,7 @@ class TestBulkImportConfirmViewIntegration:
         """A VM confirmation row shows its selected cluster and role in their own fields."""
         from dcim.models import DeviceRole
 
-        cluster_issue = "Cluster must be manually selected before importing as VM"
+        placement_issue = "VM placement requires a matching site, selected cluster, or selected host device"
         server_key = "confirm-integration-vm-selections"
         role = DeviceRole.objects.create(
             name="Confirm Integration VM Selected Role",
@@ -828,6 +828,8 @@ class TestBulkImportConfirmViewIntegration:
             {
                 "server_key": server_key,
                 "select": ["31"],
+                "object_type_31": "virtualmachine",
+                "vm_placement_31": "cluster",
                 "cluster_31": str(cluster.pk),
                 "role_31": str(role.pk),
                 "use_sysname": "true",
@@ -845,8 +847,8 @@ class TestBulkImportConfirmViewIntegration:
         assert validation["cluster"]["found"] is True
         assert validation["device_role"]["role"] == role
         assert validation["device_role"]["found"] is True
-        assert cluster_issue not in validation["issues"]
-        assert cluster_issue.encode() not in response.content
+        assert placement_issue not in validation["issues"]
+        assert placement_issue.encode() not in response.content
         assert b"Virtual Machine" in response.content
         assert b"Confirm Integration VM Selected Role" in response.content
         assert b"<strong>Cluster:</strong> Confirm Integration VM Selected Cluster" in response.content
@@ -1221,7 +1223,9 @@ class TestDeviceImportHelperMixin:
 
         assert libre_device["device_id"] == device_id
         assert validation is not None
-        assert selections == {"cluster_id": None, "role_id": None, "rack_id": None}
+        assert selections.object_type.value == "device"
+        assert selections.role_id is None
+        assert selections.rack_id is None
         assert response.status_code == 200
         assert b"helper-new-device" in response.content
         assert any(item["path"] == f"/api/v0/devices/{device_id}" for item in librenms_server.requests)
@@ -2133,22 +2137,30 @@ class TestDeviceConflictActionViewVMGuard:
 
 
 @pytest.mark.django_db
-class TestApplyUserSelectionsToValidation:
+class TestApplyImportIntentToValidation:
     """Apply selected real NetBox rows and recalculate the validation state."""
 
     def test_vm_with_cluster_and_role(self):
-        from netbox_librenms_plugin.views.imports.actions import _apply_user_selections_to_validation
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent, VMPlacementMethod
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
 
         cluster = make_cluster("selection-cluster")
         role = make_device("selection-vm-role-source").role
         validation = {
             "cluster": {"found": False, "cluster": None},
+            "vm_placement": {"method": "site", "found": False, "host_device": None},
             "device_role": {"found": False, "role": None},
-            "issues": ["Cluster must be selected", "Device role must be selected"],
+            "issues": ["VM placement requires a selected cluster", "Device role must be selected"],
         }
-        selections = {"cluster_id": str(cluster.pk), "role_id": str(role.pk), "rack_id": None}
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.VIRTUAL_MACHINE,
+            role_id=role.pk,
+            vm_placement_method=VMPlacementMethod.CLUSTER,
+            cluster_id=cluster.pk,
+        )
 
-        _apply_user_selections_to_validation(validation, selections, is_vm=True)
+        _apply_import_intent_to_validation(validation, intent, is_vm=True, user=make_superuser())
 
         assert validation["cluster"] == {"found": True, "cluster": cluster}
         assert validation["device_role"] == {"found": True, "role": role}
@@ -2159,7 +2171,8 @@ class TestApplyUserSelectionsToValidation:
     def test_device_with_role_and_rack(self):
         from dcim.models import Rack
 
-        from netbox_librenms_plugin.views.imports.actions import _apply_user_selections_to_validation
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
 
         source = make_device("selection-device-role-source")
         rack = Rack.objects.create(name="Selection Rack", site=source.site, status="active")
@@ -2169,9 +2182,14 @@ class TestApplyUserSelectionsToValidation:
             "device_role": {"found": False, "role": None},
             "issues": ["Device role must be selected"],
         }
-        selections = {"cluster_id": None, "role_id": str(source.role.pk), "rack_id": str(rack.pk)}
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.DEVICE,
+            role_id=source.role.pk,
+            rack_id=rack.pk,
+        )
 
-        _apply_user_selections_to_validation(validation, selections, is_vm=False)
+        _apply_import_intent_to_validation(validation, intent, is_vm=False, user=make_superuser())
 
         assert validation["device_role"] == {"found": True, "role": source.role}
         assert validation["rack"] == {"found": True, "rack": rack}
@@ -3583,7 +3601,11 @@ class TestBulkImportDevicesMorePaths:
                 settings,
                 ["1"],
                 user,
-                {"cluster_1": cluster_value},
+                {
+                    "object_type_1": "virtualmachine",
+                    "vm_placement_1": "cluster",
+                    "cluster_1": cluster_value,
+                },
                 server_key=f"bulk-more-invalid-cluster-{case}",
                 server_url=server.url,
                 htmx=True,
@@ -3591,17 +3613,15 @@ class TestBulkImportDevicesMorePaths:
             response = post_view(view, request)
 
         assert response.status_code == 400
-        assert response.content == b"Invalid cluster or role selection"
+        assert response.content == b"Invalid selection for cluster_1."
         assert set(VirtualMachine.objects.values_list("pk", flat=True)) == before
 
     @pytest.mark.parametrize(
         ("role_value", "case"),
         [("not-int", "text"), ("0", "zero"), ("-1", "negative"), (None, "overflow")],
     )
-    def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(
-        self, settings, caplog, monkeypatch, role_value, case
-    ):
-        """A bad role id next to a valid cluster keeps the VM import and drops only the role."""
+    def test_invalid_role_on_a_valid_cluster_fails_closed(self, settings, monkeypatch, role_value, case):
+        """A malformed optional role blocks the submitted VM plan."""
         from virtualization.models import VirtualMachine
 
         from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
@@ -3623,20 +3643,22 @@ class TestBulkImportDevicesMorePaths:
                 settings,
                 ["1"],
                 user,
-                {"cluster_1": str(cluster.pk), "role_1": role_value},
+                {
+                    "object_type_1": "virtualmachine",
+                    "vm_placement_1": "cluster",
+                    "cluster_1": str(cluster.pk),
+                    "role_1": role_value,
+                },
                 server_key=f"bulk-more-invalid-role-{case}",
                 server_url=server.url,
             )
             response = post_view(view, request)
 
-        assert f"Ignoring invalid role id '{role_value}' for VM import of device 1" in caplog.text
-        imported = VirtualMachine.objects.get(name=f"bulk-more-invalid-role-{case}-imported")
-        assert imported.cluster_id == cluster.pk
-        assert imported.role_id is None
+        assert not VirtualMachine.objects.filter(name=f"bulk-more-invalid-role-{case}-imported").exists()
         assert response.status_code == 302
 
-    def test_invalid_device_role_and_rack_ids_do_not_abort_valid_rows(self, settings, caplog, monkeypatch):
-        """Invalid device mapping IDs must not prevent a valid row from importing."""
+    def test_invalid_device_role_and_rack_ids_reject_the_batch(self, settings, monkeypatch):
+        """Malformed Device selections reject the batch before any row is imported."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
@@ -3672,12 +3694,8 @@ class TestBulkImportDevicesMorePaths:
             )
             response = post_view(view, request)
 
-        assert f"Ignoring invalid role id '{invalid_id}' for device 1" in caplog.text
-        assert f"Ignoring invalid rack id '{invalid_id}' for device 2" in caplog.text
         assert not Device.objects.filter(name="bulk-more-invalid-device-mapping-1").exists()
-        imported = Device.objects.get(name="bulk-more-invalid-device-mapping-2")
-        assert imported.role_id == mapping_source.role_id
-        assert imported.rack_id is None
+        assert not Device.objects.filter(name="bulk-more-invalid-device-mapping-2").exists()
         assert response.status_code == 302
         assert (
             response["Location"]
@@ -3779,6 +3797,8 @@ class TestBulkImportEdgePaths:
                 {
                     "server_key": server_key,
                     "select": ["1"],
+                    "object_type_1": "virtualmachine",
+                    "vm_placement_1": "cluster",
                     "cluster_1": str(existing_vm.cluster_id),
                     "role_1": str(role_source.role_id),
                 },

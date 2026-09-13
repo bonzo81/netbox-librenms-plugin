@@ -70,32 +70,6 @@ def fetch_model_by_id(model_class, pk):
         return None
 
 
-def extract_device_selections(request, device_id):
-    """
-    Extract cluster, role, and rack selections from request POST/GET data.
-
-    Args:
-        request: Django request object
-        device_id: LibreNMS device ID
-
-    Returns:
-        dict with keys: cluster_id, role_id, rack_id (all may be None)
-
-    Example:
-        >>> selections = extract_device_selections(request, 1234)
-        >>> selections
-        {'cluster_id': None, 'role_id': '5', 'rack_id': '12'}
-    """
-    # Check both POST and GET data (different views use different methods)
-    data_source = request.POST if request.method == "POST" else request.GET
-
-    return {
-        "cluster_id": data_source.get(f"cluster_{device_id}"),
-        "role_id": data_source.get(f"role_{device_id}"),
-        "rack_id": data_source.get(f"rack_{device_id}"),
-    }
-
-
 def apply_role_to_validation(validation: dict, role, is_vm: bool = False) -> None:
     """
     Update validation state after device/VM role selection.
@@ -133,7 +107,26 @@ def apply_cluster_to_validation(validation: dict, cluster) -> None:
     """
     validation["cluster"]["found"] = True
     validation["cluster"]["cluster"] = cluster
-    remove_validation_issue(validation, "cluster")
+    validation["vm_placement"] = {
+        "method": "cluster",
+        "found": True,
+        "host_device": None,
+    }
+    remove_validation_issue(validation, "VM placement")
+    recalculate_validation_status(validation, is_vm=True)
+
+
+def apply_host_to_validation(validation: dict, host_device) -> None:
+    """Apply a selected NetBox host Device as virtual-machine placement."""
+    validation["vm_placement"] = {
+        "method": "host",
+        "found": True,
+        "host_device": host_device,
+    }
+    if host_device.cluster_id:
+        validation["cluster"]["found"] = True
+        validation["cluster"]["cluster"] = host_device.cluster
+    remove_validation_issue(validation, "VM placement")
     recalculate_validation_status(validation, is_vm=True)
 
 
@@ -323,7 +316,7 @@ def reset_cluster(validation: dict) -> None:
     """
     Reset the row's cluster selection to "not found", preserving available_clusters.
 
-    The VM twin of :func:`reset_device_role`: VM rows are gated on cluster, not role.
+    Cluster is optional VM placement. This helper clears stale cluster display state.
 
     Args:
         validation (dict): The import-row validation dict, mutated in place.
@@ -354,7 +347,7 @@ def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None
         - site, device_type, device_role
 
     Required fields for VMs:
-        - cluster
+        - matched site, selected cluster, or selected host device
     """
     # Merge mode is a hard block that does not live in ``issues`` — apply_merge_candidates()
     # sets can_import=False directly. Without this guard a later mutation (e.g. applying a role
@@ -368,7 +361,7 @@ def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None
     validation["can_import"] = len(validation["issues"]) == 0
 
     if is_vm:
-        validation["is_ready"] = validation["can_import"] and validation["cluster"]["found"]
+        validation["is_ready"] = validation["can_import"] and bool(validation.get("vm_placement", {}).get("found"))
     else:
         validation["is_ready"] = (
             validation["can_import"]

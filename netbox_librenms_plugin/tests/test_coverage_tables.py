@@ -1,6 +1,8 @@
 """Behavior tests for LibreNMS device and interface tables."""
 
+import json
 import re
+from html import unescape
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -271,7 +273,7 @@ class TestDeviceImportTable:
         assert f'value="{cluster.pk}" selected' in select_html
         assert (
             reverse(
-                "plugins:netbox_librenms_plugin:device_cluster_update",
+                "plugins:netbox_librenms_plugin:device_import_plan_update",
                 kwargs={"device_id": 4101},
             )
             in select_html
@@ -398,13 +400,15 @@ class TestDeviceImportTable:
             )
             assert "server_key=server+with+space" in html
 
-    def test_validation_url_prefers_cluster_and_preserves_server_and_vc_state(self):
+    def test_validation_url_preserves_vm_cluster_intent_and_request_scope(self):
         cluster = make_cluster("Validation URL cluster")
         table = self._table(server_key="secondary server")
 
         url = table._build_validation_details_url(
             9,
             {
+                "import_as_vm": True,
+                "vm_placement": {"method": "cluster", "found": True, "host_device": None},
                 "cluster": {"found": True, "cluster": cluster},
                 "_vc_detection_enabled": True,
             },
@@ -416,21 +420,66 @@ class TestDeviceImportTable:
             kwargs={"device_id": 9},
         )
         assert parse_qs(parsed.query) == {
-            "cluster_id": [str(cluster.pk)],
+            "cluster_9": [str(cluster.pk)],
             "enable_vc_detection": ["true"],
+            "object_type_9": ["virtualmachine"],
             "server_key": ["secondary server"],
+            "vm_placement_9": ["cluster"],
         }
 
-    def test_validation_url_uses_role_when_no_cluster_is_selected(self):
-        from dcim.models import DeviceRole
+    def test_validation_url_preserves_device_role_intent(self):
+        from dcim.models import Rack
 
-        role = DeviceRole.objects.create(name="Validation URL role", slug="validation-url-role")
+        source = make_device("validation-url-device")
+        rack = Rack.objects.create(name="Validation URL rack", site=source.site, status="active")
         url = self._table()._build_validation_details_url(
             10,
-            {"device_role": {"found": True, "role": role}},
+            {
+                "device_role": {"found": True, "role": source.role},
+                "rack": {"found": True, "rack": rack},
+            },
         )
 
-        assert parse_qs(urlparse(url).query) == {"role_id": [str(role.pk)]}
+        assert parse_qs(urlparse(url).query) == {
+            "object_type_10": ["device"],
+            "rack_10": [str(rack.pk)],
+            "role_10": [str(source.role_id)],
+        }
+
+    def test_validation_url_preserves_vm_host_intent(self):
+        host = make_device("Validation URL host")
+        url = self._table()._build_validation_details_url(
+            11,
+            {
+                "import_as_vm": True,
+                "vm_placement": {"method": "host", "found": True, "host_device": host},
+            },
+        )
+
+        assert parse_qs(urlparse(url).query) == {
+            "host_device_11": [str(host.pk)],
+            "object_type_11": ["virtualmachine"],
+            "vm_placement_11": ["host"],
+        }
+
+    def test_validation_details_button_does_not_duplicate_url_intent_fields(self):
+        cluster = make_cluster("Validation details button cluster")
+        html = str(
+            self._table().render_actions(
+                None,
+                _import_record(
+                    import_as_vm=True,
+                    can_import=True,
+                    is_ready=True,
+                    vm_placement={"method": "cluster", "found": True, "host_device": None},
+                    cluster={"found": True, "cluster": cluster},
+                ),
+            )
+        )
+
+        assert 'hx-include="#use-sysname-toggle, #strip-domain-toggle"' in html
+        assert f"object_type_{4101}=virtualmachine" in html
+        assert f"cluster_{4101}={cluster.pk}" in html
 
     def test_actions_render_real_object_routes(self):
         device = make_device("actions-existing-device")
@@ -579,7 +628,27 @@ class TestDeviceImportTable:
         assert "From sysName, domain removed" in html
         assert "Role required" in html
         assert "Optional placement" in html
-        assert "Import as virtual machine" in html
+        assert "Object type" in html
+
+    @pytest.mark.parametrize(
+        ("sysname", "expected_name", "expected_source"),
+        [
+            ("999.1.2.3", "999", "sysName"),
+            (".example.test", "device-42", "fallback name"),
+        ],
+    )
+    def test_live_name_variants_come_from_the_importer_resolver(self, sysname, expected_name, expected_source):
+        record = _import_record(42)
+        record["sysName"] = sysname
+
+        rendered = str(self._table().render_netbox_object(None, record))
+        encoded_variants = re.search(r'data-import-name-variants="([^"]+)"', rendered).group(1)
+        variants = json.loads(unescape(encoded_variants))
+
+        assert variants["sysname_stripped"] == {
+            "name": expected_name,
+            "source": expected_source,
+        }
 
     def test_vm_setup_keeps_cluster_inline_and_role_in_attached_options(self):
         cluster = make_cluster("Focused setup cluster")
@@ -595,7 +664,7 @@ class TestDeviceImportTable:
         assert "Cluster" in html
         assert f'value="{cluster.pk}" selected' in html
         assert "VM role" in html
-        assert html.index("Cluster") < html.index("VM role")
+        assert html.index(f'name="cluster_{record["device_id"]}"') < html.index("VM role")
 
     def test_virtual_chassis_summary_is_attached_to_the_netbox_object(self):
         record = _import_record(

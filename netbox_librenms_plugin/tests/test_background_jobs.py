@@ -97,7 +97,7 @@ def _import_user(tag, *, devices=True, vms=True):
         ),
         pytest.param(
             "import",
-            {"device_ids": [], "vm_imports": {}},
+            {"import_plans": []},
             id="import-devices",
         ),
     ],
@@ -295,17 +295,22 @@ class TestImportDevicesJob:
         }
 
         ImportDevicesJob(job).run(
-            device_ids=[6401],
-            vm_imports={6402: {"cluster_id": cluster.pk}},
+            import_plans=[
+                {
+                    "source_device_id": 6401,
+                    "object_type": "device",
+                    "role_id": infrastructure.role_id,
+                    "rack_id": None,
+                },
+                {
+                    "source_device_id": 6402,
+                    "object_type": "virtualmachine",
+                    "placement": {"method": "cluster", "cluster_id": cluster.pk},
+                    "role_id": None,
+                },
+            ],
             server_key=SERVER_KEY,
             sync_options={"sync_interfaces": False, "sync_cables": False},
-            manual_mappings_per_device={
-                6401: {
-                    "site_id": infrastructure.site_id,
-                    "device_type_id": infrastructure.device_type_id,
-                    "device_role_id": infrastructure.role_id,
-                }
-            },
             libre_devices_cache=rows,
         )
 
@@ -340,20 +345,17 @@ class TestImportDevicesJob:
                 location=infrastructure.site.name,
             )
         }
-        mappings = {
-            device_id: {
-                "site_id": infrastructure.site_id,
-                "device_type_id": infrastructure.device_type_id,
-                "device_role_id": infrastructure.role_id,
-            }
-            for device_id in (6403, 6404)
-        }
-
         ImportDevicesJob(job).run(
-            device_ids=[6403, 6404],
-            vm_imports={},
+            import_plans=[
+                {
+                    "source_device_id": device_id,
+                    "object_type": "device",
+                    "role_id": infrastructure.role_id,
+                    "rack_id": None,
+                }
+                for device_id in (6403, 6404)
+            ],
             server_key=SERVER_KEY,
-            manual_mappings_per_device=mappings,
             libre_devices_cache=rows,
         )
 
@@ -380,8 +382,20 @@ class TestImportDevicesJob:
         vm_count = VirtualMachine.objects.count()
 
         ImportDevicesJob(job).run(
-            device_ids=[6405],
-            vm_imports={6406: {"cluster_id": cluster.pk}},
+            import_plans=[
+                {
+                    "source_device_id": 6405,
+                    "object_type": "device",
+                    "role_id": None,
+                    "rack_id": None,
+                },
+                {
+                    "source_device_id": 6406,
+                    "object_type": "virtualmachine",
+                    "placement": {"method": "cluster", "cluster_id": cluster.pk},
+                    "role_id": None,
+                },
+            ],
             server_key=SERVER_KEY,
             libre_devices_cache=rows,
         )
@@ -407,8 +421,14 @@ class TestImportDevicesJob:
 
         with pytest.raises(PermissionDenied, match="dcim.add_device"):
             ImportDevicesJob(job).run(
-                device_ids=[6407],
-                vm_imports={},
+                import_plans=[
+                    {
+                        "source_device_id": 6407,
+                        "object_type": "device",
+                        "role_id": None,
+                        "rack_id": None,
+                    }
+                ],
                 server_key=SERVER_KEY,
                 libre_devices_cache={6407: _device_payload(6407)},
             )
@@ -425,8 +445,14 @@ class TestImportDevicesJob:
         job = _job(user, "vm-only-import")
 
         ImportDevicesJob(job).run(
-            device_ids=[],
-            vm_imports={6408: {"cluster_id": cluster.pk}},
+            import_plans=[
+                {
+                    "source_device_id": 6408,
+                    "object_type": "virtualmachine",
+                    "placement": {"method": "cluster", "cluster_id": cluster.pk},
+                    "role_id": None,
+                }
+            ],
             server_key=SERVER_KEY,
             libre_devices_cache={6408: _device_payload(6408, hostname="background-vm-only")},
         )
@@ -442,8 +468,7 @@ class TestImportDevicesJob:
         job = _job(make_superuser("background-empty-import-owner"), "empty-import")
 
         ImportDevicesJob(job).run(
-            device_ids=[],
-            vm_imports={},
+            import_plans=[],
             server_key=SERVER_KEY,
         )
 
@@ -473,8 +498,7 @@ class TestImportDevicesJob:
 
         with pytest.raises(ValueError, match="configured LibreNMS server"):
             ImportDevicesJob(job).run(
-                device_ids=[],
-                vm_imports={},
+                import_plans=[],
                 server_key=SERVER_KEY,
             )
 

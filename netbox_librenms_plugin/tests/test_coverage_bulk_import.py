@@ -100,6 +100,7 @@ def _make_validation(existing_device=None, import_as_vm=False, issues=None):
         "device_role": {"found": True, "role": MagicMock()},
         "platform": {"found": True, "platform": MagicMock()},
         "cluster": {"found": True},
+        "vm_placement": {"method": "cluster", "found": True, "host_device": None},
         "issues": issues or [],
     }
 
@@ -935,23 +936,22 @@ class TestRefreshExistingDevice:
             "site": {"found": True},
             "device_type": {"found": True},
             "device_role": {"found": False, "role": None, "available_roles": []},
-            # Real validate_device_for_import output carries cluster regardless of
-            # import_as_vm; a cross-model match flips is_vm and recalculate then
-            # bracket-reads cluster["found"], so the fixture must carry it too.
             "cluster": {"found": False, "cluster": None, "available_clusters": []},
+            "vm_placement": {"method": "site", "found": True, "host_device": None},
         }
         base.update(overrides)
         return base
 
     @staticmethod
     def _vm_validation(**overrides):
-        """Baseline VM validation dict (recalculate is_vm=True reads cluster + issues)."""
+        """Baseline VM validation dict with a matched-site placement."""
         base = {
             "existing_device": None,
             "import_as_vm": True,
             "issues": [],
             "site": {"found": True},
             "cluster": {"found": False, "cluster": None, "available_clusters": []},
+            "vm_placement": {"method": "site", "found": True, "host_device": None},
         }
         base.update(overrides)
         return base
@@ -1291,8 +1291,8 @@ class TestRefreshExistingDevice:
         # key set, defaulting to None) — clearing must reset it, not remove it.
         assert validation["merge_candidates"] is None
 
-    def test_deleted_vm_match_clears_stale_cluster_selection(self):
-        """A dropped cached VM match must reset the stale cluster selection (preserving available_clusters), mirroring the device_role reset on the device path — otherwise the match-derived cluster.found=True survives and recalculate keeps the row "ready" even though a new VM import requires a fresh cluster."""
+    def test_deleted_vm_match_returns_to_matched_site_placement(self):
+        """A dropped VM match clears stale cluster state and uses the matched source site."""
         from virtualization.models import Cluster, ClusterType
 
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
@@ -1315,12 +1315,11 @@ class TestRefreshExistingDevice:
         assert validation["cluster"]["found"] is False
         assert validation["cluster"]["cluster"] is None
         assert validation["cluster"]["available_clusters"] == available
-        # found=False feeds is_ready (is_vm=True), so the row can't slip through without a
-        # fresh cluster choice.
-        assert validation["is_ready"] is False
+        assert validation["vm_placement"] == {"method": "site", "found": True, "host_device": None}
+        assert validation["is_ready"] is True
 
-    def test_deleted_vm_recomputes_readiness_from_cluster(self):
-        """VM deleted → the match-derived cluster is reset (found=False) and the row is back in the new-import path."""
+    def test_deleted_vm_recomputes_readiness_from_matched_site(self):
+        """A deleted VM becomes a ready site-placed VM when the source site remains matched."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         vm = make_vm("ref-vm-recompute")
@@ -1330,9 +1329,9 @@ class TestRefreshExistingDevice:
         _refresh_existing_device(validation)
 
         assert validation["existing_device"] is None
-        assert validation["can_import"] is False  # cluster blocker re-asserted
-        assert validation["is_ready"] is False  # not ready until a fresh cluster is selected
-        assert any("cluster" in issue.lower() for issue in validation["issues"])
+        assert validation["can_import"] is True
+        assert validation["is_ready"] is True
+        assert validation["issues"] == []
 
     def test_deleted_vm_not_ready_when_no_cluster(self):
         """Deleted VM with a blocking issue → can_import False and is_ready False."""
@@ -1425,13 +1424,13 @@ class TestRefreshExistingDevice:
         assert all("device type" not in issue.lower() for issue in validation["issues"])
         assert validation["can_import"] is False
 
-    def test_fresh_lookup_vm_clears_stale_cluster_blocker(self):
+    def test_fresh_lookup_vm_clears_stale_placement_blocker(self):
         """A VM row resolves to an existing VM via a fresh name match (actual_is_vm=True)."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         vm = make_vm("ref-vm-cluster-clear")
         validation = self._vm_validation(
-            issues=["Cluster must be manually selected before importing as VM"],
+            issues=["VM placement requires a matching site, selected cluster, or selected host device"],
         )
         # No librenms_id CF match; the VM is found by resolved_name → Model=VirtualMachine,
         # found_as_cross_model=False → actual_is_vm=True (the branch that cleared nothing).
@@ -1442,8 +1441,7 @@ class TestRefreshExistingDevice:
 
         assert validation["existing_device"].pk == vm.pk
         assert validation["import_as_vm"] is True
-        # The stale cluster-blocker issue must have been removed.
-        assert all("cluster" not in issue.lower() for issue in validation["issues"])
+        assert all("VM placement" not in issue for issue in validation["issues"])
         # An existing match is never import-ready.
         assert validation["can_import"] is False
 

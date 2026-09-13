@@ -17,6 +17,7 @@ from .imports import (  # noqa: F401
     CreatePlatformFromImportView,
     DeviceClusterUpdateView,
     DeviceConflictActionView,
+    DeviceImportPlanUpdateView,
     DeviceRackUpdateView,
     DeviceRoleUpdateView,
     DeviceValidationDetailsView,

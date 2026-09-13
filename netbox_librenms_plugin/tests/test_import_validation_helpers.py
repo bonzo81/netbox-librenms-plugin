@@ -64,94 +64,6 @@ class TestFetchModelById:
 
 
 # =============================================================================
-# TestExtractSelections - 4 tests
-# =============================================================================
-
-
-class TestExtractDeviceSelections:
-    """Test extraction of device selections from request."""
-
-    def test_extract_selections_all_present(self):
-        """All selections extracted from POST request."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            extract_device_selections,
-        )
-
-        mock_request = MagicMock()
-        mock_request.method = "POST"
-        mock_request.POST = {
-            "cluster_1234": "5",
-            "role_1234": "10",
-            "rack_1234": "15",
-        }
-
-        result = extract_device_selections(mock_request, device_id=1234)
-
-        assert result["cluster_id"] == "5"
-        assert result["role_id"] == "10"
-        assert result["rack_id"] == "15"
-
-    def test_extract_selections_partial(self):
-        """Missing fields return None."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            extract_device_selections,
-        )
-
-        mock_request = MagicMock()
-        mock_request.method = "POST"
-        mock_request.POST = {
-            "role_1234": "10",
-        }
-
-        result = extract_device_selections(mock_request, device_id=1234)
-
-        assert result["cluster_id"] is None
-        assert result["role_id"] == "10"
-        assert result["rack_id"] is None
-
-    def test_extract_selections_from_get(self):
-        """Selections extracted from GET request."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            extract_device_selections,
-        )
-
-        mock_request = MagicMock()
-        mock_request.method = "GET"
-        mock_request.GET = {
-            "cluster_999": "3",
-            "role_999": "7",
-            "rack_999": "11",
-        }
-
-        result = extract_device_selections(mock_request, device_id=999)
-
-        assert result["cluster_id"] == "3"
-        assert result["role_id"] == "7"
-        assert result["rack_id"] == "11"
-
-    def test_extract_selections_empty_values(self):
-        """Empty strings handled correctly."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            extract_device_selections,
-        )
-
-        mock_request = MagicMock()
-        mock_request.method = "POST"
-        mock_request.POST = {
-            "cluster_1234": "",
-            "role_1234": "",
-            "rack_1234": "",
-        }
-
-        result = extract_device_selections(mock_request, device_id=1234)
-
-        # Empty strings are returned as-is (caller decides meaning)
-        assert result["cluster_id"] == ""
-        assert result["role_id"] == ""
-        assert result["rack_id"] == ""
-
-
-# =============================================================================
 # TestValidationStateUpdates - 10 tests
 # =============================================================================
 
@@ -209,7 +121,7 @@ class TestValidationStateUpdates:
         mock_cluster = MagicMock(id=1, name="VMware Cluster 1")
         validation = {
             "cluster": {"found": False, "cluster": None},
-            "issues": ["Cluster must be manually selected before import"],
+            "issues": ["VM placement requires a matching site, selected cluster, or selected host device"],
             "can_import": False,
             "is_ready": False,
         }
@@ -218,6 +130,13 @@ class TestValidationStateUpdates:
 
         assert validation["cluster"]["found"] is True
         assert validation["cluster"]["cluster"] == mock_cluster
+        assert validation["vm_placement"] == {
+            "method": "cluster",
+            "found": True,
+            "host_device": None,
+        }
+        assert validation["issues"] == []
+        assert validation["is_ready"] is True
 
     def test_apply_rack_to_validation_success(self):
         """Rack selection updates state for device import."""
@@ -331,8 +250,8 @@ class TestValidationStateUpdates:
         assert validation["can_import"] is False
         assert validation["is_ready"] is False
 
-    def test_recalculate_can_import_vm_cluster_required(self):
-        """VM import requires cluster to be ready."""
+    def test_recalculate_can_import_vm_placement_ready(self):
+        """VM import is ready with one resolved placement."""
         from netbox_librenms_plugin.import_validation_helpers import (
             recalculate_validation_status,
         )
@@ -341,7 +260,7 @@ class TestValidationStateUpdates:
             "issues": [],
             "can_import": False,
             "is_ready": False,
-            "cluster": {"found": True},
+            "vm_placement": {"found": True},
         }
 
         recalculate_validation_status(validation, is_vm=True)
@@ -349,8 +268,8 @@ class TestValidationStateUpdates:
         assert validation["can_import"] is True
         assert validation["is_ready"] is True
 
-    def test_recalculate_can_import_vm_missing_cluster(self):
-        """VM import not ready without cluster."""
+    def test_recalculate_can_import_vm_missing_placement(self):
+        """VM import is not ready without a resolved placement."""
         from netbox_librenms_plugin.import_validation_helpers import (
             recalculate_validation_status,
         )
@@ -359,13 +278,13 @@ class TestValidationStateUpdates:
             "issues": [],
             "can_import": False,
             "is_ready": False,
-            "cluster": {"found": False},
+            "vm_placement": {"found": False},
         }
 
         recalculate_validation_status(validation, is_vm=True)
 
         assert validation["can_import"] is True  # No issues
-        assert validation["is_ready"] is False  # But not ready without cluster
+        assert validation["is_ready"] is False  # But not ready without placement
 
 
 # =============================================================================
