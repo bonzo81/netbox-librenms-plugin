@@ -23,7 +23,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     post as view_post,
     trusted_module_inventory_payload,
 )
-from netbox_librenms_plugin.utils import module_inventory_binding_token
+from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
 
 
 @pytest.mark.django_db
@@ -157,8 +157,33 @@ def _post_request(data):
     return make_request("post", data, user=make_superuser(), path="/modules/")
 
 
-def _inventory_binding(device, module, ent_index, server_key="default"):
-    return module_inventory_binding_token(device.pk, server_key, module.pk, ent_index)
+def _inventory_binding(
+    device,
+    module,
+    ent_index,
+    inventory_item,
+    server_key="default",
+    *,
+    action="update_module_serial",
+):
+    return module_inventory_binding_token(
+        device.pk,
+        server_key,
+        action,
+        {"module_id": module.pk},
+        ent_index,
+        module_inventory_row_digest(inventory_item),
+    )
+
+
+def test_module_inventory_row_digest_is_canonical_and_content_sensitive():
+    """Equivalent row mappings share a digest, while changed row content does not."""
+    first = {"entPhysicalIndex": 17, "entPhysicalSerialNum": "SERIAL", "nested": {"b": 2, "a": 1}}
+    reordered = {"nested": {"a": 1, "b": 2}, "entPhysicalSerialNum": "SERIAL", "entPhysicalIndex": 17}
+    replacement = {**first, "entPhysicalSerialNum": "REPLACEMENT"}
+
+    assert module_inventory_row_digest(first) == module_inventory_row_digest(reordered)
+    assert module_inventory_row_digest(first) != module_inventory_row_digest(replacement)
 
 
 def _inventory_item(index, model, name, *, parent=0, serial="", phys_class="module", **extra):
@@ -245,9 +270,31 @@ class TestInventoryCacheContract:
         view = _view(_cache_view_class(), _post_request({}), live_librenms)
         item = _inventory_item(77, "CARD", "Te1/1/1", _librenms_port_id=42, _librenms_ifname="Te1/1/1")
         seed_inventory(view, device, [item], librenms_id=771)
-        request = _post_request({"ent_index": "77", "server_key": "default"})
+        action_target = {"module_id": 17}
+        request = _post_request(
+            {
+                "ent_index": "77",
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "update_module_serial",
+                    action_target,
+                    77,
+                    module_inventory_row_digest(item),
+                ),
+            }
+        )
 
-        row, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+        row, refusal = _resolve_posted_inventory_row(
+            request,
+            device,
+            device,
+            "default",
+            view.get_cache_key,
+            action="update_module_serial",
+            action_target=action_target,
+        )
 
         assert refusal is None
         assert row["_librenms_port_id"] == 42
@@ -263,7 +310,15 @@ class TestInventoryCacheContract:
         # The identity the deleted fallback used to read, with no index to resolve it against.
         request = _post_request({"librenms_port_id": "56284", "librenms_ifname": "Te1/1/1", "server_key": "default"})
 
-        row, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+        row, refusal = _resolve_posted_inventory_row(
+            request,
+            device,
+            device,
+            "default",
+            view.get_cache_key,
+            action="update_module_serial",
+            action_target={"module_id": 17},
+        )
 
         assert row is None
         assert refusal is not None
@@ -278,7 +333,15 @@ class TestInventoryCacheContract:
         seed_inventory(view, device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
         request = _post_request({"ent_index": "77", "server_key": "default"})
 
-        row, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+        row, refusal = _resolve_posted_inventory_row(
+            request,
+            device,
+            device,
+            "default",
+            view.get_cache_key,
+            action="update_module_serial",
+            action_target={"module_id": 17},
+        )
 
         assert row is None
         assert refusal is not None
@@ -631,6 +694,14 @@ class TestInstallAndUpdateViews:
                 "module_type_id": module_type.pk,
                 "ent_index": 510,
                 "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+                    510,
+                    module_inventory_row_digest(item),
+                ),
             }
         )
         view = _view(InstallModuleView, request, live_librenms)
@@ -643,6 +714,45 @@ class TestInstallAndUpdateViews:
         assert module.module_type == module_type
         assert module.serial == "VIEW-SERIAL"
         assert any("Installed VIEW-INSTALL-CARD" in text for text in message_texts(request))
+
+    def test_single_install_refuses_a_reused_inventory_index(self, live_librenms):
+        """A stale install form must not apply data from a replacement inventory row."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("view-install-stale", librenms_cf={"default": 64})
+        bay = make_module_bay(device, "Stale Install Bay")
+        module_type = make_module_type("STALE-INSTALL-CARD")
+        rendered_item = _inventory_item(640, module_type.model, bay.name, serial="ORIGINAL-SERIAL")
+        replacement_item = {**rendered_item, "entPhysicalSerialNum": "REPLACEMENT-SERIAL"}
+        request = _post_request(
+            {
+                "module_bay_id": bay.pk,
+                "module_type_id": module_type.pk,
+                "ent_index": 640,
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+                    640,
+                    module_inventory_row_digest(rendered_item),
+                ),
+            }
+        )
+        view = _view(InstallModuleView, request, live_librenms)
+        seed_inventory(view, device, [replacement_item], librenms_id=64)
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        assert not Module.objects.filter(device=device, module_bay=bay).exists()
+        assert any(
+            message.startswith("Inventory action is stale or does not match this row.")
+            for message in message_texts(request, "error")
+        )
 
     def test_single_install_does_not_replace_an_occupied_bay(self, live_librenms):
         from dcim.models import Module
@@ -743,7 +853,7 @@ class TestInstallAndUpdateViews:
                 "module_id": module.pk,
                 "ent_index": 530,
                 "server_key": "default",
-                "inventory_binding": _inventory_binding(device, module, 530),
+                "inventory_binding": _inventory_binding(device, module, 530, item),
             }
         )
         view = _view(UpdateModuleSerialView, request, live_librenms)
@@ -770,7 +880,7 @@ class TestInstallAndUpdateViews:
                 "ent_index": 560,
                 "serial": "FORGED-SN",
                 "server_key": "default",
-                "inventory_binding": _inventory_binding(device, module, 560),
+                "inventory_binding": _inventory_binding(device, module, 560, item),
             }
         )
         view = _view(UpdateModuleSerialView, request, live_librenms)
@@ -782,6 +892,36 @@ class TestInstallAndUpdateViews:
         assert response.status_code == 302
         assert module.serial == "LNMS-SN"
         assert any("LNMS-SN" in text for text in message_texts(request, "success"))
+
+    def test_update_serial_refuses_a_reused_inventory_index(self, live_librenms):
+        """A stale serial form must not apply a replacement row's serial."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        device = make_device("view-serial-stale", librenms_cf={"default": 65})
+        bay = make_module_bay(device, "Stale Serial Bay")
+        module = install_module(device, bay.name, "STALE-SERIAL-CARD", serial="OLD-SERIAL")
+        rendered_item = _inventory_item(650, module.module_type.model, bay.name, serial="ORIGINAL-SERIAL")
+        replacement_item = {**rendered_item, "entPhysicalSerialNum": "REPLACEMENT-SERIAL"}
+        request = _post_request(
+            {
+                "module_id": module.pk,
+                "ent_index": 650,
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, module, 650, rendered_item),
+            }
+        )
+        view = _view(UpdateModuleSerialView, request, live_librenms)
+        seed_inventory(view, device, [replacement_item], librenms_id=65)
+
+        response = view_post(view, request, pk=device.pk)
+
+        module.refresh_from_db()
+        assert response.status_code == 302
+        assert module.serial == "OLD-SERIAL"
+        assert any(
+            message.startswith("Inventory action is stale or does not match this row.")
+            for message in message_texts(request, "error")
+        )
 
     def test_update_serial_rejects_a_row_bound_to_another_module(self, live_librenms):
         from dcim.models import Module
@@ -805,7 +945,7 @@ class TestInstallAndUpdateViews:
                 "module_id": forged.pk,
                 "ent_index": 620,
                 "server_key": "default",
-                "inventory_binding": _inventory_binding(device, expected, 620),
+                "inventory_binding": _inventory_binding(device, expected, 620, item),
             }
         )
         view = _view(UpdateModuleSerialView, request, live_librenms)
@@ -816,7 +956,10 @@ class TestInstallAndUpdateViews:
         forged.refresh_from_db()
         assert response.status_code == 302
         assert forged.serial == "FORGED-OLD"
-        assert "Inventory row does not match the selected module." in message_texts(request, "error")
+        assert any(
+            message.startswith("Inventory action is stale or does not match this row.")
+            for message in message_texts(request, "error")
+        )
 
     def test_refuses_an_oob_inventory_row(self, live_librenms):
         """OOB controller inventory is read-only, so its serial must never reach a host module."""
@@ -876,7 +1019,13 @@ class TestInstallAndUpdateViews:
                 "module_id": module.pk,
                 "ent_index": 540,
                 "server_key": "default",
-                "inventory_binding": _inventory_binding(device, module, 540),
+                "inventory_binding": _inventory_binding(
+                    device,
+                    module,
+                    540,
+                    item,
+                    action="update_module_interface",
+                ),
             }
         )
         view = _view(UpdateModuleInterfaceView, request, live_librenms)
@@ -889,6 +1038,59 @@ class TestInstallAndUpdateViews:
         assert interface.module == module
         assert get_librenms_device_id(interface, "default", auto_save=False) == 5540
         assert any("Updated interface" in text for text in message_texts(request))
+
+    def test_update_interface_refuses_a_reused_inventory_index(self, live_librenms):
+        """A stale interface form must not bind identity from a replacement row."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("view-interface-stale", librenms_cf={"default": 66})
+        bay = make_module_bay(device, "Stale Interface Bay")
+        module = install_module(device, bay.name, "STALE-INTERFACE-CARD")
+        original = make_interface(device, "Ethernet66")
+        replacement = make_interface(device, "Ethernet67")
+        rendered_item = _inventory_item(
+            660,
+            module.module_type.model,
+            bay.name,
+            _librenms_port_id=5660,
+            _librenms_ifname=original.name,
+        )
+        replacement_item = {
+            **rendered_item,
+            "_librenms_port_id": 5670,
+            "_librenms_ifname": replacement.name,
+        }
+        request = _post_request(
+            {
+                "module_id": module.pk,
+                "ent_index": 660,
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(
+                    device,
+                    module,
+                    660,
+                    rendered_item,
+                    action="update_module_interface",
+                ),
+            }
+        )
+        view = _view(UpdateModuleInterfaceView, request, live_librenms)
+        seed_inventory(view, device, [replacement_item], librenms_id=66)
+
+        response = view_post(view, request, pk=device.pk)
+
+        original.refresh_from_db()
+        replacement.refresh_from_db()
+        assert response.status_code == 302
+        assert original.module_id is None
+        assert replacement.module_id is None
+        assert get_librenms_device_id(original, "default", auto_save=False) is None
+        assert get_librenms_device_id(replacement, "default", auto_save=False) is None
+        assert any(
+            message.startswith("Inventory action is stale or does not match this row.")
+            for message in message_texts(request, "error")
+        )
 
     def test_update_interface_rejects_a_row_bound_to_another_module(self, live_librenms):
         from dcim.models import Module
@@ -919,7 +1121,13 @@ class TestInstallAndUpdateViews:
                 "module_id": forged.pk,
                 "ent_index": 630,
                 "server_key": "default",
-                "inventory_binding": _inventory_binding(device, expected, 630),
+                "inventory_binding": _inventory_binding(
+                    device,
+                    expected,
+                    630,
+                    item,
+                    action="update_module_interface",
+                ),
             }
         )
         view = _view(UpdateModuleInterfaceView, request, live_librenms)
@@ -931,7 +1139,10 @@ class TestInstallAndUpdateViews:
         assert response.status_code == 302
         assert interface.module_id is None
         assert get_librenms_device_id(interface, "default", auto_save=False) is None
-        assert "Inventory row does not match the selected module." in message_texts(request, "error")
+        assert any(
+            message.startswith("Inventory action is stale or does not match this row.")
+            for message in message_texts(request, "error")
+        )
 
     def test_update_module_interface_refuses_an_unresolved_ent_index(self, live_librenms):
         """Posted metadata carries no _source marker, so an unknown ent_index must not bind at all."""
@@ -1173,7 +1384,7 @@ class TestInstallAndUpdateViews:
         hidden.save(update_fields=["custom_field_data"])
         user = make_user_with_perms("module-interface-scope", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
-        inventory_item = _inventory_item(
+        item = _inventory_item(
             77,
             module.module_type.model,
             bay.name,
@@ -1186,13 +1397,24 @@ class TestInstallAndUpdateViews:
                 "module_id": str(module.pk),
                 "server_key": "default",
                 "ent_index": "77",
-                "inventory_binding": _inventory_binding(device, module, 77),
+                "inventory_binding": _inventory_binding(
+                    device,
+                    module,
+                    77,
+                    item,
+                    action="update_module_interface",
+                ),
             },
             user=user,
             path="/modules/update-interface/",
         )
         view = _view(UpdateModuleInterfaceView, request, live_librenms)
-        seed_inventory(view, device, [inventory_item], librenms_id=2)
+        seed_inventory(
+            view,
+            device,
+            [item],
+            librenms_id=2,
+        )
 
         response = view_post(view, request, pk=device.pk)
 
@@ -1485,7 +1707,7 @@ class TestModulesActionResponse:
         bay = make_module_bay(device, "Serial Bay")
         module_type = make_module_type("SERIAL-CARD")
         module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD-SERIAL")
-        self._seed_inventory(device, bay, module_type, librenms_id=9203)
+        inventory_item = self._seed_inventory(device, bay, module_type, librenms_id=9203)
         client.force_login(make_superuser())
         url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
@@ -1495,7 +1717,13 @@ class TestModulesActionResponse:
                 "server_key": self.SERVER_KEY,
                 "module_id": str(module.pk),
                 "ent_index": "8201",
-                "inventory_binding": _inventory_binding(device, module, 8201, self.SERVER_KEY),
+                "inventory_binding": _inventory_binding(
+                    device,
+                    module,
+                    8201,
+                    inventory_item,
+                    self.SERVER_KEY,
+                ),
             },
             HTTP_HX_REQUEST="true",
         )

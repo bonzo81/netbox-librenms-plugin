@@ -341,6 +341,33 @@ class TestReplaceModuleView:
         assert replacement.serial == "NEW-SERIAL"
         assert any(f"Replaced {old_type.model} with {new_type.model}" in text for text in message_texts(request))
 
+    def test_replacement_refuses_an_inventory_index_reused_after_preview(self):
+        """A replacement must not use a new row that reused the previewed inventory index."""
+        Module, device, old_type, _new_type, bay, installed, request, view, inventory = self._setup("stale")
+        replacement_type = make_module_type("REPLACE-REUSED-TYPE")
+        replacement_inventory = [
+            {
+                **inventory[0],
+                "entPhysicalModelName": replacement_type.model,
+                "entPhysicalSerialNum": "REUSED-SERIAL",
+            }
+        ]
+        cache_key = _cache_inventory(view, device, replacement_inventory)
+        try:
+            response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        installed.refresh_from_db()
+        assert response.status_code == 302
+        assert installed.module_type == old_type
+        assert installed.module_bay == bay
+        assert Module.objects.filter(device=device, module_bay=bay).count() == 1
+        assert any(
+            message.startswith("Inventory action is stale or does not match this row.")
+            for message in message_texts(request, "error")
+        )
+
     def test_replacement_removes_the_single_real_serial_conflict(self):
         Module, device, _old_type, new_type, bay, installed, request, view, inventory = self._setup(
             "conflict",
