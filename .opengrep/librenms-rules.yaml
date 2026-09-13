@@ -222,6 +222,36 @@ rules:
                   from requests.api import $METHOD
                   ...
               - pattern: $METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  import requests.sessions
+                  ...
+              - pattern: requests.sessions.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  import requests.sessions as $SESSIONS
+                  ...
+              - pattern: $SESSIONS.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests import sessions
+                  ...
+              - pattern: sessions.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests import sessions as $SESSIONS
+                  ...
+              - pattern: $SESSIONS.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests.sessions import $METHOD
+                  ...
+              - pattern: $METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests.sessions import $METHOD as $CALL
+                  ...
+              - pattern: $CALL(...)
       - metavariable-regex:
           metavariable: $METHOD
           regex: ^(get|head|options|post|put|patch|delete|request|Session|session)$

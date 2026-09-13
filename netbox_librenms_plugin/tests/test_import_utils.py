@@ -130,7 +130,7 @@ class TestDeviceNameDetermination:
     """Test device name determination logic."""
 
     def test_determine_device_name_prefers_sysname(self):
-        """sysName should be preferred over hostname when use_sysname=True."""
+        """SysName should be preferred over hostname when use_sysname=True."""
         from netbox_librenms_plugin.import_utils import _determine_device_name
 
         device_data = {"sysName": "switch-01", "hostname": "switch-01.example.com"}
@@ -139,7 +139,7 @@ class TestDeviceNameDetermination:
         assert name == "switch-01"
 
     def test_determine_device_name_falls_back_to_hostname(self):
-        """hostname used when sysName missing."""
+        """Hostname used when sysName missing."""
         from netbox_librenms_plugin.import_utils import _determine_device_name
 
         device_data = {"hostname": "router-01.example.com"}
@@ -649,7 +649,8 @@ class TestSerialNumberMatchingRealDB:
         assert result["can_import"] is False
 
     def test_the_cached_row_refresh_binds_a_padded_stored_serial_too(self):
-        """The refresh re-check keeps the breadth of validate_device_for_import, padding included.
+        """
+        The refresh re-check keeps the breadth of validate_device_for_import, padding included.
 
         _refresh_existing_device lives in import_utils/bulk_import.py, whose primary home is
         test_coverage_bulk_import.py; it is exercised here so both serial lookups stay in step.

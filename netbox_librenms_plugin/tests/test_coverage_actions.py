@@ -4025,7 +4025,8 @@ class TestCreatePlatformAssignmentIndependence:
 
 @pytest.mark.django_db
 class TestBulkImportRunsInlineWithoutWorkers:
-    """A background import with no RQ worker runs inline and says so as information.
+    """
+    A background import with no RQ worker runs inline and says so as information.
 
     The wording matters: this notice sits beside the per-row success toast, so a warning-level
     "no workers available" reads as a failed import when the rows actually imported.

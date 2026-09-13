@@ -472,7 +472,8 @@ def test_an_attribute_only_interface_change_schedules_the_cache_transition(
     settings,
     django_capture_on_commit_callbacks,
 ):
-    """An existing interface whose name already matches can still change.
+    """
+    An existing interface whose name already matches can still change.
 
     update_interface_from_port() reports the change through its return value rather than by
     creating a row, so a sync that only rewrites attributes must still mark the tab.
@@ -1973,7 +1974,8 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
 
 @pytest.mark.django_db
 def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(client, settings):
-    """The response still renders the freshly fetched rows when only the cache write failed.
+    """
+    The response still renders the freshly fetched rows when only the cache write failed.
 
     Saying the tab has no snapshot to show contradicts the table beside it, and leaves the user
     with no idea that those rows cannot be synced until the data is cached.

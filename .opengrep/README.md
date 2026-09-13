@@ -77,9 +77,10 @@ verify path inclusion and exclusion; rule-tests alone do not test that scope.
 ## Detection limits
 
 The requests rule checks selected HTTP methods and session constructors with an import binding
-in the same file. It accepts import aliases and imports from `requests.api`. It does not report
-parameters or local variables that shadow the library. It does not follow clients passed between
-functions. The package-wide ban keeps all HTTP in one client because rules cannot infer its destination.
+in the same file. It accepts import aliases and imports from `requests.api` and
+`requests.sessions`. It does not report parameters or local variables that shadow the library. It
+does not follow clients passed between functions. The package-wide ban keeps all HTTP in one client
+because rules cannot infer its destination.
 
 The URL rule checks `<str:pk>` and `<pk>` in literal routes and local string constants.
 It leaves `<str:id>` alone because external IDs can contain text. The `pk` name is a package

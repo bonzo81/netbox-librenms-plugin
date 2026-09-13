@@ -1,4 +1,5 @@
-"""Import-preview disclosure control: an unrestricted match must not name an unviewable object.
+"""
+Import-preview disclosure control: an unrestricted match must not name an unviewable object.
 
 The conflict searches in ``validate_device_for_import`` are deliberately unrestricted: a duplicate
 the viewer cannot see is still a real conflict that must block the import. Identity therefore has to
@@ -245,7 +246,8 @@ def test_the_serial_write_guard_names_its_conflict_only_within_the_view_scope(
 
 @pytest.mark.django_db
 def test_a_second_viewers_request_is_unaffected_by_the_first_ones_redaction(client, librenms_server, settings):
-    """Redaction must stay per-request, because the row data behind it is cached with no user in its key.
+    """
+    Redaction must stay per-request, because the row data behind it is cached with no user in its key.
 
     Scope: this drives the details modal, which re-validates and reads only the shared raw-device
     cache. It does not exercise the validated-row cache the import list uses.
@@ -268,7 +270,8 @@ def test_a_second_viewers_request_is_unaffected_by_the_first_ones_redaction(clie
 
 @pytest.mark.django_db
 def test_a_withheld_match_does_not_disclose_its_role(client, librenms_server, settings):
-    """Dropping the match is not enough: the validator copies its role into the row as well.
+    """
+    Dropping the match is not enough: the validator copies its role into the row as well.
 
     The modal prints ``validation.device_role.role`` exactly when ``existing_device`` is absent, so
     withholding the object without the rest of the match teardown would newly expose its role.
@@ -379,7 +382,8 @@ def test_a_withheld_match_still_reports_a_visible_serial_conflict(client, libren
 
 @pytest.mark.django_db
 def test_a_change_grant_alone_is_enough_to_be_told_what_the_match_is(client, librenms_server, settings):
-    """Deliberate: ``change`` without ``view`` still counts as "may see".
+    """
+    Deliberate: ``change`` without ``view`` still counts as "may see".
 
     NetBox's own edit form renders every field of an object the caller may change, so withholding
     its name would hide something the caller can already read. It would also break this plugin's

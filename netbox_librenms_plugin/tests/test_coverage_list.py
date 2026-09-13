@@ -357,7 +357,8 @@ class TestImportListRequest:
         django_user_model,
         librenms_server,
     ):
-        """The device-count preflight failing means LibreNMS did not answer.
+        """
+        The device-count preflight failing means LibreNMS did not answer.
 
         should_use_background_job() never looks at that count, so a superuser still queued a job
         that only repeats the failing call, and the outage disappeared behind a polling response.
