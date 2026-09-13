@@ -437,19 +437,27 @@ class TestActionRendering:
 
     # One record per row action that posts through HTMX.
     _HTMX_ROW_ACTIONS = {
-        "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "ent_physical_index": 32},
+        "install": {
+            "can_install": True,
+            "module_bay_id": 1,
+            "module_type_id": 2,
+            "ent_physical_index": 32,
+            "inventory_digest": "install-row-digest",
+        },
         "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
         "update_serial": {
             "can_update_serial": True,
             "installed_module_id": 42,
             "ent_physical_index": 77,
             "serial": "S2",
+            "inventory_digest": "serial-row-digest",
         },
         "update_interface": {
             "can_update_interface_binding": True,
             "installed_module_id": 42,
             "ent_physical_index": 77,
             "librenms_port_id": 56284,
+            "inventory_digest": "interface-row-digest",
         },
         "carrier_install": {
             "status": "No Bay",
@@ -482,7 +490,6 @@ class TestActionRendering:
             "module_type_id": 2,
             "can_update_serial": True,
             "installed_module_id": 99,
-            "ent_physical_index": 88,
             "serial": "SERIAL",
             "ent_physical_index": 99,
             "inventory_digest": "permission-row-digest",

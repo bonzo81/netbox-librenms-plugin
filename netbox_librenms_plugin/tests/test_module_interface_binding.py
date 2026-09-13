@@ -14,7 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
-from netbox_librenms_plugin.utils import module_inventory_binding_token
+from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
 
 pytestmark = pytest.mark.django_db
 
@@ -207,28 +207,32 @@ class TestUpdateModuleInterfaceAdoption:
             InterfaceTemplate.objects.create(module_type=module_type, name=name, type="other")
         return device, module
 
-    def _seed(self, view, device, module):
+    def _seed(self, view, device, module, inventory_item=None):
+        inventory_item = inventory_item or _adoption_inventory_row(module.module_type.model, module.module_bay.name)
         seed_inventory(
             view,
             device,
-            [_adoption_inventory_row(module.module_type.model, module.module_bay.name)],
+            [inventory_item],
             librenms_id=ADOPTION_LIBRENMS_ID,
         )
 
     def _post(self, view_class, device, data, live_librenms, module=None):
         data = data.copy()
         if module is not None:
+            inventory_item = _adoption_inventory_row(module.module_type.model, module.module_bay.name)
             data["inventory_binding"] = module_inventory_binding_token(
                 device.pk,
                 data["server_key"],
-                module.pk,
+                "update_module_interface",
+                {"module_id": module.pk},
                 data["ent_index"],
+                module_inventory_row_digest(inventory_item),
             )
         request = make_request("post", data, user=make_superuser(), path="/modules/")
         view = view_class()
         view._librenms_api = live_librenms.api
         if module is not None:
-            self._seed(view, device, module)
+            self._seed(view, device, module, inventory_item)
         return view, request, view_post(view, request, pk=device.pk)
 
     def test_a_missing_module_id_reports_an_error(self, live_librenms):
@@ -294,6 +298,7 @@ class TestUpdateModuleInterfaceAdoption:
         blocked = make_interface(device, "Ethernet1/1")
         user = make_user_with_perms("adopt-scoped-user", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints={"name": "Management1"})
+        inventory_item = _adoption_inventory_row(module.module_type.model, module.module_bay.name)
         request = make_request(
             "post",
             {
@@ -303,8 +308,10 @@ class TestUpdateModuleInterfaceAdoption:
                 "inventory_binding": module_inventory_binding_token(
                     device.pk,
                     "default",
-                    module.pk,
+                    "update_module_interface",
+                    {"module_id": module.pk},
                     ADOPTION_ENT_INDEX,
+                    module_inventory_row_digest(inventory_item),
                 ),
             },
             user=user,
@@ -312,7 +319,7 @@ class TestUpdateModuleInterfaceAdoption:
         )
         view = UpdateModuleInterfaceView()
         view._librenms_api = live_librenms.api
-        self._seed(view, device, module)
+        self._seed(view, device, module, inventory_item)
 
         response = view_post(view, request, pk=device.pk)
 

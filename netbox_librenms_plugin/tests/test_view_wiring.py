@@ -1775,8 +1775,7 @@ class TestInstallRefusesADuplicateSerial:
     """
     A serial already installed on the target device must not be installed a second time.
 
-    The rendered row is advisory: it comes from a cache and a scripted POST never reads it. The
-    refusal therefore lives on the write path, not in the table.
+    The refusal must remain on the write path after the posted action is matched to its cached row.
     """
 
     @staticmethod
@@ -1798,19 +1797,20 @@ class TestInstallRefusesADuplicateSerial:
 
     @staticmethod
     def _post_install(device, module_type, empty_bay, serial, user=None):
-        """
-        Drive a real InstallModuleView POST for a cached row carrying `serial`.
-
-        Both the posted field and the cached row carry the serial: this branch reads it from the
-        POST, and branches above take it from the selected cached inventory row.
-        """
+        """Drive a real InstallModuleView POST for a cached row carrying `serial`."""
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
+        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         view = InstallModuleView()
         view._librenms_api = MagicMock(server_key="default")
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": serial,
+        }
         request = make_request(
             "post",
             {
@@ -1819,6 +1819,14 @@ class TestInstallRefusesADuplicateSerial:
                 "serial": serial,
                 "module_bay_id": str(empty_bay.pk),
                 "module_type_id": str(module_type.pk),
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": empty_bay.pk, "module_type_id": module_type.pk},
+                    100,
+                    module_inventory_row_digest(inventory_item),
+                ),
             },
             user=user or make_superuser(f"dupserial-{empty_bay.pk}"),
             path="/x/",
@@ -1829,13 +1837,7 @@ class TestInstallRefusesADuplicateSerial:
             cache_key,
             trusted_module_inventory_payload(
                 device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": module_type.model,
-                        "entPhysicalSerialNum": serial,
-                    }
-                ],
+                [inventory_item],
             ),
         )
         try:
@@ -2425,7 +2427,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             message_texts,
             trusted_module_inventory_payload,
         )
-        from netbox_librenms_plugin.utils import module_inventory_binding_token
+        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         page_device = make_device("scope-modserial-page")
@@ -2455,12 +2457,15 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         # rather than naming a server: the configured set differs between environments.
         server_key = view.resolve_posted_server_key_or_none(request.POST)
         assert server_key is not None, "this test needs a resolvable server namespace"
+        inventory_item = {"entPhysicalIndex": 4001, "entPhysicalSerialNum": "HIJACKED"}
         post_data = request.POST.copy()
         post_data["inventory_binding"] = module_inventory_binding_token(
             page_device.pk,
             server_key,
-            module.pk,
+            "update_module_serial",
+            {"module_id": module.pk},
             4001,
+            module_inventory_row_digest(inventory_item),
         )
         request.POST = post_data
         cache_key = view.get_cache_key(page_device, "inventory", server_key=server_key)
@@ -2468,7 +2473,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             cache_key,
             trusted_module_inventory_payload(
                 page_device,
-                [{"entPhysicalIndex": 4001, "entPhysicalSerialNum": "HIJACKED"}],
+                [inventory_item],
                 server_key=server_key,
                 librenms_id=901,
             ),
@@ -2561,6 +2566,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
         device = make_device("scope-replace-conflict")
@@ -2596,9 +2602,26 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
         server_key = configured_server_key()
         view._librenms_api = LibreNMSAPI(server_key=server_key)
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": hidden.serial,
+        }
         request = self._request(
             user,
-            {"server_key": server_key, "module_id": str(target.pk), "ent_index": "100"},
+            {
+                "server_key": server_key,
+                "module_id": str(target.pk),
+                "ent_index": "100",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    server_key,
+                    "replace_module",
+                    {"module_id": target.pk},
+                    100,
+                    module_inventory_row_digest(inventory_item),
+                ),
+            },
         )
         view.setup(request)
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
@@ -2606,13 +2629,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             cache_key,
             trusted_module_inventory_payload(
                 device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": module_type.model,
-                        "entPhysicalSerialNum": hidden.serial,
-                    }
-                ],
+                [inventory_item],
                 server_key=server_key,
             ),
         )
