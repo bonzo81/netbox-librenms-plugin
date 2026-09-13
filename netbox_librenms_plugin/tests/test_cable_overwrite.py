@@ -1032,7 +1032,7 @@ class TestOverwritePreservesMidPathSegments:
     """Verify forced re-pointing deletes only endpoint segments and warns that mid-path segments stay."""
 
     def _panel_path(self, name):
-        """Csp --c1-- FrontPort | RearPort --c2 (trunk-ish)-- ConsolePort@end."""
+        """CSP --c1-- FrontPort | RearPort --c2 (trunk-ish)-- ConsolePort@end."""
         acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS1"])
         _panel_dev, fp, rp = make_patch_panel(f"panel-{name}")
         end, _, (cp,) = make_serial_device(f"end-{name}", cp_names=["console"])

@@ -33,8 +33,10 @@ class TestStackDedupKey:
         assert stack_dedup_key(vc_data, 7) == stack_dedup_key(vc_data, 8)
 
     def test_stacks_without_member_identity_get_distinct_keys(self):
-        """An empty member list fingerprints to a constant, so a shared key let the first such
-        stack suppress virtual-chassis creation for every other one in the batch."""
+        """
+        An empty member list fingerprints to a constant, so a shared key let the first such
+        stack suppress virtual-chassis creation for every other one in the batch.
+        """
         from netbox_librenms_plugin.import_utils.bulk_import import stack_dedup_key
 
         first = stack_dedup_key({"members": []}, 7)

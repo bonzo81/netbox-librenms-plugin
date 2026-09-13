@@ -1,4 +1,5 @@
-"""Usable-server-config filtering for LibreNMSAPI, driven by real plugin settings.
+"""
+Usable-server-config filtering for LibreNMSAPI, driven by real plugin settings.
 
 These focused tests drive the
 ``netbox.plugins.get_plugin_config`` -> ``settings.PLUGINS_CONFIG`` path via

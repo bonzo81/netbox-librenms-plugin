@@ -1,4 +1,5 @@
-"""The modules/interfaces tab renders must degrade (not 500) when the client is unbuildable.
+"""
+The modules/interfaces tab renders must degrade (not 500) when the client is unbuildable.
 
 The lazy ``librenms_api`` property raises KeyError/ValueError when the LibreNMS server
 config is missing or misconfigured. The cables and IP tabs resolve their render-path
@@ -128,7 +129,8 @@ class TestCablesPortsCacheShapeGuard:
 
 @pytest.mark.django_db
 class TestVlanTabDegradesOnUnbuildableClient:
-    """The VLAN tab must resolve its render-path server key through _render_server_key too.
+    """
+    The VLAN tab must resolve its render-path server key through _render_server_key too.
 
     get_vlan_context read the key via getattr(self.librenms_api, "server_key", None); the lazy
     librenms_api property raises ValueError (not AttributeError) on an unbuildable config, so getattr

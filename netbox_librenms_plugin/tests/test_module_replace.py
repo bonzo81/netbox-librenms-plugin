@@ -81,7 +81,8 @@ class TestModuleMismatchPreviewView:
         return device, installed, request, view, inventory
 
     def test_the_preview_shows_the_serial_without_the_vendor_marker(self):
-        """Juniper reports "S/N NS123"; the install path stores "NS123" through the serial rules.
+        """
+        Juniper reports "S/N NS123"; the install path stores "NS123" through the serial rules.
 
         Rendering the raw value beside the stored one reads as a mismatch against a module that
         already agrees with its own inventory row.

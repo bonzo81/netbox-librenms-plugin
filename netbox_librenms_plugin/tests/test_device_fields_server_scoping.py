@@ -1,4 +1,5 @@
-"""Server-key scoping for the device-field update views, driven by real plugin settings.
+"""
+Server-key scoping for the device-field update views, driven by real plugin settings.
 
 ``UpdateDeviceNameView.post`` rebinds the LibreNMS client to the POSTed ``server_key``
 before resolving the Virtual-Chassis sync device. The sync-device resolution must be
@@ -48,7 +49,8 @@ def _plugins_config_with_servers(servers):
 @pytest.mark.django_db
 class TestUpdateDeviceNameServerScoping:
     def test_vc_sync_device_resolved_for_posted_server(self, librenms_server):
-        """A POST scoped to ``siteB`` must resolve the siteB-linked sibling, not the default one.
+        """
+        A POST scoped to ``siteB`` must resolve the siteB-linked sibling, not the default one.
 
         VC layout (viewed member has no own librenms_id):
           * sib_default -> {"default": {"id": 10}}  (host id only on the default server)

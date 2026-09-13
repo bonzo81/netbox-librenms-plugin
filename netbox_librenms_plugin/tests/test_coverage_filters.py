@@ -14,7 +14,8 @@ def _last_query(live_librenms):
 
 
 class _CacheFailingOn:
-    """The real Django cache, except that the named operations raise.
+    """
+    The real Django cache, except that the named operations raise.
 
     Redis is a true external boundary: a local test cannot take it down for one caller
     only, so the outage is injected here and every other key still round-trips.

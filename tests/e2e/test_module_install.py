@@ -41,7 +41,8 @@ if not E2E_ENABLED:
 
 
 def _detect_device_id():
-    """Find a device linked to LibreNMS that has inventory modules.
+    """
+    Find a device linked to LibreNMS that has inventory modules.
 
     Returns the NetBox device PK, or skips the test session if none found.
     """

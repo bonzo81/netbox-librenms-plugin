@@ -105,7 +105,8 @@ def _seeded_model_rows():
 
 
 def _seeded_ignore_rule_signatures():
-    """Yield ``(model, signature)`` for each rule migration 0010 seeds.
+    """
+    Yield ``(model, signature)`` for each rule migration 0010 seeds.
 
     The signature is the migration's own reverse-match field set, so a row restored here is the
     same row its ``_delete_default_inventory_ignore_rules`` would remove. ``test_migration_state``
@@ -136,7 +137,8 @@ def _seeded_ignore_rule_signatures():
 
 
 def restore_inventory_ignore_rules():
-    """Re-apply migration 0010's seeded rules by running the migration's own insert.
+    """
+    Re-apply migration 0010's seeded rules by running the migration's own insert.
 
     Reusing the migration code (rather than restating the field values) keeps the restored rows
     byte-identical to a fresh migrate, descriptions included. The reverse runs first so repeated

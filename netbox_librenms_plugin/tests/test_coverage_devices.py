@@ -383,7 +383,8 @@ class TestSaveVLANGroupOverridesEndpoint:
         assert cache.get(overrides_key) is None
 
     def test_a_user_without_plugin_view_is_denied_before_the_view_runs(self, client, live_librenms):
-        """LibreNMSPermissionMixin denies in dispatch(), so the view body never runs.
+        """
+        LibreNMSPermissionMixin denies in dispatch(), so the view body never runs.
 
         make_user_with_perms(plugin_write=False) grants neither plugin view nor plugin
         change, and the mixin requires plugin view. The view's own

@@ -1,4 +1,5 @@
-"""Cancellation, permission, and virtual-chassis behaviour of the bulk import paths.
+"""
+Cancellation, permission, and virtual-chassis behaviour of the bulk import paths.
 
 Companion to ``test_coverage_bulk_import.py`` (the primary home for
 ``import_utils/bulk_import.py``), split out the way ``test_collisions.py`` and

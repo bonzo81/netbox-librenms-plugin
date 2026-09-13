@@ -671,8 +671,10 @@ class TestVirtualChassisHelpers:
         assert result == ["TenGigabitEthernet3/1/1"]
 
     def test_zero_id_is_not_a_valid_librenms_id(self):
-        """LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
-        A member whose resolved ID is 0 must be skipped so a real ID is preferred."""
+        """
+        LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
+        A member whose resolved ID is 0 must be skipped so a real ID is preferred.
+        """
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
         member_zero, member_real = _two_member_vc("sync-zero-id", {"default": 0}, {"default": 5})
@@ -937,7 +939,8 @@ class TestInterfaceNameField:
         assert result == "ifName"
 
     def test_get_interface_name_field_does_not_persist_the_param(self):
-        """The read path honours the parameter without writing it.
+        """
+        The read path honours the parameter without writing it.
 
         get_context_data() calls this on every GET render, so persisting here made a read mutate
         stored user state. The selector posts to the save_user_pref endpoint instead.
@@ -961,7 +964,8 @@ class TestInterfaceNameField:
 
     @pytest.mark.django_db
     def test_persisting_the_preference_does_not_leak_to_other_users(self):
-        """One user's choice must stay that user's.
+        """
+        One user's choice must stay that user's.
 
         NetBox creates each UserConfig with the ``DEFAULT_USER_PREFERENCES`` dict itself (not a
         copy) and ``UserConfig.set()`` writes in place, so a naive write turns this choice into
@@ -1215,7 +1219,8 @@ class TestBuildVCNormalizationReport:
 # =============================================================================
 @pytest.mark.django_db
 class TestRenormalizeDeviceTypeMappingsMigration:
-    """The 0011 data migration re-keys pre-existing DeviceTypeMapping rows through the
+    """
+    The 0011 data migration re-keys pre-existing DeviceTypeMapping rows through the
     device_type NormalizationRule scope so they keep matching the normalized lookup.
 
     Exercises the REAL objects end-to-end: a real NormalizationRule, a real
@@ -1309,7 +1314,8 @@ class TestRenormalizeDeviceTypeMappingsMigration:
         assert DeviceTypeMapping.objects.filter(librenms_hardware="v2-switch-1").exists()
 
     def test_row_save_failure_is_skipped_not_aborted(self, monkeypatch):
-        """An unexpected DB error on one row's save must skip that row and continue, not abort the upgrade.
+        """
+        An unexpected DB error on one row's save must skip that row and continue, not abort the upgrade.
 
         The pre-check only guards the known uniqueness clash; a different write failure (e.g. an
         over-length value) would otherwise propagate out of the migration and block the whole
@@ -1381,7 +1387,8 @@ class TestRenormalizeDeviceTypeMappingsMigration:
             assert DeviceTypeMapping.objects.filter(librenms_hardware=suffix).exists()
 
     def test_db_error_on_one_row_does_not_poison_the_rest(self, monkeypatch):
-        """A real DB error on one row's save must be confined to that row's savepoint so the rest still migrate.
+        """
+        A real DB error on one row's save must be confined to that row's savepoint so the rest still migrate.
 
         A plain try/except cannot recover from a database error: on PostgreSQL it aborts the whole
         transaction, so the NEXT row's query raises "current transaction is aborted". Only a per-row
@@ -1423,7 +1430,8 @@ class TestRenormalizeDeviceTypeMappingsMigration:
         assert DeviceTypeMapping.objects.filter(librenms_hardware="good").exists()
 
     def test_db_error_in_normalization_does_not_poison_the_rest(self, monkeypatch):
-        """A DB error inside apply_normalization_rules must be confined to that row's savepoint too.
+        """
+        A DB error inside apply_normalization_rules must be confined to that row's savepoint too.
 
         The rule queries (and the clash .exists()) run inside the migration's outer atomic
         transaction just like the save: an unguarded DB failure there aborts the transaction on
@@ -1468,7 +1476,8 @@ class TestRenormalizeDeviceTypeMappingsMigration:
         assert DeviceTypeMapping.objects.filter(librenms_hardware="good").exists()
 
     def test_preload_failure_leaves_all_rows_untouched(self, monkeypatch):
-        """A DB error while preloading the rule chain must leave EVERY row untouched, not abort the upgrade.
+        """
+        A DB error while preloading the rule chain must leave EVERY row untouched, not abort the upgrade.
 
         The single preload (the N+1 fix) runs once before the per-row loop and issues its own DB
         query. A failure there (connection/query error mid-upgrade) would otherwise propagate before
@@ -1814,7 +1823,8 @@ class TestGetVirtualChassisMemberNoneName:
 
 
 def test_whitespace_only_names_do_not_count_as_unambiguous():
-    """A blank-after-strip name is not a name, the same rule the sync path applies.
+    """
+    A blank-after-strip name is not a name, the same rule the sync path applies.
 
     ``get_interface_port_identity_sets`` used a bare truthiness test while every other site
     stripped first, so "   " counted as a distinct interface name here and as unsyncable

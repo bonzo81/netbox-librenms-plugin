@@ -1,4 +1,5 @@
-"""Shared harness for the end-to-end Playwright tests.
+"""
+Shared harness for the end-to-end Playwright tests.
 
 These tests are excluded from the default pytest discovery via ``testpaths``
 in ``pyproject.toml`` and are intended to be invoked explicitly:

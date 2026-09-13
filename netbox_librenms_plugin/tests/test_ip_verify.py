@@ -141,7 +141,8 @@ class TestVerifyPostServerCacheNamespace:
 
 @pytest.mark.django_db
 class TestVerifyPostRejectsMalformedVrfId:
-    """A non-numeric vrf_id must 400 before the VRF filter, not 500 via the broad handler.
+    """
+    A non-numeric vrf_id must 400 before the VRF filter, not 500 via the broad handler.
 
     The `vrf__id` filter in `_find_existing_ip` is only reached when an IPAddress at the posted address
     already exists, so the real IP is created first — otherwise the guard is never exercised and the

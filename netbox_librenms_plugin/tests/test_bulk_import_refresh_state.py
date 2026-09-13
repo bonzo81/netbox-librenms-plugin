@@ -1,4 +1,5 @@
-"""Real-DB tests for the cached import row's existing-device refresh.
+"""
+Real-DB tests for the cached import row's existing-device refresh.
 
 Companion to ``test_coverage_bulk_import.py``; see that file for the primary
 ``import_utils/bulk_import.py`` coverage.
