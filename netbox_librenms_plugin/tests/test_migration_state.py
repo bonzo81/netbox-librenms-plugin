@@ -298,7 +298,8 @@ def test_plugin_cross_app_migration_dependencies_resolve():
 
 @pytest.mark.django_db
 def test_conftest_restores_exactly_the_rules_migration_0010_seeds():
-    """The seed-restore signatures in conftest must match what the migration's own insert produces.
+    """
+    The seed-restore signatures in conftest must match what the migration's own insert produces.
 
     conftest re-runs the migration's insert to repair a transactional flush, but its intactness
     check compares signatures it declares itself. Pin the two against each other so a change to
@@ -353,7 +354,8 @@ def test_the_seeded_ignore_rules_survive_a_seed_restore():
 
 @pytest.mark.django_db
 def test_the_seeded_ignore_rules_are_present_before_a_test_body_runs():
-    """Every test starts with the seeded rules, including one that follows a flush.
+    """
+    Every test starts with the seeded rules, including one that follows a flush.
 
     A ``transaction=True`` test truncates the tables, so without the restore this passes or fails
     purely on xdist scheduling: the modules sync reads these rules on every render.

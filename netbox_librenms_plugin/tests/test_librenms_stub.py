@@ -778,7 +778,8 @@ def _raw_headers_only_post(
 
 
 def test_stub_refuses_an_unauthenticated_body_request_to_healthz():
-    """The unauthenticated /healthz exemption is GET-only.
+    """
+    The unauthenticated /healthz exemption is GET-only.
 
     A body-bearing method would otherwise skip the token check, so a caller could declare a
     Content-Length, send no body, and hold a ThreadingHTTPServer thread inside rfile.read().

@@ -1,5 +1,5 @@
 """
-Coverage tests for netbox_librenms_plugin/tables/vlans.py
+Coverage tests for netbox_librenms_plugin/tables/vlans.py.
 
 Tests cover all render methods and the configure() method of LibreNMSVLANTable.
 """

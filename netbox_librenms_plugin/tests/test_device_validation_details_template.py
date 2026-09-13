@@ -1,4 +1,5 @@
-"""Render the real device_validation_details.html badge for the Stage-2 merge case.
+"""
+Render the real device_validation_details.html badge for the Stage-2 merge case.
 
 The "Two NetBox devices" badge must pair its colour fill with a text colour: a bare
 ``bg-warning`` leaves muted/inherited text, which is unreadable in NetBox's light AND dark
@@ -425,7 +426,8 @@ class TestAddAsOOBFormPanes:
 
 @pytest.mark.django_db
 class TestPromoteToHostFallbackPane:
-    """A promote_to_host-classified row must render an ACTIONABLE Host pane on this branch.
+    """
+    A promote_to_host-classified row must render an ACTIONABLE Host pane on this branch.
 
     The full promote flow (side-by-side modal + device_promote_to_host endpoint) lives on the
     device-merge branch up-stack; standalone, the Host radio's data-target div did not exist,
@@ -482,7 +484,8 @@ class TestPromoteToHostFallbackPane:
 
 
 def test_promote_override_handler_clears_hidden_when_switching_back_to_keep():
-    """The override JS must set the hidden from the 'new' radio's own checked state.
+    """
+    The override JS must set the hidden from the 'new' radio's own checked state.
 
     The old handler only cleared the hidden when a radio carrying data-override-target had
     value 'keep' — but the Keep radio has no data-override-target, so switching back to Keep
@@ -585,7 +588,8 @@ class TestPromoteModalAccessibility:
 
 @pytest.mark.django_db
 class TestMappingFormsShareServerKeyInclude:
-    """Mapping-writing POST forms carry server_key once via the shared include.
+    """
+    Mapping-writing POST forms carry server_key once via the shared include.
 
     Every other action form in this template routes the hidden input through
     inc/_hidden_server_key.html, which renders NOTHING when the context has no

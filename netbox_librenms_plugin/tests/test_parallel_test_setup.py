@@ -53,7 +53,7 @@ def _pytest_plugins_lines(source):
     ids=["plain", "annotated"],
 )
 def test_the_plugin_scan_sees_both_assignment_forms(source):
-    """pytest honours the annotated form too, and the scan below only knew the plain one."""
+    """Pytest honours the annotated form too, and the scan below only knew the plain one."""
     assert _pytest_plugins_lines(source) == [1]
 
 
@@ -91,7 +91,8 @@ def test_devcontainer_setup_counts_pem_certificates(tmp_path, certificate_count)
 
 
 def test_no_test_module_registers_a_session_wide_plugin():
-    """``pytest_plugins`` in a test module registers that plugin for the whole session.
+    """
+    ``pytest_plugins`` in a test module registers that plugin for the whole session.
 
     Any autouse fixture it carries then applies to every test file collected after it. A
     helper's config mock reached the virtual-chassis tests that way and pinned
@@ -520,7 +521,8 @@ def test_a_changed_seed_value_is_restored_even_though_its_lookup_key_survived():
 
 
 def test_a_direct_transactional_db_request_still_starts_with_the_seeds(transactional_db):
-    """A test may ask for ``transactional_db`` by name instead of marking ``transaction=True``.
+    """
+    A test may ask for ``transactional_db`` by name instead of marking ``transaction=True``.
 
     The autouse restore then has to treat it as transactional. Selecting the plain ``db`` fixture
     lets pytest-django flush the seeds afterwards, so the test body runs without them.
@@ -537,7 +539,8 @@ def test_a_direct_transactional_db_request_still_starts_with_the_seeds(transacti
 
 @pytest.mark.django_db
 def test_a_flushed_rule_row_is_restored_and_not_reported_as_intact():
-    """Migration 0017's rules are seeded state too.
+    """
+    Migration 0017's rules are seeded state too.
 
     Without them a transactional flush disarms the "S/N " serial strip and the routing-engine
     include rule for every test that follows, which only shows up in a full-suite run.
@@ -900,7 +903,8 @@ def test_seed_intactness_requires_the_bridge_seed_identity():
 
 @pytest.mark.django_db
 def test_reverse_of_the_inventory_seed_keeps_a_disabled_operator_rule():
-    """The 0010 rollback matches seeded rows on a signature of non-free-text fields.
+    """
+    The 0010 rollback matches seeded rows on a signature of non-free-text fields.
 
     ``enabled`` is a boolean, not free text, so a disabled operator rule that happens to share
     every other signature value must not be swept up with the seed.

@@ -1,4 +1,5 @@
-"""Real tests for the shared mixin helpers consolidated during the develop-hardening pass.
+"""
+Real tests for the shared mixin helpers consolidated during the develop-hardening pass.
 
 - ``extract_cached_ports`` now reuses ``is_list_of_dicts`` for its ports-shape check (B7).
 - ``LibreNMSAPIMixin.resolve_requested_server_key`` centralises the "configured-string-key-or
@@ -61,7 +62,8 @@ class TestExtractCachedPortsShapeCheck:
 
 @pytest.mark.django_db
 class TestResolveRequestedServerKey:
-    """resolve_requested_server_key honours only a configured string key, else degrades to _render_server_key.
+    """
+    resolve_requested_server_key honours only a configured string key, else degrades to _render_server_key.
 
     The configured-server set (LibreNMSAPI.get_available_servers) is the external plugin-config
     boundary; it's pinned per test so the assertion is deterministic (a session-wide autouse fixture
@@ -101,7 +103,8 @@ class TestResolveRequestedServerKey:
 
 
 class TestResolvePostedServerKey:
-    """resolve_posted_server_key honours only a configured key, else falls back to the ACTIVE server.
+    """
+    resolve_posted_server_key honours only a configured key, else falls back to the ACTIVE server.
 
     Unlike resolve_requested_server_key (which degrades to _render_server_key()/None for GET renders),
     the module install/bind ACTION paths fall back to the active client server so the port-bind still

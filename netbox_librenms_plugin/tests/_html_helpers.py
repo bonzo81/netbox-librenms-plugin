@@ -2,7 +2,8 @@
 
 
 def extract_enclosing_tag(html, marker, tag="<button"):
-    """Return the opening ``tag`` of the element that contains ``marker``.
+    """
+    Return the opening ``tag`` of the element that contains ``marker``.
 
     Slices from the last ``tag`` occurrence before ``marker`` up to (not
     including) the next ``>``, so an assertion can be scoped to one element's
@@ -17,7 +18,8 @@ def extract_enclosing_tag(html, marker, tag="<button"):
 
 
 def open_tags(html, tag):
-    """Return one attribute dict per opening ``tag`` element in ``html``, in document order.
+    """
+    Return one attribute dict per opening ``tag`` element in ``html``, in document order.
 
     ``html.parser`` unescapes attribute values, so a rendered ``&amp;`` reads back as ``&``.
     Use this instead of a substring check when an assertion must hold for EVERY such element:

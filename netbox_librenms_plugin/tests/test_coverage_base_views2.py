@@ -1,4 +1,5 @@
-"""Database-backed coverage for cable and IP-address base views.
+"""
+Database-backed coverage for cable and IP-address base views.
 
 These tests use real NetBox objects, permission checks, cache entries, and rendered JSON.
 LibreNMS is not contacted because every exercised view path starts from a warm cache or resolves

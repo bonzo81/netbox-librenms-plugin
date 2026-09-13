@@ -2009,7 +2009,8 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
 def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
     client, settings, primary_librenms, monkeypatch
 ):
-    """The response still renders the freshly fetched rows when only the cache write failed.
+    """
+    The response still renders the freshly fetched rows when only the cache write failed.
 
     Saying the tab has no snapshot to show contradicts the table beside it, and leaves the user
     with no idea that those rows cannot be synced until the data is cached.

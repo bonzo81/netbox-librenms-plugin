@@ -1,4 +1,5 @@
-"""The shared real-request/real-user drivers in view_test_helpers must work end to end.
+"""
+The shared real-request/real-user drivers in view_test_helpers must work end to end.
 
 These are the seam every de-mocked view test stands on: if ``make_request`` silently failed to
 attach message storage, or ``grant`` produced a permission the NetBox backend ignores, the

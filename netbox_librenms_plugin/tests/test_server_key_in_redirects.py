@@ -1,4 +1,5 @@
-"""Real redirect-behavior guard: server-scoped redirects must carry ``server_key``.
+"""
+Real redirect-behavior guard: server-scoped redirects must carry ``server_key``.
 
 Module sync / interface / cable / VLAN / IP actions are server-scoped: after a POST (or an HTMX
 refresh) on a non-default LibreNMS server, the follow-up URL must carry ``server_key`` so the user
@@ -143,7 +144,8 @@ def test_modules_action_fragment_keeps_the_server_key(client, settings):
     ["UpdateDeviceNameView", "UpdateDeviceSerialView", "UpdateDeviceTypeView", "UpdateDevicePlatformView"],
 )
 def test_field_sync_views_preserve_server_key_on_redirect(view_name, prod_server):
-    """The four device field-sync views rebind to the POSTed server, so their redirects must carry it.
+    """
+    The four device field-sync views rebind to the POSTed server, so their redirects must carry it.
 
     Each view resolves ``server_key`` via ``rebind_api_for_server`` up front; without preserving it
     on the redirect the page reloads scoped to the session/default server and the non-default tab
@@ -168,7 +170,8 @@ def test_field_sync_views_preserve_server_key_on_redirect(view_name, prod_server
 
 
 def test_scoped_tab_builders_exist():
-    """Structural canary (not a behavioral assertion): the scoped view packages still contain
+    """
+    Structural canary (not a behavioral assertion): the scoped view packages still contain
     ``?tab=`` redirect builders, so the behavioral tests above are pointed at a tree that actually
     builds tab URLs — a refactor that moves/removes them is noticed rather than silently leaving
     this file asserting nothing.

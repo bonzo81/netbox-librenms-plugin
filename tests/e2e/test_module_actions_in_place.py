@@ -1,4 +1,4 @@
-"""
+r"""
 End-to-end Playwright tests for the in-place module row actions.
 
 Every module action on the device sync page (Install, Install Selected, and the
