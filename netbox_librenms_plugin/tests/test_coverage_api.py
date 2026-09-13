@@ -194,7 +194,7 @@ class TestTestConnectionErrors:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         configure_servers(settings, {"default": {"librenms_url": "invalid-url", "api_token": "test-token"}})
-        with pytest.raises(ValueError, match="HTTPS"):
+        with pytest.raises(ValueError, match="HTTP or HTTPS"):
             LibreNMSAPI(server_key="default")
 
 

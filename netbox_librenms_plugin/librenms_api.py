@@ -1,4 +1,3 @@
-import ipaddress
 import logging
 import math
 import urllib.parse
@@ -28,22 +27,13 @@ HTTP_NOT_FOUND = 404
 logger = logging.getLogger(__name__)
 
 
-def _validate_api_url_transport(url):
-    """Reject API URLs that would send credentials over a remote cleartext connection."""
+def _validate_api_url(url):
+    """Require a well-formed HTTP or HTTPS URL for the LibreNMS API."""
     if not isinstance(url, str):
-        raise ValueError("LibreNMS API URLs must use HTTPS, except for HTTP loopback addresses.")
+        raise ValueError("LibreNMS API URLs must use HTTP or HTTPS and include a host.")
     parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme == "https" and parsed.hostname:
-        return
-    if parsed.scheme == "http" and parsed.hostname:
-        if parsed.hostname == "localhost":
-            return
-        try:
-            if ipaddress.ip_address(parsed.hostname).is_loopback:
-                return
-        except ValueError:
-            pass
-    raise ValueError("LibreNMS API URLs must use HTTPS, except for HTTP loopback addresses.")
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("LibreNMS API URLs must use HTTP or HTTPS and include a host.")
 
 
 class LibreNMSIDConflictError(ValueError):
@@ -171,7 +161,7 @@ class LibreNMSAPI:
         if not isinstance(config, dict) or not config.get("librenms_url") or not config.get("api_token"):
             return False
         try:
-            _validate_api_url_transport(config["librenms_url"])
+            _validate_api_url(config["librenms_url"])
         except (TypeError, ValueError):
             return False
         return True
@@ -282,7 +272,7 @@ class LibreNMSAPI:
 
         if not self.librenms_url or not self.api_token:
             raise ValueError(f"LibreNMS URL or API token is not configured for server '{server_key}'.")
-        _validate_api_url_transport(self.librenms_url)
+        _validate_api_url(self.librenms_url)
 
         self.headers = {"X-Auth-Token": self.api_token}
 
