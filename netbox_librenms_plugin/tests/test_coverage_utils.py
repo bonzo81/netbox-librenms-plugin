@@ -7,7 +7,8 @@ import pytest
 
 @pytest.mark.django_db
 class TestSerialScopeNormalization:
-    """Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
+    """
+    Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
 
     The rewrite is a NormalizationRule rather than compiled-in, so an operator can see why a
     stored serial differs from the raw inventory and add the next vendor without a release.
@@ -962,7 +963,8 @@ class TestHasNestedNameConflictVersionGating:
     """has_nested_name_conflict() must short-circuit on NetBox >= 4.5.6 (issue #20467)."""
 
     def _build_args(self, with_module_token=True):
-        """Build (module_type, module_bay, sibling_counts) that would trigger
+        """
+        Build (module_type, module_bay, sibling_counts) that would trigger
         the legacy conflict (nested bay, sibling exists, {module} in template)."""
         template = MagicMock()
         template.name = "{module}" if with_module_token else "Gi0/1"
@@ -1127,7 +1129,8 @@ class TestValidateRegexField:
 
 @pytest.mark.django_db
 class TestInterfaceNameFallbackMatchesPort:
-    """The fallback reader must agree with get_librenms_device_id on every stored shape.
+    """
+    The fallback reader must agree with get_librenms_device_id on every stored shape.
 
     The two used to walk custom_field_data separately, so they could drift on which shapes
     resolve. Only the "no binding recorded" rules stay local to the fallback.

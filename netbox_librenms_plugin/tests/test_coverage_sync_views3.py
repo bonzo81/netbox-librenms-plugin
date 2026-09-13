@@ -5,7 +5,7 @@ Targets:
 - cables.py lines 147-149 (exception path in process_interface_sync)
 - devices.py lines 77, 81-82 (port_association_mode, invalid poller_group)
 - locations.py lines 26-28, 32-35, 44-49 (get_table, get_context_data, get_queryset)
-- vlans.py lines 134-139 (grouped VLAN update/skip paths)
+- vlans.py lines 134-139 (grouped VLAN update/skip paths).
 """
 
 from contextlib import contextmanager
@@ -156,7 +156,8 @@ class TestGetCachedPortsData:
 
 
 class TestSyncInterface:
-    """Which device the LibreNMS row is written to, resolved against real rows.
+    """
+    Which device the LibreNMS row is written to, resolved against real rows.
 
     ``update_interface_attributes`` and ``_sync_interface_vlans`` stay stubbed: they are the
     view's own next steps, and these tests are about target selection, not field copying.

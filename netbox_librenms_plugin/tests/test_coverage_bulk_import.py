@@ -39,7 +39,8 @@ class TestStackDedupKey:
         assert stack_dedup_key(vc_data, 7) == stack_dedup_key(vc_data, 8)
 
     def test_stacks_without_member_identity_get_distinct_keys(self):
-        """An empty member list fingerprints to a constant, so a shared key let the first such
+        """
+        An empty member list fingerprints to a constant, so a shared key let the first such
         stack suppress virtual-chassis creation for every other one in the batch."""
         from netbox_librenms_plugin.import_utils.bulk_import import stack_dedup_key
 
@@ -272,7 +273,8 @@ class TestBulkImportDevicesShared:
         assert len(result["success"]) == 1
 
     def test_mis_keyed_cache_row_is_refetched_not_trusted(self):
-        """A cached row whose own device_id contradicts the requested id (mis-keyed/stale) is NOT imported as this device — a live fetch runs instead.
+        """
+        A cached row whose own device_id contradicts the requested id (mis-keyed/stale) is NOT imported as this device — a live fetch runs instead.
 
         The multi-row collision pre-check verifies this, but its callers skip it for single-row
         imports, so the import path must re-check at the point of use.
@@ -1366,7 +1368,8 @@ class TestRefreshExistingDevice:
         assert validation["can_import"] is False
 
     def test_fresh_lookup_no_match_does_not_requery_librenms_id(self):
-        """The no-match refresh path must not re-run find_by_librenms_id in the name fallback.
+        """
+        The no-match refresh path must not re-run find_by_librenms_id in the name fallback.
 
         The cross-model collision check already resolves the id against both models (2 queries);
         _lookup_in_model then does name-only fallbacks. Before the fix it re-queried
@@ -2193,7 +2196,7 @@ class TestProcessDeviceFilters:
         assert mock_cache.set.call_count >= 2
 
     def test_validate_path_exclude_existing_skips_device(self):
-        """validate path + exclude_existing + existing_device → device skipped."""
+        """Validate path + exclude_existing + existing_device → device skipped."""
         api = self._make_api()
         device = self._make_device()
 

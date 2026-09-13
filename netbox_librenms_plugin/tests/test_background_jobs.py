@@ -275,6 +275,54 @@ class TestFilterDevicesJob:
 
 @pytest.mark.django_db
 class TestImportDevicesJob:
+    def test_queued_legacy_payload_imports_real_objects_after_upgrade(self, librenms_server):
+        """A queued pre-upgrade payload must retain its Device and VM import intent."""
+        from core.choices import JobStatusChoices
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        infrastructure = make_device("background-legacy-import-infrastructure")
+        cluster = make_cluster("background-legacy-import-cluster")
+        user = _import_user("legacy-mixed")
+        job = _job(user, "legacy-mixed-import")
+        rows = {
+            6411: _device_payload(
+                6411,
+                hostname="background-legacy-imported-device",
+                hardware=infrastructure.device_type.model,
+                location=infrastructure.site.name,
+            ),
+            6412: _device_payload(6412, hostname="background-legacy-imported-vm"),
+        }
+
+        ImportDevicesJob.handle(
+            job=job,
+            device_ids=[6411],
+            vm_imports={6412: {"cluster_id": cluster.pk}},
+            manual_mappings_per_device={
+                6411: {
+                    "site_id": infrastructure.site_id,
+                    "device_type_id": infrastructure.device_type_id,
+                    "device_role_id": infrastructure.role_id,
+                }
+            },
+            server_key=SERVER_KEY,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_devices_cache=rows,
+        )
+
+        job.refresh_from_db()
+        imported_device = Device.objects.get(name="background-legacy-imported-device")
+        imported_vm = VirtualMachine.objects.get(name="background-legacy-imported-vm")
+        assert job.data["imported_device_pks"] == [imported_device.pk]
+        assert job.data["imported_vm_pks"] == [imported_vm.pk]
+        assert job.data["imported_libre_device_ids"] == [6411]
+        assert job.data["imported_libre_vm_ids"] == [6412]
+        assert job.status == JobStatusChoices.STATUS_COMPLETED
+        assert job.data["success_count"] == 2
+        assert job.data["errors"] == []
+
     def test_mixed_device_and_vm_batch_imports_real_objects_and_persists_ids(self, librenms_server):
         from dcim.models import Device
         from virtualization.models import VirtualMachine

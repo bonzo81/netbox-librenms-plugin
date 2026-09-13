@@ -1,4 +1,5 @@
-"""Render the real _ipaddress_sync_content.html template in normal vs migrated mode.
+"""
+Render the real _ipaddress_sync_content.html template in normal vs migrated mode.
 
 In migrated mode the POST form is removed (a migrated donor must not submit an IP sync), so the
 sync-only 'Set Primary IP' switch must not render as an active control with nowhere to submit.
@@ -116,7 +117,8 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         assert "winner missing" in html
 
     def test_move_button_degrades_to_read_only_when_url_unregistered(self):
-        """A missing/restacked ipaddress_move_to_winner route must degrade to read-only, not 500.
+        """
+        A missing/restacked ipaddress_move_to_winner route must degrade to read-only, not 500.
 
         The shared include uses ``{% url ... as move_url %}`` + ``and move_url``, so an unresolved
         route yields an empty move_url and the read-only fallback instead of a bare {% url %} that

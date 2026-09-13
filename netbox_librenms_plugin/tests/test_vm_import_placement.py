@@ -675,8 +675,18 @@ def test_import_dispatch_does_not_derive_model_from_placement_truthiness():
             for statement in node.orelse:
                 self.visit(statement)
 
+        @classmethod
+        def _assigned_names(cls, target):
+            if isinstance(target, ast.Name):
+                return {target.id}
+            if isinstance(target, ast.Subscript):
+                return cls._assigned_names(target.value)
+            if isinstance(target, (ast.Tuple, ast.List)):
+                return set().union(*(cls._assigned_names(element) for element in target.elts))
+            return set()
+
         def visit_Assign(self, node):
-            assigned_names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+            assigned_names = set().union(*(self._assigned_names(target) for target in node.targets))
             value = ast.unparse(node.value).lower()
             if assigned_names & model_target_names and (
                 any(token in value for token in placement_tokens) or any(self.placement_conditions)

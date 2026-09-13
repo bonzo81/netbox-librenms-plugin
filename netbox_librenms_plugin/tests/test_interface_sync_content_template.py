@@ -1,4 +1,5 @@
-"""Render the real _interface_sync_content.html template in both modes.
+"""
+Render the real _interface_sync_content.html template in both modes.
 
 In migrated mode the POST form is replaced by a plain <div> (a migrated donor must not be
 able to POST an interface sync). The CSRF token AND the server_key hidden input must still be
@@ -250,7 +251,8 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "read-only" in html
 
     def test_migrated_move_button_renders_for_write_users_when_url_registered(self):
-        """Positive counterpart: with write perm + a resolvable move URL the live button renders.
+        """
+        Positive counterpart: with write perm + a resolvable move URL the live button renders.
 
         This proves the negative assertions above key off the button's real rendered content — i.e.
         they would actually fail if the button leaked into a read-only / unregistered render.

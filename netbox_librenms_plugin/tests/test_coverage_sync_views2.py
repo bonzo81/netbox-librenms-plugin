@@ -891,7 +891,8 @@ class TestAddDeviceToLibreNMSViewV3:
 
 class TestAddDeviceToLibreNMSViewUnknownVersion:
     def test_unknown_snmp_version_shows_error(self):
-        """A version string that is neither v1/v2c nor v3 is refused before reaching LibreNMS.
+        """
+        A version string that is neither v1/v2c nor v3 is refused before reaching LibreNMS.
 
         ``snmp_version`` on the v3 form is a plain CharField whose ``initial`` does not constrain a
         BOUND form, so a posted "v99" survives validation, reaches form_valid as the version, and
@@ -2457,7 +2458,8 @@ class TestSyncVLANsViewWithGroup:
         assert any("several VLANs" in text for text in message_texts(req, "error"))
 
     def test_invalid_vid_string_skipped(self):
-        """A non-numeric selection is skipped, and the rest of the batch still syncs.
+        """
+        A non-numeric selection is skipped, and the rest of the batch still syncs.
 
         The batch carries a valid VID after the bad one so a `break` in place of the
         `continue` would be caught — a single-item batch cannot tell them apart.
@@ -2613,7 +2615,8 @@ class TestSyncVLANsViewGroupedUpdateSkip:
 
 
 def _make_site(name, *, latitude=None, longitude=None):
-    """A real Site, optionally with coordinates.
+    """
+    A real Site, optionally with coordinates.
 
     Re-read from the DB so the coordinate fields come back as the Decimals the view actually
     formats in production, not the Python floats that were passed in.

@@ -11,6 +11,8 @@ from netbox.jobs import JobRunner
 
 logger = logging.getLogger(__name__)
 
+_LEGACY_IMPORT_PAYLOAD_KEYS = frozenset({"device_ids", "vm_imports", "manual_mappings_per_device"})
+
 
 def _build_job_api(server_key):
     """Build a client for one exact configured server key."""
@@ -21,6 +23,50 @@ def _build_job_api(server_key):
     if parsed_server.server_key is None:
         raise ValueError("The job does not reference one configured LibreNMS server.")
     return LibreNMSAPI(server_key=parsed_server.server_key)
+
+
+def _partition_import_job_payload(import_plans, job_kwargs):
+    """
+    Partition a current payload or a queued pre-upgrade payload.
+
+    Args:
+        import_plans: Serialized explicit row plans, or None for a legacy payload.
+        job_kwargs: Additional keyword arguments supplied to the job.
+
+    Returns:
+        A tuple of device IDs, manual Device mappings, and VM imports.
+
+    Raises:
+        TypeError: The payload omits fields required by its format.
+        ValueError: The payload combines the current and legacy formats.
+    """
+    from netbox_librenms_plugin.import_plan import (
+        VMPlacementMethod,
+        deserialize_import_plans,
+        partition_import_plans,
+    )
+
+    legacy_keys = _LEGACY_IMPORT_PAYLOAD_KEYS.intersection(job_kwargs)
+    if import_plans is not None:
+        if legacy_keys:
+            joined_keys = ", ".join(sorted(legacy_keys))
+            raise ValueError(f"Import job payload combines import_plans with legacy fields: {joined_keys}.")
+        plans = deserialize_import_plans(import_plans)
+        return partition_import_plans(plans)
+
+    missing_keys = {"device_ids", "vm_imports"}.difference(legacy_keys)
+    if missing_keys:
+        joined_keys = ", ".join(sorted(missing_keys))
+        raise TypeError(f"Legacy import job payload is missing required fields: {joined_keys}.")
+
+    legacy_vm_imports = {}
+    for device_id, mapping in job_kwargs.pop("vm_imports").items():
+        adapted_mapping = dict(mapping)
+        if "cluster_id" in adapted_mapping:
+            adapted_mapping["placement"] = VMPlacementMethod.CLUSTER.value
+        legacy_vm_imports[device_id] = adapted_mapping
+
+    return job_kwargs.pop("device_ids"), job_kwargs.pop("manual_mappings_per_device", None), legacy_vm_imports
 
 
 class FilterDevicesJob(JobRunner):
@@ -173,7 +219,7 @@ class ImportDevicesJob(JobRunner):
 
     def run(
         self,
-        import_plans,
+        import_plans=None,
         server_key=None,
         sync_options=None,
         libre_devices_cache=None,
@@ -183,12 +229,14 @@ class ImportDevicesJob(JobRunner):
         Execute device/VM imports in background.
 
         Args:
-            import_plans: Serialized explicit Device and virtual-machine row plans.
+            import_plans: Serialized explicit Device and virtual-machine row plans,
+                or None for a queued pre-upgrade payload.
             server_key: Exact configured LibreNMS server key, or None for a legacy queued job.
             sync_options: Dict with sync_interfaces, sync_cables,
                 use_sysname, strip_domain, and vc_detection_enabled.
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data.
-            **kwargs: Additional job parameters.
+            **kwargs: Additional job parameters. A queued pre-upgrade payload supplies
+                device_ids, vm_imports, and optional manual_mappings_per_device here.
 
         """
         from netbox_librenms_plugin.import_utils import (
@@ -199,10 +247,8 @@ class ImportDevicesJob(JobRunner):
             required_import_permissions,
         )
         from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
-        from netbox_librenms_plugin.import_plan import deserialize_import_plans, partition_import_plans
 
-        plans = deserialize_import_plans(import_plans)
-        device_ids, manual_mappings_per_device, vm_imports = partition_import_plans(plans)
+        device_ids, manual_mappings_per_device, vm_imports = _partition_import_job_payload(import_plans, kwargs)
 
         total_count = len(device_ids) + len(vm_imports)
         self.logger.info(f"Starting LibreNMS import job for {total_count} devices/VMs")
