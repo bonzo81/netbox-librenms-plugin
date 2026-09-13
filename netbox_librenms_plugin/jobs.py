@@ -76,6 +76,7 @@ class FilterDevicesJob(JobRunner):
             use_sysname: If True, prefer sysName over hostname for device name resolution
             strip_domain: If True, strip domain suffix from device names
             **kwargs: Additional job parameters
+
         """
         from netbox_librenms_plugin.import_utils import process_device_filters
 
@@ -188,6 +189,7 @@ class ImportDevicesJob(JobRunner):
                 use_sysname, strip_domain, and vc_detection_enabled.
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data.
             **kwargs: Additional job parameters.
+
         """
         from netbox_librenms_plugin.import_utils import (
             bulk_import_devices_shared,

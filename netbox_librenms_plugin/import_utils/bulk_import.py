@@ -87,6 +87,7 @@ def _is_job_cancelled(job) -> bool:
 
     Returns:
         bool: True if the RQ job has failed or stopped, otherwise False.
+
     """
     from django_rq import get_queue
     from redis.exceptions import RedisError
@@ -151,6 +152,7 @@ def detect_collisions_for_device_ids(
             were not collision-checked, so the caller must fail closed on them rather than
             import them unchecked — a transient miss could otherwise slip a colliding row
             through on a retry.
+
     """
     use_sysname = (sync_options or {}).get("use_sysname", True)
     strip_domain = (sync_options or {}).get("strip_domain", False)
@@ -277,6 +279,7 @@ class BulkPrecheckOutcome:
         skip_message: Shared copy naming skipped rows in an unblocked batch (``""`` otherwise).
         importable_device_ids: ``device_ids`` minus ``skipped_ids``.
         importable_vm_imports: ``vm_imports`` minus ``skipped_ids``.
+
     """
 
     blocked: bool
@@ -304,6 +307,7 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
 
     Returns:
         BulkPrecheckOutcome: The shared block/skip decision.
+
     """
     unresolved_set = set(unresolved)
     importable_device_ids = [d for d in device_ids if d not in unresolved_set]
@@ -415,6 +419,7 @@ def bulk_import_devices_shared(  # noqa: C901
         >>> result = bulk_import_devices_shared([1, 2, 3, 4, 5], user=request.user)
         >>> # Background job usage
         >>> result = bulk_import_devices_shared([1, 2, 3], job=self)
+
     """
     # Extract user from job if not explicitly provided
     if user is None and job is not None:
@@ -659,6 +664,7 @@ def bulk_import_devices(
 
     Raises:
         PermissionDenied: If user lacks required permissions
+
     """
     return bulk_import_devices_shared(
         device_ids=device_ids,
@@ -694,6 +700,7 @@ def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, serv
 
     Returns:
         None
+
     """
     link = _describe_existing_librenms_link(device, server_key)
     validation["existing_librenms_link"] = link
@@ -740,6 +747,7 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
 
     Returns:
         None
+
     """
     clear_match_derived_action_fields(validation)
     # Migration / device-type state is also derived from the (now dropped) match;
@@ -768,6 +776,7 @@ def _reassert_new_import_blockers(validation: dict) -> None:
 
     Returns:
         None
+
     """
     if validation.get("import_as_vm"):
         placement = validation.get("vm_placement") or {}
@@ -794,6 +803,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         validation (dict): The cached validation state, mutated in place.
         libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
         server_key (str): The active LibreNMS server key.
+
     """
     existing = validation.get("existing_device")
     if existing and hasattr(existing, "pk"):
@@ -975,6 +985,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             Returns:
                 tuple[object | None, bool]: The single matching object, if any, and whether the name
                     is ambiguous.
+
             """
             matches = list(m.objects.filter(name__iexact=value)[:2])
             if len(matches) > 1:
@@ -1269,6 +1280,7 @@ def process_device_filters(  # noqa: C901
         List[dict]: Validated devices with _validation key, or tuple of (devices, from_cache)
         if return_cache_status is True. from_cache=True means data was loaded from existing
         cache; from_cache=False means data was just fetched from LibreNMS.
+
     """
     # Fetch devices from LibreNMS
     if job:

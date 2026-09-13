@@ -103,6 +103,7 @@ def _detect_oob_type_from_name(name):
     Returns:
         str | None: The canonical OOB type token (idrac/ilo/ipmi/bmc/drac), or None
             if no token matches.
+
     """
     if not name:
         return None
@@ -124,6 +125,7 @@ def _describe_existing_librenms_link(obj, server_key):
     Returns:
         dict: ``{"host_id": int|None, "oob_id": int|None, "oob_type": str|None}``
             summarising the ``librenms_id`` custom field for *server_key*.
+
     """
     info = {"host_id": None, "oob_id": None, "oob_type": None}
     # Host ID via the single canonical accessor (per coding guidelines) rather than touching the
@@ -164,6 +166,7 @@ def _describe_link_note(existing_link):
     Returns:
         str: One of "currently linked to LibreNMS device #N", "currently linked to LibreNMS
             as an OOB controller", or "not linked to LibreNMS".
+
     """
     link = existing_link or {}
     if link.get("host_id"):
@@ -199,6 +202,7 @@ def resolve_device_by_host_ip(primary_ip):
     Raises:
         ValueError: When *primary_ip* is not a parseable host address. Callers catch it and
             fail closed for that device.
+
     """
     from dcim.models import Device
     from ipam.models import IPAddress
@@ -249,6 +253,7 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
 
     Returns:
         dict | None: Dict with matched/device_type/match_type keys, or None on failure.
+
     """
     skip_values = {"", "-", "Unspecified", "BUILTIN", "None"}
 
@@ -307,6 +312,7 @@ def _resolve_device_name(
     Returns:
         tuple[str, str]: The determined name and its source: ``"sysname"``, ``"hostname"``, or
             the ``device-<id>`` fallback itself when no usable name remains after stripping.
+
     """
     # LibreNMS sends JSON, so a name field can arrive as any type; only a str can name a device.
     sysname, hostname = _name_candidates(libre_device)
@@ -360,6 +366,7 @@ def _determine_device_name(
         >>> _determine_device_name({'sysName': 'router.example.com', 'hostname': 'router'},
         ...                        use_sysname=True, strip_domain=True)
         'router'
+
     """
     return _resolve_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain, device_id=device_id)[
         0
@@ -385,6 +392,7 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
 
     Returns:
         None
+
     """
     logger.warning("Import validation blocked — ambiguous librenms_id %r: %s", librenms_id, exc)
     result["ambiguous_librenms_id"] = True
@@ -424,6 +432,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
 
     Returns:
         dict: The keyword arguments for :func:`apply_oob_detection_result`.
+
     """
     # Compute both possible roles for the incoming LibreNMS device against
     # the existing NetBox device, then pick a heuristic default. The UI
@@ -694,6 +703,7 @@ def validate_device_for_import(  # noqa: C901
         >>> validation = validate_device_for_import(libre_device)
         >>> if validation['is_ready']:
         ...     import_single_device(libre_device['device_id'])
+
     """
     result = {
         "is_ready": False,
@@ -1716,6 +1726,7 @@ def import_single_device(  # noqa: C901
                     'ip_addresses': int
                 },
             }
+
     """
     try:
         api = LibreNMSAPI(server_key=server_key)
@@ -1981,6 +1992,7 @@ def get_librenms_device_by_id(api: LibreNMSAPI, device_id: int, use_cache: bool 
 
     Returns:
         Device dictionary or None if not found
+
     """
     try:
         # Use the dedicated API endpoint to get device by ID
@@ -2030,6 +2042,7 @@ def fetch_device_with_cache(
         >>> # With pre-fetched cache dict
         >>> cache_dict = {123: {...}, 456: {...}}
         >>> libre_device = fetch_device_with_cache(123, api, libre_devices_cache=cache_dict)
+
     """
     # Check pre-fetched cache dict first (fastest) — but only when the cached row's OWN device_id
     # doesn't contradict the requested id (cached_row_matches), so a mis-keyed/stale entry isn't
@@ -2072,6 +2085,7 @@ def __getattr__(name):
 
     Raises:
         AttributeError: If *name* is any other attribute.
+
     """
     if name == "bulk_import_devices_shared":
         from .bulk_import import bulk_import_devices_shared

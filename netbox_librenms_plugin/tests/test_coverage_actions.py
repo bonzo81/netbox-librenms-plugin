@@ -2168,6 +2168,64 @@ class TestApplyImportIntentToValidation:
         assert validation["can_import"] is True
         assert validation["is_ready"] is True
 
+    def test_standalone_host_placement_clears_a_stale_cluster(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_host_to_validation
+
+        stale_cluster = make_cluster("selection-stale-host-cluster")
+        host = make_device("selection-standalone-host")
+        validation = {
+            "cluster": {
+                "found": True,
+                "cluster": stale_cluster,
+                "available_clusters": [stale_cluster],
+            },
+            "vm_placement": {"method": "cluster", "found": True, "host_device": None},
+            "issues": [],
+        }
+
+        apply_host_to_validation(validation, host)
+
+        assert validation["cluster"] == {
+            "found": False,
+            "cluster": None,
+            "available_clusters": [stale_cluster],
+        }
+        assert validation["vm_placement"] == {"method": "host", "found": True, "host_device": host}
+
+    @pytest.mark.parametrize(
+        ("method", "site_found"),
+        [("site", True), ("site", False), ("cluster", False), ("host", False)],
+        ids=["matched-site", "missing-site", "missing-cluster", "missing-host"],
+    )
+    def test_non_cluster_or_missing_placement_clears_a_stale_cluster(self, method, site_found):
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent, VMPlacementMethod
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
+
+        stale_cluster = make_cluster(f"selection-stale-{method}-{site_found}")
+        validation = {
+            "site": {"found": site_found},
+            "cluster": {
+                "found": True,
+                "cluster": stale_cluster,
+                "available_clusters": [stale_cluster],
+            },
+            "vm_placement": {"method": "cluster", "found": True, "host_device": None},
+            "issues": [],
+        }
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.VIRTUAL_MACHINE,
+            vm_placement_method=VMPlacementMethod(method),
+        )
+
+        _apply_import_intent_to_validation(validation, intent, is_vm=True, user=make_superuser())
+
+        assert validation["cluster"] == {
+            "found": False,
+            "cluster": None,
+            "available_clusters": [stale_cluster],
+        }
+
     def test_device_with_role_and_rack(self):
         from dcim.models import Rack
 
@@ -2196,6 +2254,47 @@ class TestApplyImportIntentToValidation:
         assert validation["issues"] == []
         assert validation["can_import"] is True
         assert validation["is_ready"] is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("view_name", "method"),
+    [
+        ("DeviceValidationDetailsView", "get"),
+        ("DeviceConflictActionView", "post"),
+        ("AddAsOOBView", "post"),
+        ("PromoteToHostView", "post"),
+        ("MergeNetBoxDevicesView", "post"),
+        ("AddDeviceTypeMappingView", "post"),
+        ("AddPlatformMappingView", "post"),
+        ("CreatePlatformFromImportView", "get"),
+        ("CreatePlatformFromImportView", "post"),
+    ],
+)
+def test_import_action_boundaries_reject_malformed_row_intent(view_name, method):
+    """Every import fragment boundary must reject malformed intent before a lookup or mutation."""
+    from netbox_librenms_plugin.views.imports import actions
+
+    device_id = 8100
+    request = make_view_request(
+        method,
+        {
+            "server_key": "default",
+            f"object_type_{device_id}": "not-a-netbox-object",
+        },
+        user=make_superuser(),
+        HTTP_HX_REQUEST="true",
+    )
+
+    response = (get_view if method == "get" else post_view)(
+        getattr(actions, view_name)(),
+        request,
+        device_id=device_id,
+    )
+
+    assert response.status_code == 200
+    assert response["HX-Reswap"] == "none"
+    assert f"Invalid selection for object_type_{device_id}.".encode() in response.content
 
 
 @pytest.mark.django_db

@@ -49,6 +49,7 @@ def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None =
 
     Raises:
         RuntimeError: If the selected database connection has no open transaction.
+
     """
     # Resolve the alias the caller's transaction.atomic(using=...) opened; the default
     # connection can be in autocommit, where the lock would release immediately.
@@ -81,6 +82,7 @@ def is_list_of_dicts(value) -> bool:
 
     Returns:
         bool: True if *value* is a list of dicts (the empty list included), False otherwise.
+
     """
     return isinstance(value, list) and all(isinstance(item, dict) for item in value)
 
@@ -101,6 +103,7 @@ def cache_remaining_ttl(cache, key):
     Returns:
         int | None: The remaining TTL in seconds, ``None`` when the backend can't report it
             (no ``ttl`` method) or the key has no expiry.
+
     """
     ttl = getattr(cache, "ttl", None)
     if ttl is None:
@@ -128,6 +131,7 @@ def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
 
     Returns:
         int | None: Speed in kilobits per second, or None if input is None.
+
     """
     if speed_bps is None:
         return None
@@ -143,6 +147,7 @@ def format_mac_address(mac_address: object) -> str:
 
     Returns:
         str: The MAC address formatted as XX:XX:XX:XX:XX:XX.
+
     """
     # A device can report ifPhysAddress as an int or a list, so a truthy value is not
     # necessarily a string. Treat any non-string as absent, like the interface view does.
@@ -341,6 +346,7 @@ def validate_regex_field(value, field_name):
 
     Raises:
         ValidationError: ``{field_name: "Invalid regex: <detail>"}`` when ``value`` won't compile.
+
     """
     try:
         return re.compile(value)
@@ -367,6 +373,7 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
 
     Returns:
         tuple[dict[int, int], dict[int, int]]: Normalized lag member and sub-interface maps.
+
     """
     if not isinstance(relationships, dict):
         relationships = {}
@@ -406,7 +413,7 @@ def get_virtual_chassis_member(
     return_device_on_failure: bool = True,
 ) -> Device | None:
     """
-    Determines the likely virtual chassis member based on the device's vc_position and port name.
+    Determine the likely virtual chassis member from the device's vc_position and port name.
 
     Args:
         device (Device): The NetBox device instance.
@@ -426,6 +433,7 @@ def get_virtual_chassis_member(
         Device | None: The matching virtual chassis member. By default, returns the
             original device if matching fails; returns ``None`` instead when
             ``return_device_on_failure`` is false.
+
     """
     fallback = device if return_device_on_failure else None
     if not hasattr(device, "virtual_chassis") or not device.virtual_chassis:
@@ -487,6 +495,7 @@ def resolve_interface_row_device(
 
     Returns:
         Device | None: Resolved Virtual Chassis member, the fallback device, or ``None``.
+
     """
     if not getattr(device, "virtual_chassis", None):
         return device
@@ -551,6 +560,7 @@ def get_virtual_chassis_members(device: Device) -> list:
     Returns:
         list: All member Devices (including *device* itself), or ``[device]`` when
             it isn't in a virtual chassis.
+
     """
     vc = getattr(device, "virtual_chassis", None)
     members = getattr(vc, "members", None) if vc is not None else None
@@ -723,6 +733,7 @@ def predict_module_interface_rename(device: Device, module, names) -> list[str]:
 
     Returns:
         list[str]: Predicted names in the same order as the input names.
+
     """
     from netbox_librenms_plugin.signals import predict_module_interface_names
 
@@ -793,6 +804,7 @@ def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
 
     Returns:
         Optional[dict]: Diagnostic details, or ``None`` when normalization is not a no-op.
+
     """
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
@@ -862,6 +874,7 @@ def build_vc_normalization_report(diagnostic: dict) -> str:
 
     Returns:
         str: Markdown report for a GitHub issue.
+
     """
     import sys
 
@@ -928,6 +941,7 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
     Returns:
         Optional[Device]: The device that should handle LibreNMS sync, or None if
                          the device is not in a virtual chassis.
+
     """
     if server_key is not None:
         server_key = require_server_key(server_key)
@@ -1012,7 +1026,7 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
 
 def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     """
-    Extends Netbox pagination to support multiple tables by using table-specific prefixes.
+    Extend NetBox pagination for multiple tables with table-specific prefixes.
 
     Args:
         request: HTTP request object
@@ -1020,6 +1034,7 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
 
     Returns:
         int: Number of items to display per page
+
     """
     config = get_config()
     # Check GET first, then POST (HTMX refresh requests send pagination via POST body)
@@ -1062,6 +1077,7 @@ def save_user_pref(request, path, value):
         request (HttpRequest): Request for the user whose preference is saved.
         path (str): Preference path to set.
         value (object): Preference value to save.
+
     """
     if hasattr(request, "user") and hasattr(request.user, "config"):
         user_config = request.user.config
@@ -1086,6 +1102,7 @@ def validate_import_context_columns(value):
 
     Returns:
         tuple[str, ...] | None: Ordered columns, or None when the value is invalid.
+
     """
     if not isinstance(value, list) or any(not isinstance(column, str) for column in value):
         return None
@@ -1105,6 +1122,7 @@ def resolve_import_context_columns(request):
 
     Returns:
         tuple[str, ...]: Valid visible columns or the focused-table defaults.
+
     """
     stored = get_user_pref(request, IMPORT_CONTEXT_COLUMNS_PREFERENCE, list(IMPORT_CONTEXT_COLUMNS_DEFAULT))
     validated = validate_import_context_columns(stored)
@@ -1132,6 +1150,7 @@ def read_request_toggle(request, keys):
 
     Returns:
         str | None: First matching toggle value, or ``None`` when no key is present.
+
     """
     post_value = next((request.POST.get(key) for key in keys if key in request.POST), None)
     if post_value is not None:
@@ -1151,6 +1170,7 @@ def resolve_naming_preferences(request) -> tuple[bool, bool]:
 
     Returns:
         tuple[bool, bool]: The ``use_sysname`` and ``strip_domain`` values.
+
     """
     from netbox_librenms_plugin.models import LibreNMSSettings
 
@@ -1186,7 +1206,7 @@ def resolve_naming_preferences(request) -> tuple[bool, bool]:
 
 
 def same_host(a, b) -> bool:
-    """True if two address strings refer to the same host IP (version-aware)."""
+    """Return whether two address strings refer to the same host IP."""
     try:
         return parse_host_address(a) == parse_host_address(b)
     except ValueError:
@@ -1206,6 +1226,7 @@ def resolve_create_missing_interfaces(request) -> bool:
 
     Returns:
         bool: Whether missing NetBox interfaces can be created before IP assignment.
+
     """
     value = read_request_toggle(request, ("create-missing-interfaces-toggle", "create_missing_interfaces"))
     return is_truthy_parameter(value) if value is not None else False
@@ -1233,6 +1254,7 @@ def resolve_set_primary_ip(request) -> bool:
 
     Returns:
         bool: Whether the matching synced management IP can become the primary IP.
+
     """
     value = read_request_toggle(request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"))
     if value is not None:
@@ -1281,6 +1303,7 @@ def interface_field_limit(field_name, model=None):
 
     Returns:
         int | None: Maximum field length, or ``None`` when the field has no length limit.
+
     """
     return (model or Interface)._meta.get_field(field_name).max_length
 
@@ -1300,6 +1323,7 @@ def syncable_interface_name(port, interface_name_field, model=None):
 
     Returns:
         str | None: Valid interface name, or ``None`` when NetBox cannot store it.
+
     """
     name = port.get(interface_name_field)
     if not isinstance(name, str) or not name.strip():
@@ -1323,6 +1347,7 @@ def interface_name_rejection_reason(port, interface_name_field, model=None):
 
     Returns:
         str | None: Rejection reason, or ``None`` when the name can be synced.
+
     """
     name = port.get(interface_name_field)
     if not isinstance(name, str) or not name.strip():
@@ -1350,6 +1375,7 @@ def bounded_interface_text(field_name, value, model=None):
 
     Raises:
         ValueError: If ``field_name`` is ``name``.
+
     """
     if field_name == "name":
         raise ValueError("An interface name must not be truncated; use syncable_interface_name().")
@@ -1370,6 +1396,7 @@ def coerce_interface_mtu(value) -> int | None:
 
     Returns:
         int | None: Valid NetBox MTU, or ``None`` when the value is invalid or outside the accepted range.
+
     """
     from dcim.constants import INTERFACE_MTU_MAX, INTERFACE_MTU_MIN
 
@@ -1437,6 +1464,7 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
 
     Returns:
         str: Interface name field to use
+
     """
     platform_id = coerce_model_pk(getattr(obj, "platform_id", None))
     if request:
@@ -1495,6 +1523,7 @@ def match_librenms_hardware_to_device_type(hardware_name: str, *, preloaded_rule
         (DeviceTypeMapping, part_number, or model) — i.e., the function fails closed
         on all ambiguity cases.  Callers must guard with ``if result is None:``
         before inspecting the dict.
+
     """
     from dcim.models import DeviceType
 
@@ -1630,6 +1659,7 @@ def find_matching_site(librenms_location: str) -> dict:
             - site (Site|None): The matched Site object
             - match_type (str|None): 'exact', 'mapping', or None
             - confidence (float): 1.0 if found, 0.0 otherwise
+
     """
     from dcim.models import Site
 
@@ -1668,6 +1698,7 @@ def resolve_location_mapping(field_type: str, librenms_value: str, parent_site=N
     Returns:
         The matched NetBox object, or None if no mapping applies or if several
         mappings resolve to different objects (ambiguous — see below).
+
     """
     if not librenms_value:
         return None
@@ -1782,6 +1813,7 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
 
     Returns:
         dict: Mapping of each supported token to its parsed value (or None).
+
     """
     result = {name: None for name in LOCATION_PARSE_TOKENS}
     if not location_string or not pattern:
@@ -1846,6 +1878,7 @@ def parse_location_for_import(location_string: str) -> dict:
 
     Returns:
         dict: Mapping of each supported token to its parsed value (or None).
+
     """
     location_string = _normalise_location_value(location_string)
     pattern, is_regex = get_location_parse_settings()
@@ -1887,6 +1920,7 @@ def find_matching_platform(librenms_os: str) -> dict:
               'ambiguous' means multiple PlatformMapping entries matched, or
               multiple Platform objects share the same name, and a single
               Platform could not be determined.
+
     """
     from dcim.models import Platform
 
@@ -1943,6 +1977,7 @@ def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -
 
     Returns:
         CSS class string: 'text-success', 'text-warning', or 'text-danger'.
+
     """
     if not exists_in_netbox:
         return "text-danger"
@@ -1978,6 +2013,7 @@ def get_untagged_vlan_css_class(librenms_vid, netbox_vid, exists_in_netbox, miss
 
     Returns:
         CSS class string: text-danger, text-warning, or text-success.
+
     """
     if not exists_in_netbox:
         return "text-danger"
@@ -2012,6 +2048,7 @@ def get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing
 
     Returns:
         CSS class string: text-danger, text-warning, or text-success.
+
     """
     if not exists_in_netbox:
         return "text-danger"
@@ -2060,6 +2097,7 @@ def check_vlan_group_matches(
 
     Returns:
         bool: True if groups match (or comparison not applicable).
+
     """
     if vlan_type == "U":
         if netbox_untagged_vid == vid:
@@ -2085,6 +2123,7 @@ def normalize_serial(value) -> str:
 
     Args:
         value: The raw serial as returned by LibreNMS (str, number, or None).
+
     """
     return "" if value is None else str(value).strip()
 
@@ -2100,6 +2139,7 @@ def find_devices_by_serial(serial: str, limit: int = 2) -> list:
     Args:
         serial: The incoming serial, already passed through ``normalize_serial``.
         limit: How many rows to read, enough to tell a unique match from a duplicate.
+
     """
     from dcim.models import Device
     from django.db.models import CharField, F, Func, Value
@@ -2157,6 +2197,7 @@ def coerce_librenms_id(value) -> int | None:
 
     Returns:
         int | None: The positive integer id, or None if it can't be coerced.
+
     """
     if isinstance(value, bool):
         return None
@@ -2189,6 +2230,7 @@ def render_vc_member_options(members, selected_id):
 
     Returns:
         SafeString: The concatenated ``<option>`` elements, member names escaped.
+
     """
     return mark_safe(  # noqa: S308 — names escaped above; ids are model pks
         "".join(
@@ -2214,6 +2256,7 @@ def oob_badge_html(record, leading_space=False):
 
     Returns:
         SafeString: The badge markup, or ``""`` when the row is not OOB-sourced.
+
     """
     if record.get("_source") != "oob":
         return ""
@@ -2235,6 +2278,7 @@ def is_valid_ports_payload(payload) -> bool:
 
     Returns:
         bool: True when *payload* is a dict whose ``"ports"`` is a list of dict rows.
+
     """
     return (
         isinstance(payload, dict)
@@ -2261,6 +2305,7 @@ def resolve_server_mapping_display_id(entry) -> tuple[int | None, bool]:
         tuple[int | None, bool]: ``(display_id, is_oob_only)`` — the coerced id to display (or
             None when neither a host nor an OOB id is valid), and whether it came from the OOB
             fallback (host id absent/invalid but ``oob.id`` valid).
+
     """
     if isinstance(entry, dict):
         host_id = coerce_librenms_id(entry.get("id"))
@@ -2293,6 +2338,7 @@ def coerce_positive_int(value) -> int | None:
 
     Returns:
         int | None: The positive integer, or None if it can't be coerced.
+
     """
     return coerce_librenms_id(value)
 
@@ -2312,6 +2358,7 @@ def cached_row_matches(cached_row, device_id) -> bool:
 
     Returns:
         bool: True when the cached row may be used for *device_id*.
+
     """
     if not isinstance(cached_row, dict):
         return False
@@ -2338,6 +2385,7 @@ def row_identity_matches(row, device_id) -> bool:
 
     Returns:
         bool: True when the payload's own device_id equals the requested id.
+
     """
     requested_id = coerce_librenms_id(device_id)
     if requested_id is None:
@@ -2369,6 +2417,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
 
     Returns:
         int or None
+
     """
     server_key = require_server_key(server_key)
     cf_value = obj.cf.get("librenms_id")
@@ -2432,6 +2481,7 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         obj: NetBox object with a ``librenms_id`` custom field.
         device_id: LibreNMS device ID (integer).
         server_key: LibreNMS server key (from plugin ``servers`` config).
+
     """
     server_key = require_server_key(server_key)
     if isinstance(device_id, bool):
@@ -2508,6 +2558,7 @@ def add_librenms_server_mapping(
         ValueError: If the custom-field container is not a server mapping or uses the legacy format.
         SameServerIdentityConflict: If an unconfirmed call would replace a different host ID.
         StaleIdentityReplacement: If ``confirmed_replacement_of`` is not the current host ID.
+
     """
     server_key = require_server_key(server_key)
     normalized_device_id = coerce_librenms_id(device_id)
@@ -2584,6 +2635,7 @@ def build_librenms_id_qs(server_key, value):
         tuple[Q, Q]: ``(host_q, oob_q)`` — host-identity predicates (scalar / ``__id`` / legacy
             bare) and the OOB-controller predicate (``__oob__id``), kept separate so callers can
             fail closed on a host-vs-OOB cross-row collision.
+
     """
     try:
         server_key = require_server_key(server_key)
@@ -2659,6 +2711,7 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, sele
 
     Returns:
         Model instance or None
+
     """
     if librenms_id is None:
         return None
@@ -2778,6 +2831,7 @@ def lock_librenms_id_assignment(librenms_id, server_key: str, *, owner_queryset=
     Raises:
         ValueError: If the ID, server key, or owner arguments are invalid.
         AmbiguousLibreNMSIdError: If more than one existing object owns the ID.
+
     """
     from virtualization.models import VirtualMachine
 
@@ -2824,6 +2878,7 @@ def get_librenms_oob(obj, server_key: str = "default") -> dict | None:
 
     Returns:
         dict or None
+
     """
     server_key = require_server_key(server_key)
     cf_value = obj.cf.get("librenms_id")
@@ -2869,6 +2924,7 @@ def set_librenms_oob(
             generic ``"oob"`` sentinel, or if the stored host-side ``librenms_id`` for
             *server_key* is a non-empty, unparseable string (fail closed rather than
             silently dropping the corrupted host link).
+
     """
     from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN, OOB_TYPES
 
@@ -2953,6 +3009,7 @@ def clear_librenms_oob(obj, server_key: str = "default") -> None:
     Args:
         obj: NetBox object with a ``librenms_id`` custom field.
         server_key: LibreNMS server key (from plugin ``servers`` config).
+
     """
     server_key = require_server_key(server_key)
     cf_value = obj.custom_field_data.get("librenms_id")
@@ -2985,6 +3042,7 @@ def is_legacy_librenms_id(value) -> bool:
     Returns:
         bool: ``True`` for a *positive* bare int (non-bool) or a positive int-parseable string;
             ``False`` for ``None``, ``0``/negative, the dict form, a bool, or a non-numeric string.
+
     """
     if isinstance(value, bool):
         return False
@@ -3015,6 +3073,7 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
 
     Returns:
         True if the value was migrated, False if it was already in the correct format.
+
     """
     server_key = require_server_key(server_key)
     cf_value = obj.custom_field_data.get("librenms_id")
@@ -3066,6 +3125,7 @@ def _get_netbox_version_tuple():
 
     Returns:
         tuple[int, int, int] | None: Parsed NetBox version, or ``None`` when it cannot be determined.
+
     """
     try:
         from netbox.settings import RELEASE
@@ -3089,6 +3149,7 @@ def netbox_clean_reads_parent_virtual_chassis():
 
     Returns:
         bool: Whether the running NetBox needs tolerance for the parent validation defect.
+
     """
     version = _get_netbox_version_tuple()
     if version is None:
@@ -3130,6 +3191,7 @@ def netbox_resolves_module_token_per_leaf():
 
     Returns:
         bool: Whether NetBox resolves the token to the leaf module bay's position.
+
     """
     version = _get_netbox_version_tuple()
     if version is None:
@@ -3148,6 +3210,7 @@ def ip_family(ip):
 
     Args:
         ip: The IPAddress whose family to read.
+
     """
     address = ip.address
     if not address:
@@ -3180,6 +3243,7 @@ def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key, copy_d
 
     Returns:
         dict: The normalized entry (``{"id": N}``, ``{}``, or the original/copied dict).
+
     """
     if isinstance(entry, int) and not isinstance(entry, bool):
         return {"id": entry}
@@ -3221,6 +3285,7 @@ def _coerce_link_id_or_raise(raw, *, owner, name, server_key, kind):
 
     Returns:
         int | None: The positive integer id, or None when the value is blank/absent.
+
     """
     if isinstance(raw, str) and not raw.strip():
         raw = None
@@ -3263,6 +3328,7 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:  #
         A dict describing what was actually merged: keys ``host_id_from_donor``,
         ``oob_from_donor`` (None or dict), ``donor_id_demoted_to_oob``
         (None or dict).  Useful for audit logging and tests.
+
     """
     from netbox_librenms_plugin.constants import normalize_oob_type
 
@@ -3453,6 +3519,7 @@ def validation_error_detail(exc: ValidationError) -> str:
 
     Returns:
         str: ``field: message`` pairs joined with ``"; "`` (or the plain messages/str form).
+
     """
     if hasattr(exc, "message_dict"):
         return "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
@@ -3503,6 +3570,7 @@ def set_device_ip_fk(device, field, ip, *, save=True):
     Raises:
         ValueError: If *field* is unsupported, or a non-``None`` *ip* is not assigned
             to an interface on *device*, or its family doesn't match the field.
+
     """
     from dcim.models import Interface
 
@@ -3549,6 +3617,7 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
         at: ISO timestamp string. When None, a timezone-aware UTC timestamp
             (``datetime.now(timezone.utc)`` formatted as ``YYYY-MM-DDTHH:MM:SSZ``)
             is used.
+
     """
     from datetime import datetime, timezone
 
@@ -3659,6 +3728,7 @@ def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
         dict | None: The marker dict ``{device_id, server_key, at}`` when the donor
             was previously merged via :func:`mark_librenms_migrated`, or None when no
             valid marker is present (missing, malformed, or superseded by a live link).
+
     """
     server_key = require_server_key(server_key or "default")
     if device is None:
@@ -3720,6 +3790,7 @@ def build_migrated_context(obj, server_key: str = "default") -> dict:
             rejected server key, no marker, or a corrupt self-pointing marker). ``migrated_to_winner``
             is a lazy ``Device`` proxy (truthiness/attribute access resolves it; it proxies None if
             the winner row was since deleted) — test it via truthiness in templates, not ``is None``.
+
     """
     # Callers pass a request-supplied scope. Only mark_librenms_migrated() writes markers, and it
     # validates the key first, so a rejected key can hold none — report migrated mode off instead
@@ -3768,6 +3839,7 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
             When provided, avoids a per-call DB query.  Pass
             ``{mid: len(bays) for mid, bays in module_scoped_bays.items()}`` from
             the caller that already has the bay maps loaded.
+
     """
     from dcim.constants import MODULE_TOKEN
 
@@ -3808,7 +3880,7 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
 
 class _ModuleTypeIndex(dict):
     """
-    This dict maps LibreNMS keys to ``ModuleType`` objects and stores manufacturer-scoped overrides.
+    Map LibreNMS keys to ``ModuleType`` objects and store manufacturer-scoped overrides.
 
     Behaves exactly like a plain ``dict`` for the global key space (model/part_number
     plus any global ``ModuleTypeMapping`` rows), but additionally exposes
@@ -3848,6 +3920,7 @@ def _module_types_index_version():
     Returns:
         tuple[tuple[int, str], tuple[int, str], tuple[int, str]]: Fingerprints for module types,
             interface templates, and module type mappings.
+
     """
     from dcim.models import InterfaceTemplate, ModuleType
 
@@ -3879,6 +3952,7 @@ def get_module_types_indexed() -> dict:
 
     Returns:
         dict: Module types indexed by LibreNMS lookup keys.
+
     """
     global _MODULE_TYPES_INDEX_CACHE
 
@@ -3910,6 +3984,7 @@ def _build_module_types_index() -> dict:
 
     Returns:
         dict: Module types indexed by global keys and manufacturer-scoped overrides.
+
     """
     from dcim.models import ModuleType
 
@@ -3994,6 +4069,7 @@ def get_module_type_ambiguities() -> dict:
 
     Returns:
         dict[str, list]: Ambiguous lookup keys mapped to their candidate ModuleTypes.
+
     """
     from dcim.models import ModuleType
 
@@ -4023,6 +4099,7 @@ def get_generic_module_types_indexed() -> dict:
 
     Returns:
         dict: Generic module types indexed by unambiguous model and part number values.
+
     """
     from dcim.models import ModuleType
 
@@ -4060,6 +4137,7 @@ def preload_normalization_rules(scope: str, manufacturer=None) -> dict:
 
     Returns:
         dict: Rule lists indexed by scope and optional manufacturer primary key.
+
     """
     from netbox_librenms_plugin.models import NormalizationRule
 
@@ -4097,6 +4175,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
 
     Returns:
         The normalized string after all matching rules have been applied.
+
     """
     from netbox_librenms_plugin.models import NormalizationRule
 
@@ -4179,6 +4258,7 @@ def resolve_module_type(
 
     Returns:
         ModuleType | None: Matched ModuleType, or ``None`` when no lookup path matches.
+
     """
     if not model_name:
         return None
@@ -4255,6 +4335,7 @@ def load_bay_mappings() -> tuple:
 
     Returns:
         (exact_mappings, regex_mappings) tuple of lists.
+
     """
     from netbox_librenms_plugin.models import ModuleBayMapping
 

@@ -72,6 +72,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         Returns:
             bool: True if background job should be used, False for synchronous
+
         """
         # Non-superusers cannot poll background-tasks API (requires IsSuperuser)
         if not self.request.user.is_superuser:
@@ -114,6 +115,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         Returns:
             List[dict]: Validated devices from job cache, or [] if cache expired
+
         """
         from core.models import Job
 

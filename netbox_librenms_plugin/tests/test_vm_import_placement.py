@@ -334,6 +334,7 @@ def test_sync_import_post_creates_host_placed_vm(
     assert response.status_code == 302
     assert imported.device_id == host.pk
     assert imported.cluster_id == host.cluster_id
+    assert imported.site_id == host.site_id
 
 
 @pytest.mark.django_db

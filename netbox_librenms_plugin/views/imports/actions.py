@@ -66,6 +66,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     apply_role_to_validation,
     fetch_model_by_id,
     merge_candidate_pks,
+    reset_cluster,
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -131,6 +132,7 @@ def _attach_messages_oob(response, request):
 
     Returns:
         The response, unchanged when it has no byte content or nothing is queued.
+
     """
     if response is None or not hasattr(response, "content"):
         return response
@@ -225,6 +227,7 @@ def _resolve_vc_detection_enabled(request) -> bool:
 
     Returns:
         bool: Whether VC detection is enabled.
+
     """
     for source in (request.POST, request.GET):
         parsed = _parse_boolish(source.get("enable_vc_detection"))
@@ -267,6 +270,7 @@ def _htmx_error_response(message: str) -> HttpResponse:
 
     Returns:
         HttpResponse: The HTMX error response.
+
     """
     toast_html = format_html(
         '<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">'
@@ -288,6 +292,16 @@ def _htmx_error_response(message: str) -> HttpResponse:
     return resp
 
 
+def _invalid_import_intent_response(request, device_id: int) -> HttpResponse | None:
+    """Return an HTMX error for malformed row intent, or None when the intent is valid."""
+    data = request.POST if request.method == "POST" else request.GET
+    try:
+        parse_import_row_intent(data, device_id)
+    except InvalidImportIntent as exc:
+        return _htmx_error_response(str(exc))
+    return None
+
+
 def _render_identity_replacement_confirmation(request, obj, action, force, conflict) -> HttpResponse:
     """
     Offer the signed confirmation for one blocked same-server identity replacement.
@@ -301,6 +315,7 @@ def _render_identity_replacement_confirmation(request, obj, action, force, confl
 
     Returns:
         HttpResponse: The confirmation dialog, swapped over the open modal.
+
     """
     intent = IdentityReplacementIntent(
         user_pk=request.user.pk,
@@ -352,6 +367,7 @@ def _rebind_or_htmx_error(view, request) -> HttpResponse | None:
 
     Returns:
         HttpResponse | None: An HTMX error toast when the rebind fails closed, else ``None``.
+
     """
     if _rebind_configured_import_server(view, request.POST) is None:
         return _htmx_error_response("Selected LibreNMS server is no longer configured.")
@@ -393,6 +409,7 @@ def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
     Returns:
         tuple: ``(locked, None)`` on success, where *locked* is None when no row exists, or
         ``(None, error_response)`` when the caller must stop.
+
     """
     present_pks = list(model.objects.filter(**lookup).values_list("pk", flat=True)[:2])
     if len(present_pks) > 1:
@@ -454,6 +471,7 @@ def _oob_ip_is_reassignable(candidate, interface) -> bool:
     Returns:
         bool: True when the row is free or already on this device, and no other device
             references it through primary_ip4/primary_ip6/oob_ip.
+
     """
     from dcim.models import Device
     from django.db.models import Q
@@ -487,6 +505,7 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
 
     Raises:
         RuntimeError: When called in autocommit — the lock would release immediately.
+
     """
     acquire_advisory_transaction_lock(f"netbox-librenms-plugin:device-serial:{serial}")
 
@@ -512,6 +531,7 @@ def _apply_conflict_checked_serial(device, incoming_serial: str, user) -> HttpRe
 
     Returns:
         HttpResponse | None: An HTMX error toast when another device owns the serial, else None.
+
     """
     from dcim.models import Device
 
@@ -549,6 +569,7 @@ def _platform_device_type_mismatch(device) -> HttpResponse | None:
 
     Returns:
         HttpResponse | None: An HTMX error response on mismatch, otherwise None.
+
     """
     platform = getattr(device, "platform", None)
     device_type = getattr(device, "device_type", None)
@@ -586,6 +607,7 @@ def _device_type_rack_fit_error(device) -> HttpResponse | None:
 
     Returns:
         HttpResponse | None: An HTMX error response on a violation, otherwise None.
+
     """
     rack = getattr(device, "rack", None)
     position = getattr(device, "position", None)
@@ -657,6 +679,7 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
 
     Returns:
         HttpResponse | None: An error response on failure, or None on success.
+
     """
 
     def _err(msg: str, status: int) -> HttpResponse:
@@ -736,6 +759,7 @@ def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> s
 
     Returns:
         str: The resolved hostname.
+
     """
     resolved = validation.get("resolved_name")
     if resolved:
@@ -767,6 +791,7 @@ class DeviceImportHelperMixin:
         Returns:
             tuple: The LibreNMS device, validation, and parsed intent. The first two
                 values are None when the device is not found.
+
         """
         # Reuse a caller-supplied device, else use cached device data from the table load
         # (both eliminate redundant API calls).
@@ -809,6 +834,7 @@ class DeviceImportHelperMixin:
 
         Returns:
             tuple[dict, ImportRowIntent]: The validation and parsed row intent.
+
         """
         data = request.POST if request.method == "POST" else request.GET
         intent = parse_import_row_intent(data, device_id)
@@ -870,6 +896,7 @@ class DeviceImportHelperMixin:
 
         Returns:
             HttpResponse: The rendered device row.
+
         """
         libre_device["_validation"] = validation
         table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key, user=request.user)
@@ -918,6 +945,7 @@ class DeviceImportHelperMixin:
         Returns:
             HttpResponse: A 200 response with the OOB toast container attached and
                 ``HX-Reswap: none`` so the empty body doesn't blank the modal/row.
+
         """
         for level, text in deferred_messages:
             messages.add_message(request, level, text)
@@ -939,6 +967,7 @@ class DeviceImportHelperMixin:
 
 def _set_missing_vm_placement(validation: dict, method: VMPlacementMethod, issue: str) -> None:
     """Set an incomplete VM placement and keep the row non-executable."""
+    reset_cluster(validation)
     validation["vm_placement"] = {
         "method": method.value,
         "found": False,
@@ -969,6 +998,7 @@ def _apply_import_intent_to_validation(
         intent: Parsed row state with an explicit object type and placement method.
         is_vm: True if importing as a VM. False if importing as a Device.
         user: Requesting user used to scope host Device selection.
+
     """
     from dcim.models import Device, DeviceRole, Rack
     from virtualization.models import Cluster
@@ -976,6 +1006,7 @@ def _apply_import_intent_to_validation(
     if is_vm:
         method = intent.vm_placement_method or VMPlacementMethod.SITE
         if method is VMPlacementMethod.SITE:
+            reset_cluster(validation)
             placement_found = bool(validation.get("site", {}).get("found"))
             validation["vm_placement"] = {
                 "method": method.value,
@@ -1005,7 +1036,7 @@ def _apply_import_intent_to_validation(
             if intent.host_device_id:
                 host_device = (
                     Device.objects.restrict(user, "view")
-                    .select_related("cluster")
+                    .select_related("cluster", "site")
                     .filter(pk=intent.host_device_id)
                     .first()
                 )
@@ -1281,6 +1312,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
         Returns:
             bool: True if background job should be used, False for synchronous
+
         """
         # Non-superusers cannot poll background-tasks API (requires IsSuperuser)
         if not request.user.is_superuser:
@@ -1776,6 +1808,7 @@ def _suggest_oob_interface(device, oob_candidate, interfaces=None):
     Returns:
         tuple: ``(suggested_interface_id, default_new_name)``; the id is None when no
             interface name obviously matches.
+
     """
     oob_type = (oob_candidate.get("type") or "oob").strip().lower() or "oob"
     default_new_name = f"{oob_type}0"
@@ -1802,6 +1835,9 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
 
     def _render_for_bound_server(self, request, device_id):
         """Render validation details after a caller binds an exact server."""
+        if error := _invalid_import_intent_response(request, device_id):
+            return error
+
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -1926,6 +1962,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
 
         Returns:
             list[dict] | None: The per-server ID mappings, or None for legacy, absent, or invalid data.
+
         """
         from django.conf import settings
 
@@ -2000,6 +2037,8 @@ class DeviceConflictActionView(
     def post(self, request, device_id):  # noqa: C901
         """Resolve a device conflict by linking, updating, or syncing serial."""
         if error := self.require_write_permission():
+            return error
+        if error := _invalid_import_intent_response(request, device_id):
             return error
 
         from dcim.models import Device
@@ -2380,6 +2419,8 @@ class AddDeviceTypeMappingView(
         # Check plugin write permission early (cheap, no API call needed).
         if error := self.require_write_permission():
             return error
+        if error := _invalid_import_intent_response(request, device_id):
+            return error
 
         # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
         # or broken default can't 500 via the lazy librenms_api property.
@@ -2569,6 +2610,9 @@ class CreatePlatformFromImportView(
         """Render the shared create-platform form fragment for the import HTMX modal."""
         from dcim.models import Manufacturer
 
+        if error := _invalid_import_intent_response(request, device_id):
+            return error
+
         # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
         # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
         if _rebind_configured_import_server(self, request.GET) is None:
@@ -2632,6 +2676,8 @@ class CreatePlatformFromImportView(
         from netbox_librenms_plugin.models import PlatformMapping
 
         if error := self.require_write_permission():
+            return error
+        if error := _invalid_import_intent_response(request, device_id):
             return error
 
         # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
@@ -2925,6 +2971,8 @@ class AddAsOOBView(
     def post(self, request, device_id):  # noqa: C901
         """Attach a LibreNMS OOB identity to the matched NetBox device."""
         if error := self.require_write_permission():
+            return error
+        if error := _invalid_import_intent_response(request, device_id):
             return error
 
         from dcim.models import Device
@@ -3247,6 +3295,7 @@ class AddAsOOBView(
         Returns:
             str | None: A warning naming the missing permission(s) or invalid IP, or
                 None when no extra permission is needed.
+
         """
         from dcim.models import Interface
         from ipam.models import IPAddress
@@ -3356,6 +3405,7 @@ class AddAsOOBView(
                 required but the user lacks Interface ``add``, ``(None, "invalid_name")``
                 for a malformed new name, or ``(None, "name_out_of_scope")`` when the
                 requested interface is outside the caller's view scope.
+
         """
         from django.core.exceptions import ValidationError
         from dcim.models import Interface
@@ -3453,6 +3503,7 @@ class AddAsOOBView(
             tuple: ``(ip, None)`` on success, or ``(None, reason)`` where *reason* is
                 ``"invalid"``, ``"conflict"`` (already on another device / create
                 race), or ``"permission"``.
+
         """
         from ipam.models import IPAddress
         from utilities.permissions import get_permission_for_model
@@ -3545,6 +3596,8 @@ class PromoteToHostView(
 
     def post(self, request, device_id):  # noqa: C901
         if error := self.require_write_permission():
+            return error
+        if error := _invalid_import_intent_response(request, device_id):
             return error
 
         from dcim.models import Device
@@ -3757,6 +3810,8 @@ class MergeNetBoxDevicesView(
 
     def post(self, request, device_id):  # noqa: C901
         if error := self.require_write_permission():
+            return error
+        if error := _invalid_import_intent_response(request, device_id):
             return error
 
         from dcim.models import Device
@@ -4080,6 +4135,8 @@ class AddPlatformMappingView(
     def post(self, request, device_id):  # noqa: C901
         """Create a PlatformMapping linking the LibreNMS OS string to a NetBox Platform."""
         if error := self.require_write_permission():
+            return error
+        if error := _invalid_import_intent_response(request, device_id):
             return error
 
         from dcim.models import Platform

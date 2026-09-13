@@ -79,3 +79,7 @@ class TestVlanSyncContentTemplateMigratedMode:
         assert 'id="vlanFilterSection"' in html
         for field in ("vlan-id", "vlan-name", "vlan-group", "vlan-type", "vlan-state"):
             assert f'id="filter-{field}"' in html
+            assert re.search(
+                rf'<label[^>]*class="[^"]*visually-hidden[^"]*"[^>]*for="filter-{field}"[^>]*>',
+                html,
+            )

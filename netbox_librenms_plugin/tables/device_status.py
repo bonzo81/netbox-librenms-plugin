@@ -162,6 +162,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             str: The escaped hx-vals attribute, or an empty string when no server key is set.
+
         """
         server_key = getattr(self, "server_key", None)
         if not server_key:
@@ -299,6 +300,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered NetBox object summary.
+
         """
         validation = record.get("_validation", {})
         existing = validation.get("existing_device")
@@ -365,6 +367,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered import setup controls.
+
         """
         validation = record.get("_validation", {})
         existing = validation.get("existing_device")
@@ -551,6 +554,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered cluster selection HTML.
+
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -644,6 +648,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered role selection HTML.
+
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -706,6 +711,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered rack selection HTML.
+
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -775,6 +781,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered import action HTML.
+
         """
         validation = record.get("_validation", {})
         device_id = record.get("device_id")
@@ -1035,6 +1042,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             str: Complete URL with query parameters.
+
         """
         details_url = reverse(
             "plugins:netbox_librenms_plugin:device_validation_details",

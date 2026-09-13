@@ -45,7 +45,9 @@ def _apply_vm_placement(validation: dict, mappings: dict, user) -> str | None:
     if placement_method == VMPlacementMethod.HOST:
         if not host_device_id or cluster_id:
             return "Host placement requires one host and no cluster selection"
-        host_device = Device.objects.restrict(user, "view").select_related("cluster").filter(id=host_device_id).first()
+        host_device = (
+            Device.objects.restrict(user, "view").select_related("cluster", "site").filter(id=host_device_id).first()
+        )
         if host_device is None:
             return "Selected host device is unavailable"
         apply_host_to_validation(validation, host_device)
@@ -79,6 +81,7 @@ def create_vm_from_librenms(
 
     Raises:
         ValueError: If the VM cannot be created from the validated data.
+
     """
     from virtualization.models import VirtualMachine
 
@@ -88,9 +91,14 @@ def create_vm_from_librenms(
     # Extract matched objects from validation.
     placement = validation.get("vm_placement") or {}
     placement_method = placement.get("method")
-    site = validation.get("site", {}).get("site") if placement_method == VMPlacementMethod.SITE else None
-    cluster = validation.get("cluster", {}).get("cluster") if placement_method != VMPlacementMethod.SITE else None
     host_device = placement.get("host_device") if placement_method == VMPlacementMethod.HOST else None
+    if placement_method == VMPlacementMethod.SITE:
+        site = validation.get("site", {}).get("site")
+    elif host_device is not None:
+        site = host_device.site
+    else:
+        site = None
+    cluster = validation.get("cluster", {}).get("cluster") if placement_method != VMPlacementMethod.SITE else None
     platform = validation["platform"].get("platform")
     role = role if role is not None else validation.get("device_role", {}).get("role")
 
@@ -201,6 +209,7 @@ def bulk_import_vms(
         >>>
         >>> # Background job import
         >>> result = bulk_import_vms(vm_imports, api, sync_options, cache, job=self)
+
     """
     # Extract user from job if not explicitly provided
     if user is None and job is not None:

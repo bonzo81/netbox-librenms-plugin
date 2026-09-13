@@ -132,6 +132,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
         Raises:
             Http404: If the object type is invalid or no permitted device matches the object ID.
+
         """
         self.required_object_permissions = {"POST": self._required_post_permissions(request)}
 
@@ -564,6 +565,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
         Returns:
             HttpResponse: A confirmation disclosure or redirect to the VLAN synchronization page.
+
         """
         force_intents, intent_errors = self._load_force_intents(
             request,
