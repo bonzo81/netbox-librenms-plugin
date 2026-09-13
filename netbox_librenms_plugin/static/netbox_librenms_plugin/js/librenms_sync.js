@@ -1480,6 +1480,19 @@ function _selectionStorageKey(table) {
 }
 
 /**
+ * Return the source snapshot that owns a table selection.
+ *
+ * Most sync rows keep stable identities across a refresh. Module ENTITY-MIB indices can be reused
+ * for replacement hardware, so the module table supplies its inventory digest here.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {string} The snapshot identity, or an empty string for an unscoped table.
+ */
+function _selectionSnapshot(table) {
+    return table.dataset.selectionSnapshot || '';
+}
+
+/**
  * Read a table's stored selection.
  *
  * Each entry records the row's companion inputs and whether the cascade put the row there, so a
@@ -1490,15 +1503,31 @@ function _selectionStorageKey(table) {
  */
 function readStoredSelection(table) {
     try {
-        const raw = window.sessionStorage.getItem(_selectionStorageKey(table));
+        const storageKey = _selectionStorageKey(table);
+        const raw = window.sessionStorage.getItem(storageKey);
         const parsed = raw ? JSON.parse(raw) : null;
         // A hand-edited or half-written entry must not take the table down with it. The result
         // gets a null prototype so a row key like __proto__ becomes an ordinary entry instead of
         // hitting the prototype setter and disappearing.
         const store = Object.create(null);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-            Object.keys(parsed).forEach(function (key) {
-                store[key] = parsed[key];
+        const snapshot = _selectionSnapshot(table);
+        let rows = parsed;
+        if (snapshot) {
+            if (
+                !parsed ||
+                parsed.snapshot !== snapshot ||
+                !parsed.rows ||
+                typeof parsed.rows !== 'object' ||
+                Array.isArray(parsed.rows)
+            ) {
+                window.sessionStorage.removeItem(storageKey);
+                return store;
+            }
+            rows = parsed.rows;
+        }
+        if (rows && typeof rows === 'object' && !Array.isArray(rows)) {
+            Object.keys(rows).forEach(function (key) {
+                store[key] = rows[key];
             });
         }
         return store;
@@ -1519,7 +1548,9 @@ function writeStoredSelection(table, selection) {
     try {
         const key = _selectionStorageKey(table);
         if (Object.keys(selection).length) {
-            window.sessionStorage.setItem(key, JSON.stringify(selection));
+            const snapshot = _selectionSnapshot(table);
+            const payload = snapshot ? {snapshot: snapshot, rows: selection} : selection;
+            window.sessionStorage.setItem(key, JSON.stringify(payload));
         } else {
             window.sessionStorage.removeItem(key);
         }

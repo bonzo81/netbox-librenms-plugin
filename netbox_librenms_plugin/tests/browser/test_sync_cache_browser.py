@@ -66,14 +66,21 @@ def _selection_row_markup(row):
     )
 
 
-def _selection_page_html(rows, *, auto_select=True):
+def _selection_page_html(
+    rows,
+    *,
+    auto_select=True,
+    table_id="librenms-interface-table",
+    selection_snapshot="",
+):
     checked = "checked" if auto_select else ""
     body = "".join(_selection_row_markup(row) for row in rows)
+    snapshot_attr = f' data-selection-snapshot="{escape(selection_snapshot)}"' if selection_snapshot else ""
     return f"""<!doctype html><html><body>
         <input type="checkbox" id="autoSelectLagMembers" {checked}>
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
           <input type="hidden" name="server_key" value="production">
-          <table id="librenms-interface-table">
+          <table id="{escape(table_id)}"{snapshot_attr}>
             <thead><tr><th><input type="checkbox" class="toggle"></th><th>Name</th></tr></thead>
             <tbody>{body}</tbody>
           </table>
@@ -82,9 +89,22 @@ def _selection_page_html(rows, *, auto_select=True):
         </body></html>"""
 
 
-def _load_selection_page(page, rows, *, url=SELECTION_PAGE_URL, auto_select=True):
+def _load_selection_page(
+    page,
+    rows,
+    *,
+    url=SELECTION_PAGE_URL,
+    auto_select=True,
+    table_id="librenms-interface-table",
+    selection_snapshot="",
+):
     """Serve the fixture page from a real origin so sessionStorage behaves as it does in NetBox."""
-    html = _selection_page_html(rows, auto_select=auto_select)
+    html = _selection_page_html(
+        rows,
+        auto_select=auto_select,
+        table_id=table_id,
+        selection_snapshot=selection_snapshot,
+    )
     page.route(
         f"{SELECTION_PAGE_URL}**",
         lambda route: route.fulfill(status=200, content_type="text/html", body=html),
@@ -401,6 +421,29 @@ class TestCrossPageSelection:
             page.click("#do-sync")
 
         assert ("device_selection_4303", "7") in _selection_form_pairs(request_info.value.post_data)
+
+    def test_module_selection_is_discarded_when_the_inventory_snapshot_changes(self, page):
+        """Discard an off-page selection when a module inventory snapshot changes."""
+        options = {"table_id": "librenms-module-table", "auto_select": False}
+        _load_selection_page(
+            page,
+            [JUNOS_ROWS[0]],
+            url=f"{SELECTION_PAGE_URL}?page=1",
+            selection_snapshot="snapshot-a",
+            **options,
+        )
+        page.check("#cb-4303")
+
+        _load_selection_page(
+            page,
+            [JUNOS_ROWS[2]],
+            url=f"{SELECTION_PAGE_URL}?page=2",
+            selection_snapshot="snapshot-b",
+            **options,
+        )
+
+        assert page.locator("#librenms-module-table-offpage-selection").count() == 0
+        assert page.evaluate("Object.keys(readStoredSelection(document.querySelector('table'))).length") == 0
 
 
 def _selection_form_pairs(post_data):

@@ -1837,6 +1837,7 @@ class TestIdentityIsNotGatedOnBayMapping:
         view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key="session-default"))
         context = view._build_context(request, device, inventory, server_key="default")
         assert context["table"].server_key == "default"
+        assert context["table"].attrs["data-selection-snapshot"] == module_inventory_snapshot_digest(inventory)
         assert module_inventory_binding_matches(
             context["install_selected_inventory_binding"],
             device.pk,

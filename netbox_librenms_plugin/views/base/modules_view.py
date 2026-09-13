@@ -778,6 +778,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         table = self.get_table(table_data, obj)
         table.server_key = self._active_server_key
         table.inventory_snapshot_digest = inventory_snapshot_digest
+        table.attrs["data-selection-snapshot"] = inventory_snapshot_digest
         table.configure(request)
 
         # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
