@@ -626,6 +626,15 @@ def test_import_intent_rejects_duplicate_object_type_values():
         parse_import_row_intent(data, 7312)
 
 
+@pytest.mark.parametrize("source_device_id", [0, -1])
+def test_import_intent_rejects_non_positive_source_device_ids(source_device_id):
+    """Synchronous imports must reject source IDs that jobs cannot deserialize."""
+    from netbox_librenms_plugin.import_plan import InvalidImportIntent, parse_import_row_intent
+
+    with pytest.raises(InvalidImportIntent, match="Source device ID must be a positive integer"):
+        parse_import_row_intent(QueryDict(), source_device_id)
+
+
 @pytest.mark.parametrize(
     "payload",
     [

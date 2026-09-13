@@ -1,6 +1,5 @@
-<span id="{{ cache_container_id }}"
-      class="text-secondary d-inline-flex align-items-center gap-1{% if not cache_expiry %} d-none{% endif %}"
-      {% if cache_oob %}hx-swap-oob="outerHTML"{% endif %}>
+<span {% if cache_oob %}hx-swap-oob="innerHTML:#{{ cache_container_id }}"{% else %}id="{{ cache_container_id }}"
+      class="text-secondary d-inline-flex align-items-center gap-1"{% endif %}>
     {% if cache_expiry %}
     <i class="mdi mdi-clock-outline"></i>
     <span>Cache expires in <span id="{{ cache_countdown_id }}" data-expiry="{{ cache_expiry|date:'c' }}"></span></span>

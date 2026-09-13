@@ -128,6 +128,10 @@ def parse_import_row_intent(
     require_object_type: bool = False,
 ) -> ImportRowIntent:
     """Parse one import row without requiring its placement to be complete."""
+    source_device_id = coerce_positive_int(source_device_id)
+    if source_device_id is None:
+        raise InvalidImportIntent("Source device ID must be a positive integer.")
+
     object_type_field = f"object_type_{source_device_id}"
     raw_object_type = _single_value(data, object_type_field, required=require_object_type)
     if raw_object_type is None:
