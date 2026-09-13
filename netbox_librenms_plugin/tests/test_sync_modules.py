@@ -4420,6 +4420,13 @@ class TestInstallViewsPreserveInventoryCache:
                 "select": ["100"],
                 "server_key": "default",
                 "device_selection_100": str(member.pk),
+                "inventory_binding": self._snapshot_binding(
+                    page,
+                    "install_selected",
+                    {},
+                    None,
+                    inventory,
+                ),
             },
             user=self._user("target-rules"),
         )
