@@ -85,6 +85,9 @@ def _captured_table_view(view):
         rows_store["rows"] = table_data
 
         class CapturedTable:
+            def __init__(self):
+                self.attrs = {}
+
             def configure(self, request):
                 self.request = request
 
