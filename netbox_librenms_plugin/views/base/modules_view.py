@@ -14,6 +14,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_sync_device,
     get_module_template_interface_names,
     is_valid_ports_payload,
+    module_inventory_row_digest,
     normalize_librenms_port_id,
     normalize_serial,
 )
@@ -760,6 +761,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             module_types,
             manufacturer=manufacturer,
         )
+        for row in table_data:
+            inventory_item = index_map.get(row.get("ent_physical_index"))
+            if inventory_item is not None:
+                row["inventory_digest"] = module_inventory_row_digest(inventory_item)
 
         # Sort top-level groups by status, keeping children after their parent
         table_data = self._group_children_under_parents(table_data)

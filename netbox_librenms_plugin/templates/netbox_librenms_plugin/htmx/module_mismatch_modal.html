@@ -106,6 +106,7 @@
         <input type="hidden" name="serial" value="{{ librenms_serial }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">
         <input type="hidden" name="selected_device_id" value="{{ selected_device_id }}">
+        <input type="hidden" name="inventory_binding" value="{{ serial_inventory_binding }}">
         <button type="submit" class="btn btn-warning">
             <i class="mdi mdi-sync me-1"></i>Update Serial Only
         </button>
@@ -149,6 +150,7 @@
         <input type="hidden" name="ent_index" value="{{ ent_index }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">
         <input type="hidden" name="selected_device_id" value="{{ selected_device_id }}">
+        <input type="hidden" name="inventory_binding" value="{{ replace_inventory_binding }}">
         {% if serial_conflict %}
         <input type="hidden" name="conflict_module_id" value="{{ serial_conflict.pk }}">
         {% endif %}

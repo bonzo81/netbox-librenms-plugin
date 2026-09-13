@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import re
 import threading
@@ -8,6 +9,7 @@ from typing import Optional
 import netaddr
 from dcim.models import Device, Interface
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core import signing
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -37,6 +39,82 @@ logger = logging.getLogger(__name__)
 # Bounded at 19 digits, the width of a PostgreSQL bigint. Without the bound an oversized string is
 # rejected only by CPython's int_max_str_digits limit, which a host may raise or disable.
 _ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]{1,19}[ \t\r\n\f\v]*$")
+_MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_binding"
+
+
+def module_inventory_row_digest(inventory_item) -> str:
+    """Return a canonical digest for one cached LibreNMS inventory row."""
+    if not isinstance(inventory_item, dict):
+        raise TypeError("inventory_item must be a dictionary")
+    serialized = json.dumps(inventory_item, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def _module_inventory_binding_payload(
+    device_id,
+    server_key,
+    action,
+    action_target,
+    ent_index,
+    inventory_digest,
+):
+    """Return the canonical fields that bind one rendered action to one inventory row."""
+    return {
+        "device_id": coerce_positive_int(device_id),
+        "server_key": server_key,
+        "action": action,
+        "action_target": {key: coerce_positive_int(value) for key, value in sorted(action_target.items())},
+        "ent_index": coerce_positive_int(ent_index),
+        "inventory_digest": inventory_digest,
+    }
+
+
+def module_inventory_binding_token(
+    device_id,
+    server_key,
+    action,
+    action_target,
+    ent_index,
+    inventory_digest,
+) -> str:
+    """Sign one rendered module action and its exact inventory row."""
+    return signing.dumps(
+        _module_inventory_binding_payload(
+            device_id,
+            server_key,
+            action,
+            action_target,
+            ent_index,
+            inventory_digest,
+        ),
+        salt=_MODULE_INVENTORY_BINDING_SALT,
+    )
+
+
+def module_inventory_binding_matches(
+    token,
+    device_id,
+    server_key,
+    action,
+    action_target,
+    ent_index,
+    inventory_digest,
+) -> bool:
+    """Return whether a signed action still matches its target and inventory row."""
+    if not isinstance(token, str) or not token:
+        return False
+    try:
+        payload = signing.loads(token, salt=_MODULE_INVENTORY_BINDING_SALT)
+    except signing.BadSignature:
+        return False
+    return payload == _module_inventory_binding_payload(
+        device_id,
+        server_key,
+        action,
+        action_target,
+        ent_index,
+        inventory_digest,
+    )
 
 
 def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None = None) -> None:
