@@ -50,6 +50,13 @@ def module_inventory_row_digest(inventory_item) -> str:
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
+def module_inventory_snapshot_digest(inventory) -> str:
+    """Return a canonical digest for a complete cached LibreNMS inventory snapshot."""
+    if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
+        raise TypeError("inventory must be a list of dictionaries")
+    return module_inventory_row_digest({"inventory": inventory})
+
+
 def _module_inventory_binding_payload(
     device_id,
     server_key,
@@ -58,7 +65,7 @@ def _module_inventory_binding_payload(
     ent_index,
     inventory_digest,
 ):
-    """Return the canonical fields that bind one rendered action to one inventory row."""
+    """Return the canonical fields that bind one rendered action to inventory state."""
     return {
         "device_id": coerce_positive_int(device_id),
         "server_key": server_key,
@@ -77,7 +84,7 @@ def module_inventory_binding_token(
     ent_index,
     inventory_digest,
 ) -> str:
-    """Sign one rendered module action and its exact inventory row."""
+    """Sign one rendered module action and its exact inventory state."""
     return signing.dumps(
         _module_inventory_binding_payload(
             device_id,
@@ -100,7 +107,7 @@ def module_inventory_binding_matches(
     ent_index,
     inventory_digest,
 ) -> bool:
-    """Return whether a signed action still matches its target and inventory row."""
+    """Return whether a signed action still matches its target and inventory state."""
     if not isinstance(token, str) or not token:
         return False
     try:

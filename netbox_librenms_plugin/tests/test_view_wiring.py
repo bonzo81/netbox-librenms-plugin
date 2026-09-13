@@ -1735,10 +1735,10 @@ class TestInstallRefusesADuplicateSerial:
         from dcim.models import Module
 
         from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
-        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
-
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
+        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
         device = make_device("bulkdup", librenms_cf={"default": 77})
         module_type = make_module_type("MT-bulkdup")
@@ -1750,9 +1750,28 @@ class TestInstallRefusesADuplicateSerial:
         )
         make_module_bay(device, "Slot 2")
 
+        inventory = [
+            {
+                "entPhysicalIndex": 200,
+                "entPhysicalName": "Slot 2",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": "BULK-DUP",
+            }
+        ]
         request = make_request(
             "post",
-            {"server_key": "default", "select": ["200"]},
+            {
+                "server_key": "default",
+                "select": ["200"],
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_selected",
+                    {},
+                    None,
+                    module_inventory_snapshot_digest(inventory),
+                ),
+            },
             user=make_superuser("bulkdup-user"),
             path="/x/",
         )
@@ -1760,14 +1779,7 @@ class TestInstallRefusesADuplicateSerial:
         key = seed_inventory(
             view,
             device,
-            [
-                {
-                    "entPhysicalIndex": 200,
-                    "entPhysicalName": "Slot 2",
-                    "entPhysicalModelName": module_type.model,
-                    "entPhysicalSerialNum": "BULK-DUP",
-                }
-            ],
+            inventory,
             librenms_id=77,
         )
         try:
@@ -1807,6 +1819,7 @@ class TestIdentityIsNotGatedOnBayMapping:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
+        from netbox_librenms_plugin.utils import module_inventory_binding_matches, module_inventory_snapshot_digest
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = make_device(prefix, librenms_cf={"default": 91})
@@ -1821,8 +1834,18 @@ class TestIdentityIsNotGatedOnBayMapping:
             make_module_bay(device, extra_bay)
 
         request = make_request("get", {}, user=make_superuser(f"{prefix}-user"), path="/x/")
-        view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key="session-default"))
         context = view._build_context(request, device, inventory, server_key="default")
+        assert context["table"].server_key == "default"
+        assert module_inventory_binding_matches(
+            context["install_selected_inventory_binding"],
+            device.pk,
+            "default",
+            "install_selected",
+            {},
+            None,
+            module_inventory_snapshot_digest(inventory),
+        )
         return device, module_type, installed, list(context["table"].data)
 
     def test_a_row_with_no_matching_bay_still_reports_the_installed_module(self):

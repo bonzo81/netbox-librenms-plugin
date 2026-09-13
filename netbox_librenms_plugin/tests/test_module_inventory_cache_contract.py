@@ -11,6 +11,20 @@ from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 CACHE_MISS_TEXT = "No cached inventory data. Please refresh modules first."
 
 
+def _inventory_binding(device, action, inventory, parent_index=None):
+    """Return a valid full-snapshot binding for one bulk install request."""
+    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+
+    return module_inventory_binding_token(
+        device.pk,
+        "default",
+        action,
+        {"parent_index": parent_index} if parent_index is not None else {},
+        parent_index,
+        module_inventory_snapshot_digest(inventory),
+    )
+
+
 @pytest.mark.django_db
 class TestSeedInventoryMatchesTheReaderContract:
     """The shared seed helper must write a payload the production reader accepts."""
@@ -85,7 +99,15 @@ class TestEmptyInventoryIsNotACacheMiss:
                 ("delete", Interface),
             ],
         )
-        request = make_request("post", {"select": ["100"], "server_key": "default"}, user=user)
+        request = make_request(
+            "post",
+            {
+                "select": ["100"],
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, "install_selected", []),
+            },
+            user=user,
+        )
         view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
         key = seed_inventory(view, device, [], librenms_id=7)
 
@@ -149,7 +171,15 @@ class TestEmptyInventoryIsNotACacheMiss:
                 ("delete", Interface),
             ],
         )
-        request = make_request("post", {"parent_index": "100", "server_key": "default"}, user=user)
+        request = make_request(
+            "post",
+            {
+                "parent_index": "100",
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, "install_branch", [], parent_index=100),
+            },
+            user=user,
+        )
         view = make_view(InstallBranchView, request, librenms_api=SimpleNamespace(server_key="default"))
         key = seed_inventory(view, device, [], librenms_id=7)
 

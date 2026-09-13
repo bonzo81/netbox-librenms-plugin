@@ -33,6 +33,7 @@ from netbox_librenms_plugin.utils import (
     module_inventory_binding_matches,
     module_inventory_binding_token,
     module_inventory_row_digest,
+    module_inventory_snapshot_digest,
     netbox_relocates_module_subtree,
     normalize_inventory_serial,
     normalize_serial,
@@ -1098,6 +1099,20 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
         if cached_data is None:
             return _modules_cache_missing_response(request, page_device, server_key)
+        if not module_inventory_binding_matches(
+            request.POST.get("inventory_binding"),
+            target_device.pk,
+            server_key,
+            "install_branch",
+            {"parent_index": parent_index},
+            parent_index,
+            module_inventory_snapshot_digest(cached_data),
+        ):
+            messages.error(
+                request,
+                "Inventory action is stale or does not match this snapshot. Refresh Modules and try again.",
+            )
+            return _modules_action_response(request, page_device, server_key)
 
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
@@ -1723,16 +1738,30 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.warning(request, "No modules selected.")
             return _modules_action_response(request, page_device, server_key)
 
-        sync_device = _get_sync_device_for_inventory(page_device, server_key)
-        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if cached_data is None:
-            return _modules_cache_missing_response(request, page_device, server_key)
-
         try:
             # Use dict.fromkeys to preserve order while deduplicating
             selected_list = list(dict.fromkeys(int(i) for i in selected_indices))
         except ValueError:
             messages.error(request, "Invalid selection.")
+            return _modules_action_response(request, page_device, server_key)
+
+        sync_device = _get_sync_device_for_inventory(page_device, server_key)
+        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
+        if cached_data is None:
+            return _modules_cache_missing_response(request, page_device, server_key)
+        if not module_inventory_binding_matches(
+            request.POST.get("inventory_binding"),
+            page_device.pk,
+            server_key,
+            "install_selected",
+            {},
+            None,
+            module_inventory_snapshot_digest(cached_data),
+        ):
+            messages.error(
+                request,
+                "Inventory action is stale or does not match this snapshot. Refresh Modules and try again.",
+            )
             return _modules_action_response(request, page_device, server_key)
 
         index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}

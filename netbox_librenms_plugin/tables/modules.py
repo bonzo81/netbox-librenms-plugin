@@ -76,6 +76,7 @@ class LibreNMSModuleTable(tables.Table):
         self.device = device
         self.csrf_token = ""
         self.server_key = server_key
+        self.inventory_snapshot_digest = ""
         self.has_write_permission = has_write_permission
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
@@ -602,8 +603,21 @@ class LibreNMSModuleTable(tables.Table):
             )
 
         # Install branch button for parents with installable children (requires add)
-        if self.can_add_module and record.get("has_installable_children") and record.get("ent_physical_index"):
+        if (
+            self.can_add_module
+            and record.get("has_installable_children")
+            and record.get("ent_physical_index")
+            and self.inventory_snapshot_digest
+        ):
             url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "install_branch",
+                {"parent_index": record.get("ent_physical_index")},
+                record.get("ent_physical_index"),
+                self.inventory_snapshot_digest,
+            )
             buttons.append(
                 format_html(
                     # hx-post: the view answers with the module tab fragment, swapped into
@@ -616,6 +630,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="parent_index" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-primary ms-1"'
                     ' title="Install this module and all installable children">'
                     '<i class="mdi mdi-file-tree"></i> Install Branch'
@@ -626,6 +641,7 @@ class LibreNMSModuleTable(tables.Table):
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record.get("ent_physical_index", ""),
+                    inventory_binding,
                 )
             )
 

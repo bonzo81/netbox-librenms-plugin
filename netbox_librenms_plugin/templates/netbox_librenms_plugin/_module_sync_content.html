@@ -16,6 +16,7 @@
     hx-sync="#module-sync-content:drop" hx-disabled-elt="find button">
     {% csrf_token %}
     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
+    <input type="hidden" name="inventory_binding" value="{{ module_sync.install_selected_inventory_binding }}">
     <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
         <button type="submit" class="btn btn-primary" id="install-selected-btn">
             <span class="lnms-btn-idle"><i class="mdi mdi-package-down"></i> Install Selected</span>

@@ -35,6 +35,7 @@ class TestLibreNMSModuleTable:
         table.device = device
         table.csrf_token = "test-csrf-token"
         table.server_key = ""
+        table.inventory_snapshot_digest = "test-snapshot-digest"
         table.has_write_permission = True
         table.can_add_module = can_add_module
         table.can_change_module = can_change_module
@@ -523,6 +524,8 @@ class TestLibreNMSModuleTable:
 
     def test_render_actions_has_installable_children_renders_branch_button(self):
         """has_installable_children + ent_physical_index renders Install Branch button."""
+        from netbox_librenms_plugin.utils import module_inventory_binding_matches
+
         device = MagicMock()
         device.pk = 2
         table = self._make_table(device=device)
@@ -536,6 +539,16 @@ class TestLibreNMSModuleTable:
         assert "Install Branch" in result
         assert "/branch-url/" in result
         assert "mdi-file-tree" in result
+        binding = next(tag["value"] for tag in open_tags(result, "input") if tag.get("name") == "inventory_binding")
+        assert module_inventory_binding_matches(
+            binding,
+            2,
+            "",
+            "install_branch",
+            {"parent_index": 42},
+            42,
+            "test-snapshot-digest",
+        )
 
     def test_render_actions_both_buttons_rendered(self):
         """Both Install and Install Branch buttons render when both flags are set."""

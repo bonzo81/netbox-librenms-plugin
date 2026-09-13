@@ -14,7 +14,9 @@ from netbox_librenms_plugin.utils import (
     get_librenms_sync_device,
     get_module_template_interface_names,
     is_valid_ports_payload,
+    module_inventory_binding_token,
     module_inventory_row_digest,
+    module_inventory_snapshot_digest,
     normalize_librenms_port_id,
     normalize_serial,
 )
@@ -693,6 +695,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # (reached via the row builders) uses the same key without threading it through
         # every intermediate signature.
         self._active_server_key = server_key or self.librenms_api.server_key
+        inventory_snapshot_digest = module_inventory_snapshot_digest(inventory_data)
         # Build a lookup of all inventory items by index for parent resolution
         # Skip items with missing entPhysicalIndex to avoid KeyError on malformed data.
         index_map = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
@@ -773,6 +776,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self._detect_serial_conflicts(table_data, index_map, obj=obj)
 
         table = self.get_table(table_data, obj)
+        table.server_key = self._active_server_key
+        table.inventory_snapshot_digest = inventory_snapshot_digest
         table.configure(request)
 
         # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
@@ -790,6 +795,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": self._active_server_key,
+            "install_selected_inventory_binding": module_inventory_binding_token(
+                obj.pk,
+                self._active_server_key,
+                "install_selected",
+                {},
+                None,
+                inventory_snapshot_digest,
+            ),
         }
 
     @staticmethod
