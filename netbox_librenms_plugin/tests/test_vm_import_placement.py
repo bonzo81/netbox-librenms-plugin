@@ -181,6 +181,8 @@ def test_search_row_offers_netbox_host_selector(client, monkeypatch, settings):
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     source_device_id = 7309
     host = make_device("vm-row-selector-host")
+    host.cluster = make_cluster("vm-row-selector-cluster")
+    host.save(update_fields=["cluster"])
     user = make_user_with_perms("vm-host-selector-user", [("view", Device)])
 
     with librenms_mock_server() as server:

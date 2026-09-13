@@ -2168,11 +2168,15 @@ class TestApplyImportIntentToValidation:
         assert validation["can_import"] is True
         assert validation["is_ready"] is True
 
-    def test_standalone_host_placement_clears_a_stale_cluster(self):
+    def test_standalone_host_placement_clears_a_stale_cluster(self, monkeypatch):
         from netbox_librenms_plugin.import_validation_helpers import apply_host_to_validation
 
         stale_cluster = make_cluster("selection-stale-host-cluster")
         host = make_device("selection-standalone-host")
+        monkeypatch.setattr(
+            "netbox_librenms_plugin.utils.netbox_allows_standalone_vm_host",
+            lambda: True,
+        )
         validation = {
             "cluster": {
                 "found": True,
