@@ -1,5 +1,5 @@
 """
-Coverage tests for views/sync/interfaces.py
+Coverage tests for views/sync/interfaces.py.
 
 SyncInterfacesView + DeleteNetBoxInterfacesView
 Target: 95%+ coverage
@@ -316,7 +316,8 @@ def test_cross_page_parent_notice_close_button_has_accessible_name():
 
 
 def test_relationship_rows_are_matched_without_interpolated_selectors():
-    """Requirement resolution indexes the rows instead of building a selector per port id.
+    """
+    Requirement resolution indexes the rows instead of building a selector per port id.
 
     The behaviour this protects (a port id that carries selector metacharacters still cascades)
     is exercised for real in tests/browser/test_sync_cache_browser.py; this pins the structure
@@ -4104,7 +4105,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         assert get_librenms_device_id(conflicting_owner, "default", auto_save=False) == 42
 
     def test_ifalias_not_set_when_same_as_name(self):
-        """ifAlias should not overwrite when equal to interface name."""
+        """IfAlias should not overwrite when equal to interface name."""
         view = _sync_view()
         interface = make_interface(make_device("ifalias-same-as-name"), "Gi0/1")
         librenms_port = {
@@ -4221,7 +4222,8 @@ class TestSyncLagAndParentRelationships:
         return iface
 
     def _sync_vm_sub_interface(self, name_limit=None):
-        """Run the relationship pass for one VM sub-interface, optionally shrinking the
+        """
+        Run the relationship pass for one VM sub-interface, optionally shrinking the
         VMInterface name limit. Interface and VMInterface both allow 64 in NetBox 4.7, so the
         gate reading the wrong model is only observable once the two differ."""
         from unittest.mock import patch

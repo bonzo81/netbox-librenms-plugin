@@ -2,7 +2,7 @@
 Coverage tests for base view classes:
   - views/base/cables_view.py   (~30% → target 95%+)
   - views/base/interfaces_view.py (~14% → target 95%+)
-  - views/base/ip_addresses_view.py (~34% → target 95%+)
+  - views/base/ip_addresses_view.py (~34% → target 95%+).
 
 The page object and the request are REAL: the cable views resolve every object through
 ``restrict(user, ...)``, so a MagicMock page object has no ``objects`` manager and a MagicMock

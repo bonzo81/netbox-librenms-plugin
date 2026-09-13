@@ -1,4 +1,5 @@
-"""Real-DB coverage for BaseCableTableView.enrich_remote_port librenms_id lookup.
+"""
+Real-DB coverage for BaseCableTableView.enrich_remote_port librenms_id lookup.
 
 Issue #113 (CodeRabbit): the mock-based enrich_remote_port tests in test_coverage_base_views2.py
 use a reported remote_port equal to the interface name, so they still pass if the librenms_id
@@ -106,7 +107,8 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
 
 @pytest.mark.django_db
 class TestVCCableTableSerialOwnership:
-    """A serial row names the ConsoleServerPort's own device, which may not be a VC member.
+    """
+    A serial row names the ConsoleServerPort's own device, which may not be a VC member.
 
     The sync view compares the submitted device against the port's device and rejects a
     mismatch, so substituting a member turns the row into a click that always fails.
@@ -154,7 +156,8 @@ class TestVCCableTableSerialOwnership:
         assert f'value="{member.pk}">' not in markup.split("<input", 1)[1]
 
     def test_a_row_owned_outside_the_chassis_cannot_be_selected(self):
-        """The checkbox column is sequenced before device_selection, so the flag must be set
+        """
+        The checkbox column is sequenced before device_selection, so the flag must be set
         while the table is built, not while a column renders."""
         _table, row, _outsider, _member = self._table_with_outside_owner()
 

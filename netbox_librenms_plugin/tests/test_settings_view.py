@@ -350,7 +350,8 @@ class TestCableSyncSettingsTab:
         assert set(csp.cable.tags.values_list("slug", flat=True)) == {"librenms"}
 
     def test_a_read_path_reports_no_tag_instead_of_raising_on_a_malformed_setting(self):
-        """LibreNMSSettings.save() does not full_clean(), so a bad tag name can reach the database.
+        """
+        LibreNMSSettings.save() does not full_clean(), so a bad tag name can reach the database.
 
         The Cables tab render asks for the tag with create=False. Deriving the slug before that
         guard turned a provenance lookup into a ValidationError on a read-only page.

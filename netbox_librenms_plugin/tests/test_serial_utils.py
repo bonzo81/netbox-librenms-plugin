@@ -464,7 +464,8 @@ class TestConfigurableSensorTypes:
         assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "ttyS11")]
 
     def test_an_unusable_configured_pattern_falls_back_instead_of_aborting(self):
-        """One bad pattern must not drop every serial row.
+        """
+        One bad pattern must not drop every serial row.
 
         The pattern comes from the SerialSensorTypePattern table, which takes free text. A
         truthy non-string reaches ``.replace`` and raises, and nothing catches it, so a single

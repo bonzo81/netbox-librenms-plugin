@@ -1,4 +1,5 @@
-"""Tests for SingleCableVerifyView and SingleInterfaceVerifyView VC resolution.
+"""
+Tests for SingleCableVerifyView and SingleInterfaceVerifyView VC resolution.
 
 Verifies that both views delegate VC device resolution to
 get_librenms_sync_device() and handle the None return gracefully
@@ -2202,7 +2203,8 @@ class TestSingleModuleVerifyPermissionOrder:
 
 @pytest.mark.django_db
 def test_module_verify_rejects_an_out_of_range_device_id_like_its_siblings():
-    """The module endpoint let a raw JSON value reach the pk lookup, so a bad request became a
+    """
+    The module endpoint let a raw JSON value reach the pk lookup, so a bad request became a
     database error and a 500 where the interface and VLAN-group endpoints answer 400."""
     import json as json_module
 

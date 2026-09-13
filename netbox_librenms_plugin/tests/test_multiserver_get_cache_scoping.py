@@ -1,4 +1,5 @@
-"""Multi-server GET-render cache-scoping regression tests.
+"""
+Multi-server GET-render cache-scoping regression tests.
 
 On a full page render the orchestrator (object_sync/devices.py) delegates to each tab's
 ``get_context_data`` without a ``server_key`` and never rebinds the client, so a non-default

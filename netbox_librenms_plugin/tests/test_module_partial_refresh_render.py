@@ -1,4 +1,5 @@
-"""A partial module refresh renders nothing rather than a degraded table.
+"""
+A partial module refresh renders nothing rather than a degraded table.
 
 ``post()`` only fingerprints ``librenms_id``/``oob_librenms_id`` when it reads a snapshot back,
 so a truncated one would be served as complete until its TTL expired. The refresh therefore

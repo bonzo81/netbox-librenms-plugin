@@ -46,7 +46,8 @@ def _wait_until_blocked(pid, future, seconds=5):
 
 @pytest.fixture(autouse=True)
 def restore_librenms_id_custom_field():
-    """Recreate migration-seeded custom-field state after each transaction flush.
+    """
+    Recreate migration-seeded custom-field state after each transaction flush.
 
     conftest owns this contract. The local copy mutated the alias set in place through a
     ``getattr(..., set())`` default, so it did nothing at all until the attribute existed.

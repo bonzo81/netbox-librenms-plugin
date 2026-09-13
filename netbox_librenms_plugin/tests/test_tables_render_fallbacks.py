@@ -1,4 +1,5 @@
-"""Render fallbacks in tables/interfaces.py and tables/cables.py.
+"""
+Render fallbacks in tables/interfaces.py and tables/cables.py.
 
 The primary home for both modules is test_coverage_tables.py. These cases live in their
 own file so they do not collide at that shared file's tail when the stack is restacked.

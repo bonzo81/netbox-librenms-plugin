@@ -105,7 +105,8 @@ def _seeded_model_rows():
 
 
 def _seeded_sap_rows():
-    """Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
+    """
+    Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
 
     Kept apart from :func:`_seeded_model_rows` because migration 0016 sets a second field on rows
     0013 already created, so these rows are applied with ``update()`` rather than
@@ -120,7 +121,8 @@ def _seeded_sap_rows():
 
 
 def _seeded_rule_rows():
-    """Yield ``(model, lookup, defaults)`` for every rule row the data migrations seed.
+    """
+    Yield ``(model, lookup, defaults)`` for every rule row the data migrations seed.
 
     Kept apart from :func:`_seeded_model_rows` because these rows are identified by a
     composite lookup rather than one field. The values are read from the migrations so the

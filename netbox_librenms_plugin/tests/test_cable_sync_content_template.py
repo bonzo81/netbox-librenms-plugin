@@ -1,4 +1,5 @@
-"""Render the real _cable_sync_content.html template in both modes.
+"""
+Render the real _cable_sync_content.html template in both modes.
 
 In migrated mode the POST form is replaced by a plain <div> (a migrated donor must not POST a
 cable sync). But the cable table still renders interactive controls whose verify-cable fetch

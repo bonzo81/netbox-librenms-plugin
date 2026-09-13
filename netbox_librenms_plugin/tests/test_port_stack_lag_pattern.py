@@ -35,7 +35,8 @@ class TestPortStackLagPattern:
         assert model.compiled_sap_patterns_for_os("junos") == []
 
     def test_the_unscoped_lag_read_is_a_superset_of_every_scoped_read(self):
-        """The refresh gates the scoped LAG read on a name signal measured with the unscoped set.
+        """
+        The refresh gates the scoped LAG read on a name signal measured with the unscoped set.
 
         That gate is only safe while the unscoped read returns every stored row, so a scoped
         pattern can never match a name the unscoped signal missed. Narrowing the None case would
@@ -52,7 +53,8 @@ class TestPortStackLagPattern:
         assert r"^Port-Channel\d+$" in unscoped
 
     def test_an_unknown_os_applies_every_stored_sap_rule(self):
-        """The SAP reader over-skips rather than under-skips, the opposite of the LAG reader.
+        """
+        The SAP reader over-skips rather than under-skips, the opposite of the LAG reader.
 
         An unmatched LAG regex invents a relationship; an unmatched SAP regex only suppresses
         one. So an OS this model cannot resolve must keep every vendor's SAP rule, which is also

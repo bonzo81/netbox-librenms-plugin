@@ -2627,7 +2627,8 @@ class TestResolvePortRelationships:
         assert 200 not in result["lag_members"]
 
     def test_sap_rows_stay_excluded_from_the_name_derived_sub_interface_fallback(self, mock_librenms_api):
-        """Rule 2 skips a SAP pair, but the name-derived fallback walks every port with an id,
+        """
+        Rule 2 skips a SAP pair, but the name-derived fallback walks every port with an id,
         not the filtered pairs, so a SAP child can still be recorded as a sub-interface."""
         ports = [
             {"port_id": 301, "ifName": "lag-1:10", "ifDescr": "lag-1:10", "ifType": "ipForward"},

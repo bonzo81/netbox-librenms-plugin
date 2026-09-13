@@ -1,4 +1,5 @@
-"""The consolidated sidebar navigation: Mappings and Rules & Patterns.
+"""
+The consolidated sidebar navigation: Mappings and Rules & Patterns.
 
 Nine per-model menu items collapse into two sidebar entries. The object lists
 cross-link through a switcher rendered above the native Results/Filters tabs, so
