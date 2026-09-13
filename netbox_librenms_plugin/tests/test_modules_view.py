@@ -5556,13 +5556,18 @@ class TestRenderActionsPortIdentityFields:
             "module_bay_id": 10,
             "module_type_id": 5,
             "serial": "SN-1",
+            "inventory_digest": "render-actions-row-digest",
         }
 
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/plugins/install-module/"):
             html = str(table.render_actions("", record))
 
-        assert 'name="librenms_ifname" value="TenGigabitEthernet1/1/1"' in html
-        assert 'name="librenms_ifdescr" value="Te1/1/1"' in html
+        # The view reads the serial and the port identity from the cached row for this index.
+        # Posted identity fields carry no _source marker, so they must not reach the view at all.
+        assert 'name="ent_index" value="77"' in html
+        assert 'name="inventory_binding"' in html
+        assert "librenms_ifname" not in html
+        assert "librenms_ifdescr" not in html
 
     def test_interface_child_row_does_not_render_install_action(self):
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
