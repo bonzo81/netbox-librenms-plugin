@@ -543,6 +543,15 @@ async def probe_async_parameter_link_note(result, _describe_link_note):
 probe_lambda_parameter_link_note = lambda result, _describe_link_note: _describe_link_note(result)
 
 
+# --- [flag] the link-note wording is not safe outside its canonical helper
+def probe_spoofed_link_note_wording(result):
+    from dcim.models import Device
+
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    result["warnings"].append(f"currently linked to LibreNMS device #{owner.pk}")
+
+
 # --- [quiet] an aggregate rather than an identity
 def probe_quiet07(result, serial):
     from dcim.models import Device

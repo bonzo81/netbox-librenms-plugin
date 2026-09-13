@@ -62,7 +62,11 @@ rules:
         exact: true
       # This exact rendering may carry a visible match's LibreNMS linkage ID. Trust the value
       # transformation, not `_describe_link_note` as a callable name that another binding can use.
-      - pattern: 'f"currently linked to LibreNMS device #{$ID}"'
+      - patterns:
+          - pattern-inside: |
+              def _describe_link_note(existing_link):
+                ...
+          - pattern: 'f"currently linked to LibreNMS device #{$ID}"'
         exact: true
     pattern-sinks:
       # the validation dict's message lists
