@@ -2385,6 +2385,7 @@ class TestSyncVLANsViewHandleCreateVlans:
             patch.object(view, "get_cache_key", return_value="key"),
             patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msg,
             patch.object(view, "_redirect", return_value=MagicMock()),
+            patch.object(view, "_render_conflicts", return_value=MagicMock()),
         ):
             mock_cache.get.return_value = cached_vlans
             view._handle_create_vlans(req, obj, "device", 1)
@@ -2459,7 +2460,7 @@ class TestSyncVLANsViewHandleCreateVlans:
         vlan = VLAN.objects.get(vid=10, group__isnull=True)
         assert vlan.name == "Management"
 
-    def test_updates_vlan_name_when_changed(self):
+    def test_changed_vlan_name_waits_for_confirmation(self):
         from ipam.models import VLAN
 
         view = self._make_view()
@@ -2469,8 +2470,8 @@ class TestSyncVLANsViewHandleCreateVlans:
 
         mock_msg = self._run(view, _make_request({"select": ["10"]}), obj, cached_vlans)
 
-        assert VLAN.objects.get(vid=10, group__isnull=True).name == "NewName"
-        assert "updated" in mock_msg.success.call_args[0][1]
+        assert VLAN.objects.get(vid=10, group__isnull=True).name == "OldName"
+        mock_msg.success.assert_not_called()
 
     def test_skips_unchanged_vlan(self):
         from ipam.models import VLAN

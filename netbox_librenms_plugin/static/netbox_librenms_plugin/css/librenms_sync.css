@@ -34,3 +34,45 @@
     font-weight: 600;
     box-shadow: inset 0 -3px 0 0 var(--tblr-primary);
 }
+
+.interface-sync-options-menu,
+.ip-sync-options-menu {
+    min-width: 23rem;
+}
+
+.sync-tab-refresh-toolbar:not(:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar)),
+.sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] > .alert) {
+    margin-bottom: 1rem !important;
+}
+
+@media (min-width: 1200px) {
+    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
+        :has(~ [id$="-sync-content"] > .alert)
+    ) {
+        position: relative;
+        z-index: 2;
+        height: 0;
+    }
+
+    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
+        :has(~ [id$="-sync-content"] > .alert)
+    ) > .btn-list {
+        position: absolute;
+        inset-block-start: 0;
+        inset-inline-end: 0;
+    }
+
+    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
+        :has(~ [id$="-sync-content"] > .alert)
+    ) ~ [id$="-sync-content"] .sync-tab-primary-toolbar {
+        min-height: 1.875rem;
+        padding-inline-end: 21rem;
+    }
+}
+
+@media (max-width: 575.98px) {
+    .interface-sync-options-menu,
+    .ip-sync-options-menu {
+        min-width: min(23rem, calc(100vw - 2rem));
+    }
+}

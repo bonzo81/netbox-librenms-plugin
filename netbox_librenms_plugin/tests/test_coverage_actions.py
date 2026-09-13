@@ -1,5 +1,6 @@
 """Coverage tests for views/imports/actions.py missing lines."""
 
+import json
 from types import SimpleNamespace as Namespace
 
 import pytest
@@ -1848,6 +1849,34 @@ class TestSaveUserPrefView:
         assert response.status_code == 200
         stored_user = django_user_model.objects.get(pk=user.pk)
         assert stored_user.config.get("plugins.netbox_librenms_plugin.use_sysname") is True
+
+    def test_import_columns_preference_is_validated_and_persisted(self, client, django_user_model):
+        user = make_view_user("pref-import-columns-user", [])
+
+        response = self._post(
+            client,
+            user,
+            b'{"key":"import_columns","value":["hardware","hostname"]}',
+        )
+
+        assert response.status_code == 200
+        stored_user = django_user_model.objects.get(pk=user.pk)
+        assert stored_user.config.get("plugins.netbox_librenms_plugin.import_columns") == ["hardware", "hostname"]
+
+    @pytest.mark.parametrize(
+        "value",
+        ["hostname", ["hostname", "actions"], ["hostname", "hostname"], [1], [[]]],
+    )
+    def test_import_columns_preference_rejects_invalid_shapes(self, client, value):
+        user = make_view_user("pref-invalid-import-columns-user", [])
+
+        response = self._post(
+            client,
+            user,
+            json.dumps({"key": "import_columns", "value": value}),
+        )
+
+        assert response.status_code == 400
 
 
 @pytest.mark.django_db

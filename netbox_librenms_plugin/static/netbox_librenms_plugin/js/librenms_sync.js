@@ -1006,6 +1006,63 @@ function initializeCountdowns() {
     window.moduleCountdownInterval = initializeCountdown("module-countdown-timer");
 }
 
+/**
+ * Keep a compact sync-options summary in step with its form controls.
+ *
+ * @param {string} rootId - Options dropdown element ID
+ * @param {string} optionSelector - Selector for controls inside the dropdown
+ * @param {string} countId - Changed-options badge element ID
+ * @param {string} resetId - Reset button element ID
+ */
+function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
+    const root = document.getElementById(rootId);
+    if (!root || root.dataset.initialized === 'true') return;
+
+    const options = Array.from(root.querySelectorAll(optionSelector));
+    const countBadge = document.getElementById(countId);
+    const resetButton = document.getElementById(resetId);
+    if (!countBadge) return;
+
+    const updateCount = () => {
+        const changedCount = options.filter((option) => {
+            const defaultChecked = option.dataset.defaultChecked === 'true';
+            return option.checked !== defaultChecked;
+        }).length;
+        countBadge.textContent = String(changedCount);
+        countBadge.classList.toggle('bg-secondary-lt', changedCount === 0);
+        countBadge.classList.toggle('bg-primary-lt', changedCount > 0);
+    };
+
+    options.forEach((option) => option.addEventListener('change', updateCount));
+    resetButton?.addEventListener('click', () => {
+        options.forEach((option) => {
+            const defaultChecked = option.dataset.defaultChecked === 'true';
+            if (option.checked !== defaultChecked) {
+                option.checked = defaultChecked;
+                option.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        });
+        updateCount();
+    });
+    root.dataset.initialized = 'true';
+    updateCount();
+}
+
+function initializeSyncOptionMenus() {
+    initializeSyncOptions(
+        'interface-sync-options',
+        '.interface-sync-option',
+        'interface-sync-options-count',
+        'reset-interface-sync-options'
+    );
+    initializeSyncOptions(
+        'ip-sync-options',
+        '.ip-sync-option',
+        'ip-sync-options-count',
+        'reset-ip-sync-options'
+    );
+}
+
 // ============================================
 // TABLE CHECKBOX HANDLING
 // ============================================
@@ -2795,7 +2852,9 @@ function filterTable(tableId, filterKeys, dataCols) {
         filters[key] = document.getElementById(`filter-${key}`)?.value.toLowerCase() || '';
     });
 
-    const rows = table.querySelectorAll('tr[data-interface]');
+    const rows = table.querySelectorAll(
+        ':scope > tbody > tr[data-interface], :scope > tbody > tr[data-vlan-id]'
+    );
     rows.forEach(row => {
         const matches = filterKeys.map(key => {
             let cellText = '';
@@ -2812,8 +2871,79 @@ function filterTable(tableId, filterKeys, dataCols) {
     });
 }
 
+const FILTER_DISCLOSURE_STORAGE_PREFIX = 'netbox-librenms:sync-filter';
+const filterDisclosureState = new Map();
+const initializedFilterDisclosures = new WeakSet();
+
+function filterDisclosureStorageKey(sectionId) {
+    return `${FILTER_DISCLOSURE_STORAGE_PREFIX}:${window.location.pathname}:${sectionId}`;
+}
+
+function readFilterDisclosureState(sectionId) {
+    const key = filterDisclosureStorageKey(sectionId);
+    if (filterDisclosureState.has(key)) return filterDisclosureState.get(key);
+    try {
+        const stored = window.sessionStorage.getItem(key);
+        if (stored !== null) {
+            const expanded = stored === 'expanded';
+            filterDisclosureState.set(key, expanded);
+            return expanded;
+        }
+    } catch (_) {
+        // The in-memory state still preserves the choice across HTMX fragment replacements.
+    }
+    return null;
+}
+
+function writeFilterDisclosureState(sectionId, expanded) {
+    const key = filterDisclosureStorageKey(sectionId);
+    filterDisclosureState.set(key, expanded);
+    try {
+        window.sessionStorage.setItem(key, expanded ? 'expanded' : 'collapsed');
+    } catch (_) {
+        // The in-memory state is sufficient when browser storage is unavailable.
+    }
+}
+
+function applyFilterDisclosureState(section, button, expanded) {
+    section.classList.toggle('show', expanded);
+    button.classList.toggle('active', expanded);
+    button.classList.toggle('btn-primary', expanded);
+    button.classList.toggle('btn-secondary', !expanded);
+    button.setAttribute('aria-expanded', String(expanded));
+    button.setAttribute('aria-pressed', String(expanded));
+    const icon = button.querySelector('.mdi');
+    if (icon) {
+        icon.classList.toggle('mdi-filter-check', expanded);
+        icon.classList.toggle('mdi-filter-outline', !expanded);
+    }
+}
+
+function initializeFilterDisclosures() {
+    document.querySelectorAll('.sync-filter-toggle[aria-controls]').forEach((button) => {
+        const section = document.getElementById(button.getAttribute('aria-controls'));
+        if (!section) return;
+
+        const storedState = readFilterDisclosureState(section.id);
+        applyFilterDisclosureState(section, button, storedState ?? section.classList.contains('show'));
+        if (initializedFilterDisclosures.has(section)) return;
+
+        section.addEventListener('shown.bs.collapse', () => {
+            applyFilterDisclosureState(section, button, true);
+            writeFilterDisclosureState(section.id, true);
+        });
+        section.addEventListener('hidden.bs.collapse', () => {
+            applyFilterDisclosureState(section, button, false);
+            writeFilterDisclosureState(section.id, false);
+        });
+        initializedFilterDisclosures.add(section);
+    });
+}
+
 // Initialize filters for different tables
 function initializeFilters() {
+    initializeFilterDisclosures();
+
     // Interface table
     initializeTableFilters(
         'librenms-interface-table',
@@ -2870,6 +3000,20 @@ function initializeFilters() {
             prefix: { name: 'prefix' },
             device: { name: 'device' },
             interface: { name: 'interface' }
+        }
+    );
+    initializeTableFilters(
+        'librenms-vlan-table',
+        ['vlan-id', 'vlan-name', 'vlan-group', 'vlan-type', 'vlan-state'],
+        {
+            'vlan-id': { name: 'vlan_id' },
+            'vlan-name': { name: 'name' },
+            'vlan-group': {
+                selector: 'td[data-col="vlan_group_selection"] .ts-control .item, '
+                    + 'td[data-col="vlan_group_selection"] option:checked'
+            },
+            'vlan-type': { name: 'type' },
+            'vlan-state': { name: 'state' }
         }
     );
 }
@@ -3375,6 +3519,7 @@ function initializeScripts() {
     initializeVlanModalSave();
     initializeFilters();
     initializeCountdowns();
+    initializeSyncOptionMenus();
     initializeCheckboxListeners();
     initializeBulkEditApply();
     updateInterfaceNameField();
@@ -3461,6 +3606,10 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
     }
     initializeScripts();
 });
+
+// HTMX settles the server-rendered class list after afterSwap. Restore the saved disclosure state
+// once more so that class settlement cannot collapse a panel that the user left open.
+document.body.addEventListener('htmx:afterSettle', initializeFilterDisclosures);
 
 document.body.addEventListener('htmx:afterRequest', function (event) {
     const controller = syncCacheController();

@@ -177,9 +177,21 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated={"server_key": "default", "device_id": 1, "at": "now"})
         assert "Exclude from Sync:" not in html
 
-    def test_normal_mode_shows_exclude_from_sync_controls(self):
+    def test_normal_mode_groups_sync_controls_in_choice_a_dropdown(self):
         html = self._render(migrated=None)
-        assert "Exclude from Sync:" in html
+
+        assert "Sync options" in html
+        assert "Exclude from sync" in html
+        assert 'id="interface-sync-options-count"' in html
+        assert 'id="reset-interface-sync-options"' in html
+        assert 'data-bs-auto-close="outside"' in html
+        assert html.index("Sync Selected Interfaces") < html.index("Sync options") < html.index("info")
+
+    def test_normal_mode_keeps_choice_a_defaults_on_the_real_form_controls(self):
+        html = self._render(migrated=None)
+
+        assert re.search(r'id="autoSelectLagMembers"[^>]*data-default-checked="true"[^>]*checked', html)
+        assert len(re.findall(r'name="exclude_columns"[^>]*data-default-checked="false"', html)) == 7
 
     def test_interface_type_help_uses_the_shared_modal_helper(self):
         """The info link opens through NetBox's modal helper instead of competing Bootstrap trigger state."""

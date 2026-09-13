@@ -1072,6 +1072,45 @@ def save_user_pref(request, path, value):
             pass
 
 
+IMPORT_CONTEXT_COLUMNS = ("location", "hardware", "hostname", "sysname")
+IMPORT_CONTEXT_COLUMNS_DEFAULT = ("location", "hardware")
+IMPORT_CONTEXT_COLUMNS_PREFERENCE = "plugins.netbox_librenms_plugin.import_columns"
+
+
+def validate_import_context_columns(value):
+    """
+    Validate and order an import context-column preference.
+
+    Args:
+        value (object): The stored or submitted preference value.
+
+    Returns:
+        tuple[str, ...] | None: Ordered columns, or None when the value is invalid.
+    """
+    if not isinstance(value, list) or any(not isinstance(column, str) for column in value):
+        return None
+    if len(value) != len(set(value)):
+        return None
+    if any(column not in IMPORT_CONTEXT_COLUMNS for column in value):
+        return None
+    return tuple(column for column in IMPORT_CONTEXT_COLUMNS if column in value)
+
+
+def resolve_import_context_columns(request):
+    """
+    Resolve the user's visible import context columns.
+
+    Args:
+        request (HttpRequest): Request for the user who owns the preference.
+
+    Returns:
+        tuple[str, ...]: Valid visible columns or the focused-table defaults.
+    """
+    stored = get_user_pref(request, IMPORT_CONTEXT_COLUMNS_PREFERENCE, list(IMPORT_CONTEXT_COLUMNS_DEFAULT))
+    validated = validate_import_context_columns(stored)
+    return IMPORT_CONTEXT_COLUMNS_DEFAULT if validated is None else validated
+
+
 _TRUTHY_PARAMETER_VALUES = frozenset({"on", "true", "1"})
 
 

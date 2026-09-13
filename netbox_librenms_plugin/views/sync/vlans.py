@@ -2,11 +2,12 @@ from urllib.parse import quote_plus
 
 from dcim.models import Device
 from django.contrib import messages
+from django.core import signing
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.http import Http404
-from django.shortcuts import redirect
+from django.http import Http404, HttpResponse
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
@@ -25,6 +26,8 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
 )
 
+VLAN_CONFLICT_SIGNING_SALT = "netbox_librenms_plugin.vlan_conflict"
+
 
 def _acquire_global_vlan_locks(vids):
     """Lock global VLAN VIDs in stable order for the current transaction."""
@@ -33,9 +36,7 @@ def _acquire_global_vlan_locks(vids):
 
 
 class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
-    """
-    Handle POST requests to create/update VLANs in NetBox from LibreNMS data.
-    """
+    """Create or update NetBox VLANs from a LibreNMS source snapshot."""
 
     required_object_permissions = {
         "POST": [
@@ -76,7 +77,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             object_id (int): The target object's ID.
 
         Returns:
-            HttpResponse: A permission error response or a redirect after synchronization.
+            HttpResponse: A permission error, confirmation disclosure, or synchronization redirect.
 
         Raises:
             Http404: If the object type is invalid or no permitted device matches the object ID.
@@ -107,6 +108,13 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
     def _redirect(self, object_type: str, object_id: int):
         """Redirect back to sync page with VLAN tab active."""
+        url = self.get_vlan_tab_url(object_type, object_id)
+        if getattr(getattr(self, "request", None), "headers", {}).get("HX-Request") == "true":
+            return HttpResponse("", headers={"HX-Redirect": url})
+        return redirect(url)
+
+    def get_vlan_tab_url(self, object_type: str, object_id: int) -> str:
+        """Return the URL for the VLAN synchronization tab."""
         url_name = (
             "dcim:device_librenms_sync"
             if object_type == "device"
@@ -116,11 +124,106 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         url = reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans"
         if server_key:
             url += f"&server_key={quote_plus(server_key)}"
-        return redirect(url)
+        return url
 
-    def _handle_create_vlans(self, request, obj, object_type, object_id):
+    @staticmethod
+    def _vlan_state(vlan: VLAN) -> dict:
+        """Return the mutable VLAN state protected by a confirmation intent."""
+        return {
+            "vid": vlan.vid,
+            "group_id": vlan.group_id,
+            "name": vlan.name,
+        }
+
+    def _build_conflict(self, *, vlan, proposed_name, obj, object_type, server_key):
+        """Return one VLAN rename disclosure with its signed confirmation intent."""
+        payload = {
+            "vid": vlan.vid,
+            "object_type": object_type,
+            "object_pk": str(obj.pk),
+            "server_key": server_key,
+            "target_group_id": vlan.group_id,
+            "vlan_pk": str(vlan.pk),
+            "vlan_state": self._vlan_state(vlan),
+            "proposed_name": proposed_name,
+        }
+        return {
+            "vid": vlan.vid,
+            "group": str(vlan.group) if vlan.group is not None else "Global",
+            "group_id": vlan.group_id,
+            "current_name": vlan.name,
+            "proposed_name": proposed_name,
+            "intent": signing.dumps(payload, salt=VLAN_CONFLICT_SIGNING_SALT, compress=True),
+        }
+
+    def _render_conflicts(self, request, conflicts, obj, object_type, object_id):
+        """Render VLAN rename disclosures for an HTMX or native form submission."""
+        context = {
+            "conflicts": conflicts,
+            "object_type": object_type,
+            "object": obj,
+            "server_key": self._post_server_key,
+            "cancel_url": self.get_vlan_tab_url(object_type, object_id),
+        }
+        if request.headers.get("HX-Request") == "true":
+            template_name = "netbox_librenms_plugin/htmx/vlan_conflicts.html"
+        else:
+            context["full_page"] = True
+            template_name = "netbox_librenms_plugin/vlan_conflicts_page.html"
+        return render(request, template_name, context)
+
+    def _load_force_intents(self, request, obj, object_type, server_key):
+        """Validate submitted conflict intents and return them by canonical VID."""
+        intents = {}
+        errors = []
+        for token in request.POST.getlist("conflict_intent"):
+            try:
+                payload = signing.loads(token, salt=VLAN_CONFLICT_SIGNING_SALT, max_age=3600)
+                if not isinstance(payload, dict) or isinstance(payload.get("vid"), bool):
+                    raise signing.BadSignature("Invalid VLAN conflict intent.")
+                vid = str(int(payload["vid"]))
+                if (
+                    payload.get("object_type") != object_type
+                    or str(payload.get("object_pk")) != str(obj.pk)
+                    or payload.get("server_key") != server_key
+                ):
+                    raise signing.BadSignature("Conflict intent belongs to another sync context.")
+                if vid in intents:
+                    raise signing.BadSignature("Duplicate conflict intent.")
+                intents[vid] = payload
+            except (KeyError, TypeError, ValueError, signing.BadSignature, signing.SignatureExpired):
+                errors.append("VLAN confirmation is invalid or has expired. Refresh the VLAN data and try again.")
+        return intents, errors
+
+    def _apply_confirmed_vlan_change(
+        self,
+        *,
+        vid,
+        payload,
+        proposed_name,
+        row_vlan_group,
+        changeable_vlans,
+    ):
+        """Recheck and apply one signed VLAN rename while the target row is locked."""
+        target_group_id = row_vlan_group.pk if row_vlan_group is not None else None
+        if payload.get("target_group_id") != target_group_id or payload.get("proposed_name") != proposed_name:
+            raise ValueError("The VLAN target changed after confirmation. Refresh the VLAN data and try again.")
+
+        vlan = changeable_vlans.select_for_update(of=("self",)).filter(pk=payload.get("vlan_pk")).first()
+        if vlan is None:
+            raise ValueError("The existing VLAN is no longer available in your change scope.")
+        if vlan.vid != vid or vlan.group_id != target_group_id or payload.get("vlan_state") != self._vlan_state(vlan):
+            raise ValueError("The existing VLAN changed after confirmation. Refresh the VLAN data and try again.")
+        if VLAN.objects.filter(vid=vid, group=row_vlan_group).exclude(pk=vlan.pk).exists():
+            raise ValueError("The VLAN scope is now ambiguous. Refresh the VLAN data and try again.")
+
+        vlan.name = proposed_name
+        vlan.save(update_fields=["name"])
+        return vlan
+
+    def _handle_create_vlans(self, request, obj, object_type, object_id):  # noqa: C901
         """
-        Handle creating selected VLANs in NetBox.
+        Create selected VLANs and disclose name changes that require confirmation.
 
         Reads per-row VLAN group selections from form fields named 'vlan_group_{vid}'.
 
@@ -131,12 +234,34 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             object_id (int): The target object's ID.
 
         Returns:
-            HttpResponse: A redirect to the VLAN synchronization page.
+            HttpResponse: A confirmation disclosure or redirect to the VLAN synchronization page.
         """
-        selected_vlans = request.POST.getlist("select")
+        force_intents, intent_errors = self._load_force_intents(
+            request,
+            obj,
+            object_type,
+            self._post_server_key,
+        )
+        if request.POST.get("force_all"):
+            selected_vlans = list(force_intents)
+        elif request.POST.get("confirm_conflicts"):
+            confirmed = set()
+            for value in request.POST.getlist("force_conflict"):
+                try:
+                    if not isinstance(value, bool):
+                        confirmed.add(str(int(value)))
+                except (TypeError, ValueError):
+                    continue
+            selected_vlans = [vid for vid in force_intents if vid in confirmed]
+        else:
+            selected_vlans = request.POST.getlist("select")
 
         if not selected_vlans:
-            messages.error(request, "No VLANs selected for creation.")
+            if intent_errors:
+                for error in dict.fromkeys(intent_errors):
+                    messages.error(request, error)
+            else:
+                messages.error(request, "No VLAN changes selected.")
             return self._redirect(object_type, object_id)
 
         # Get cached VLAN data
@@ -158,6 +283,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         invalid_vid_count = 0
         invalid_name_count = 0
         add_permission_skipped_count = 0
+        confirmation_error_count = 0
+        conflicts = []
         addable_vlans = self.restricted_queryset(VLAN, "add")
         changeable_vlans = self.restricted_queryset(VLAN, "change")
 
@@ -172,7 +299,13 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                     vid = int(vid_str)
                 except ValueError:
                     continue
-                if str(vid) in librenms_vlans and not request.POST.get(f"vlan_group_{vid}", ""):
+                force_payload = force_intents.get(str(vid))
+                target_group_id = (
+                    force_payload.get("target_group_id")
+                    if force_payload is not None
+                    else request.POST.get(f"vlan_group_{vid}", "")
+                )
+                if str(vid) in librenms_vlans and not target_group_id:
                     global_vids.append(vid)
             _acquire_global_vlan_locks(global_vids)
 
@@ -187,12 +320,25 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                     continue
 
                 # Get per-row VLAN group selection
-                group_id_str = request.POST.get(f"vlan_group_{vid}", "")
+                force_payload = force_intents.get(str(vid))
+                group_id_str = (
+                    force_payload.get("target_group_id")
+                    if force_payload is not None
+                    else request.POST.get(f"vlan_group_{vid}", "")
+                )
                 row_vlan_group = None
-                if group_id_str:
+                if group_id_str is not None and group_id_str != "":
                     try:
                         row_vlan_group = self.restricted_queryset(VLANGroup).get(pk=int(group_id_str))
                     except (ValueError, VLANGroup.DoesNotExist):
+                        if force_payload is not None:
+                            messages.error(
+                                request,
+                                f"VLAN {vid}: the confirmed VLAN group is no longer available. "
+                                "Refresh the VLAN data and try again.",
+                            )
+                            confirmation_error_count += 1
+                            continue
                         # A group was explicitly requested but doesn't exist (stale page or
                         # tampered id). Fail closed: do NOT fall back to a global VLAN, which
                         # would persist the VLAN in the wrong scope. Skip this VID and warn.
@@ -219,6 +365,22 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 except ValidationError:
                     messages.error(request, f"VLAN {vid}: the LibreNMS name is invalid; skipped.")
                     invalid_name_count += 1
+                    continue
+
+                if force_payload is not None:
+                    try:
+                        self._apply_confirmed_vlan_change(
+                            vid=vid,
+                            payload=force_payload,
+                            proposed_name=librenms_name,
+                            row_vlan_group=row_vlan_group,
+                            changeable_vlans=changeable_vlans,
+                        )
+                    except ValueError as exc:
+                        messages.error(request, f"VLAN {vid}: {exc}")
+                        confirmation_error_count += 1
+                        continue
+                    updated_count += 1
                     continue
 
                 lookup = {"vid": vid, "group": row_vlan_group}
@@ -299,9 +461,15 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 if created:
                     created_count += 1
                 elif vlan.name != librenms_name:
-                    vlan.name = librenms_name
-                    vlan.save(update_fields=["name"])
-                    updated_count += 1
+                    conflicts.append(
+                        self._build_conflict(
+                            vlan=vlan,
+                            proposed_name=librenms_name,
+                            obj=obj,
+                            object_type=object_type,
+                            server_key=self._post_server_key,
+                        )
+                    )
                 else:
                     skipped_count += 1
 
@@ -332,14 +500,19 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             skip_reasons.append(f"{invalid_vid_count} skipped (invalid VLAN VID)")
         if invalid_name_count > 0:
             skip_reasons.append(f"{invalid_name_count} skipped (invalid VLAN name)")
+        if confirmation_error_count > 0:
+            skip_reasons.append(f"{confirmation_error_count} skipped (confirmation no longer current)")
 
         if parts:
             messages.success(request, f"VLANs synced: {', '.join(parts + skip_reasons)}.")
         elif skip_reasons:
             # Nothing actually synced. Do not claim success for rows rejected by a scope check.
             messages.warning(request, f"No VLANs synced: {', '.join(skip_reasons)}.")
-        else:
+        elif not conflicts:
             messages.warning(request, "No VLANs were created or updated.")
+
+        for error in dict.fromkeys(intent_errors):
+            messages.error(request, error)
 
         if created_count or updated_count:
             schedule_request_cache_mutation(
@@ -347,5 +520,11 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 obj,
                 SyncTab.VLANS,
                 self._post_server_key,
+                source_fragment_required=bool(conflicts),
+            )
+        if conflicts:
+            return apply_request_cache_transition(
+                request,
+                self._render_conflicts(request, conflicts, obj, object_type, object_id),
             )
         return apply_request_cache_transition(request, self._redirect(object_type, object_id))

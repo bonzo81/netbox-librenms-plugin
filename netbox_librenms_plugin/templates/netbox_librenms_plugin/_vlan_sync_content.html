@@ -1,5 +1,8 @@
 {% load helpers %}
 {% include 'inc/messages.html' %}
+{% if request.htmx %}
+{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=vlan_sync.cache_expiry cache_container_id="vlan-cache-countdown" cache_countdown_id="vlan-countdown-timer" cache_oob=True %}
+{% endif %}
 
 {% if vlan_sync.error_message %}
 <!-- Error Message -->
@@ -22,7 +25,10 @@
 {% else %}
 {% with model_name=vlan_sync.object|meta:"model_name" %}
 <form method="post"
-      action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}">
+      action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}"
+      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}"
+      hx-target="#htmx-modal-content"
+      hx-swap="innerHTML">
 {% endwith %}
 {% endif %}
     {% comment %}
@@ -37,30 +43,48 @@
     <input type="hidden" name="action" value="create_vlans">
     {% endif %}
 
-    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+    {% if not migrated_to_marker %}
+    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
         <div>
-            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected VLANs</span>
             </button>
-            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+        <div>
             <small class="text-muted ms-2">
                 <i class="mdi mdi-information-outline"></i> Select a VLAN Group for each row, or leave empty for global VLANs
             </small>
         </div>
-        <div class="ms-auto d-flex align-items-center">
-            {% if vlan_sync.cache_expiry %}
-            <div id="vlan-cache-countdown" class="me-3">
-                Cache expires in: <span id="vlan-countdown-timer"
-                    data-expiry="{{ vlan_sync.cache_expiry|date:'c' }}"></span>
-            </div>
-            {% endif %}
-            <div class="color-key me-3">
+        <div class="ms-auto d-flex align-items-center justify-content-end flex-wrap gap-2">
+            <div class="color-key">
                 <span class="badge text-success text-white">Matching values</span>
                 <span class="badge text-warning text-white">Mismatched values</span>
                 <span class="badge text-danger text-white">Not present in NetBox</span>
             </div>
+            <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
+                data-bs-target="#vlanFilterSection" aria-expanded="false" aria-controls="vlanFilterSection">
+                <i class="mdi mdi-filter-outline"></i> Filters
+            </button>
+        </div>
+    </div>
+
+    <div class="collapse mb-3" id="vlanFilterSection">
+        <div class="mb-2">
+            <small class="text-muted">
+                <i class="mdi mdi-information"></i> Filters apply to currently displayed VLANs.
+            </small>
+        </div>
+        <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-5 g-2">
+            <div class="col"><input type="text" id="filter-vlan-id" placeholder="Filter by VLAN ID" class="form-control"></div>
+            <div class="col"><input type="text" id="filter-vlan-name" placeholder="Filter by Name" class="form-control"></div>
+            <div class="col"><input type="text" id="filter-vlan-group" placeholder="Filter by VLAN Group" class="form-control"></div>
+            <div class="col"><input type="text" id="filter-vlan-type" placeholder="Filter by Type" class="form-control"></div>
+            <div class="col"><input type="text" id="filter-vlan-state" placeholder="Filter by State" class="form-control"></div>
         </div>
     </div>
 

@@ -2616,6 +2616,8 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
 @pytest.mark.django_db
 def test_create_missing_interfaces_toggle_survives_a_table_refresh(client, settings):
     """The refreshed fragment must re-check the toggle the user posted, not silently drop it."""
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+
     _configure_test_server(settings)
     device = make_device("ip-toggle-state", librenms_cf={"default": {"id": 42}})
     client.force_login(make_superuser("ip-toggle-state-user"))
@@ -2631,7 +2633,11 @@ def test_create_missing_interfaces_toggle_survives_a_table_refresh(client, setti
         assert response.status_code == 200
         html = response.content.decode()
         assert 'id="create-missing-interfaces-toggle-cb"' in html
-        return html.split('id="create-missing-interfaces-toggle-cb"', 1)[1].split(">", 1)[0]
+        return next(
+            attributes
+            for attributes in open_tags(html, "input")
+            if attributes.get("id") == "create-missing-interfaces-toggle-cb"
+        )
 
     base = {"server_key": "default", "interface_name_field": "ifName"}
     # Positive control: without the toggle the box must stay clear, so the assertion below

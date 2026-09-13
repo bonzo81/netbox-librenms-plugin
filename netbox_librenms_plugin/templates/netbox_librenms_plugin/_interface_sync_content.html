@@ -1,5 +1,8 @@
 {% load helpers %}
 {% include 'inc/messages.html' %}
+{% if request.htmx %}
+{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=interface_sync.cache_expiry cache_container_id="cache-countdown" cache_countdown_id="countdown-timer" cache_oob=True %}
+{% endif %}
 
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
@@ -51,72 +54,106 @@
 {% endif %}
     {% endwith %}
     {% block table_actions %}
-    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+    <div class="noprint d-flex justify-content-between align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
         <div class="d-flex align-items-center gap-2">
             {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected Interfaces</span>
             </button>
+            <div class="dropdown" id="interface-sync-options">
+                <button class="btn btn-outline-secondary dropdown-toggle" type="button"
+                    data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                    <i class="mdi mdi-tune-variant"></i> Sync options
+                    <span class="badge bg-secondary-lt ms-1" id="interface-sync-options-count">0</span>
+                </button>
+                <div class="dropdown-menu p-3 interface-sync-options-menu">
+                    <div class="form-check form-switch mb-2"
+                        title="When enabled, checking a LAG/portchannel row also checks all its member interfaces, and checking a sub-interface also selects its parent interface">
+                        <input class="form-check-input interface-sync-option" type="checkbox"
+                            id="autoSelectLagMembers" name="auto_select_lag_members" value="1"
+                            data-default-checked="true" checked>
+                        <label class="form-check-label small" for="autoSelectLagMembers">
+                            Auto-select LAG members &amp; parents
+                        </label>
+                    </div>
+                    <hr class="my-2">
+                    <div class="small fw-bold mb-2 text-secondary">Exclude from sync</div>
+                    <div class="row row-cols-2 g-1">
+                        <div class="col">
+                            <div class="form-check">
+                                <input class="form-check-input interface-sync-option" type="checkbox"
+                                    name="exclude_columns" value="type" id="excludeType"
+                                    data-default-checked="false">
+                                <label class="form-check-label small" for="excludeType">Type</label>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-check">
+                                <input class="form-check-input interface-sync-option" type="checkbox"
+                                    name="exclude_columns" value="speed" id="excludeSpeed"
+                                    data-default-checked="false">
+                                <label class="form-check-label small" for="excludeSpeed">Speed</label>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-check">
+                                <input class="form-check-input interface-sync-option" type="checkbox"
+                                    name="exclude_columns" value="vlans" id="excludeVlans"
+                                    data-default-checked="false">
+                                <label class="form-check-label small" for="excludeVlans">VLANs</label>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-check">
+                                <input class="form-check-input interface-sync-option" type="checkbox"
+                                    name="exclude_columns" value="mac_address" id="excludeMACAddress"
+                                    data-default-checked="false">
+                                <label class="form-check-label small" for="excludeMACAddress">MAC</label>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-check">
+                                <input class="form-check-input interface-sync-option" type="checkbox"
+                                    name="exclude_columns" value="mtu" id="excludeMTU"
+                                    data-default-checked="false">
+                                <label class="form-check-label small" for="excludeMTU">MTU</label>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-check">
+                                <input class="form-check-input interface-sync-option" type="checkbox"
+                                    name="exclude_columns" value="enabled" id="excludeEnabled"
+                                    data-default-checked="false">
+                                <label class="form-check-label small" for="excludeEnabled">Enabled</label>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-check">
+                                <input class="form-check-input interface-sync-option" type="checkbox"
+                                    name="exclude_columns" value="description" id="excludeDescription"
+                                    data-default-checked="false">
+                                <label class="form-check-label small" for="excludeDescription">Description</label>
+                            </div>
+                        </div>
+                    </div>
+                    <hr class="my-2">
+                    <button class="btn btn-link btn-sm p-0" type="button" id="reset-interface-sync-options">
+                        Reset to defaults
+                    </button>
+                </div>
+            </div>
             {% endif %}
-            <a href="#" class="m-2"
+            <a href="#" class="ms-1"
                 onclick="event.preventDefault(); showModal(document.getElementById('interfaceTypeHelpModal'))">
                 <i class="mdi mdi-help-circle"></i> info
             </a>
-            <div class="d-flex align-items-center ms-2" title="When enabled, checking a LAG/portchannel row also checks all its member interfaces, and checking a sub-interface also selects its parent interface">
-                <input class="form-check-input form-check-input-sm me-1" type="checkbox" id="autoSelectLagMembers" name="auto_select_lag_members" value="1" checked>
-                <label class="form-check-label small mb-0" for="autoSelectLagMembers">Auto-select LAG members &amp; parents</label>
-            </div>
         </div>
-        {% if not migrated_to_marker %}
-        <div class="ms-auto d-flex align-items-center">
-            <div class="exclude-columns-section d-flex align-items-center gap-2 me-2">
-                <h6 class="mb-0">Exclude from Sync:</h6>
-                <div class="d-flex align-items-center m-0">
-                    <span class="small me-1">Type</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
-                        value="type" id="excludeType">
-                </div>
-                <div class="d-flex align-items-center m-1">
-                    <span class="small me-1">Speed</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
-                        value="speed" id="excludeSpeed">
-                </div>
-                <div class="d-flex align-items-center m-1">
-                    <span class="small me-1">VLANs</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
-                        value="vlans" id="excludeVlans">
-                </div>
-                <div class="d-flex align-items-center m-1">
-                    <span class="small me-1">MAC</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
-                        value="mac_address" id="excludeMACAddress">
-                </div>
-                <div class="d-flex align-items-center m-1">
-                    <span class="small me-1">MTU</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
-                        value="mtu" id="excludeMTU">
-                </div>
-                <div class="d-flex align-items-center m-1">
-                    <span class="small me-1">Enabled</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
-                        value="enabled" id="excludeEnabled">
-                </div>
-                <div class="d-flex align-items-center m-1">
-                    <span class="small me-1">Description</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
-                        value="description" id="excludeDescription">
-                </div>
-            </div>
-        </div>
-        {% endif %}
-
-
     </div>
     {% endblock %} <!-- End block table_actions -->
     <div class="row mb-3">
         <div class="col col-md-12">
-            <div class="d-flex justify-content-between align-items-center mb-3">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
                 <div>
                     {% if interface_sync.object.virtual_chassis %}
                     <button type="button" class="btn btn-secondary" id="bulk-vc-member-button" data-bs-toggle="modal"
@@ -133,25 +170,18 @@
                     </a>
                     {% endif %}
                 </div>
-                <div class="ms-auto d-flex align-items-center">
-                    {% if interface_sync.cache_expiry %}
-                    <div id="cache-countdown" class="me-3">
-                        Cache expires in: <span id="countdown-timer"
-                            data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
-                    </div>
-
-                    {% endif %}
-                    <div class="color-key me-3">
+                <div class="ms-auto d-flex align-items-center justify-content-end flex-wrap gap-2">
+                    <div class="color-key">
                         <span class="badge text-success text-white">Matching values</span>
                         <span class="badge text-warning text-white">Mismatched values</span>
                         <span class="badge text-danger text-white">Not present in NetBox</span>
                     </div>
+                    <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
+                        data-bs-target="#interfaceFilterSection" aria-expanded="false"
+                        aria-controls="interfaceFilterSection">
+                        <i class="mdi mdi-filter-outline"></i> Filters
+                    </button>
                 </div>
-                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse"
-                    data-bs-target="#interfaceFilterSection" aria-expanded="false"
-                    aria-controls="interfaceFilterSection">
-                    <i class="mdi mdi-filter"></i> Toggle Filters
-                </button>
             </div>
             <div class="collapse mb-3" id="interfaceFilterSection">
                 <div class="mb-2">

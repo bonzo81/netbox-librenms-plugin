@@ -69,3 +69,13 @@ class TestVlanSyncContentTemplateMigratedMode:
         assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
         assert 'value="create_vlans"' in html
+        assert 'hx-target="#htmx-modal-content"' in html
+        assert 'hx-swap="innerHTML"' in html
+
+    def test_normal_mode_renders_filters_for_the_vlan_columns(self):
+        html = self._render(migrated=None)
+
+        assert 'aria-controls="vlanFilterSection"' in html
+        assert 'id="vlanFilterSection"' in html
+        for field in ("vlan-id", "vlan-name", "vlan-group", "vlan-type", "vlan-state"):
+            assert f'id="filter-{field}"' in html

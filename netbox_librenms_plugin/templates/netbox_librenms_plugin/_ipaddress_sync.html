@@ -2,9 +2,9 @@
 {% load static %}
 
 <!-- Action Buttons -->
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h2>IP Address Sync</h2>
-    <div class="btn-list">
+<div class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar">
+    <div class="btn-list align-items-center">
+        {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=ip_sync.cache_expiry cache_container_id="ip-cache-countdown" cache_countdown_id="ip-countdown-timer" %}
         <form method="post">
             {% csrf_token %}
             {# Carry the tab's server_key so the refresh rebinds to it (mirrors _module_sync.html). #}
@@ -14,14 +14,14 @@
                         {% if model_name == "device" %}
                             <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_ipaddress_sync' pk=object.pk %}"
                                     hx-target="#ipaddress-sync-content"
-                                    hx-include="[name='interface_name_field']"
+                                    hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
                                     class="btn btn-outline-primary">
                                 Refresh IP Addresses
                             </button>
                         {% elif model_name == "virtualmachine" %}
                             <button hx-post="{% url 'plugins:netbox_librenms_plugin:vm_ipaddress_sync' pk=object.pk %}"
                                     hx-target="#ipaddress-sync-content"
-                                    hx-include="[name='interface_name_field']"
+                                    hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
                                     class="btn btn-outline-primary">
                                 Refresh IP Addresses
                             </button>

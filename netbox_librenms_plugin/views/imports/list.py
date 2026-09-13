@@ -21,7 +21,7 @@ from netbox_librenms_plugin.server_selection import (
     parse_configured_server_key,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import get_user_pref
+from netbox_librenms_plugin.utils import get_user_pref, resolve_import_context_columns
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGenericPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -418,6 +418,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         cached_searches = get_active_cached_searches_for_servers(LibreNMSAPI.get_available_servers())
 
         server_key = self._active_server_key
+        import_columns = resolve_import_context_columns(request)
         context = {
             "model": Device,
             "table": table,
@@ -443,6 +444,9 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             "server_selection_error": self._server_selection_error,
             "can_use_background_jobs": request.user.is_superuser,
             "device_count": device_count,
+            "import_columns": import_columns,
+            "import_columns_count": len(import_columns),
+            "import_options_count": int(not self._use_sysname) + int(self._strip_domain),
         }
         return render(request, self.template_name, context)
 

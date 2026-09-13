@@ -1291,6 +1291,236 @@ def test_the_tab_templates_keep_the_refresh_button_outside_the_cached_content(te
     assert refresh < content, f"{template}: the refresh button moved inside #{content_id}"
 
 
+@pytest.mark.parametrize(
+    ("template", "heading", "countdown_id"),
+    [
+        ("_interface_sync.html", "Interface Sync", "cache-countdown"),
+        ("_ipaddress_sync.html", "IP Address Sync", "ip-cache-countdown"),
+        ("_module_sync.html", "Module Sync", "module-cache-countdown"),
+        ("_vlan_sync.html", "VLAN Sync", "vlan-cache-countdown"),
+        ("_cable_sync.html", "Cable Sync", "cable-cache-countdown"),
+    ],
+)
+def test_tab_toolbars_put_the_shared_countdown_before_refresh(template, heading, countdown_id):
+    """Every tab uses one compact header toolbar without a redundant title."""
+    markup = (TEMPLATE_DIR / template).read_text()
+
+    assert f"<h2>{heading}</h2>" not in markup
+    countdown = markup.index(f'cache_container_id="{countdown_id}"')
+    refresh = markup.index("Refresh ")
+    assert countdown < refresh
+
+
+@pytest.mark.parametrize(
+    ("template", "countdown_id"),
+    [
+        ("_interface_sync_content.html", "cache-countdown"),
+        ("_ipaddress_sync_content.html", "ip-cache-countdown"),
+        ("_module_sync_content.html", "module-cache-countdown"),
+        ("_vlan_sync_content.html", "vlan-cache-countdown"),
+        ("_cable_sync_content.html", "cable-cache-countdown"),
+    ],
+)
+def test_refreshed_tab_content_replaces_the_header_countdown_out_of_band(template, countdown_id):
+    """A tab refresh updates the countdown even though its toolbar is outside the swap target."""
+    markup = (TEMPLATE_DIR / template).read_text()
+
+    assert "{% if request.htmx %}" in markup
+    assert f'cache_container_id="{countdown_id}"' in markup
+    assert "cache_oob=True" in markup
+
+
+@pytest.mark.parametrize(
+    ("wrapper_template", "content_template"),
+    [
+        ("_interface_sync.html", "_interface_sync_content.html"),
+        ("_ipaddress_sync.html", "_ipaddress_sync_content.html"),
+        ("_module_sync.html", "_module_sync_content.html"),
+        ("_vlan_sync.html", "_vlan_sync_content.html"),
+        ("_cable_sync.html", "_cable_sync_content.html"),
+    ],
+)
+def test_tab_toolbars_do_not_stack_extra_vertical_margins(wrapper_template, content_template):
+    """The refresh and primary action rows use one compact vertical rhythm."""
+    wrapper = (TEMPLATE_DIR / wrapper_template).read_text()
+    content = (TEMPLATE_DIR / content_template).read_text()
+
+    assert 'class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar"' in wrapper
+    assert "sync-tab-primary-toolbar" in content
+    assert "mt-0" in content
+
+
+def test_tab_toolbars_share_a_row_only_when_the_viewport_has_room(page):
+    """Wide tabs align their actions with refresh controls, while narrow tabs stack them."""
+    page.set_content(
+        """
+        <style>
+          * { box-sizing: border-box; }
+          .sync-shell { width: 100%; }
+          .sync-tab-refresh-toolbar { display: flex; justify-content: flex-end; height: 30px; }
+          .sync-tab-refresh-toolbar > .btn-list { display: flex; width: 300px; height: 30px; }
+          .sync-tab-primary-toolbar { display: flex; width: 100%; height: 30px; }
+          .sync-tab-primary-toolbar > .primary-actions { width: 390px; height: 30px; }
+        </style>
+        <div class="sync-shell">
+          <div class="sync-tab-refresh-toolbar">
+            <div class="btn-list" id="refresh-actions"></div>
+          </div>
+          <div id="interface-sync-content">
+            <div class="sync-tab-primary-toolbar">
+              <div class="primary-actions" id="sync-actions"></div>
+            </div>
+          </div>
+        </div>
+        <div class="sync-shell" id="empty-sync-tab">
+          <div class="sync-tab-refresh-toolbar">
+            <div class="btn-list" id="empty-refresh-actions"></div>
+          </div>
+          <div id="cable-sync-content">
+            <div class="card" id="empty-state-card" style="height: 100px;"></div>
+          </div>
+        </div>
+        <div class="sync-shell" id="module-sync-tab">
+          <div class="sync-tab-refresh-toolbar">
+            <div class="btn-list" id="module-refresh-actions"></div>
+          </div>
+          <style id="module-inline-styles"></style>
+          <div id="module-sync-content">
+            <div class="sync-tab-primary-toolbar">
+              <div class="primary-actions" id="module-install-actions"></div>
+            </div>
+          </div>
+        </div>
+        <div class="sync-shell" id="warning-sync-tab">
+          <div class="sync-tab-refresh-toolbar">
+            <div class="btn-list" id="warning-refresh-actions"></div>
+          </div>
+          <div id="warning-sync-content">
+            <div class="alert" id="sync-warning" style="height: 30px;"></div>
+            <div class="sync-tab-primary-toolbar">
+              <div class="primary-actions"></div>
+            </div>
+          </div>
+        </div>
+        """
+    )
+    page.add_style_tag(path=str(STYLE_PATH))
+
+    page.set_viewport_size({"width": 1440, "height": 800})
+    refresh_rect = page.locator("#refresh-actions").bounding_box()
+    sync_rect = page.locator("#sync-actions").bounding_box()
+    assert refresh_rect["y"] == pytest.approx(sync_rect["y"], abs=1)
+    assert sync_rect["x"] + sync_rect["width"] < refresh_rect["x"]
+    module_refresh_rect = page.locator("#module-refresh-actions").bounding_box()
+    module_install_rect = page.locator("#module-install-actions").bounding_box()
+    assert module_refresh_rect["y"] == pytest.approx(module_install_rect["y"], abs=1)
+
+    page.set_viewport_size({"width": 900, "height": 800})
+    refresh_rect = page.locator("#refresh-actions").bounding_box()
+    sync_rect = page.locator("#sync-actions").bounding_box()
+    assert refresh_rect["y"] + refresh_rect["height"] <= sync_rect["y"]
+
+    empty_refresh_rect = page.locator("#empty-refresh-actions").bounding_box()
+    empty_card_rect = page.locator("#empty-state-card").bounding_box()
+    assert empty_refresh_rect["y"] + empty_refresh_rect["height"] + 16 <= empty_card_rect["y"]
+    warning_refresh_rect = page.locator("#warning-refresh-actions").bounding_box()
+    warning_rect = page.locator("#sync-warning").bounding_box()
+    assert warning_refresh_rect["y"] + warning_refresh_rect["height"] + 16 <= warning_rect["y"]
+
+
+def test_vlan_filters_hide_nonmatching_vlan_rows(page):
+    """VLAN filters match the visible values in VLAN rows."""
+    page.set_content(
+        """
+        <input id="filter-vlan-id">
+        <input id="filter-vlan-name">
+        <input id="filter-vlan-group">
+        <input id="filter-vlan-type">
+        <input id="filter-vlan-state">
+        <table id="librenms-vlan-table"><tbody>
+          <tr class="empty"><td colspan="5">No matching VLANs</td></tr>
+          <tr data-vlan-id="10" id="users-vlan">
+            <td data-col="vlan_id"><span>10</span></td>
+            <td data-col="name"><span>Users</span></td>
+            <td data-col="vlan_group_selection"><div class="ts-control"><span class="item">Campus</span></div></td>
+            <td data-col="type">Ethernet</td>
+            <td data-col="state"><span>Active</span></td>
+          </tr>
+          <tr data-vlan-id="20" id="guests-vlan">
+            <td data-col="vlan_id"><span>20</span></td>
+            <td data-col="name"><span>Guests</span></td>
+            <td data-col="vlan_group_selection"><div class="ts-control"><span class="item">Edge</span></div></td>
+            <td data-col="type">QinQ</td>
+            <td data-col="state"><span>Inactive</span></td>
+          </tr>
+        </tbody></table>
+        """
+    )
+    _add_page_scripts(page)
+    page.evaluate("initializeFilters()")
+
+    page.locator("#filter-vlan-name").fill("guest")
+    assert page.locator("#users-vlan").evaluate("row => row.style.display") == "none"
+    assert page.locator("#guests-vlan").evaluate("row => row.style.display") == ""
+
+    page.locator("#filter-vlan-name").fill("")
+    page.locator("#filter-vlan-group").fill("campus")
+    assert page.locator("#users-vlan").evaluate("row => row.style.display") == ""
+    assert page.locator("#guests-vlan").evaluate("row => row.style.display") == "none"
+
+
+def test_filter_disclosure_state_survives_fragment_replacement(page):
+    """An expanded filter remains expanded and visibly active after its tab refreshes."""
+    markup = """
+      <div id="filter-host">
+        <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button"
+                data-bs-target="#interfaceFilterSection" aria-expanded="false"
+                aria-controls="interfaceFilterSection">
+          <i class="mdi mdi-filter-outline"></i> Filters
+        </button>
+        <div class="collapse" id="interfaceFilterSection"></div>
+      </div>
+    """
+    page.set_content(markup)
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+
+    page.locator("#interfaceFilterSection").evaluate(
+        """section => {
+            section.classList.add('show');
+            section.dispatchEvent(new Event('shown.bs.collapse', { bubbles: true }));
+        }"""
+    )
+    button = page.locator(".sync-filter-toggle")
+    assert "active" in button.get_attribute("class").split()
+    assert button.get_attribute("aria-expanded") == "true"
+    assert button.locator("i").evaluate("icon => icon.classList.contains('mdi-filter-check')")
+
+    page.locator("#filter-host").evaluate("(host, markup) => { host.innerHTML = markup; }", markup)
+    page.evaluate("initializeScripts()")
+
+    assert page.locator("#interfaceFilterSection").evaluate("section => section.classList.contains('show')")
+    assert "active" in page.locator(".sync-filter-toggle").get_attribute("class").split()
+
+    page.locator("#interfaceFilterSection").evaluate("section => section.classList.remove('show')")
+    page.evaluate("document.body.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
+
+    assert page.locator("#interfaceFilterSection").evaluate("section => section.classList.contains('show')")
+    assert "btn-primary" in page.locator(".sync-filter-toggle").get_attribute("class").split()
+
+    page.locator("#interfaceFilterSection").evaluate(
+        """section => {
+            section.classList.remove('show');
+            section.dispatchEvent(new Event('hidden.bs.collapse', { bubbles: true }));
+        }"""
+    )
+    button = page.locator(".sync-filter-toggle")
+    assert "active" not in button.get_attribute("class").split()
+    assert "btn-secondary" in button.get_attribute("class").split()
+    assert button.get_attribute("aria-expanded") == "false"
+    assert button.locator("i").evaluate("icon => icon.classList.contains('mdi-filter-outline')")
+
+
 def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled(page):
     """A status response alone must not restore controls after fail-closed content loss."""
     initial = {

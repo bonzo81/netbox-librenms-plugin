@@ -733,18 +733,19 @@ class TestVlansGroupedUpdateAndSkip:
         )
         return view, req, dev, vlan, cache_key
 
-    def test_grouped_vlan_with_different_name_is_renamed(self):
-        """A grouped VLAN whose LibreNMS name differs is renamed and persisted."""
+    def test_grouped_vlan_with_different_name_requires_confirmation(self):
+        """A grouped VLAN whose LibreNMS name differs is disclosed without a write."""
         from django.core.cache import cache
         from ipam.models import VLAN
 
         view, req, dev, vlan, cache_key = self._setup("update", cached_name="NewName", existing_name="OldName")
 
         try:
-            view._handle_create_vlans(req, dev, "device", dev.pk)
+            response = view._handle_create_vlans(req, dev, "device", dev.pk)
 
-            assert VLAN.objects.get(pk=vlan.pk).name == "NewName"
-            assert any("updated" in t for t in message_texts(req, "success"))
+            assert response.status_code == 200
+            assert b"Confirm VLAN changes" in response.content
+            assert VLAN.objects.get(pk=vlan.pk).name == "OldName"
         finally:
             cache.delete(cache_key)
 

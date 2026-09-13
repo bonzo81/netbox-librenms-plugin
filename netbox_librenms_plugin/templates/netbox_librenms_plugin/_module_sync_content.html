@@ -1,21 +1,11 @@
 {% load helpers %}
 {% include 'inc/messages.html' %}
+{% if request.htmx %}
+{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=module_sync.cache_expiry cache_container_id="module-cache-countdown" cache_countdown_id="module-countdown-timer" cache_oob=True %}
+{% endif %}
 
 <!-- Module Sync Table -->
 {% if module_sync.table %}
-<div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
-    <div>
-        <span class="text-muted">
-            Showing inventory items from LibreNMS matched against NetBox module bays and module types.
-        </span>
-    </div>
-    {% if module_sync.cache_expiry %}
-        <div id="module-cache-countdown" class="me-3">
-            Cache expires in: <span id="module-countdown-timer" data-expiry="{{ module_sync.cache_expiry|date:'c' }}"></span>
-        </div>
-    {% endif %}
-</div>
-
 {# Migrated donors must not install: drop the whole form (not just the button) so install_selected isn't a live POST target / wired JS handler in migrated mode — matching the other sync-content templates. #}
 {% if has_write_permission and not migrated_to_marker %}
 {# Separate form for Install Selected — uses JS to collect checked rows before submit #}
@@ -26,7 +16,7 @@
     hx-sync="#module-sync-content:drop" hx-disabled-elt="find button">
     {% csrf_token %}
     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
-    <div class="noprint mb-3">
+    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
         <button type="submit" class="btn btn-primary" id="install-selected-btn">
             <span class="lnms-btn-idle"><i class="mdi mdi-package-down"></i> Install Selected</span>
             <span class="lnms-installing"><span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Installing…</span>
@@ -43,6 +33,9 @@ interface/IP/VLAN fragments.
 <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
 {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
 {% endif %}
+<div class="noprint text-secondary mb-3">
+    Showing inventory items from LibreNMS matched against NetBox module bays and module types.
+</div>
 <div class="card">
     {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
     {% include 'inc/table.html' with table=module_sync.table %}

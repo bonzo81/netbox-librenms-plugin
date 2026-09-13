@@ -188,8 +188,8 @@ class DeviceImportTable(tables.Table):
         orderable=False,
         accessor="device_id",
         attrs={
-            "th": {"class": "w-1", "aria-label": "Select all"},
-            "td": {"class": "w-1"},
+            "th": {"class": "w-1 import-select-column", "aria-label": "Select all"},
+            "td": {"class": "w-1 import-select-column"},
             "input": {"name": "select"},
             "td__input": {
                 "name": "select",
@@ -214,42 +214,43 @@ class DeviceImportTable(tables.Table):
         },
     )
 
-    # LibreNMS device fields
-    hostname = Column(verbose_name="Hostname", accessor="hostname", orderable=True)
-    sysname = Column(verbose_name="System Name", accessor="sysName", orderable=True)
-    location = Column(verbose_name="Location", accessor="location", orderable=True)
-    hardware = Column(verbose_name="Hardware", accessor="hardware", orderable=True)
-
-    # Cluster selection - if selected, import as VM; otherwise import as Device
-    netbox_cluster = Column(
-        verbose_name="NetBox Cluster",
+    netbox_object = Column(
+        verbose_name="NetBox object",
         empty_values=(),
         orderable=False,
         accessor="device_id",
+        attrs={"th": {"class": "import-name-column"}, "td": {"class": "import-name-column"}},
     )
-
-    # NetBox role selection (for devices only)
-    netbox_role = Column(
-        verbose_name="NetBox Role",
-        empty_values=(),
-        orderable=False,
-        accessor="device_id",
+    location = Column(
+        verbose_name="Location",
+        accessor="location",
+        orderable=True,
+        attrs={"th": {"data-import-column": "location"}, "td": {"data-import-column": "location"}},
     )
-
-    # NetBox rack selection (for devices only, optional)
-    netbox_rack = Column(
-        verbose_name="NetBox Rack",
-        empty_values=(),
-        orderable=False,
-        accessor="device_id",
+    hardware = Column(
+        verbose_name="Hardware",
+        accessor="hardware",
+        orderable=True,
+        attrs={"th": {"data-import-column": "hardware"}, "td": {"data-import-column": "hardware"}},
     )
-
-    # Virtual Chassis detection column
-    virtual_chassis = Column(
-        verbose_name="Virtual Chassis",
+    hostname = Column(
+        verbose_name="Hostname",
+        accessor="hostname",
+        orderable=True,
+        attrs={"th": {"data-import-column": "hostname"}, "td": {"data-import-column": "hostname"}},
+    )
+    sysname = Column(
+        verbose_name="System Name",
+        accessor="sysName",
+        orderable=True,
+        attrs={"th": {"data-import-column": "sysname"}, "td": {"data-import-column": "sysname"}},
+    )
+    import_setup = Column(
+        verbose_name="Import setup",
         empty_values=(),
         orderable=False,
         accessor="device_id",
+        attrs={"th": {"class": "import-setup-column"}, "td": {"class": "import-setup-column"}},
     )
 
     # Actions column
@@ -258,11 +259,156 @@ class DeviceImportTable(tables.Table):
         empty_values=(),
         orderable=False,
         accessor="device_id",
+        attrs={"th": {"class": "import-actions-column text-end"}, "td": {"class": "import-actions-column text-end"}},
     )
 
     def render_hostname(self, value, record):
         """Render hostname with link to LibreNMS if available."""
         return format_html("<strong>{}</strong>", value)
+
+    def render_netbox_object(self, value, record):
+        """
+        Render the intended NetBox identity and any virtual-chassis summary.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered NetBox object summary.
+        """
+        validation = record.get("_validation", {})
+        existing = validation.get("existing_device")
+        is_vm = validation.get("import_as_vm", False) or isinstance(existing, VirtualMachine)
+        kind_label = "Virtual machine" if is_vm else "Device"
+        kind_class = "bg-purple-lt" if is_vm else "bg-blue-lt"
+
+        if existing:
+            url_name = "virtualization:virtualmachine" if is_vm else "dcim:device"
+            object_url = reverse(url_name, kwargs={"pk": existing.pk})
+            name_html = format_html(
+                '<a href="{}"><strong>{}</strong> <i class="mdi mdi-open-in-new"></i></a>',
+                object_url,
+                existing.name,
+            )
+            source_html = format_html(
+                '<div class="text-secondary small">Existing NetBox {}</div>',
+                "virtual machine" if is_vm else "device",
+            )
+        else:
+            resolved_name = (
+                validation.get("resolved_name")
+                or record.get("sysName")
+                or record.get("hostname")
+                or f"device-{record.get('device_id')}"
+            )
+            name_html = format_html(
+                '<strong data-import-name data-hostname="{}" data-sysname="{}">{}</strong>',
+                record.get("hostname") or "",
+                record.get("sysName") or "",
+                resolved_name,
+            )
+            criteria = validation.get("naming_criteria") or {}
+            source = criteria.get("source")
+            source_label = {"sysname": "sysName", "hostname": "hostname"}.get(source, "fallback name")
+            suffix = ", domain removed" if criteria.get("strip_domain") else ""
+            source_html = format_html(
+                '<div class="text-secondary small" data-import-name-source>From {}{}</div>',
+                source_label,
+                suffix,
+            )
+
+        vc_data = validation.get("virtual_chassis") or {}
+        vc_html = (
+            self.render_virtual_chassis(None, record)
+            if vc_data.get("is_stack") and vc_data.get("member_count", 0) > 1
+            else ""
+        )
+        return format_html(
+            '<div class="d-flex align-items-center gap-1 flex-wrap">{}<span class="badge {}">{}</span>{}</div>{}',
+            name_html,
+            kind_class,
+            kind_label,
+            vc_html,
+            source_html,
+        )
+
+    def render_import_setup(self, value, record):
+        """
+        Render the required choice inline and attach optional row choices.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered import setup controls.
+        """
+        validation = record.get("_validation", {})
+        existing = validation.get("existing_device")
+        if existing:
+            return mark_safe(
+                '<span class="badge bg-yellow-lt">Review existing match</span>'
+                '<div class="small text-secondary">Import setup is not applicable</div>'
+            )
+
+        is_vm = validation.get("import_as_vm", False)
+        if is_vm:
+            cluster_found = bool(validation.get("cluster", {}).get("found"))
+            label_class = "text-secondary" if cluster_found else "text-danger"
+            primary_label = "Cluster" if cluster_found else "Cluster required"
+            primary_control = self.render_netbox_cluster(None, record)
+            role_control = self.render_netbox_role(None, record)
+            options_count = int(bool(validation.get("device_role", {}).get("role")))
+            menu_html = format_html(
+                '<div class="small fw-bold mb-2">VM options</div>'
+                '<label class="form-label small" for="role_{}">VM role '
+                '<span class="text-secondary">(optional)</span></label>{}',
+                record.get("device_id"),
+                role_control,
+            )
+        else:
+            role_found = bool(validation.get("device_role", {}).get("found"))
+            label_class = "text-secondary" if role_found else "text-danger"
+            primary_label = "Device role" if role_found else "Role required"
+            primary_control = self.render_netbox_role(None, record)
+            rack_control = self.render_netbox_rack(None, record)
+            cluster_control = self.render_netbox_cluster(None, record)
+            options_count = int(bool(validation.get("rack", {}).get("rack")))
+            menu_html = format_html(
+                '<div class="small fw-bold mb-2">Optional placement</div>'
+                '<label class="form-label small" for="rack_{}">Rack</label>{}'
+                '<hr class="my-2"><div class="small fw-bold mb-2">Object type</div>'
+                '<label class="form-label small" for="cluster_{}">Import as virtual machine</label>{}',
+                record.get("device_id"),
+                rack_control,
+                record.get("device_id"),
+                cluster_control,
+            )
+
+        badge_html = (
+            format_html('<span class="badge bg-primary-lt ms-1">{}</span>', options_count) if options_count else ""
+        )
+        options_html = format_html(
+            '<div class="dropdown flex-shrink-0">'
+            '<button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" '
+            'data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" '
+            'title="More import settings" aria-label="More import settings">'
+            '<i class="mdi mdi-tune"></i>{}</button>'
+            '<div class="dropdown-menu dropdown-menu-end p-3 import-row-options-menu">{}</div></div>',
+            badge_html,
+            menu_html,
+        )
+        return format_html(
+            '<label class="import-source-label {}" for="{}_{}">{}</label>'
+            '<div class="d-flex gap-1 align-items-center">{}{}</div>',
+            label_class,
+            "cluster" if is_vm else "role",
+            record.get("device_id"),
+            primary_label,
+            primary_control,
+            options_html,
+        )
 
     def render_netbox_cluster(self, value, record):
         """
@@ -325,15 +471,14 @@ class DeviceImportTable(tables.Table):
             vc_detection_flag = "?enable_vc_detection=true"
 
         select_html = (
-            f'<select class="form-select form-select-sm cluster-select" '
+            f'<select class="form-select form-select-sm cluster-select import-setup-select" '
             f'name="cluster_{device_id}" '
             f'data-device-id="{device_id}" '
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="[name=role_{device_id}], [name=rack_{device_id}]" '
-            f'style="width: 180px;">'
+            f'hx-include="[name=role_{device_id}], [name=rack_{device_id}]">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -401,15 +546,14 @@ class DeviceImportTable(tables.Table):
             vc_detection_flag = "?enable_vc_detection=true"
 
         select_html = (
-            f'<select class="form-select form-select-sm device-role-select" '
+            f'<select class="form-select form-select-sm device-role-select import-setup-select" '
             f'name="role_{device_id}" '
             f'data-device-id="{device_id}" '
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="[name=cluster_{device_id}], [name=rack_{device_id}]" '
-            f'style="width: 150px;">'
+            f'hx-include="[name=cluster_{device_id}], [name=rack_{device_id}]">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -484,15 +628,14 @@ class DeviceImportTable(tables.Table):
             vc_detection_flag = "?enable_vc_detection=true"
 
         select_html = (
-            f'<select class="form-select form-select-sm rack-select" '
+            f'<select class="form-select form-select-sm rack-select import-option-select" '
             f'name="rack_{device_id}" '
             f'data-device-id="{device_id}" '
             f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
-            f'style="width: 200px;">'
+            f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -653,7 +796,7 @@ class DeviceImportTable(tables.Table):
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="{btn_title}">'
-                f'<i class="mdi {btn_icon}"></i>{btn_label}</button>'
+                f'<i class="mdi {btn_icon}"></i><span class="device-import-action-label">{btn_label}</span></button>'
             )
         elif is_ready:
             # Ready to import - show Import and Details buttons
@@ -665,7 +808,7 @@ class DeviceImportTable(tables.Table):
                 f'data-device-id="{device_id}" '
                 f'data-import-mode="single"{vc_attributes} '
                 f'title="Import this device">'
-                f'<i class="mdi mdi-download"></i> Import</button>'
+                f'<i class="mdi mdi-download"></i><span class="device-import-action-label"> Import</span></button>'
             )
             buttons.append(
                 f'<button type="button" '
@@ -676,7 +819,7 @@ class DeviceImportTable(tables.Table):
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="View details">'
-                f'<i class="mdi mdi-information-outline"></i></button>'
+                f'<i class="mdi mdi-information-outline"></i><span class="device-import-action-label visually-hidden"> Details</span></button>'
             )
         elif can_import:
             # Has warnings - show Review button with Details
@@ -690,7 +833,7 @@ class DeviceImportTable(tables.Table):
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="Review and import">'
-                f'<i class="mdi mdi-alert"></i> Review</button>'
+                f'<i class="mdi mdi-alert"></i><span class="device-import-action-label"> Review</span></button>'
             )
         else:
             # Cannot import (usually missing role) - show Import button (disabled until role selected) and Details
@@ -702,7 +845,7 @@ class DeviceImportTable(tables.Table):
                 f'data-device-id="{device_id}" '
                 f"disabled{vc_attributes} "
                 f'title="Select a role to enable import">'
-                f'<i class="mdi mdi-download"></i> Import</button>'
+                f'<i class="mdi mdi-download"></i><span class="device-import-action-label"> Import</span></button>'
             )
             buttons.append(
                 f'<button type="button" '
@@ -712,7 +855,7 @@ class DeviceImportTable(tables.Table):
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="View validation details">'
-                f'<i class="mdi mdi-alert-circle"></i> Details</button>'
+                f'<i class="mdi mdi-alert-circle"></i><span class="device-import-action-label"> Details</span></button>'
             )
 
         return mark_safe('<div class="btn-group btn-group-sm">' + " ".join(buttons) + "</div>")
@@ -737,26 +880,23 @@ class DeviceImportTable(tables.Table):
 
         # Show error button if detection failed
         if vc_data.get("detection_error"):
-            return mark_safe(
-                f'<button type="button" '
-                f'class="btn btn-sm btn-outline-warning" '
-                f'hx-get="{vc_url}" '
-                f'hx-target="#htmx-modal-content" '
-                f'hx-swap="innerHTML" '
-                f'title="View virtual chassis error details">'
-                f'<i class="mdi mdi-alert"></i> Error</button>'
+            return format_html(
+                '<button type="button" class="badge bg-yellow-lt border-0" '
+                'hx-get="{}" hx-target="#htmx-modal-content" hx-swap="innerHTML" '
+                'title="View virtual chassis error details">'
+                '<i class="mdi mdi-alert"></i> Stack Error</button>',
+                vc_url,
             )
 
         # Show member count button for valid multi-member stacks
         member_count = vc_data.get("member_count", 0)
-        return mark_safe(
-            f'<button type="button" '
-            f'class="btn btn-sm btn-outline-info" '
-            f'hx-get="{vc_url}" '
-            f'hx-target="#htmx-modal-content" '
-            f'hx-swap="innerHTML" '
-            f'title="View virtual chassis details">'
-            f'<i class="mdi mdi-server-network"></i> {member_count} members</button>'
+        return format_html(
+            '<button type="button" class="badge bg-cyan-lt border-0" '
+            'hx-get="{}" hx-target="#htmx-modal-content" hx-swap="innerHTML" '
+            'title="View virtual chassis details">'
+            '<i class="mdi mdi-server-network"></i> Stack, {}</button>',
+            vc_url,
+            member_count,
         )
 
     def _build_validation_details_url(self, device_id: int, validation: dict) -> str:
@@ -856,26 +996,22 @@ class DeviceImportTable(tables.Table):
 
         fields = (
             "selection",
-            "hostname",
-            "sysname",
+            "netbox_object",
             "location",
             "hardware",
-            "netbox_cluster",
-            "netbox_role",
-            "netbox_rack",
-            "virtual_chassis",
+            "hostname",
+            "sysname",
+            "import_setup",
             "actions",
         )
         sequence = (
             "selection",
-            "hostname",
-            "sysname",
+            "netbox_object",
             "location",
             "hardware",
-            "netbox_cluster",
-            "netbox_role",
-            "netbox_rack",
-            "virtual_chassis",
+            "hostname",
+            "sysname",
+            "import_setup",
             "actions",
         )
         default_columns = fields

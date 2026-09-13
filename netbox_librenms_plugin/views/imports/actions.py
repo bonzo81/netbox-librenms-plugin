@@ -63,6 +63,7 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
+    IMPORT_CONTEXT_COLUMNS_PREFERENCE,
     acquire_advisory_transaction_lock,
     add_librenms_server_mapping,
     coerce_librenms_id,
@@ -77,6 +78,7 @@ from netbox_librenms_plugin.utils import (
     save_interface_name_preference,
     save_user_pref,
     set_device_ip_fk,
+    validate_import_context_columns,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
@@ -3989,6 +3991,7 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
     """Save a user preference via POST. Used by JS toggle handlers."""
 
     ALLOWED_PREFS = {
+        "import_columns": IMPORT_CONTEXT_COLUMNS_PREFERENCE,
         "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
         "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
         "set_primary_ip": "plugins.netbox_librenms_plugin.set_primary_ip",
@@ -4022,6 +4025,12 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
             if not save_interface_name_preference(request, value, platform_id):
                 return JsonResponse({"error": "Invalid interface name field"}, status=400)
             return JsonResponse({"status": "ok"})
+
+        if key == "import_columns":
+            validated_columns = validate_import_context_columns(value)
+            if validated_columns is None:
+                return JsonResponse({"error": "Invalid import columns"}, status=400)
+            value = list(validated_columns)
 
         save_user_pref(request, self.ALLOWED_PREFS[key], value)
         return JsonResponse({"status": "ok"})

@@ -379,7 +379,7 @@ class TestDeviceImportTable:
             ({}, "—"),
             ({"is_stack": True, "member_count": 1}, "—"),
             ({"is_stack": True, "member_count": 2, "detection_error": "timeout"}, "Error"),
-            ({"is_stack": True, "member_count": 3}, "3 members"),
+            ({"is_stack": True, "member_count": 3}, "Stack, 3"),
         ],
     )
     def test_virtual_chassis_states_use_the_real_details_route(self, vc_data, expected):
@@ -546,6 +546,72 @@ class TestDeviceImportTable:
         assert (
             reverse(
                 "plugins:netbox_librenms_plugin:device_validation_details",
+                kwargs={"device_id": 4101},
+            )
+            in html
+        )
+
+    def test_full_table_render_uses_the_focused_proposal_a_columns(self):
+        record = _import_record(
+            can_import=True,
+            is_ready=True,
+            resolved_name="edge-4101",
+            naming_criteria={"source": "sysname", "strip_domain": True},
+        )
+        table = self._table([record], server_key="secondary")
+
+        html = table.as_html(RequestFactory().get("/"))
+
+        assert list(table.columns.names()) == [
+            "selection",
+            "netbox_object",
+            "location",
+            "hardware",
+            "hostname",
+            "sysname",
+            "import_setup",
+            "actions",
+        ]
+        assert "NetBox object" in html
+        assert "Import setup" in html
+        assert 'data-import-column="hostname"' in html
+        assert 'data-import-column="sysname"' in html
+        assert "From sysName, domain removed" in html
+        assert "Role required" in html
+        assert "Optional placement" in html
+        assert "Import as virtual machine" in html
+
+    def test_vm_setup_keeps_cluster_inline_and_role_in_attached_options(self):
+        cluster = make_cluster("Focused setup cluster")
+        record = _import_record(
+            import_as_vm=True,
+            cluster={"found": True, "cluster": cluster},
+            resolved_name="compute-4101",
+        )
+        table = self._table([record])
+
+        html = str(table.rows[0].get_cell("import_setup"))
+
+        assert "Cluster" in html
+        assert f'value="{cluster.pk}" selected' in html
+        assert "VM role" in html
+        assert html.index("Cluster") < html.index("VM role")
+
+    def test_virtual_chassis_summary_is_attached_to_the_netbox_object(self):
+        record = _import_record(
+            resolved_name="stack-4101",
+            virtual_chassis={"is_stack": True, "member_count": 3},
+        )
+        table = self._table([record], server_key="secondary")
+
+        html = str(table.rows[0].get_cell("netbox_object"))
+
+        assert "Device" in html
+        assert "Stack, 3" in html
+        assert "device_vc_details" not in html
+        assert (
+            reverse(
+                "plugins:netbox_librenms_plugin:device_vc_details",
                 kwargs={"device_id": 4101},
             )
             in html

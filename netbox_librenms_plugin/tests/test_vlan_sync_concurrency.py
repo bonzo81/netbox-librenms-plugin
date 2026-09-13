@@ -1,7 +1,7 @@
 """Concurrency tests for VLAN synchronization.
 
-Global VIDs are serialized by an advisory lock. A grouped VLAN has no such lock, so its row is
-protected only by the re-lock the sync takes between the change-scope check and the save.
+Global VIDs are serialized by an advisory lock. Confirmed grouped VLAN changes lock their exact
+row before applying the disclosed rename.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -136,17 +136,26 @@ def test_concurrent_global_vlan_sync_creates_one_vlan():
     assert VLAN.objects.filter(vid=321, group__isnull=True).count() == 1
 
 
-def _drive_grouped_sync(device, user, group, vid, librenms_name):
+def _drive_grouped_sync(device, user, group, vid, librenms_name, *, intent=None):
     """POST one grouped VID into the real view and return the recorded messages."""
     from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
+    data = {
+        "action": "create_vlans",
+        "select": [str(vid)],
+        f"vlan_group_{vid}": str(group.pk),
+        "server_key": "default",
+    }
+    if intent is not None:
+        data.update(
+            {
+                "confirm_conflicts": "1",
+                "force_conflict": str(vid),
+                "conflict_intent": intent,
+            }
+        )
     request = make_request(
-        data={
-            "action": "create_vlans",
-            "select": [str(vid)],
-            f"vlan_group_{vid}": str(group.pk),
-            "server_key": "default",
-        },
+        data=data,
         user=user,
         path="/sync/vlans/",
     )
@@ -160,9 +169,23 @@ def _drive_grouped_sync(device, user, group, vid, librenms_name):
     return messages_on(request)
 
 
+def _rename_intent(vlan, device, proposed_name):
+    """Return a signed intent for the current test VLAN state."""
+    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
+    conflict = SyncVLANsView()._build_conflict(
+        vlan=vlan,
+        proposed_name=proposed_name,
+        obj=device,
+        object_type="device",
+        server_key="default",
+    )
+    return conflict["intent"]
+
+
 @pytest.mark.django_db
 def test_grouped_vlan_row_is_locked_before_the_rename():
-    """The resolved VLAN row must be locked, since no advisory lock covers a grouped VID.
+    """A confirmed grouped VLAN row must be locked before its disclosed rename.
 
     Asserted on the emitted SQL rather than on a patched manager: a mock records whichever call
     the code happens to make, so it stays green while the row is read unlocked.
@@ -178,9 +201,17 @@ def test_grouped_vlan_row_is_locked_before_the_rename():
         "vlan-lock-sql-user",
         [("view", type(device)), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)],
     )
+    intent = _rename_intent(vlan, device, "librenms-name")
 
     with transaction.atomic(), CaptureQueriesContext(connection) as captured:
-        _drive_grouped_sync(device, user, group, vid=41, librenms_name="librenms-name")
+        _drive_grouped_sync(
+            device,
+            user,
+            group,
+            vid=41,
+            librenms_name="librenms-name",
+            intent=intent,
+        )
 
     assert_locked_before_update(captured, "ipam_vlan")
     vlan.refresh_from_db()
