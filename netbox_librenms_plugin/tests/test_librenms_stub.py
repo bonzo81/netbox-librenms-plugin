@@ -373,7 +373,11 @@ def test_stub_replays_the_scaffolded_virtual_machine_recording():
         assert ok is True
         assert len(devices) == 1
         assert devices[0]["type"] == "server"
-        assert "virtual machine" in devices[0]["hardware"].casefold()
+        recorded_device = LibreNMSStubServer._find_response(
+            recording,
+            f"/api/v0/devices/{recording['device_id']}",
+        )["devices"][0]
+        assert devices[0]["hardware"] == recorded_device["hardware"]
 
         ok, ports = api.get_ports(recording["device_id"])
         assert ok is True

@@ -10,16 +10,6 @@ own file because higher branches of the PR stack grow that file's tail.
 import json
 
 import pytest
-from django.urls import reverse
-
-from netbox_librenms_plugin.tests.conftest import (
-    configure_librenms_servers,
-    make_device_with_module_bays,
-    make_module_type,
-    make_superuser,
-    make_virtual_chassis_members,
-)
-from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
 SERVER_KEY = "default"
@@ -49,6 +39,9 @@ INVENTORY = [
 @pytest.fixture
 def librenms_server(settings, monkeypatch):
     """Point the plugin at a loopback LibreNMS whose snapshots outlive one request."""
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+    from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     with librenms_mock_server() as server:
@@ -75,6 +68,8 @@ def _register_inventory(server, inventory):
 
 def _refresh_modules(client, device):
     """Run the real modules-tab refresh so it writes the inventory snapshot to the cache."""
+    from django.urls import reverse
+
     return client.post(
         reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[device.pk]),
         {"server_key": SERVER_KEY},
@@ -84,6 +79,8 @@ def _refresh_modules(client, device):
 
 def _verify_module(client, body):
     """POST a JSON body to the single-module verify endpoint."""
+    from django.urls import reverse
+
     return client.post(
         reverse("plugins:netbox_librenms_plugin:verify_module"),
         data=json.dumps(body),
@@ -97,6 +94,8 @@ class TestSingleModuleVerifyRow:
 
     def test_a_cached_inventory_row_is_rebuilt_and_formatted(self, client, librenms_server):
         """A refreshed snapshot yields the matched bay, module type and serial for the asked index."""
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+
         device = make_device_with_module_bays("module-verify-row", ["Bay 1"], serial="CHASSIS-1")
         device.custom_field_data["librenms_id"] = {SERVER_KEY: LIBRENMS_ID}
         device.save()
@@ -130,6 +129,8 @@ class TestSingleModuleVerifyRow:
 
     def test_a_row_depth_that_matches_nothing_falls_back_to_the_index_match(self, client, librenms_server):
         """A posted depth no row carries still resolves the row through the index-only fallback."""
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+
         device = make_device_with_module_bays("module-verify-depth", ["Bay 1"], serial="CHASSIS-2")
         device.custom_field_data["librenms_id"] = {SERVER_KEY: LIBRENMS_ID}
         device.save()
@@ -202,6 +203,8 @@ class TestSingleInterfaceVerifyChassisGuard:
 
     def test_unresolvable_chassis_sync_device_returns_404(self, client, librenms_server):
         """A virtual chassis whose members resolve to no sync device returns the named 404."""
+        from django.urls import reverse
+        from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
         _chassis, (device, _sibling) = make_virtual_chassis_members("iface-verify-vc")
