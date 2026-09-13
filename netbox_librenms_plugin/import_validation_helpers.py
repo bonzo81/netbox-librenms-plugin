@@ -120,11 +120,21 @@ def apply_cluster_to_validation(validation: dict, cluster) -> None:
     recalculate_validation_status(validation, is_vm=True)
 
 
-def apply_host_to_validation(validation: dict, host_device) -> None:
-    """Apply a selected NetBox host Device as virtual-machine placement."""
+def vm_host_placement_issue(host_device) -> str | None:
+    """Return the compatibility error for a selected VM host, if any."""
+    from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
+
+    if host_device.cluster_id or netbox_allows_standalone_vm_host():
+        return None
+    return "NetBox requires a clustered host device for VM placement"
+
+
+def apply_host_to_validation(validation: dict, host_device) -> str | None:
+    """Apply a compatible NetBox host Device as virtual-machine placement."""
+    issue = vm_host_placement_issue(host_device)
     validation["vm_placement"] = {
         "method": "host",
-        "found": True,
+        "found": issue is None,
         "host_device": host_device,
     }
     if host_device.cluster_id:
@@ -133,7 +143,10 @@ def apply_host_to_validation(validation: dict, host_device) -> None:
     else:
         reset_cluster(validation)
     remove_validation_issue(validation, "VM placement")
+    if issue is not None:
+        validation["issues"].append(issue)
     recalculate_validation_status(validation, is_vm=True)
+    return issue
 
 
 def apply_rack_to_validation(validation: dict, rack) -> None:

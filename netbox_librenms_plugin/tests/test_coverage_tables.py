@@ -327,6 +327,22 @@ class TestDeviceImportTable:
 
         assert "Select Role (Optional)" in html
 
+    def test_legacy_netbox_labels_the_clustered_host_requirement(self, monkeypatch):
+        """The host placement choice must explain the older NetBox constraint."""
+        monkeypatch.setattr(
+            "netbox_librenms_plugin.tables.device_status.netbox_allows_standalone_vm_host",
+            lambda: False,
+        )
+
+        html = str(
+            self._table().render_vm_placement_method(
+                None,
+                _import_record(import_as_vm=True),
+            )
+        )
+
+        assert "Host device (clustered host required)" in html
+
     def test_rack_dropdown_uses_real_location_and_rack_once(self):
         from dcim.models import Location, Rack
 

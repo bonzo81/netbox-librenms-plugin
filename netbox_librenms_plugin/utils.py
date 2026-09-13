@@ -3111,6 +3111,7 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
 
 _MODULE_TOKEN_LEAF_FIX_VERSION = (4, 5, 6)
 _PARENT_CHASSIS_CLEAN_BUG_VERSION = (4, 4, 0)
+_STANDALONE_VM_HOST_VERSION = (4, 6, 0)
 _MODULE_RELOCATION_VERSION = (4, 7, 0)
 _NETBOX_VERSION_PREFIX_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
@@ -3155,6 +3156,23 @@ def netbox_clean_reads_parent_virtual_chassis():
     if version is None:
         return True
     return version == _PARENT_CHASSIS_CLEAN_BUG_VERSION
+
+
+def netbox_allows_standalone_vm_host():
+    """
+    Return whether NetBox allows a VM to use a host without a cluster.
+
+    NetBox 4.6 added direct VM assignment to standalone devices. Older releases require the
+    selected host and VM to share a cluster. An undetectable version fails closed because an
+    optimistic result would let the import reach ``VirtualMachine.full_clean()`` with an invalid
+    placement.
+
+    Returns:
+        bool: Whether standalone host placement is supported.
+
+    """
+    version = _get_netbox_version_tuple()
+    return version is not None and version >= _STANDALONE_VM_HOST_VERSION
 
 
 def netbox_relocates_module_subtree():

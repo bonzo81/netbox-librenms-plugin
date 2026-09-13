@@ -398,6 +398,41 @@ class TestBulkImportVms:
         assert result["failed"][0]["device_id"] == 6208
         assert "valid virtual-machine placement method" in result["failed"][0]["error"]
 
+    def test_standalone_host_is_rejected_when_netbox_requires_a_cluster(self, librenms_api, monkeypatch):
+        """NetBox 4.4 must reject a standalone host before VM model validation."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+
+        api, _server = librenms_api
+        host = make_device("bulk-standalone-host")
+        user = make_user_with_perms(
+            "vm-import-writer-standalone-host",
+            [("view", Device), ("add", VirtualMachine)],
+            plugin_write=False,
+        )
+        monkeypatch.setattr(
+            "netbox_librenms_plugin.utils._get_netbox_version_tuple",
+            lambda: (4, 4, 0),
+        )
+
+        result = bulk_import_vms(
+            {6211: {"placement": "host", "host_device_id": host.pk}},
+            api,
+            libre_devices_cache={6211: _payload(6211)},
+            user=user,
+        )
+
+        assert result["success"] == []
+        assert result["failed"] == [
+            {
+                "device_id": 6211,
+                "error": "NetBox requires a clustered host device for VM placement",
+            }
+        ]
+        assert not VirtualMachine.objects.filter(name="vm-6211.example.test").exists()
+
     def test_one_bad_row_does_not_stop_later_real_imports(self, librenms_api):
         from virtualization.models import Cluster
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms

@@ -6,14 +6,17 @@ No claims have been refuted.
 
 ## 1. Factual brief
 
-NetBox 4.6 accepts a virtual machine that is assigned to a site, a cluster, or a host device. The corrected importer will offer all three placement choices.
+NetBox accepts a virtual machine that is assigned to a site or a cluster. NetBox 4.6 also accepts
+direct assignment to a standalone host device. Older supported releases accept host placement only
+when the host belongs to the VM's cluster. The corrected importer will offer all three placement
+choices while enforcing the running NetBox release's host constraint.
 
 The current import workflow overloads `cluster_<device_id>` as both a cluster selection and the decision to import a LibreNMS row as a virtual machine. Search-result validation skips site matching for new virtual machines, adds a mandatory-cluster issue, and marks readiness from cluster state alone. VM creation writes a cluster but not a site. The same assumption reaches the HTMX row updates, confirmation form, synchronous dispatcher, background job payload, and bulk VM importer.
 
 The corrected workflow must:
 
 - Use an explicit object-type choice that is independent from placement.
-- Accept a new VM when its matched site, selected cluster, or selected host device supplies placement.
+- Accept a new VM when its matched site, selected cluster, or compatible selected host device supplies placement.
 - When a selected host belongs to a cluster, assign both the host and that cluster as NetBox requires.
 - Preserve device import, existing-object detection, collision checks, permission checks, and naming behavior.
 - Keep synchronous and background imports equivalent.
@@ -23,7 +26,8 @@ The corrected workflow must:
 
 Evidence:
 
-- Installed NetBox `VirtualMachine.clean()` rejects a row only when site, cluster, and device are all absent.
+- NetBox 4.4 `VirtualMachine.clean()` requires a host device to belong to the VM's cluster.
+- NetBox 4.6 allows direct assignment to a standalone host device.
 - `netbox_librenms_plugin/import_utils/device_operations.py` currently adds the mandatory-cluster issue and bypasses site matching for VM rows.
 - `netbox_librenms_plugin/views/imports/actions.py` derives VM mode from a truthy cluster in row refresh, confirmation, and execution.
 - `netbox_librenms_plugin/import_utils/vm_operations.py` writes only the validated cluster during VM creation.
@@ -154,8 +158,9 @@ Acceptance conditions:
 1. A new search row defaults to Device. Cluster or host input alone cannot change its type.
 2. A row with a matched site becomes a ready VM with matched-site placement and no cluster.
 3. Cluster placement works without a matched site.
-4. A standalone host creates a VM with that host. A clustered host creates a VM with that host
-   and its cluster.
+4. On NetBox 4.6 and later, a standalone host creates a VM with that host. On every supported
+   release, a clustered host creates a VM with that host and its cluster. Earlier releases reject
+   a standalone host before model validation.
 5. A missing type retains the existing safe Device default. A malformed type, or an incomplete or
    malformed VM placement, fails closed. Placement never changes the target model or permissions.
 6. Confirmation shows and preserves the explicit type and placement.

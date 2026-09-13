@@ -286,6 +286,8 @@ def test_sync_import_post_creates_host_placed_vm(
     from dcim.models import Device
     from virtualization.models import VirtualMachine
 
+    from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
+
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     source_device_id = 7305 if not clustered_host else 7306
@@ -330,11 +332,14 @@ def test_sync_import_post_creates_host_placed_vm(
             },
         )
 
-    imported = VirtualMachine.objects.get(name=f"vm-host-placement-{source_device_id}.example.test")
     assert response.status_code == 302
-    assert imported.device_id == host.pk
-    assert imported.cluster_id == host.cluster_id
-    assert imported.site_id == host.site_id
+    if clustered_host or netbox_allows_standalone_vm_host():
+        imported = VirtualMachine.objects.get(name=f"vm-host-placement-{source_device_id}.example.test")
+        assert imported.device_id == host.pk
+        assert imported.cluster_id == host.cluster_id
+        assert imported.site_id == host.site_id
+    else:
+        assert not VirtualMachine.objects.filter(name=f"vm-host-placement-{source_device_id}.example.test").exists()
 
 
 @pytest.mark.django_db

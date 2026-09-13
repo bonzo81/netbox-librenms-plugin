@@ -13,6 +13,7 @@ from ..import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
     apply_role_to_validation,
+    vm_host_placement_issue,
 )
 from ..utils import lock_librenms_id_assignment
 from .bulk_import import _is_job_cancelled
@@ -50,8 +51,7 @@ def _apply_vm_placement(validation: dict, mappings: dict, user) -> str | None:
         )
         if host_device is None:
             return "Selected host device is unavailable"
-        apply_host_to_validation(validation, host_device)
-        return None
+        return apply_host_to_validation(validation, host_device)
 
     return "Select a valid virtual-machine placement method"
 
@@ -92,6 +92,8 @@ def create_vm_from_librenms(
     placement = validation.get("vm_placement") or {}
     placement_method = placement.get("method")
     host_device = placement.get("host_device") if placement_method == VMPlacementMethod.HOST else None
+    if host_device is not None and (issue := vm_host_placement_issue(host_device)) is not None:
+        raise ValueError(f"VM cannot be imported: {issue}")
     if placement_method == VMPlacementMethod.SITE:
         site = validation.get("site", {}).get("site")
     elif host_device is not None:

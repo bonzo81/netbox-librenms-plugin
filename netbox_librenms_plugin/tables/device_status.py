@@ -14,7 +14,11 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.import_utils.device_operations import _resolve_device_name
 from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod
-from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_sync_device
+from netbox_librenms_plugin.utils import (
+    coerce_librenms_id,
+    get_librenms_sync_device,
+    netbox_allows_standalone_vm_host,
+)
 
 _IMPORT_NAMING_INCLUDE = "#use-sysname-toggle, #strip-domain-toggle"
 
@@ -526,11 +530,14 @@ class DeviceImportTable(tables.Table):
             )
         )
         site = validation.get("site", {}).get("site")
+        host_label = "Host device"
+        if not netbox_allows_standalone_vm_host():
+            host_label = "Host device (clustered host required)"
         options = []
         for option, label in (
             (VMPlacementMethod.SITE, f"Matched site ({site.name})" if site else "Matched site (unavailable)"),
             (VMPlacementMethod.CLUSTER, "Cluster"),
-            (VMPlacementMethod.HOST, "Host device"),
+            (VMPlacementMethod.HOST, host_label),
         ):
             selected = " selected" if option is method else ""
             options.append(f'<option value="{option.value}"{selected}>{escape(label)}</option>')
