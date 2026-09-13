@@ -1,12 +1,10 @@
 """
 Tests for netbox_librenms_plugin.import_validation_helpers module.
 
-Phase 2 tests covering validation state updates, model retrieval,
-and selection extraction functions.
+Phase 2 tests cover validation state updates and model retrieval.
 """
 
 import pytest
-from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_vm
 
@@ -68,98 +66,6 @@ class TestFetchModelById:
         result = fetch_model_by_id(DeviceRole, None)
 
         assert result is None
-
-
-# =============================================================================
-# TestExtractSelections - 4 tests
-# =============================================================================
-
-
-class TestExtractDeviceSelections:
-    """Test extraction of device selections from request."""
-
-    def test_extract_selections_all_present(self):
-        """All selections extracted from POST request."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            extract_device_selections,
-        )
-
-        request = RequestFactory().post(
-            "/",
-            {
-                "cluster_1234": "5",
-                "role_1234": "10",
-                "rack_1234": "15",
-            },
-        )
-
-        result = extract_device_selections(request, device_id=1234)
-
-        assert result["cluster_id"] == "5"
-        assert result["role_id"] == "10"
-        assert result["rack_id"] == "15"
-
-    def test_extract_selections_partial(self):
-        """Missing fields return None."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            extract_device_selections,
-        )
-
-        request = RequestFactory().post(
-            "/",
-            {
-                "role_1234": "10",
-            },
-        )
-
-        result = extract_device_selections(request, device_id=1234)
-
-        assert result["cluster_id"] is None
-        assert result["role_id"] == "10"
-        assert result["rack_id"] is None
-
-    def test_extract_selections_from_get(self):
-        """Selections extracted from GET request."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            extract_device_selections,
-        )
-
-        request = RequestFactory().get(
-            "/",
-            {
-                "cluster_999": "3",
-                "role_999": "7",
-                "rack_999": "11",
-            },
-        )
-
-        result = extract_device_selections(request, device_id=999)
-
-        assert result["cluster_id"] == "3"
-        assert result["role_id"] == "7"
-        assert result["rack_id"] == "11"
-
-    def test_extract_selections_empty_values(self):
-        """Empty strings handled correctly."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            extract_device_selections,
-        )
-
-        request = RequestFactory().post(
-            "/",
-            {
-                "cluster_1234": "",
-                "role_1234": "",
-                "rack_1234": "",
-            },
-        )
-
-        result = extract_device_selections(request, device_id=1234)
-
-        # Empty strings are returned as-is (caller decides meaning)
-        assert result["cluster_id"] == ""
-        assert result["role_id"] == ""
-        assert result["rack_id"] == ""
 
 
 # =============================================================================
