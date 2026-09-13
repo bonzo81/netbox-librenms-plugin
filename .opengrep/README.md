@@ -97,9 +97,9 @@ Symbolic propagation covers simple local constructor bindings. Other method call
 those bindings. The rule does not track dynamically supplied scorers or prove exact-only selection.
 Runtime tests must cover the exact-only invariant.
 
-The disclosure rule accepts only manager calls through `.objects` and the canonical fixed-wording
-link-note helper. Its companion rule rejects local definitions and assignments that can shadow the
-trusted spellings.
+The disclosure rule accepts only manager calls through `.objects` and the exact fixed-wording
+linkage rendering. It does not trust a helper name. Its companion rule rejects local definitions,
+assignments, and callable parameters that can obscure these taint flows.
 
 ## `--taint-intrafile` is required
 

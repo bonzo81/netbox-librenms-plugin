@@ -505,7 +505,7 @@ def probe_shadowed_link_note(result):
         return owner.name
 
     owner = Device.objects.first()
-    # ok: import-disclosure
+    # ruleid: import-disclosure
     result["warnings"].append(_describe_link_note(owner))
 
 
@@ -522,6 +522,25 @@ def probe_shadowed_link_note_receiver(result):
     owner = Device.objects.first()
     # ok: import-disclosure
     result["warnings"].append(ShadowedLinkNoteRenderer()._describe_link_note(owner))
+
+
+# --- [flag] a function parameter cannot impersonate the safe link-note renderer
+# ruleid: import-disclosure-sanitizer-shadow
+def probe_parameter_link_note(result, _describe_link_note):
+    from dcim.models import Device
+
+    owner = Device.objects.first()
+    # ruleid: import-disclosure
+    result["warnings"].append(_describe_link_note(owner))
+
+
+# ruleid: import-disclosure-sanitizer-shadow
+async def probe_async_parameter_link_note(result, _describe_link_note):
+    return _describe_link_note(result)
+
+
+# ruleid: import-disclosure-sanitizer-shadow
+probe_lambda_parameter_link_note = lambda result, _describe_link_note: _describe_link_note(result)
 
 
 # --- [quiet] an aggregate rather than an identity
