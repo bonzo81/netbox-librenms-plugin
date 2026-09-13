@@ -23,7 +23,11 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     post as view_post,
     trusted_module_inventory_payload,
 )
-from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+from netbox_librenms_plugin.utils import (
+    module_inventory_binding_token,
+    module_inventory_row_digest,
+    module_inventory_snapshot_digest,
+)
 
 
 @pytest.mark.django_db
@@ -176,6 +180,18 @@ def _inventory_binding(
     )
 
 
+def _bulk_inventory_binding(device, action, inventory, parent_index=None, server_key="default"):
+    """Return a signed full-inventory binding for one bulk install action."""
+    return module_inventory_binding_token(
+        device.pk,
+        server_key,
+        action,
+        {"parent_index": parent_index} if parent_index is not None else {},
+        parent_index,
+        module_inventory_snapshot_digest(inventory),
+    )
+
+
 def test_module_inventory_row_digest_is_canonical_and_content_sensitive():
     """Equivalent row mappings share a digest, while changed row content does not."""
     first = {"entPhysicalIndex": 17, "entPhysicalSerialNum": "SERIAL", "nested": {"b": 2, "a": 1}}
@@ -184,6 +200,16 @@ def test_module_inventory_row_digest_is_canonical_and_content_sensitive():
 
     assert module_inventory_row_digest(first) == module_inventory_row_digest(reordered)
     assert module_inventory_row_digest(first) != module_inventory_row_digest(replacement)
+
+
+def test_module_inventory_snapshot_digest_is_canonical_and_content_sensitive():
+    """Equivalent snapshots share a digest, while changed inventory content does not."""
+    first = [{"entPhysicalIndex": 17, "nested": {"b": 2, "a": 1}}]
+    reordered = [{"nested": {"a": 1, "b": 2}, "entPhysicalIndex": 17}]
+    replacement = [{"entPhysicalIndex": 18, "nested": {"b": 2, "a": 1}}]
+
+    assert module_inventory_snapshot_digest(first) == module_inventory_snapshot_digest(reordered)
+    assert module_inventory_snapshot_digest(first) != module_inventory_snapshot_digest(replacement)
 
 
 def _inventory_item(index, model, name, *, parent=0, serial="", phys_class="module", **extra):
@@ -1259,7 +1285,14 @@ class TestInstallAndUpdateViews:
             manufacturer=member_mfr,
         )
         item = _inventory_item(100, module_type.model, "Slot 0")
-        request = _post_request({"select": ["100"], "server_key": "default", "device_selection_100": str(member.pk)})
+        request = _post_request(
+            {
+                "select": ["100"],
+                "server_key": "default",
+                "device_selection_100": str(member.pk),
+                "inventory_binding": _bulk_inventory_binding(page, "install_selected", [item]),
+            }
+        )
         view = _view(InstallSelectedView, request, live_librenms)
         seed_inventory(view, page, [item], librenms_id=77)
 
@@ -1285,7 +1318,13 @@ class TestInstallAndUpdateViews:
             netbox_bay_name=bay.name,
         )
         item = _inventory_item(550, module_type.model, "LibreNMS Selected Slot", serial="SELECTED-SERIAL")
-        request = _post_request({"select": ["550"], "server_key": "default"})
+        request = _post_request(
+            {
+                "select": ["550"],
+                "server_key": "default",
+                "inventory_binding": _bulk_inventory_binding(device, "install_selected", [item]),
+            }
+        )
         view = _view(InstallSelectedView, request, live_librenms)
         seed_inventory(view, device, [item], librenms_id=55)
 
@@ -1296,6 +1335,93 @@ class TestInstallAndUpdateViews:
         assert module.module_type == module_type
         assert module.serial == "SELECTED-SERIAL"
         assert any("Installed 1 module" in text for text in message_texts(request))
+
+    @pytest.mark.parametrize("scenario", ["selected-row", "branch-child", "selected-ancestor"])
+    def test_bulk_install_refuses_a_changed_inventory_snapshot(self, live_librenms, scenario):
+        """Bulk actions must not use changed rows, descendants, or ancestor placement context."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        device = make_device(f"view-bulk-stale-{scenario}", librenms_cf={"default": 66})
+        bay = make_module_bay(device, f"Stale {scenario} Bay")
+        module_type = make_module_type(f"STALE-{scenario}-CARD")
+        selected = _inventory_item(700, module_type.model, bay.name, serial="ORIGINAL-SERIAL")
+        rendered_inventory = [selected]
+        action = "install_selected"
+        parent_index = None
+        request_data = {"select": ["700"], "server_key": "default"}
+        view_class = InstallSelectedView
+
+        if scenario == "branch-child":
+            rendered_inventory.append(_inventory_item(701, "UNMAPPED-CHILD", "Child", parent=700))
+            changed_inventory = [rendered_inventory[0], {**rendered_inventory[1], "entPhysicalName": "Replacement"}]
+            action = "install_branch"
+            parent_index = 700
+            request_data = {"parent_index": "700", "server_key": "default"}
+            view_class = InstallBranchView
+        elif scenario == "selected-ancestor":
+            ancestor = _inventory_item(699, "CHASSIS", "Original Parent", phys_class="chassis")
+            selected["entPhysicalContainedIn"] = 699
+            rendered_inventory.insert(0, ancestor)
+            changed_inventory = [{**ancestor, "entPhysicalName": "Replacement Parent"}, selected]
+        else:
+            changed_inventory = [{**selected, "entPhysicalSerialNum": "REPLACEMENT-SERIAL"}]
+
+        request_data["inventory_binding"] = _bulk_inventory_binding(
+            device,
+            action,
+            rendered_inventory,
+            parent_index=parent_index,
+        )
+        request = _post_request(request_data)
+        view = _view(view_class, request, live_librenms)
+        seed_inventory(view, device, changed_inventory, librenms_id=66)
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        assert not Module.objects.filter(device=device).exists()
+        assert any(
+            text.startswith("Inventory action is stale or does not match this snapshot.")
+            for text in message_texts(request, "error")
+        )
+
+    @pytest.mark.parametrize(
+        ("action", "request_data"),
+        [
+            ("install_branch", {"parent_index": "700", "server_key": "default"}),
+            ("install_selected", {"select": ["700"], "server_key": "default"}),
+        ],
+    )
+    def test_bulk_install_refuses_a_missing_inventory_binding(
+        self,
+        live_librenms,
+        action,
+        request_data,
+    ):
+        """Bulk actions must fail closed when the rendered snapshot binding is absent."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        device = make_device(f"view-bulk-unsigned-{action}", librenms_cf={"default": 67})
+        bay = make_module_bay(device, f"Unsigned {action} Bay")
+        module_type = make_module_type(f"UNSIGNED-{action}-CARD")
+        inventory = [_inventory_item(700, module_type.model, bay.name)]
+        request = _post_request(request_data)
+        view_class = InstallBranchView if action == "install_branch" else InstallSelectedView
+        view = _view(view_class, request, live_librenms)
+        seed_inventory(view, device, inventory, librenms_id=67)
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        assert not Module.objects.filter(device=device).exists()
+        assert any(
+            text.startswith("Inventory action is stale or does not match this snapshot.")
+            for text in message_texts(request, "error")
+        )
 
     def test_batch_install_preloads_the_serial_normalization_rules_once(self, live_librenms):
         """The serial scope is queried once for the batch, not once per inventory row."""
@@ -1312,7 +1438,11 @@ class TestInstallAndUpdateViews:
             bay = make_module_bay(device, f"Preload Slot {position}")
             inventory.append(_inventory_item(600 + position, module_type.model, bay.name, serial=f"SN{position}"))
         request = _post_request(
-            {"select": [str(item["entPhysicalIndex"]) for item in inventory], "server_key": "default"}
+            {
+                "select": [str(item["entPhysicalIndex"]) for item in inventory],
+                "server_key": "default",
+                "inventory_binding": _bulk_inventory_binding(device, "install_selected", inventory),
+            }
         )
         view = _view(InstallSelectedView, request, live_librenms)
         seed_inventory(view, device, inventory, librenms_id=60)
@@ -1350,19 +1480,24 @@ class TestInstallAndUpdateViews:
         )
         user = grant(user, "view", ModuleBay, constraints={"pk": allowed_bay.pk})
         user = grant(user, "view", ModuleType, constraints={"pk": allowed_type.pk})
+        inventory = [_inventory_item(100, hidden_type.model, hidden_bay.name)]
         request = make_request(
             "post",
-            {"parent_index": "100", "server_key": "default"},
+            {
+                "parent_index": "100",
+                "server_key": "default",
+                "inventory_binding": _bulk_inventory_binding(
+                    device,
+                    "install_branch",
+                    inventory,
+                    parent_index=100,
+                ),
+            },
             user=user,
             path="/modules/install-branch/",
         )
         view = _view(InstallBranchView, request, live_librenms)
-        seed_inventory(
-            view,
-            device,
-            [_inventory_item(100, hidden_type.model, hidden_bay.name)],
-            librenms_id=1,
-        )
+        seed_inventory(view, device, inventory, librenms_id=1)
 
         view_post(view, request, pk=device.pk)
 
@@ -2605,6 +2740,13 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         CacheMixin().get_cache_key(device, "inventory", "default"), trusted_module_inventory_payload(device, rows)
     )
     data = {"server_key": "default", "parent_index": "1", "select": ["2", "3", "4"]}
+    is_branch = endpoint == "install_branch"
+    data["inventory_binding"] = _bulk_inventory_binding(
+        device,
+        "install_branch" if is_branch else "install_selected",
+        rows,
+        parent_index=1 if is_branch else None,
+    )
     if member is not None:
         data["device_selection_3"] = str(member.pk)
     client.force_login(make_superuser("serial-rule-batch-user"))
