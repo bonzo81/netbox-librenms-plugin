@@ -1556,7 +1556,9 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             # inside the loop made re-render O(n*m) for an import of n devices and m VM successes.
             imported_vm_ids = {item["device_id"] for item in vm_result.get("success", [])}
 
-            # Re-validate and render each imported device with fresh status
+            refreshed_devices = []
+
+            # Re-validate each imported device with fresh status.
             for device_id in imported_device_ids:
                 # Fetch device from cache or API
                 libre_device = fetch_device_with_cache(
@@ -1594,24 +1596,28 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         self.librenms_api.cache_timeout,
                     )
 
-                    # Render updated row
-                    table = DeviceImportTable(
-                        [libre_device], server_key=self.librenms_api.server_key, user=request.user
-                    )
-                    context = {
-                        "record": libre_device,
-                        "table": table,
-                        "cluster_id": None,
-                        "role_id": None,
-                        "rack_id": None,
-                    }
+                    refreshed_devices.append(libre_device)
 
-                    row_html = render(
-                        request,
-                        "netbox_librenms_plugin/htmx/device_import_row.html",
-                        context,
-                    ).content.decode("utf-8")
-                    updated_rows_html.append(row_html)
+            if refreshed_devices:
+                table = DeviceImportTable(
+                    refreshed_devices,
+                    server_key=self.librenms_api.server_key,
+                    user=request.user,
+                )
+                context = {
+                    "record": refreshed_devices[0],
+                    "table": table,
+                    "cluster_id": None,
+                    "role_id": None,
+                    "rack_id": None,
+                }
+
+                row_html = render(
+                    request,
+                    "netbox_librenms_plugin/htmx/device_import_row.html",
+                    context,
+                ).content.decode("utf-8")
+                updated_rows_html.append(row_html)
 
             # Append all summary toasts as a single OOB swap. In the HTMX path no
             # Django messages were queued (see above), so this OOB fragment is the
@@ -3494,8 +3500,8 @@ class PromoteToHostView(
     Promote a LibreNMS host to the primary link of an existing NetBox device.
 
     The existing NetBox device's current ``librenms_id.{server_key}.id`` is moved into
-    the ``oob`` slot (preserving its bare-int → dict-form transition), and the incoming
-    LibreNMS device id becomes the new host id.  No new NetBox device is created — this
+    the ``oob`` slot (preserving its bare-int to dict-form transition), and the incoming
+    LibreNMS device id becomes the new host id. No new NetBox device is created. This
     is a reassignment, not an import.
     """
 

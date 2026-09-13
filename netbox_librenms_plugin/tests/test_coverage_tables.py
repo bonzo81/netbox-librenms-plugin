@@ -126,6 +126,47 @@ class TestDeviceImportTable:
         assert table.tab == "import"
         assert table.prefix == "import_"
 
+    def test_a_multi_row_table_scopes_disclosures_in_one_device_query(self):
+        """One table must scope all of its import rows as a batch."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        user = make_superuser("batch-scoped-import-table-user")
+        matches = [make_device(f"batch-scoped-import-{index}") for index in range(2)]
+        rows = [_import_record(4200 + index, existing_device=match) for index, match in enumerate(matches)]
+
+        with CaptureQueriesContext(connection) as queries:
+            self._table(rows, user=user)
+
+        repeated_device_queries = [query["sql"] for query in queries if 'FROM "dcim_device"' in query["sql"]]
+        assert len(repeated_device_queries) == 1
+
+    def test_bulk_import_builds_the_refreshed_table_outside_the_device_loop(self):
+        """HTMX refreshes must pass the complete imported row batch to one table."""
+        import ast
+        import inspect
+        import textwrap
+
+        from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(BulkImportDevicesView.post)))
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        table_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "DeviceImportTable"
+        ]
+
+        def ancestors(node):
+            while node in parents:
+                node = parents[node]
+                yield node
+
+        assert len(table_calls) == 1
+        assert not any(
+            isinstance(ancestor, (ast.For, ast.AsyncFor)) for call in table_calls for ancestor in ancestors(call)
+        )
+
     @pytest.mark.parametrize(
         ("order_by", "field"),
         [
