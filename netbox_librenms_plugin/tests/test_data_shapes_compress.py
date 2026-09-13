@@ -1,4 +1,5 @@
-"""Tests for data-shape port compression: collapse redundant cardinality, preserve outcome + signature.
+"""
+Tests for data-shape port compression: collapse redundant cardinality, preserve outcome + signature.
 
 The invariants: resolve_port_relationships and compute_shape_signature produce identical output for
 the full and compressed recordings (verified by replaying both over real HTTP), while redundant

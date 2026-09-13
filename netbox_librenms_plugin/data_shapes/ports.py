@@ -121,7 +121,8 @@ def _content_is_ambiguous(pattern, start, end):
 
 
 def _has_ambiguous_quantified_group(pattern):
-    """Whether any unbounded-quantified group can partition its input more than one way.
+    r"""
+    Whether any unbounded-quantified group can partition its input more than one way.
 
     Depth-aware on purpose: a bounded ``\\([^()]*...\\)`` scan cannot see past a wrapper group, so
     ``^((a+))+$`` read as safe while a 26-character near-match already took seconds to fail.

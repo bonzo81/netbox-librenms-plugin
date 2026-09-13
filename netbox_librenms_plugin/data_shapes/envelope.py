@@ -1,4 +1,5 @@
-"""One definition of how a recorded response carries its HTTP status.
+"""
+One definition of how a recorded response carries its HTTP status.
 
 A non-2xx response used to be stored as ``[status, body]``. A LibreNMS body can itself be a
 two-element list whose first item is an integer, so that framing was ambiguous: the reader took
@@ -18,7 +19,8 @@ def _is_int(value):
 
 
 def is_status_envelope(value):
-    """Return whether *value* is a tagged status envelope.
+    """
+    Return whether *value* is a tagged status envelope.
 
     Both keys are required. A body would have to carry the reserved status key AND a "body" key
     to be mistaken for one, and an envelope written without its body is not silently read as an
@@ -28,7 +30,8 @@ def is_status_envelope(value):
 
 
 def is_malformed_status_envelope(value):
-    """Return whether *value* carries the reserved status key without a body.
+    """
+    Return whether *value* carries the reserved status key without a body.
 
     A complete envelope always has both keys. A half-written one would otherwise read as a
     successful body that happens to contain the reserved key.
@@ -44,7 +47,8 @@ def wrap_response(status, body):
 
 
 def unwrap_response(value):
-    """Return ``(status, body)`` for a stored response value.
+    """
+    Return ``(status, body)`` for a stored response value.
 
     Anything that is not a tagged envelope is the body of a 2xx response, including a plain list.
     """

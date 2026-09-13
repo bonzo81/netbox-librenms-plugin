@@ -4367,7 +4367,8 @@ class TestInstallViewsPreserveInventoryCache:
             cache.delete(cache_key)
 
     def test_ignore_rules_follow_the_resolved_target_manufacturer(self):
-        """A row can be installed onto a VC member whose manufacturer differs from the page device.
+        """
+        A row can be installed onto a VC member whose manufacturer differs from the page device.
 
         Loading the ignore rules once from the page device omits the target's vendor rules, so a
         row the target's own rule says to skip is installed anyway.

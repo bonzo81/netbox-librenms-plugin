@@ -1,4 +1,5 @@
-"""Outcome tests driven by captured LibreNMS data-shape recordings.
+"""
+Outcome tests driven by captured LibreNMS data-shape recordings.
 
 Each recording in ``data_shapes/recordings/*.json`` is replayed through the mock
 LibreNMS HTTP server and the real LibreNMSAPI client, then the real detection
@@ -259,7 +260,8 @@ _LEAKED_OUIS = frozenset({"36965", "713", "21327", "8172124", "9098", "2589"})
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_recording_has_anonymized_vendor_metadata(recording):
-    """A committed recording must carry the anonymizer's normalized icon (generic.svg) and
+    """
+    A committed recording must carry the anonymizer's normalized icon (generic.svg) and
     pseudonymized manufacturer names (MFG-<hash>) — a raw value means the fixture predates an
     anonymizer rule and re-leaks vendor metadata.
 

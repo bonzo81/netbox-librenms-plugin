@@ -20,7 +20,8 @@ mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
 
 
 class TestApiTokenStaysOnItsHost:
-    """A redirect off the configured LibreNMS must not carry the API token with it.
+    """
+    A redirect off the configured LibreNMS must not carry the API token with it.
 
     ``requests`` drops only ``Authorization`` when a redirect crosses hosts and forwards every
     other header, so ``X-Auth-Token`` reached whatever answered the redirect.

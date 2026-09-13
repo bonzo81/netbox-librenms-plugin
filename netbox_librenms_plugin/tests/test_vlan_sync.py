@@ -470,7 +470,7 @@ class TestVlanEntryDictGuardInSync:
     """Verify isinstance(vlan_entry, dict) guard works in parse_port_vlan_data."""
 
     def test_mixed_vlans_data_only_dicts_parsed(self, mock_librenms_config):
-        """vlans array with non-dict entries: only dict entries produce VIDs."""
+        """Vlans array with non-dict entries: only dict entries produce VIDs."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         api = LibreNMSAPI(server_key="default")

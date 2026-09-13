@@ -23,7 +23,8 @@ def _seeded_include_rules(apps, db_alias):
 
 
 def scope_include_rule_to_juniper(apps, schema_editor):
-    """Point the seeded routing-engine rule at Juniper, where that manufacturer is known.
+    """
+    Point the seeded routing-engine rule at Juniper, where that manufacturer is known.
 
     Left vendor-agnostic it makes one vendor's quirk admit an entPhysicalClass the built-in list
     omits for every other vendor.

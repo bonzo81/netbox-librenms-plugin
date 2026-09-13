@@ -4908,7 +4908,8 @@ def slashless_route_aliases(patterns):
 
 
 def get_enabled_ignore_rules(manufacturer=None) -> list:
-    """Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
+    """
+    Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
 
     Scoping follows :func:`apply_normalization_rules`: a manufacturer takes its own rules plus
     the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits an

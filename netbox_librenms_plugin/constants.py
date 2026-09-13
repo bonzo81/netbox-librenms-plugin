@@ -15,7 +15,8 @@ INTERFACE_NAME_FIELDS = frozenset({DEFAULT_INTERFACE_NAME_FIELD, "ifDescr"})
 
 
 def is_supported_interface_name_field(value):
-    """Return whether *value* names a LibreNMS port field usable as the interface name.
+    """
+    Return whether *value* names a LibreNMS port field usable as the interface name.
 
     The set membership alone raises TypeError on an unhashable value, and a preference can
     arrive from a JSON body or a cache entry. Every site tests through this one predicate so

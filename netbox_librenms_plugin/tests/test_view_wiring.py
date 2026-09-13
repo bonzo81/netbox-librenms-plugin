@@ -201,7 +201,8 @@ class TestMappingBulkImportViewsAreRegistered:
 
 
 class TestSourceMarkerConvention:
-    """The row-source marker is written and compared through one constant, never a bare string.
+    """
+    The row-source marker is written and compared through one constant, never a bare string.
 
     Every reader gates read-only OOB rows on this value, so a typo at one site silently turns a
     display-only row into an actionable one. constants.OOB_INVENTORY_SOURCE is the single spelling.
@@ -2064,7 +2065,7 @@ class TestIdentityIsNotGatedOnBayMapping:
         return str(table.render_module_bay(record.get("module_bay", "-"), record))
 
     def test_an_unmatched_bay_reports_where_the_module_actually_is(self):
-        """ "No matching bay" alone hides the fact that NetBox already holds the part."""
+        """Report where NetBox holds a part when no bay matches."""
         prefix = "identity-render"
         inventory = [
             {

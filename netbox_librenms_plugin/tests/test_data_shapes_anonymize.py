@@ -575,7 +575,8 @@ def test_port_pattern_ifname_preserved_verbatim(name):
 
 
 def test_linux_tunnel_sibling_ports_stay_distinct():
-    """ip6tnl0 and ip6tnl1 must not both collapse to the truncated ip6 token.
+    """
+    ip6tnl0 and ip6tnl1 must not both collapse to the truncated ip6 token.
 
     A collapse makes _build_name_index mark the token ambiguous and drop it, which loses
     name-based retention and pairing for every tunnel on the device.
@@ -1027,7 +1028,8 @@ def test_transceiver_vendor_is_pseudonymized():
 
 
 def test_transceiver_oui_is_masked():
-    """36965 is 0x009065, Finisar's registered OUI, and it identifies the vendor on its own.
+    """
+    36965 is 0x009065, Finisar's registered OUI, and it identifies the vendor on its own.
 
     Where the row's vendor is null the OUI is the only vendor field, so masking the name alone
     would leave the manufacturer readable.

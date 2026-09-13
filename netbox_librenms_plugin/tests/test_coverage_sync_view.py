@@ -420,7 +420,8 @@ class TestVirtualChassisInventory:
         assert result[1]["assigned_member"] is None
 
     def test_a_vendor_marker_does_not_hide_the_assigned_member(self, librenms_server):
-        """Juniper reports the chassis serial as "S/N BCFB9793"; NetBox stores it without.
+        """
+        Juniper reports the chassis serial as "S/N BCFB9793"; NetBox stores it without.
 
         Compared raw the two never match, so an already-assigned member is offered for
         assignment again and the modal shows the decorated serial.

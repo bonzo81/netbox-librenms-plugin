@@ -1,4 +1,5 @@
-"""Contract guard for posted LibreNMS server-key parsing.
+"""
+Contract guard for posted LibreNMS server-key parsing.
 
 The view behaviour itself lives in test_coverage_device_fields.py and test_view_wiring.py.
 """

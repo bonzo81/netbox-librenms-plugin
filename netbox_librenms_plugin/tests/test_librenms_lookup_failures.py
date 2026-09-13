@@ -1,4 +1,5 @@
-"""A failed LibreNMS lookup must say which failure it was.
+"""
+A failed LibreNMS lookup must say which failure it was.
 
 A device that LibreNMS does not have, a device LibreNMS errors on, and a server that cannot be
 reached are three different problems with three different fixes. Reporting all of them as

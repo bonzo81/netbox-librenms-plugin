@@ -265,7 +265,7 @@ def _structural_axes(signature):
     )
 
 
-def signature_schema_errors(signature):
+def signature_schema_errors(signature):  # noqa: C901
     """Return schema errors for one generated novelty signature."""
     if not isinstance(signature, dict):
         return ["signature must be a JSON object"]

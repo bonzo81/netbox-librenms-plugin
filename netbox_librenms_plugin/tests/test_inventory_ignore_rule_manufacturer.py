@@ -148,7 +148,8 @@ class TestSeededRuleScoping:
         assert rule.manufacturer == juniper
 
     def test_the_seeded_rule_is_left_enabled_when_juniper_is_absent(self):
-        """With nothing to scope to, the rule keeps working.
+        """
+        With nothing to scope to, the rule keeps working.
 
         Disabling it would hide the Routing Engines again for a NetBox that gains its first
         Juniper device after this migration ran, with nothing to point the operator at.

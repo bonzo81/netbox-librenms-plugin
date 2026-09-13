@@ -557,7 +557,8 @@ def test_is_redos_prone_flags_nested_quantifiers_but_not_real_lag_patterns():
 
 
 def test_is_redos_prone_flags_overlapping_alternation_in_a_quantified_group():
-    """``^(a|aa)+$`` backtracks catastrophically without any nested quantifier.
+    """
+    ``^(a|aa)+$`` backtracks catastrophically without any nested quantifier.
 
     The group holds alternatives that can match the same text, so an unbounded quantifier over it
     explores exponentially many splits. Matching 255 characters plus one non-matching character

@@ -117,7 +117,8 @@ class TestCachedInterfaceUrlFallback:
     def test_a_row_without_address_fields_is_skipped_not_raised(self):
         """
         enrich_ip_data guards only isinstance/port_id, so an unparseable row aborted the
-        whole call for a direct caller instead of being skipped like the first loop does."""
+        whole call for a direct caller instead of being skipped like the first loop does.
+        """
         device = make_device("ipurl-malformed")
         make_interface(device, "Ethernet1")
 

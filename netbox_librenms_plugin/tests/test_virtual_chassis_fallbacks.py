@@ -1,4 +1,5 @@
-"""Fallback and failure paths in import_utils/virtual_chassis.py.
+"""
+Fallback and failure paths in import_utils/virtual_chassis.py.
 
 The primary home for that module is test_import_utils.py. These cases live in their own
 file so they do not collide at that shared file's tail when the stack is restacked.
@@ -12,7 +13,8 @@ from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, ma
 
 
 class _FailingCache:
-    """The real Django cache, except that one key raises on read.
+    """
+    The real Django cache, except that one key raises on read.
 
     Redis is a true external boundary: a local test cannot take it down for one key
     only, so the failure is injected here and every other key still round-trips.
@@ -311,7 +313,8 @@ class TestCreateVirtualChassisWithMembers:
         assert Device.objects.filter(name="vc-keep-name-M1").count() == 1
 
     def test_a_member_serial_keeps_no_vendor_marker(self):
-        """Juniper reports ENTITY-MIB serials as "S/N BCFB9751".
+        """
+        Juniper reports ENTITY-MIB serials as "S/N BCFB9751".
 
         Stored verbatim the VC member carries a serial the hardware never matches, and every
         later comparison against a serial normalized elsewhere fails.
@@ -329,7 +332,8 @@ class TestCreateVirtualChassisWithMembers:
         assert created.serial == "BCFB9751"
 
     def test_the_master_position_is_found_from_a_decorated_serial(self, caplog):
-        """Without an is_master flag the master is located by serial, which arrives decorated.
+        """
+        Without an is_master flag the master is located by serial, which arrives decorated.
 
         Compared raw it never matches, so the master keeps position 1 while its real slot is 2,
         and the member-count check counts the master row as a member it failed to create.
@@ -354,7 +358,8 @@ class TestCreateVirtualChassisWithMembers:
         assert "expected" not in caplog.text
 
     def test_the_master_row_is_skipped_when_its_serial_carries_the_marker(self):
-        """The master's own chassis row comes back with the marker, its stored serial without.
+        """
+        The master's own chassis row comes back with the marker, its stored serial without.
 
         Comparing the two raw makes them differ, so the master is created a second time as a
         member of its own virtual chassis.

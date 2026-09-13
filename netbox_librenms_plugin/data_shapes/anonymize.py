@@ -442,7 +442,7 @@ def _anon_asn(value, salt):
     return 64512 + int(_hash(str(value), salt, 4), 16) % 1023
 
 
-def _anon_value(key, value, rules):
+def _anon_value(key, value, rules):  # noqa: C901
     """Apply the field rule for a single scalar (non-container) value keyed by *key*."""
     salt = rules.salt
     if key in PRESERVE_KEYS:

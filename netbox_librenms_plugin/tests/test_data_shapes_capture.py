@@ -1,4 +1,5 @@
-"""Round-trip tests for data-shape capture: capture from a seeded mock, replay, assert same outcome.
+"""
+Round-trip tests for data-shape capture: capture from a seeded mock, replay, assert same outcome.
 
 These exercise the real LibreNMSAPI (via _raw_get) over real HTTP against the mock server, then
 re-run the real detection / relationship-resolution logic on the captured recording — proving
@@ -767,7 +768,8 @@ class TestRecordedResponseEnvelope:
     """The stored status framing must not collide with a body LibreNMS can actually send."""
 
     def test_a_list_body_replays_whole(self):
-        """`[1, {...}]` is a body, not a status and a body.
+        """
+        `[1, {...}]` is a body, not a status and a body.
 
         The old framing read any two-item list whose head was an int as [status, body], so this
         body registered HTTP status 1 and lost its first item.
@@ -797,7 +799,8 @@ class TestRecordedResponseEnvelope:
         assert wrap_response(200, {"ports": []}) == {"ports": []}
 
     def test_a_half_written_envelope_is_refused_rather_than_read_as_a_body(self):
-        """The reserved status key has no other use, so a value carrying it must be complete.
+        """
+        The reserved status key has no other use, so a value carrying it must be complete.
 
         Otherwise it unwraps as a successful body that merely contains the key, turning a
         recorded error into a recorded success.
@@ -834,7 +837,8 @@ class TestRecordedResponseEnvelope:
 
 
 def test_a_list_body_survives_a_real_replay(recording_server):
-    """End to end: a recorded list body replays whole, through the real loader and HTTP.
+    """
+    End to end: a recorded list body replays whole, through the real loader and HTTP.
 
     `[1, {...}]` is exactly the shape the removed framing mistook for [status, body]: the loader
     registered HTTP status 1 and served only the second item.

@@ -1,4 +1,5 @@
-"""Back-compat shim: recordings now live in ``data_shapes/recordings/``.
+"""
+Back-compat shim: recordings now live in ``data_shapes/recordings/``.
 
 Only ``manifest.json`` ships in the wheel (see ``[tool.setuptools.package-data]``); the full
 recordings remain source/dev-time fixtures, so a wheel install cannot load them.

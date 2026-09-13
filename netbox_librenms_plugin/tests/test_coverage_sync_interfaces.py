@@ -4295,7 +4295,8 @@ class TestSyncLagAndParentRelationships:
         """
         Run the relationship pass for one VM sub-interface, optionally shrinking the
         VMInterface name limit. Interface and VMInterface both allow 64 in NetBox 4.7, so the
-        gate reading the wrong model is only observable once the two differ."""
+        gate reading the wrong model is only observable once the two differ.
+        """
         from unittest.mock import patch
 
         from virtualization.models import VMInterface

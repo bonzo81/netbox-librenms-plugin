@@ -213,7 +213,8 @@ class TestVlanTabIpamScoping:
         assert row["netbox_vlan_group"] == group.name
 
     def test_a_constrained_ipam_grant_is_reported_as_incomplete(self, settings):
-        """A constrained grant satisfies the permission-name check while still hiding rows.
+        """
+        A constrained grant satisfies the permission-name check while still hiding rows.
 
         The tab would otherwise render a VLAN comparison with no notice that part of the scope is
         invisible, which is exactly what the sync path guards against.
