@@ -814,6 +814,7 @@ class TestSafeDisabledFilters:
         assert _safe_disabled({}) == 0
 
 
+@pytest.mark.django_db
 class TestPaginationHelpers:
     """Test pagination helper functions."""
 
