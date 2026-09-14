@@ -133,6 +133,91 @@ def test_compression_keeps_name_parent_of_a_fingerprint_representative(recording
     }
 
 
+def test_compression_preserves_ambiguous_name_parent_outcome(recording_server):
+    """Compression must not resolve a parent name that was ambiguous in the full port set."""
+    rec = {
+        "schema_version": 1,
+        "name": "ambiguous-parent",
+        "device_id": 7,
+        "responses": {
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Gi0/2", "ethernetCsmacd"),
+                    _port(2, "Gi0/2", "ethernetCsmacd"),
+                    _port(3, "Gi0/2.10", "l2vlan"),
+                ],
+            },
+            "GET /api/v0/devices/7/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+
+    full_lag, full_sub = _resolve(rec, recording_server)
+    compressed = compress_recording(rec)
+    compressed_lag, compressed_sub = _resolve(compressed, recording_server)
+
+    assert full_lag == compressed_lag == {}
+    assert full_sub == compressed_sub == {}
+    assert {port["port_id"] for port in compressed["responses"]["GET /api/v0/devices/7/ports"]["ports"]} == {
+        1,
+        2,
+        3,
+    }
+
+
+def test_compression_keeps_name_indexes_separate_by_field(recording_server):
+    """An ifDescr collision must not hide the unambiguous ifName parent."""
+    rec = {
+        "schema_version": 1,
+        "name": "separate-name-fields",
+        "device_id": 7,
+        "responses": {
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Gi0/1", "ethernetCsmacd", ifDescr="Gi0/2"),
+                    _port(2, "Gi0/2", "ethernetCsmacd", ifDescr="port-two"),
+                    _port(3, "Gi0/2.10", "l2vlan", ifDescr="port-three"),
+                ],
+            },
+            "GET /api/v0/devices/7/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+
+    full_lag, full_sub = _resolve(rec, recording_server)
+    compressed_lag, compressed_sub = _resolve(compress_recording(rec), recording_server)
+
+    assert full_lag == compressed_lag == {}
+    assert full_sub == compressed_sub == {"3": "2"}
+
+
+def test_compression_keeps_each_name_derived_child(recording_server):
+    """Same-fingerprint sub-interfaces still carry distinct relationship edges."""
+    rec = {
+        "schema_version": 1,
+        "name": "multiple-name-children",
+        "device_id": 7,
+        "responses": {
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Gi0/1", "ethernetCsmacd"),
+                    _port(2, "Gi0/2", "ethernetCsmacd"),
+                    _port(3, "Gi0/1.10", "l2vlan"),
+                    _port(4, "Gi0/2.10", "l2vlan"),
+                ],
+            },
+            "GET /api/v0/devices/7/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+
+    full_lag, full_sub = _resolve(rec, recording_server)
+    compressed_lag, compressed_sub = _resolve(compress_recording(rec), recording_server)
+
+    assert full_lag == compressed_lag == {}
+    assert full_sub == compressed_sub == {"3": "1", "4": "2"}
+
+
 def test_compression_preserves_signature():
     """The novelty signature is identical for the full and compressed recordings."""
     rec = _large_recording()
@@ -308,9 +393,9 @@ def test_compression_keeps_ifdescr_mode_base_ports(recording_server):
     assert "compressed_ports" in comp["meta"]
 
 
-def test_build_name_index_scans_ifdescr_and_drops_ambiguous():
-    """_build_name_index keys ports by ifDescr as well as ifName, and drops a name two different ports share so it can't bind a base/sub-unit lookup to the wrong port."""
-    from netbox_librenms_plugin.data_shapes.compress import _build_name_index
+def test_build_name_indexes_separate_fields_and_keep_ambiguity_candidates():
+    """Name indexes mirror the resolver's per-field namespaces and retain all candidates."""
+    from netbox_librenms_plugin.data_shapes.compress import _build_name_indexes
 
     ports = [
         {"port_id": 1, "ifName": "", "ifDescr": "ae1"},  # name lives only in ifDescr
@@ -318,12 +403,12 @@ def test_build_name_index_scans_ifdescr_and_drops_ambiguous():
         {"port_id": 3, "ifName": "dup", "ifDescr": ""},  # 'dup' shared by 3 and 4 -> ambiguous
         {"port_id": 4, "ifName": "dup", "ifDescr": ""},
     ]
-    index = _build_name_index(ports)
-    # An ifDescr-only and an ifName-only name are both indexed to their single owning port.
-    assert index["ae1"]["port_id"] == 1
-    assert index["xe-0/0/0"]["port_id"] == 2
-    # A name two distinct ports carry is dropped entirely (can't disambiguate which port it means).
-    assert "dup" not in index
+    indexes = _build_name_indexes(ports)
+
+    assert [port["port_id"] for port in indexes["ifDescr"]["ae1"]] == [1]
+    assert [port["port_id"] for port in indexes["ifName"]["xe-0/0/0"]] == [2]
+    assert [port["port_id"] for port in indexes["ifName"]["dup"]] == [3, 4]
+    assert "dup" not in indexes["ifDescr"]
 
 
 def test_pattern_matched_lag_port_is_never_deduped_away():

@@ -319,7 +319,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         return Interface.objects.filter(device=device, module__isnull=True, name__in=template_names).count()
 
-    def _infer_vc_member_for_item(self, obj, item, index_map, vc_members):
+    @staticmethod
+    def _vc_member_at_position(vc_members, position):
+        """Return the VC member at a normalized positive position, or None."""
+        try:
+            position = int(position)
+        except (TypeError, ValueError):
+            return None
+        if position <= 0:
+            return None
+        return next((member for member in vc_members if getattr(member, "vc_position", None) == position), None)
+
+    def _infer_vc_member_for_item(self, obj, item, index_map, vc_members, inherited_member=None):
         """
         Infer VC member ownership for an inventory item using LibreNMS ENTITY data.
 
@@ -351,17 +362,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 return member_by_serial[parent_serial], "ancestor-serial"
             parent_idx = parent.get("entPhysicalContainedIn", 0)
 
-        # Position-based fallback from ENTITY parentRelPos.
-        rel_pos = item.get("entPhysicalParentRelPos")
-        try:
-            rel_pos = int(rel_pos)
-        except (TypeError, ValueError):
-            rel_pos = None
+        # A descendant's parentRelPos is its hardware slot, not its Virtual Chassis position.
+        # Inherit the parent context unless this item or an ancestor supplied member serial evidence.
+        if inherited_member is not None:
+            return inherited_member, "parent-context"
 
-        if rel_pos:
-            for member in vc_members:
-                if getattr(member, "vc_position", None) == rel_pos:
-                    return member, "position"
+        # Position-based fallback from ENTITY parentRelPos.
+        positioned_member = self._vc_member_at_position(vc_members, item.get("entPhysicalParentRelPos"))
+        if positioned_member is not None:
+            return positioned_member, "position"
 
         # Name/model hint fallback: common "<position>/..." prefixes.
         hints = [
@@ -375,13 +384,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             match = re.match(r"^\D*([1-9]\d*)[/:\-].*", hint)
             if not match:
                 continue
-            try:
-                hinted_pos = int(match.group(1))
-            except (TypeError, ValueError):
-                continue
-            for member in vc_members:
-                if getattr(member, "vc_position", None) == hinted_pos:
-                    return member, "name-hint"
+            hinted_member = self._vc_member_at_position(vc_members, match.group(1))
+            if hinted_member is not None:
+                return hinted_member, "name-hint"
 
         return obj, "default"
 
@@ -863,21 +868,44 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         default_context = policy_for(obj)
         item_contexts = {}
-        for item in inventory_data:
+
+        def context_for(item, resolving=None):
+            """Resolve one item after its parent so weak child hints cannot replace ownership."""
+            item_key = id(item)
+            if item_key in item_contexts:
+                return item_contexts[item_key]
             if item.get("_source") == OOB_INVENTORY_SOURCE:
-                item_contexts[id(item)] = {
+                item_contexts[item_key] = {
                     **default_context,
                     "selected_device": obj,
                     "resolution_source": OOB_INVENTORY_SOURCE,
                 }
-                continue
-            selected_device, resolution_source = self._infer_vc_member_for_item(obj, item, index_map, vc_members)
+                return item_contexts[item_key]
+
+            resolving = set() if resolving is None else resolving
+            inherited_member = None
+            parent = index_map.get(item.get("entPhysicalContainedIn"))
+            if parent is not None and id(parent) not in resolving:
+                parent_context = context_for(parent, resolving | {item_key})
+                inherited_member = parent_context["selected_device"]
+
+            selected_device, resolution_source = self._infer_vc_member_for_item(
+                obj,
+                item,
+                index_map,
+                vc_members,
+                inherited_member=inherited_member,
+            )
             policy = policy_for(selected_device)
-            item_contexts[id(item)] = {
+            item_contexts[item_key] = {
                 **policy,
                 "selected_device": selected_device,
                 "resolution_source": resolution_source,
             }
+            return item_contexts[item_key]
+
+        for item in inventory_data:
+            context_for(item)
         return default_context, item_contexts
 
     @staticmethod

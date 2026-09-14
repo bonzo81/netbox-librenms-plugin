@@ -438,10 +438,11 @@ def _anon_serial_label(value, rules):
 
 def _anon_entity_text(value, rules):
     """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
-    if _ENTITY_TOKEN_RE.fullmatch(value) or _ENTITY_LOCATOR_RE.fullmatch(value):
-        return value
-    locator_match = _ENTITY_LOCATOR_SUFFIX_RE.search(value)
-    token = f"entity-{_hash(value, rules.salt)}"
+    normalized = value.strip()
+    if not normalized or _ENTITY_TOKEN_RE.fullmatch(normalized) or _ENTITY_LOCATOR_RE.fullmatch(normalized):
+        return normalized
+    locator_match = _ENTITY_LOCATOR_SUFFIX_RE.search(normalized)
+    token = f"entity-{_hash(normalized, rules.salt)}"
     if locator_match:
         return f"{token} {locator_match.group('locator')}"
     return token

@@ -6197,3 +6197,37 @@ def test_vc_descendants_use_their_own_member_context():
     assert {row["name"] for row in rows} == {"Page parent", "Visible member child"}
     visible_child = next(row for row in rows if row["name"] == "Visible member child")
     assert visible_child["selected_device_id"] == member.pk
+
+
+@pytest.mark.django_db
+def test_vc_descendant_local_position_does_not_override_parent_member():
+    """A hardware-local child position must inherit its parent's VC member."""
+    page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("descendant-position")
+    inventory = [
+        {
+            "entPhysicalIndex": 120,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "1/FPC0",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 121,
+            "entPhysicalClass": "fan",
+            "entPhysicalName": "Fan 2",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 120,
+        },
+    ]
+    view = _make_view()
+    index_map = {item["entPhysicalIndex"]: item for item in inventory}
+
+    _default, contexts = view._build_inventory_ignore_contexts(
+        page,
+        inventory,
+        index_map,
+        [page, member],
+        lambda _manufacturer: [],
+    )
+
+    assert contexts[id(inventory[0])]["selected_device"].pk == page.pk
+    assert contexts[id(inventory[1])]["selected_device"].pk == page.pk

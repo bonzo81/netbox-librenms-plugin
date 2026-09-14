@@ -23,6 +23,7 @@ lockstep if that signature grows.
 
 import re
 
+from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response, wrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, port_has_vlan, port_is_lag, port_names
 
@@ -97,66 +98,59 @@ def _transceiver_referenced(recording):
     return referenced
 
 
-def _build_name_index(dict_ports):
+def _build_name_indexes(dict_ports):
     """
-    Index ports by every name they're known by (ifName + ifDescr), dropping AMBIGUOUS names.
+    Index ports by each interface-name field without merging their ambiguity namespaces.
 
-    A name carried by two DIFFERENT ports (distinct port_ids) can't disambiguate which port a
-    base/sub-unit lookup means, so it is dropped entirely. This mirrors the ambiguous-name drop in
-    ``resolve_port_relationships`` (whose old last-write-wins ``by_name`` would bind the wrong
-    aggregate). Keying the same way here keeps compress's base-port retention consistent with what
-    the resolver actually resolves.
+    Keep every candidate for a name. Compression must retain all candidates when a sub-interface
+    base is ambiguous, or removing one candidate makes the compressed resolver invent an edge.
 
     Args:
-        dict_ports (list[dict]): Ports to index by ``ifName`` and ``ifDescr``.
+        dict_ports (list[dict]): Ports to index.
 
     Returns:
-        dict[str, dict]: Ports keyed by unambiguous names.
+        dict[str, dict[str, list[dict]]]: Candidate ports keyed first by field, then name.
 
     """
-    by_name: dict = {}
-    ambiguous_names: set = set()
-    for p in dict_ports:
-        for name in port_names(p):
-            if name in ambiguous_names:
+    indexes = {field: {} for field in INTERFACE_NAME_FIELDS}
+    for field, by_name in indexes.items():
+        for port in dict_ports:
+            name = port.get(field)
+            if not isinstance(name, str) or not name:
                 continue
-            existing = by_name.get(name)
-            if existing is not None and str(existing.get("port_id")) != str(p.get("port_id")):
-                del by_name[name]
-                ambiguous_names.add(name)
-                continue
-            by_name[name] = p
-    return by_name
+            candidates = by_name.setdefault(name, [])
+            if all(str(candidate.get("port_id")) != str(port.get("port_id")) for candidate in candidates):
+                candidates.append(port)
+    return indexes
 
 
-def _add_base_name_ports(dict_ports, by_name, keep_ids):
+def _add_name_relationship_ports(dict_ports, name_indexes, keep_ids):
     """
-    Grow *keep_ids* to include base-level ports that kept ``parent.N`` names resolve to (fixpoint).
+    Keep every child and base candidate that can affect a name-derived relationship.
 
-    resolve_port_relationships' _resolve_physical strips a ``.N`` suffix and looks the base up by
-    name; dropping that base would change the resolved LAG/sub maps, so keep it too. Scan every
-    known name (ifName + ifDescr), not just ifName, so an ifDescr-mode device whose ``.N`` marker
-    lives in ifDescr still has its base port preserved.
+    The resolver indexes ``ifName`` and ``ifDescr`` separately, drops ambiguous names, and derives
+    an edge for every ``base.N`` child. Retaining all children and every same-field base candidate
+    preserves both real edges and deliberate ambiguity.
 
     Args:
         dict_ports (list[dict]): Ports to scan for kept sub-unit names.
-        by_name (dict[str, dict]): Ports keyed by unambiguous names.
-        keep_ids (set[str]): Port ids to extend with resolved base ports.
+        name_indexes (dict): Per-field candidate indexes from :func:`_build_name_indexes`.
+        keep_ids (set[str]): Port ids to extend.
 
     """
-    changed = True
-    while changed:
-        changed = False
-        for p in dict_ports:
-            if str(p.get("port_id")) not in keep_ids:
+    for port in dict_ports:
+        for field, by_name in name_indexes.items():
+            name = port.get(field)
+            if not isinstance(name, str):
                 continue
-            for name in port_names(p):
-                if "." not in name:
-                    continue
-                base = by_name.get(name.rsplit(".", 1)[0])
-                if base is not None and str(base.get("port_id")) not in keep_ids:
-                    keep_ids.add(str(base.get("port_id")))
-                    changed = True
+            base, separator, suffix = name.rpartition(".")
+            if not separator or not suffix.isdigit():
+                continue
+            candidates = by_name.get(base, [])
+            if not candidates:
+                continue
+            keep_ids.add(str(port.get("port_id")))
+            keep_ids.update(str(candidate.get("port_id")) for candidate in candidates)
 
 
 def _fingerprint(port, compiled_lag_patterns=()):
@@ -210,12 +204,13 @@ def compress_recording(recording):
 
     ports = ports_body["ports"]
     dict_ports = [p for p in ports if isinstance(p, dict)]
-    by_name = _build_name_index(dict_ports)
+    name_indexes = _build_name_indexes(dict_ports)
 
     # Always keep the ports whose relationships we must preserve: those named by port_stack, plus the
     # base-level ports their ``.N`` names resolve to.
     referenced = _port_stack_referenced(recording) | _transceiver_referenced(recording)
     keep_ids = {str(p.get("port_id")) for p in dict_ports if str(p.get("port_id")) in referenced}
+    _add_name_relationship_ports(dict_ports, name_indexes, keep_ids)
 
     # One representative per distinct fingerprint preserves every shape the signature reads while
     # collapsing redundant cardinality. Iterate in original order so the first ieee8023adLag port
@@ -227,10 +222,6 @@ def compress_recording(recording):
         if fp not in seen_fingerprints:
             seen_fingerprints.add(fp)
             keep_ids.add(str(p.get("port_id")))
-    # Representatives can themselves be name-derived sub-interfaces. Select them before growing
-    # the parent closure, or their unreferenced base ports can be discarded.
-    _add_base_name_ports(dict_ports, by_name, keep_ids)
-
     kept = [p for p in ports if isinstance(p, dict) and str(p.get("port_id")) in keep_ids]
     if len(kept) == len(dict_ports):
         return recording  # nothing dropped — leave the recording (and its meta) untouched

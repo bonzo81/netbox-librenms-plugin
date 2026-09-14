@@ -424,8 +424,8 @@ def test_entity_text_preserves_only_supported_terminal_locators():
     rec["responses"]["GET /api/v0/inventory/1/all"] = {
         "status": "ok",
         "inventory": [
-            {"entPhysicalIndex": 1, "entPhysicalName": "MDA 1/1"},
-            {"entPhysicalIndex": 2, "entPhysicalName": "XIOM 2/x1"},
+            {"entPhysicalIndex": 1, "entPhysicalName": "MDA 1/1 "},
+            {"entPhysicalIndex": 2, "entPhysicalName": "XIOM 2/x1\t"},
             {"entPhysicalIndex": 3, "entPhysicalName": "rack12/server3"},
             {"entPhysicalIndex": 4, "entPhysicalName": "1/1/c1"},
         ],
@@ -445,8 +445,8 @@ def test_entity_locator_anonymization_preserves_transceiver_nesting_and_is_idemp
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
     inventory = [
-        {"entPhysicalIndex": 10, "entPhysicalName": "MDA 1/1", "entPhysicalContainedIn": 0},
-        {"entPhysicalIndex": 20, "entPhysicalName": "XIOM 2/x1", "entPhysicalContainedIn": 0},
+        {"entPhysicalIndex": 10, "entPhysicalName": "MDA 1/1 ", "entPhysicalContainedIn": 0},
+        {"entPhysicalIndex": 20, "entPhysicalName": "XIOM 2/x1\t", "entPhysicalContainedIn": 0},
         {
             "entPhysicalIndex": 30,
             "entPhysicalName": "1/1/c1",
