@@ -887,7 +887,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             parent = index_map.get(item.get("entPhysicalContainedIn"))
             if parent is not None and id(parent) not in resolving:
                 parent_context = context_for(parent, resolving | {item_key})
-                inherited_member = parent_context["selected_device"]
+                # A generic stack/container root can only fall back to the page device. It has not
+                # established ownership, so let a chassis child use its own position or name hint.
+                if parent_context["resolution_source"] != "default":
+                    inherited_member = parent_context["selected_device"]
 
             selected_device, resolution_source = self._infer_vc_member_for_item(
                 obj,

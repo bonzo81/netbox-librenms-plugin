@@ -6231,3 +6231,44 @@ def test_vc_descendant_local_position_does_not_override_parent_member():
 
     assert contexts[id(inventory[0])]["selected_device"].pk == page.pk
     assert contexts[id(inventory[1])]["selected_device"].pk == page.pk
+
+
+@pytest.mark.django_db
+def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
+    """A generic stack root must not suppress a chassis member position."""
+    page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("stack-root-position")
+    inventory = [
+        {
+            "entPhysicalIndex": 130,
+            "entPhysicalClass": "stack",
+            "entPhysicalName": "Switch stack",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 131,
+            "entPhysicalClass": "chassis",
+            "entPhysicalName": "Chassis 2",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 130,
+        },
+        {
+            "entPhysicalIndex": 132,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "2/FPC0",
+            "entPhysicalContainedIn": 131,
+        },
+    ]
+    view = _make_view()
+    index_map = {item["entPhysicalIndex"]: item for item in inventory}
+
+    _default, contexts = view._build_inventory_ignore_contexts(
+        page,
+        inventory,
+        index_map,
+        [page, member],
+        lambda _manufacturer: [],
+    )
+
+    assert contexts[id(inventory[0])]["resolution_source"] == "default"
+    assert contexts[id(inventory[1])]["selected_device"].pk == member.pk
+    assert contexts[id(inventory[2])]["selected_device"].pk == member.pk
