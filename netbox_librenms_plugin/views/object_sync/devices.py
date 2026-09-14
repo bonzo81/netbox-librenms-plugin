@@ -35,6 +35,8 @@ from netbox_librenms_plugin.utils import (
     get_interface_port_identity_sets,
     get_vlan_sync_css_class,
     is_valid_ports_payload,
+    module_inventory_row_digest,
+    module_inventory_snapshot_digest,
     normalize_librenms_port_id,
 )
 
@@ -467,6 +469,7 @@ class SingleModuleVerifyView(
             )
         if row is None:
             return JsonResponse({"status": "error", "message": "Inventory row not found"}, status=404)
+        row["inventory_digest"] = module_inventory_row_digest(item)
 
         has_write_permission = self.has_write_permission()
         table_class = VCModuleTable if selected_device.virtual_chassis else LibreNMSModuleTable
@@ -491,6 +494,7 @@ class SingleModuleVerifyView(
                 has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
             ),
         )
+        table.inventory_snapshot_digest = module_inventory_snapshot_digest(inventory_data)
         table.configure(request)
         formatted_row = table.format_module_data(row)
         return JsonResponse({"status": "success", "formatted_row": formatted_row})
