@@ -3,18 +3,13 @@
 Custom [opengrep](https://github.com/opengrep/opengrep) rules enforce this project's import-preview
 invariants and coding guidelines.
 
-## Why opengrep (and not ruff or a hand-written checker)
+## Why opengrep
 
 - **ruff** covers generic Python lint. It has no plugin system and no user-defined rules, so a
   project-specific invariant cannot be expressed there at all.
 - **CodeQL** (`.github/workflows/codeql.yml`) covers broad dataflow SAST.
 - **opengrep** fills the gap: taint rules for *our* invariants, in YAML, and it is the same engine
   CodeRabbit runs.
-
-`import-disclosure` replaces `tools/lint_import_disclosure.py`, a 595-line AST taint checker. The
-rule reproduces that checker's verdicts on 39 of its 40 test cases and finds all 14 disclosure sites
-it originally found in the pre-fix tree, in a fraction of the code. It also closes the two shapes
-that checker documented as an unfixable limitation (see **Known limitation** below).
 
 ## Relationship to CodeRabbit (these run *on top* of CR's defaults)
 
@@ -116,8 +111,9 @@ per-function analysis. Without the flag those sites are missed.
 ./scripts/opengrep-scan.sh --json -- netbox_librenms_plugin/urls.py  # scan one target
 ```
 
-Both find opengrep via `$OPENGREP_BIN`, then `PATH`, then `~/.local/opt/opengrep/bin`. Install it
-from <https://github.com/opengrep/opengrep> (there is no PyPI package), or set `OPENGREP_BIN`.
+The devcontainer installs opengrep 1.30.0. Outside the devcontainer, both scripts find opengrep via
+`$OPENGREP_BIN`, then `PATH`, then `~/.local/opt/opengrep/bin`. Install it from
+<https://github.com/opengrep/opengrep> (there is no PyPI package), or set `OPENGREP_BIN`.
 
 ## Known limitation
 
@@ -127,9 +123,8 @@ A keyword argument read back out of a `**kwargs` dict is not followed:
 _describe(value=device)          # def _describe(**values): return str(values["value"])
 ```
 
-The reverse shape, a caller-side `**{...}` unpacking, **is** reported. This is the one case out of 40
-where the rule is less precise than the AST checker it replaced; that checker had the mirror-image
-hole. Both fixtures are recorded in `.opengrep/tests/import-disclosure.py`.
+The reverse shape, a caller-side `**{...}` unpacking, **is** reported. Both fixtures are recorded in
+`.opengrep/tests/import-disclosure.py`.
 
 ## Suppressing a true exception
 
