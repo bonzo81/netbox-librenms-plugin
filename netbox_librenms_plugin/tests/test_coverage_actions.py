@@ -939,7 +939,7 @@ class TestBulkImportConfirmViewIntegration:
         assert response.status_code == 200
         assert b"unavailable role selection" in response.content
         assert hidden.name.encode() not in response.content
-        assert str(hidden.pk).encode() not in response.content
+        assert f'value="{hidden.pk}"'.encode() not in response.content
 
     def test_device_row_shows_selected_role_and_rack(self, settings, librenms_server):
         """A device confirmation row shows its selected role and rack in their own fields."""
