@@ -187,6 +187,16 @@ class TestDeviceNameDetermination:
         # IP addresses should not have domain stripped
         assert name == "192.168.1.1"
 
+    def test_determine_device_name_handles_a_padded_ip_address(self):
+        """The canonical address parser must recognize surrounding whitespace."""
+        from netbox_librenms_plugin.import_utils import _determine_device_name
+
+        device_data = {"hostname": "198.18.0.1 "}
+
+        name = _determine_device_name(device_data, use_sysname=False, strip_domain=True)
+
+        assert name == "198.18.0.1 "
+
     def test_determine_device_name_fallback_to_device_id(self):
         """Fallback to device_id when no name available."""
         from netbox_librenms_plugin.import_utils import _determine_device_name

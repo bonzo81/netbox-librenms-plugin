@@ -1,6 +1,6 @@
 """Pure name resolution shared by import rendering and persistence."""
 
-from ipaddress import ip_interface
+from ..ip_addressing import parse_host_address
 
 
 def _name_candidates(libre_device: dict) -> tuple[str | None, str | None]:
@@ -37,7 +37,7 @@ def _resolve_device_name(
 
     if strip_domain and name and "." in name:
         try:
-            ip_interface(name)
+            parse_host_address(name)
         except ValueError:
             name = name.split(".")[0]
 
