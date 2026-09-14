@@ -1192,6 +1192,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 apply_cluster_to_validation(validation, new_device.cluster)
             else:
                 reset_cluster(validation)
+                validation["vm_placement"] = {
+                    "method": "site",
+                    "found": bool(validation.get("site", {}).get("found")),
+                    "host_device": None,
+                }
             recalculate_validation_status(validation, is_vm=actual_is_vm)
             # Re-assert non-importable: recalculate sets can_import from issues list,
             # but a late-found existing match must never be import-ready.

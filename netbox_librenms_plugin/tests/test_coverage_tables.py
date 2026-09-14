@@ -407,6 +407,24 @@ class TestDeviceImportTable:
 
         assert table._cached_clusters == [visible]
 
+    def test_role_dropdown_only_caches_roles_the_user_can_view(self):
+        """The import table must not disclose roles outside the viewer's object scope."""
+        from dcim.models import DeviceRole
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        visible = DeviceRole.objects.create(name="Visible import table role", slug="visible-import-table-role")
+        hidden = DeviceRole.objects.create(name="Hidden import table role", slug="hidden-import-table-role")
+        user = make_user_with_perms("role-scoped-import-table-user", [])
+        user = grant(user, "view", DeviceRole, constraints={"pk": visible.pk})
+
+        table = self._table(user=user)
+        html = str(table.render_netbox_role(None, _import_record(import_as_vm=True)))
+
+        assert table._cached_roles == [visible]
+        assert visible.name in html
+        assert hidden.name not in html
+
     def test_clusterless_vm_is_rendered_without_dereferencing_a_cluster(self):
         vm = make_vm("import-table-standalone-vm")
         vm.cluster = None

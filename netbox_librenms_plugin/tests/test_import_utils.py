@@ -2049,7 +2049,7 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["is_ready"] is False
 
     def test_vm_fresh_match_without_cluster_resets_stale_display(self):
-        """A newly matched clusterless VM clears a stale cluster selection but keeps available clusters."""
+        """A newly matched clusterless VM clears stale cluster and placement selections."""
         from virtualization.models import VirtualMachine
 
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
@@ -2065,6 +2065,8 @@ class TestRefreshExistingDeviceCrossModelIdWins:
             "issues": [],
             "warnings": [],
             "cluster": {"found": True, "cluster": stale, "available_clusters": ["keep-me"]},
+            "site": {"found": True},
+            "vm_placement": {"method": "host", "found": True, "host_device": stale},
         }
 
         _refresh_existing_device(
@@ -2075,6 +2077,11 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["cluster"]["found"] is False
         assert validation["cluster"]["cluster"] is None
         assert validation["cluster"]["available_clusters"] == ["keep-me"]
+        assert validation["vm_placement"] == {
+            "method": "site",
+            "found": True,
+            "host_device": None,
+        }
 
     def test_serial_fallback_ambiguity_fails_closed(self):
         """When the serial fallback resolves more than one NetBox device, the refresh re-check must fail closed (ambiguous match + can_import False), not bind to an arbitrary duplicate."""

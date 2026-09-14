@@ -293,13 +293,11 @@ def bulk_import_vms(
 
             role = None
             if role_id:
-                role = DeviceRole.objects.filter(id=role_id).first()
+                role = DeviceRole.objects.restrict(user, "view").filter(id=role_id).first()
                 if role:
                     apply_role_to_validation(validation, role, is_vm=True)
                 else:
-                    result["failed"].append(
-                        {"device_id": vm_id, "error": f"Selected role (id={role_id}) no longer exists"}
-                    )
+                    result["failed"].append({"device_id": vm_id, "error": "Selected role is unavailable"})
                     continue
 
             # Determine VM name
