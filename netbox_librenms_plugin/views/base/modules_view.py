@@ -633,7 +633,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             {"module_sync": context},
         )
 
-    def get_context_data(self, request, obj, server_key=None):
+    def get_context_data(self, request, obj, server_key=None, *, pin_rows_to_object=False):
         """Get context from cache (used on initial page load and by the module actions' in-place re-render)."""
         # Scope the cache read + OOB-fingerprint comparison to the active server from the request
         # (GET query), matching the server post() rebinds to and caches under. Without this the
@@ -709,10 +709,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # rather than falling back to self.librenms_api.server_key — the same rebind-side-effect
         # avoidance the sync_device resolution above documents.
         return self._build_context(
-            request, obj, cached_payload["inventory"], server_key=scoped_server, sync_device=sync_device
+            request,
+            obj,
+            cached_payload["inventory"],
+            server_key=scoped_server,
+            sync_device=sync_device,
+            pin_rows_to_object=pin_rows_to_object,
         )
 
-    def _build_context(self, request, obj, inventory_data, server_key=None, sync_device=None):
+    def _build_context(
+        self,
+        request,
+        obj,
+        inventory_data,
+        server_key=None,
+        sync_device=None,
+        *,
+        pin_rows_to_object=False,
+    ):
         """Build context with matched inventory items and table."""
         # Scope cache reads + per-row interface binding to the POST-resolved server when
         # provided (fallback: session server). Stored on self so _build_member_contexts
@@ -743,7 +757,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Resolve ignore policy once per attributed VC member. A stacked device can contain
         # inventory for members with different manufacturers and device serials.
         manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
-        vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
+        vc_members = (
+            []
+            if pin_rows_to_object
+            else list(obj.virtual_chassis.members.all())
+            if getattr(obj, "virtual_chassis", None)
+            else []
+        )
         default_ignore_context, item_ignore_contexts = self._build_inventory_ignore_contexts(
             obj,
             inventory_data,
