@@ -123,6 +123,8 @@ def module_inventory_binding_matches(
         ent_index,
         inventory_digest,
     )
+
+
 _CABLE_ROW_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
