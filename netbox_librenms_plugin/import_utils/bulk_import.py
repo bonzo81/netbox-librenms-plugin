@@ -549,6 +549,21 @@ def bulk_import_devices_shared(  # noqa: C901
             if manual_mappings_per_device and device_id in manual_mappings_per_device:
                 device_mappings.update(manual_mappings_per_device[device_id])
 
+            selected_role_id = device_mappings.pop("device_role_id", None)
+            if selected_role_id:
+                from dcim.models import DeviceRole
+
+                selected_role = DeviceRole.objects.restrict(user, "view").filter(pk=selected_role_id).first()
+                if selected_role is None:
+                    error_msg = "Selected role is unavailable"
+                    failed_list.append({"device_id": device_id, "error": error_msg})
+                    if job and job.logger:
+                        job.logger.error(error_msg)
+                    else:
+                        logger.error(error_msg)
+                    continue
+                apply_role_to_validation(validation, selected_role, is_vm=False)
+
             result = import_single_device(
                 device_id,
                 server_key=api.server_key,  # use resolved key, not raw parameter (may be None)

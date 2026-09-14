@@ -1052,13 +1052,13 @@ def _apply_import_intent_to_validation(
 
         # Handle role selection for VM
         if intent.role_id:
-            role = fetch_model_by_id(DeviceRole, intent.role_id)
+            role = DeviceRole.objects.restrict(user, "view").filter(pk=intent.role_id).first()
             if role:
                 apply_role_to_validation(validation, role, is_vm=True)
     else:
         # Handle role selection for device
         if intent.role_id:
-            role = fetch_model_by_id(DeviceRole, intent.role_id)
+            role = DeviceRole.objects.restrict(user, "view").filter(pk=intent.role_id).first()
             if role:
                 apply_role_to_validation(validation, role, is_vm=False)
 
@@ -1155,7 +1155,10 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
             target = plan.target
             role_id = target.role_id
-            role = fetch_model_by_id(DeviceRole, role_id) if role_id else None
+            role = DeviceRole.objects.restrict(request.user, "view").filter(pk=role_id).first() if role_id else None
+            if role_id and role is None:
+                errors.append(f"Device ID {device_id} has an unavailable role selection")
+                continue
             rack = None
             cluster = None
             host_device = None

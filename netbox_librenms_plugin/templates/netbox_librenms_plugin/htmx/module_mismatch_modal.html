@@ -103,6 +103,7 @@
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
+        <input type="hidden" name="ent_index" value="{{ ent_index }}">
         <input type="hidden" name="serial" value="{{ librenms_serial }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">
         <input type="hidden" name="selected_device_id" value="{{ selected_device_id }}">

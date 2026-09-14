@@ -145,7 +145,32 @@ class SingleInterfaceVerifyView(
     # Read-only verify endpoint: require object-view permission (mirrors SingleModuleVerifyView).
     required_object_permissions = {"POST": [("view", Device)]}
 
-    def post(self, request):  # noqa: C901
+    def _resolve_origin_device(self, data, selected_device):
+        """Resolve and validate the interface page's origin device."""
+        raw_origin_device_id = data.get("origin_device_id")
+        if raw_origin_device_id is None:
+            return selected_device, None
+
+        origin_device_id = coerce_model_pk(raw_origin_device_id)
+        if origin_device_id is None:
+            return None, JsonResponse(
+                {"status": "error", "message": "A valid origin device ID is required."},
+                status=400,
+            )
+        origin_device = self.restrict_object_or_404(Device, pk=origin_device_id)
+        same_device = origin_device.pk == selected_device.pk
+        same_chassis = (
+            origin_device.virtual_chassis_id is not None
+            and origin_device.virtual_chassis_id == selected_device.virtual_chassis_id
+        )
+        if not same_device and not same_chassis:
+            return None, JsonResponse(
+                {"status": "error", "message": "The interface page and selected device do not match."},
+                status=400,
+            )
+        return origin_device, None
+
+    def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
         # Bind the request so require_object_permissions_json() (which reads self.request)
         # works even when post() is invoked directly rather than through dispatch().
@@ -181,23 +206,9 @@ class SingleInterfaceVerifyView(
             if is_supported_interface_name_field(posted_name_field)
             else get_interface_name_field(request, selected_device)
         )
-        origin_device = selected_device
-        raw_origin_device_id = data.get("origin_device_id")
-        if raw_origin_device_id is not None:
-            origin_device_id = coerce_model_pk(raw_origin_device_id)
-            if origin_device_id is None:
-                return JsonResponse({"status": "error", "message": "A valid origin device ID is required."}, status=400)
-            origin_device = self.restrict_object_or_404(Device, pk=origin_device_id)
-            same_device = origin_device.pk == selected_device.pk
-            same_chassis = (
-                origin_device.virtual_chassis_id is not None
-                and origin_device.virtual_chassis_id == selected_device.virtual_chassis_id
-            )
-            if not same_device and not same_chassis:
-                return JsonResponse(
-                    {"status": "error", "message": "The interface page and selected device do not match."},
-                    status=400,
-                )
+        origin_device, origin_error = self._resolve_origin_device(data, selected_device)
+        if origin_error:
+            return origin_error
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
         if selected_device.virtual_chassis:

@@ -6402,6 +6402,48 @@ class TestModulesActionResponse:
             assert form["hx-swap"] == "innerHTML"
             assert form["hx-sync"] == "#module-sync-content:drop"
 
+    def test_the_serial_only_form_submits_the_rendered_inventory_identity(self, client, settings):
+        """The rendered serial-only form must submit enough identity to update its cached row."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        self._configure_server(settings)
+        device, module = self._seed_serial_mismatch("serial-submit", conflict=False, librenms_id=9212)
+        client.force_login(make_superuser("modules-preview-serial-submit-user"))
+        preview_url = reverse("plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": device.pk})
+
+        preview = client.get(
+            preview_url,
+            {
+                "module_id": str(module.pk),
+                "ent_index": "8201",
+                "server_key": self.SERVER_KEY,
+                "selected_device_id": str(device.pk),
+            },
+        )
+        body = preview.content.decode()
+        update_url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+        form_body = next(
+            form for form in re.findall(r"<form\b.*?</form>", body, flags=re.DOTALL) if f'action="{update_url}"' in form
+        )
+        payload = {
+            field["name"]: field.get("value", "")
+            for field in open_tags(form_body, "input")
+            if field.get("name") != "csrfmiddlewaretoken"
+        }
+
+        response = client.post(
+            update_url,
+            payload,
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        module.refresh_from_db()
+        assert module.serial == "ACTION-1"
+
 
 class TestAddBayTemplateViewWiring:
     """AddBayTemplateView must have the right mixins and target kinds."""
