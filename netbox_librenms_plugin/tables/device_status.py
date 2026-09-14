@@ -623,7 +623,13 @@ class DeviceImportTable(tables.Table):
         form.fields[field_name] = field
         if selected_host is not None:
             form.initial[field_name] = selected_host.pk
-        return mark_safe(str(form[field_name]))
+        bound_field = form[field_name]
+        if selected_host is not None:
+            field.widget.choices = [
+                ("", field.empty_label),
+                (field.prepare_value(selected_host), field.label_from_instance(selected_host)),
+            ]
+        return mark_safe(str(bound_field))
 
     def render_netbox_role(self, value, record):
         """

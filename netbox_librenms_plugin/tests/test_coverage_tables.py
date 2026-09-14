@@ -143,6 +143,26 @@ class TestDeviceImportTable:
         repeated_device_queries = [query["sql"] for query in queries if 'FROM "dcim_device"' in query["sql"]]
         assert len(repeated_device_queries) == 1
 
+    def test_selected_host_render_reuses_the_scoped_device(self, django_assert_num_queries):
+        """Rendering a selected host must not fetch the already loaded Device again."""
+        from dcim.models import Device
+
+        user = make_superuser("selected-host-render-user")
+        host = make_device("selected-host-render-device")
+        selected_host = Device.objects.restrict(user, "view").get(pk=host.pk)
+        table = self._table(user=user)
+        record = _import_record(
+            import_as_vm=True,
+            vm_placement={"method": "host", "found": True, "host_device": selected_host},
+        )
+
+        with django_assert_num_queries(0):
+            html = str(table.render_import_setup(None, record))
+
+        assert 'name="host_device_4101"' in html
+        assert f'value="{host.pk}"' in html
+        assert host.name in html
+
     def test_bulk_import_builds_the_refreshed_table_outside_the_device_loop(self):
         """HTMX refreshes must pass the complete imported row batch to one table."""
         import ast
