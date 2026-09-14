@@ -80,7 +80,7 @@ Changing the import server clears the current filters and results. The **Clear**
 
 ### Replacing an identity on the active server
 
-An import link or update action never replaces a different host ID that the object already stores for the active server. It is blocked, and a separate confirmation offers the replacement. Confirming changes only that server's host ID and keeps its out-of-band link, every other server mapping, and the preferred server. See [Validation](../librenms_import/validation.md#replacing-a-librenms-identity).
+An import link or update action never replaces a different host ID that the object already stores for the active server. It is blocked, and a separate confirmation offers the replacement. Confirming changes only that server's host ID and keeps its out-of-band link, every other server mapping, and the preferred server. See [Validation](../device_import/validation_and_configuration.md#replacing-a-librenms-identity).
 
 ### Object sync server selection
 
