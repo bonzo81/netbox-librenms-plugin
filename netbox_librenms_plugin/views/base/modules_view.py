@@ -245,7 +245,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return self.restrict_object_or_404(self.model, pk=pk)
 
     def get_table(self, data, obj):
-        """Return the table class. Subclasses should override."""
+        """Return the table class. Subclasses must override this method."""
         raise NotImplementedError("Subclasses must implement get_table()")
 
     def _get_sync_device(self, obj, server_key=None):
@@ -761,7 +761,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         module_types = self._get_module_types()
         self._generic_module_types = self._get_generic_module_types()
         self._module_type_ambiguities = self._get_module_type_ambiguities()
-        self._carrier_install_rules = self._get_carrier_install_rules(manufacturer)
+        self._carrier_install_rules_by_manufacturer = {}
 
         transparent_indices = self._find_transparent_indices(inventory_data, ignore_cache)
         top_items = self._collect_top_items(
@@ -1118,6 +1118,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 manufacturer=target_manufacturer,
                 selected_device=target_device,
                 resolution_source=resolution_source,
+                member_contexts=member_contexts,
+                ignore_contexts=ignore_contexts,
             )
 
         return table_data
@@ -1153,6 +1155,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 manufacturer=manufacturer,
                 selected_device=member,
                 resolution_source="manual",
+                member_contexts=member_contexts,
             )
 
         return table_data
@@ -1295,6 +1298,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         row["can_update_interface_binding"] = True
 
+    def _activate_row_context(self, target_context, selected_device):
+        """Select the device-specific state used while one inventory row is built."""
+        self._current_device_bays = target_context.get("device_bays") or {}
+        selected_type = getattr(selected_device, "device_type", None)
+        manufacturer = getattr(selected_type, "manufacturer", None)
+        self._current_manufacturer = manufacturer
+        self._current_manufacturer_id = getattr(manufacturer, "id", None)
+        self._current_manufacturer_name = getattr(manufacturer, "name", None)
+        self._carrier_install_rules = self._carrier_install_rules_for(manufacturer)
+
     def _append_rows_for_item_context(  # noqa: C901
         self,
         table_data,
@@ -1308,21 +1321,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         manufacturer,
         selected_device,
         resolution_source,
+        member_contexts=None,
+        ignore_contexts=None,
     ):
         """Append one top-level item and descendants using one target device context."""
-        # Stash full device-level bay set for the holder-install hint in
-        # _build_no_bay_warning. Set per-item-context so virtual-chassis members
-        # see the right device's bays.
-        self._current_device_bays = target_context.get("device_bays") or {}
-        # Manufacturer for ModuleBayMapping vendor-scoping: prefer mappings
-        # whose manufacturer matches this device's manufacturer; fall back to
-        # vendor-agnostic (NULL) mappings; skip mappings scoped to a different
-        # manufacturer. Set per-item-context so VC members resolve correctly.
-        sel_dt = getattr(selected_device, "device_type", None)
-        sel_mfr = getattr(sel_dt, "manufacturer", None)
-        self._current_manufacturer = sel_mfr
-        self._current_manufacturer_id = getattr(sel_mfr, "id", None)
-        self._current_manufacturer_name = getattr(sel_mfr, "name", None)
+        member_contexts = member_contexts or {selected_device.id: target_context}
+        ignore_contexts = ignore_contexts or {}
+        self._activate_row_context(target_context, selected_device)
         # Top-level items match against the full bay set: device-level bays plus
         # bays exposed by already-installed carriers/modules. This lets a
         # cpmModule reported by SNMP at the chassis level (e.g. Nokia 'Slot A')
@@ -1411,33 +1416,57 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             index_map,
             ignore_rules,
             device_serial,
+            ignore_contexts=ignore_contexts,
         )
+        target_context_by_depth = {0: target_context}
         for depth, sub_item in sub_items:
+            sub_policy = ignore_contexts.get(id(sub_item))
+            if sub_policy is None:
+                sub_selected_device = selected_device
+                sub_resolution_source = resolution_source
+                sub_manufacturer = manufacturer
+            else:
+                sub_selected_device = sub_policy["selected_device"]
+                sub_resolution_source = sub_policy["resolution_source"]
+                sub_manufacturer = sub_policy["manufacturer"]
+            sub_target_context = member_contexts.get(sub_selected_device.id) or target_context
+            parent_target_context = target_context_by_depth.get(depth - 1, target_context)
+            target_context_by_depth[depth] = sub_target_context
+
             # Fallbacks return the top-level state so the first iteration
             # (typically depth=1) inherits the right scope semantics rather
             # than silently defaulting to False.
-            scope_bays = bays_by_depth.get(depth, child_bays)
-            scope_uninstalled = scope_uninstalled_by_depth.get(depth, scope_uninstalled_init)
-            scope_preserved = scope_preserved_by_depth.get(depth, scope_preserved_init)
-            scope_empty_installed_bays = scope_empty_installed_bays_by_depth.get(depth, scope_empty_installed_bays_init)
+            if sub_target_context is parent_target_context:
+                scope_bays = bays_by_depth.get(depth, child_bays)
+                scope_uninstalled = scope_uninstalled_by_depth.get(depth, scope_uninstalled_init)
+                scope_preserved = scope_preserved_by_depth.get(depth, scope_preserved_init)
+                scope_empty_installed_bays = scope_empty_installed_bays_by_depth.get(
+                    depth, scope_empty_installed_bays_init
+                )
+            else:
+                scope_bays = sub_target_context["all_bays"]
+                scope_uninstalled = False
+                scope_preserved = False
+                scope_empty_installed_bays = False
+            self._activate_row_context(sub_target_context, sub_selected_device)
             sub_row = self._build_row(
                 sub_item,
                 index_map,
                 scope_bays,
                 module_types,
                 depth=depth,
-                manufacturer=manufacturer,
-                sibling_counts=target_context["sibling_counts"],
+                manufacturer=sub_manufacturer,
+                sibling_counts=sub_target_context["sibling_counts"],
                 scope_uninstalled=scope_uninstalled,
                 scope_preserved=scope_preserved,
                 scope_empty_installed_bays=scope_empty_installed_bays,
-                normalized_serial=self._normalized_item_serial(sub_item, manufacturer),
+                normalized_serial=self._normalized_item_serial(sub_item, sub_manufacturer),
             )
-            sub_row["selected_device_id"] = selected_device.id
-            sub_row["selected_device_name"] = selected_device.name
-            sub_row["member_resolution_source"] = resolution_source
-            self._apply_carrier_install_rules(sub_row, sub_item, selected_device)
-            self._attach_interface_match(sub_row, target_context)
+            sub_row["selected_device_id"] = sub_selected_device.id
+            sub_row["selected_device_name"] = sub_selected_device.name
+            sub_row["member_resolution_source"] = sub_resolution_source
+            self._apply_carrier_install_rules(sub_row, sub_item, sub_selected_device)
+            self._attach_interface_match(sub_row, sub_target_context)
             table_data.append(sub_row)
 
             # Update bay scope for children of this sub-item.
@@ -1449,7 +1478,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     and matched_sub_bay.installed_module
                 ):
                     sub_module_id = matched_sub_bay.installed_module.pk
-                    sub_bays = target_context["module_scoped_bays"].get(sub_module_id, {})
+                    sub_bays = sub_target_context["module_scoped_bays"].get(sub_module_id, {})
                     bays_by_depth[depth + 1] = sub_bays
                     scope_uninstalled_by_depth[depth + 1] = False
                     scope_preserved_by_depth[depth + 1] = False
@@ -1474,12 +1503,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     scope_preserved_by_depth[depth + 1] = True
                 scope_empty_installed_bays_by_depth[depth + 1] = scope_empty_installed_bays
 
-            if sub_row.get("can_install"):
+            if sub_selected_device == selected_device and sub_row.get("can_install"):
                 table_data[parent_row_idx]["has_installable_children"] = True
             # When parent bay is uninstalled, sub-rows have empty bays so
             # can_install is False, but module_type_id is still resolved.
             # Use it to enable "Install Branch" without a second resolve pass.
-            elif parent_bay_matched_but_uninstalled and sub_row.get("module_type_id"):
+            elif (
+                sub_selected_device == selected_device
+                and parent_bay_matched_but_uninstalled
+                and sub_row.get("module_type_id")
+            ):
                 table_data[parent_row_idx]["has_installable_children"] = True
 
         # If the installed module's type has no bay templates but has LibreNMS
@@ -1488,7 +1521,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if parent_installed_module and not child_bays:
             first_no_bay_child_idx = None
             for i in range(parent_row_idx + 1, len(table_data)):
-                if table_data[i].get("no_bay_reason") == "empty_parent_bays":
+                if (
+                    table_data[i].get("selected_device_id") == selected_device.id
+                    and table_data[i].get("no_bay_reason") == "empty_parent_bays"
+                ):
                     first_no_bay_child_idx = i
                     break
             if first_no_bay_child_idx is not None:
@@ -1944,7 +1980,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     return module_bays[pattern]
         return None
 
-    def _get_sub_components(self, parent_idx, children_by_parent, index_map, ignore_rules, device_serial=""):
+    def _get_sub_components(
+        self,
+        parent_idx,
+        children_by_parent,
+        index_map,
+        ignore_rules,
+        device_serial="",
+        ignore_contexts=None,
+    ):
         """
         Find descendant items with a model name (real hardware, not empty containers).
 
@@ -1954,6 +1998,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             index_map (dict): Inventory items keyed by physical index.
             ignore_rules (list): The ignore rules to apply.
             device_serial (str): The NetBox device serial.
+            ignore_contexts (dict | None): Per-item policies for attributed VC members.
 
         Returns:
             list[tuple[int, dict]]: The descendant items paired with their depths.
@@ -1969,6 +2014,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             depth=1,
             results=results,
             visited={parent_idx},
+            ignore_contexts=ignore_contexts,
         )
         return results
 
@@ -1982,6 +2028,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         results,
         visited=None,
         device_serial="",
+        ignore_contexts=None,
     ):
         """Recursively collect descendant items that have a model name."""
         if visited is None:
@@ -1996,7 +2043,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Apply ignore rules: skip drops the item and its subtree; transparent
             # hides the item but promotes its children to the current depth level.
             parent_item = index_map.get(parent_idx)
-            action = _check_ignore_rules(child, parent_item, ignore_rules, index_map, device_serial)
+            child_rules, child_device_serial = self._ignore_policy_for_item(
+                child,
+                ignore_contexts,
+                ignore_rules,
+                device_serial,
+            )
+            action = _check_ignore_rules(child, parent_item, child_rules, index_map, child_device_serial)
             if action == "skip":
                 continue
             if action == "transparent":
@@ -2010,7 +2063,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth,
                     results=results,
                     visited=visited,
-                    device_serial=device_serial,
+                    device_serial=child_device_serial,
+                    ignore_contexts=ignore_contexts,
                 )
                 continue
             model = _normalize_librenms_text(child.get("entPhysicalModelName")).lower()
@@ -2025,7 +2079,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth + 1,
                     results=results,
                     visited=visited,
-                    device_serial=device_serial,
+                    device_serial=child_device_serial,
+                    ignore_contexts=ignore_contexts,
                 )
             else:
                 # Skip generic/empty items, but check their children
@@ -2037,7 +2092,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth,
                     results=results,
                     visited=visited,
-                    device_serial=device_serial,
+                    device_serial=child_device_serial,
+                    ignore_contexts=ignore_contexts,
                 )
 
     def _group_children_under_parents(self, table_data):
@@ -2134,6 +2190,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         else:
             qs = qs.filter(manufacturer__isnull=True)
         return list(qs)
+
+    def _carrier_install_rules_for(self, manufacturer):
+        """Return cached carrier rules for one row's selected manufacturer."""
+        rule_cache = self.__dict__.setdefault("_carrier_install_rules_by_manufacturer", {})
+        manufacturer_id = getattr(manufacturer, "pk", None)
+        if manufacturer_id not in rule_cache:
+            rule_cache[manufacturer_id] = self._get_carrier_install_rules(manufacturer)
+        return rule_cache[manufacturer_id]
 
     def _apply_carrier_install_rules(self, row, item, selected_device):
         """

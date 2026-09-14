@@ -95,7 +95,7 @@ class TestInventoryClassIncludeRule:
     """
 
     def _inventory(self):
-        """A chassis with the two Routing Engines under it, as LibreNMS reports them."""
+        """Return a chassis with the two Routing Engines that LibreNMS reports."""
         return [
             {
                 "entPhysicalIndex": 1,
@@ -6062,3 +6062,138 @@ def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, setting
     assert {row["name"] for row in rows} == {"OOB Member policy item", "Page policy item"}
     assert next(row for row in rows if row["name"] == "OOB Member policy item")["status"] == "OOB"
     assert next(row for row in rows if row["name"] == "Page policy item")["selected_device_id"] == member.pk
+
+
+def _make_mixed_manufacturer_chassis(tag):
+    """Return a two-member chassis whose members use different manufacturers."""
+    from dcim.models import Manufacturer, VirtualChassis
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    page_manufacturer = Manufacturer.objects.create(name=f"{tag} Page Vendor", slug=f"{tag}-page-vendor")
+    member_manufacturer = Manufacturer.objects.create(name=f"{tag} Member Vendor", slug=f"{tag}-member-vendor")
+    page = make_device_with_module_bays(
+        f"{tag}-page",
+        ["Page Bay"],
+        manufacturer=page_manufacturer,
+        serial=f"{tag.upper()}-PAGE",
+    )
+    member = make_device_with_module_bays(
+        f"{tag}-member",
+        ["Carrier Bay"],
+        manufacturer=member_manufacturer,
+        serial=f"{tag.upper()}-MEMBER",
+    )
+    virtual_chassis = VirtualChassis.objects.create(name=f"{tag}-chassis", master=page)
+    for position, device in ((1, page), (2, member)):
+        device.virtual_chassis = virtual_chassis
+        device.vc_position = position
+        device.save(update_fields=["virtual_chassis", "vc_position"])
+    return page, member, member_manufacturer
+
+
+@pytest.mark.django_db
+def test_vc_carrier_rules_follow_the_attributed_members_manufacturer():
+    """A member row must use carrier rules selected for that member's manufacturer."""
+    from dcim.models import ModuleType
+
+    from netbox_librenms_plugin.models import CarrierAutoInstallRule
+
+    page, member, member_manufacturer = _make_mixed_manufacturer_chassis("carrier-context")
+    carrier_type = ModuleType.objects.create(manufacturer=member_manufacturer, model="Member Carrier")
+    CarrierAutoInstallRule.objects.create(
+        manufacturer=member_manufacturer,
+        device_type_pattern=member.device_type.model,
+        librenms_child_class="powerSupply",
+        librenms_child_name_pattern="Member Orphan",
+        netbox_bay_name_pattern="Carrier Bay",
+        carrier_module_type=carrier_type,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 101,
+            "entPhysicalClass": "powerSupply",
+            "entPhysicalName": "Member Orphan",
+            "entPhysicalModelName": "UNMAPPED-CHILD",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+        }
+    ]
+
+    rows = _run_build_context_real(_make_view(), inventory, page)
+
+    assert rows[0]["selected_device_id"] == member.pk
+    assert rows[0]["carrier_install_options"][0]["module_type_id"] == carrier_type.pk
+
+
+@pytest.mark.django_db
+def test_rule_admission_does_not_change_the_cached_inventory_digest():
+    """Presentation markers must not change the digest used to bind a cached inventory row."""
+    from netbox_librenms_plugin.utils import module_inventory_row_digest
+
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("module-digest-admission")
+    inventory = [
+        {
+            "entPhysicalIndex": 102,
+            "entPhysicalClass": "other",
+            "entPhysicalName": "Rule admitted module",
+            "entPhysicalModelName": "RULE-MODEL",
+            "entPhysicalContainedIn": 0,
+        }
+    ]
+    cached_digest = module_inventory_row_digest(inventory[0])
+
+    rows = _run_build_context_real(_make_view(), inventory, device)
+
+    assert rows[0]["inventory_digest"] == cached_digest
+
+
+@pytest.mark.django_db
+def test_vc_descendants_use_their_own_member_context():
+    """A descendant attributed by serial must use that member's rule and device context."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    page, member, member_manufacturer = _make_mixed_manufacturer_chassis("descendant-context")
+    InventoryIgnoreRule.objects.filter(match_type=InventoryIgnoreRule.MATCH_SERIAL_DEVICE).delete()
+    InventoryIgnoreRule.objects.create(
+        name="Skip member descendant",
+        match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+        pattern="Hidden member child",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=member_manufacturer,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 110,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Page parent",
+            "entPhysicalModelName": "PAGE-PARENT",
+            "entPhysicalSerialNum": page.serial,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 111,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Hidden member child",
+            "entPhysicalModelName": "HIDDEN-CHILD",
+            "entPhysicalSerialNum": member.serial,
+            "entPhysicalContainedIn": 110,
+        },
+        {
+            "entPhysicalIndex": 112,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Visible member child",
+            "entPhysicalModelName": "VISIBLE-CHILD",
+            "entPhysicalSerialNum": member.serial,
+            "entPhysicalContainedIn": 110,
+        },
+    ]
+
+    rows = _run_build_context_real(_make_view(), inventory, page)
+
+    assert {row["name"] for row in rows} == {"Page parent", "Visible member child"}
+    visible_child = next(row for row in rows if row["name"] == "Visible member child")
+    assert visible_child["selected_device_id"] == member.pk
