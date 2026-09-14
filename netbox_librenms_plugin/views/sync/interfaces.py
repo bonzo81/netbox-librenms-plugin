@@ -414,6 +414,7 @@ class SyncInterfacesView(
 
         Returns:
             None
+
         """
         if not relationships:
             return
@@ -671,6 +672,7 @@ class SyncInterfacesView(
         Returns:
             tuple[callable, callable] | None: The persist and restore callables, or None when no
                 promotion is needed.
+
         """
         return _promote_lag_aggregate(agg_iface, with_restore=True)
 
@@ -724,6 +726,7 @@ class SyncInterfacesView(
         Returns:
             tuple[Interface | VMInterface | None, Interface | VMInterface | None]: The resolved interface pair,
                 or ``(None, None)`` when the row must be skipped.
+
         """
         related_port_id = str(related_raw)
         normalized_related_port_id = normalize_librenms_port_id(related_raw)
@@ -816,6 +819,7 @@ class SyncInterfacesView(
 
         Returns:
             bool: True when the relationship is saved, or False when validation or persistence fails.
+
         """
         try:
             # Own savepoint: an IntegrityError from the persist poisons the enclosing batch
@@ -1035,6 +1039,7 @@ class SyncInterfacesView(
         Returns:
             The selected VC member Device when valid, *obj* when no target was selected,
             or None when an explicit target is invalid or inaccessible.
+
         """
         if not isinstance(obj, Device):
             return obj
@@ -1254,6 +1259,7 @@ class SyncInterfacesView(
         Args:
             interface: NetBox Interface or VMInterface object
             librenms_port: Port data dict from LibreNMS with VLAN info
+
         """
         port_id = normalize_librenms_port_id(librenms_port.get("port_id"))
 
@@ -1547,6 +1553,7 @@ def _promote_lag_aggregate(agg, *, with_restore):
 
     Returns:
         callable | tuple | None: ``persist`` (or ``(persist, restore)``), or None when nothing to do.
+
     """
     if not _lag_aggregate_needs_promotion(agg):
         return None
@@ -1608,6 +1615,7 @@ def _validate_relationship(source_iface, relation_field):
     Raises:
         ValidationError: when NetBox rejects the relationship.
         AttributeError: any failure that is not the 4.4.x cross-chassis parent bug.
+
     """
     try:
         source_iface.clean()
@@ -1666,6 +1674,7 @@ def _apply_interface_relationship(
     Raises:
         ValidationError: when the source fails ``clean()`` (after restoring the related
             mutation); the caller decides how to surface it (bulk logs+skips, single-row 409).
+
     """
     # Capture the source's original FK before mutating: source_iface (and the aggregate) are
     # reused across rows via the shared interface index, so a failed attempt must leave BOTH
@@ -1777,7 +1786,7 @@ class _BaseRelationshipSyncView(
 
     def _prepare_related(self, related_iface):
         """
-        Hook: mutate the related interface in memory before the source is validated.
+        Prepare the related interface in memory before the source is validated.
 
         Returns a no-arg callable that persists that mutation (invoked only after the source
         interface validates) or None when there's nothing to do. SyncInterfaceLagView
@@ -1785,6 +1794,7 @@ class _BaseRelationshipSyncView(
 
         Args:
             related_iface (Interface | VMInterface): The related interface that a subclass can prepare.
+
         """
         return None
 
@@ -1793,7 +1803,7 @@ class _BaseRelationshipSyncView(
         return None
 
     def _related_needs_preparation(self, related_iface):
-        """Hook: whether _prepare_related still has work to do on an already-linked pair."""
+        """Report whether _prepare_related has work to do on an already-linked pair."""
         return False
 
     def _source_needs_preparation(self, source_iface):
@@ -2067,7 +2077,7 @@ class SyncInterfaceLagView(_BaseRelationshipSyncView):
         return _promote_lag_aggregate(related_iface, with_restore=False)
 
     def _related_needs_preparation(self, related_iface):
-        """The aggregate can be edited back to a non-LAG type after linking, so a retry repairs it."""
+        """Check whether the aggregate needs promotion back to a LAG type."""
         return _lag_aggregate_needs_promotion(related_iface)
 
 

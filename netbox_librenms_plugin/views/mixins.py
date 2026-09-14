@@ -1089,6 +1089,7 @@ class VlanAssignmentMixin:
 
         Returns:
             The requesting user, or None when no request is bound.
+
         """
         if request is None:
             request = getattr(self, "request", None)
@@ -1109,6 +1110,7 @@ class VlanAssignmentMixin:
 
         Returns:
             list[str]: The missing permission names, group before VLAN, or an empty list.
+
         """
         from django.db.models import Q
         from ipam.models import VLAN, VLANGroup
@@ -1152,6 +1154,7 @@ class VlanAssignmentMixin:
 
         Returns:
             bool: True when any group or VLAN in the unscoped scope is hidden from *user*.
+
         """
         from ipam.models import VLAN
 

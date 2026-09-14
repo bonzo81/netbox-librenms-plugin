@@ -74,6 +74,7 @@ class BaseInterfaceTableView(
 
         Raises:
             NotImplementedError: Always, because subclasses must implement this method.
+
         """
         raise NotImplementedError
 
@@ -88,6 +89,7 @@ class BaseInterfaceTableView(
 
         Raises:
             NotImplementedError: Always, because subclasses must implement this method.
+
         """
         raise NotImplementedError
 
@@ -110,6 +112,7 @@ class BaseInterfaceTableView(
 
         Returns:
             HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
+
         """
         SyncCacheConsistency(obj).mark_refresh_failure(
             SyncTab.INTERFACES,
@@ -136,6 +139,7 @@ class BaseInterfaceTableView(
             obj: Device or VirtualMachine object
             interface_name_field: Field to use for interface name ('ifName' or 'ifDescr')
             vlan_groups: List of VLANGroup objects for VLAN group dropdowns
+
         """
         raise NotImplementedError("Subclasses must implement get_table()")
 
@@ -159,6 +163,7 @@ class BaseInterfaceTableView(
         Returns:
             dict: Name and LibreNMS ID indexes plus the number of interfaces carrying each ID.
                 LibreNMS IDs that map to more than one interface are dropped from the direct index.
+
         """
         by_name = {}
         by_librenms_id = {}
@@ -534,6 +539,7 @@ class BaseInterfaceTableView(
 
         Returns:
             List of enriched port dicts with VLAN data
+
         """
         enriched = []
         for port in ports:
@@ -571,6 +577,7 @@ class BaseInterfaceTableView(
         Returns:
             dict: The template context (object, table, vlan_groups, server_key,
                 oob_incomplete and related render state).
+
         """
         ports_data = []
         table = None

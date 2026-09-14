@@ -27,6 +27,7 @@ def port_has_vlan(port):
 
     Returns:
         bool: Whether the port carries a real VLAN id or a non-empty VLAN list.
+
     """
     return port.get("ifVlan") not in (None, "", 0, "0") or bool(port.get("vlans"))
 
@@ -148,6 +149,7 @@ def is_redos_prone(pattern):
 
     Returns:
         True if the pattern must be skipped rather than compiled and applied.
+
     """
     if not isinstance(pattern, str) or len(pattern) > _MAX_LAG_PATTERN_LEN:
         return True
@@ -177,6 +179,7 @@ def _compile_recording_patterns(recording, key):
 
     Returns:
         list[re.Pattern]: The compiled patterns (ReDoS-prone, typo'd and non-string ones skipped).
+
     """
     compiled = []
     # A truthy non-dict map (e.g. a list) has no .values() and must degrade to "no patterns",
@@ -204,6 +207,7 @@ def compile_lag_patterns(recording):
 
     Returns:
         list[re.Pattern]: The compiled LAG name patterns.
+
     """
     return _compile_recording_patterns(recording, "lag_patterns")
 
@@ -220,6 +224,7 @@ def compile_sap_patterns(recording):
 
     Returns:
         list[re.Pattern]: The compiled SAP name patterns.
+
     """
     return _compile_recording_patterns(recording, "sap_patterns")
 
@@ -237,6 +242,7 @@ def port_names(port):
 
     Returns:
         list[str]: Non-empty string values from ``ifName`` and ``ifDescr``.
+
     """
     return [n for n in (port.get("ifName"), port.get("ifDescr")) if isinstance(n, str) and n]
 
@@ -261,6 +267,7 @@ def port_is_lag(port, compiled_lag_patterns):
 
     Returns:
         bool: Whether the port's type or a known name identifies it as a LAG aggregate.
+
     """
     if port.get("ifType") == "ieee8023adLag":
         return True

@@ -137,6 +137,7 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
         Returns:
             str: The prefilled GitHub issue URL.
+
         """
         params = {
             "template": "data-shape.yml",

@@ -1727,6 +1727,7 @@ class BaseCableTableView(
             csp: The row's resolved (and cabled) local ConsoleServerPort.
             path: An already-computed ``csp.trace()`` result to reuse (avoids re-tracing).
             visible_ids (dict | None): Visible object IDs grouped by model.
+
         """
         if path is None:
             path = csp.trace()
@@ -1778,6 +1779,7 @@ class BaseCableTableView(
             target_cp: The ConsolePort the remote should resolve to.
             manual (bool): Mark the row as manually picked (rendered as a hint in the table).
             remote_context (dict | None): Preloaded visibility and trace data for remote objects.
+
         """
         link["netbox_remote_device_id"] = target_cp.device_id
         # Show the picked device's real name (display-only key: the raw ``remote_device`` label

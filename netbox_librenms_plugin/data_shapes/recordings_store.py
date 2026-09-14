@@ -100,6 +100,7 @@ def recording_schema_errors(recording):
 
     Returns:
         list[str]: One message per violated schema expectation.
+
     """
     errors = []
     if not isinstance(recording, dict):

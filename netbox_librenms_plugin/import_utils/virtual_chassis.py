@@ -105,6 +105,7 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
         >>> # Before rendering import table
         >>> prefetch_vc_data_for_devices(api, [123, 124, 125])
         >>> # Now all validate_device_for_import() calls hit cache instantly
+
     """
     if not api or not device_ids:
         return
@@ -160,6 +161,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         2. Find parent index (entPhysicalClass='stack' or 'chassis')
         3. Get children chassis at that parent's index
         4. If multiple chassis found -> Stack detected
+
     """
     try:
         # Get the master device info to use for naming
@@ -337,6 +339,7 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
         pattern=" ({position})" -> "switch01 (2)"
         pattern="-SW{position}" -> "switch01-SW2"
         pattern=" [{serial}]" -> "switch01 [ABC123]"
+
     """
     if pattern is None:
         pattern = _load_vc_member_name_pattern()
@@ -370,6 +373,7 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
 
     Returns:
         Updated vc_data dict with corrected suggested_name for each member
+
     """
     if not vc_data or not vc_data.get("is_stack"):
         return vc_data
@@ -451,6 +455,7 @@ def create_virtual_chassis_with_members(  # noqa: C901
             {'serial': 'ABC123', 'position': 0, 'model': 'C9300-48U', 'name': 'Switch 1'},
             {'serial': 'ABC124', 'position': 1, 'model': 'C9300-48U', 'name': 'Switch 2'}
         ]
+
     """
     # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
     # not in-memory model fields.

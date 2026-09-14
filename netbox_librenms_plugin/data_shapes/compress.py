@@ -80,6 +80,7 @@ def _transceiver_referenced(recording):
 
     Returns:
         set[str]: Port ids referenced by captured transceivers, excluding 0 and ``"0"``.
+
     """
     tx_key = _route_key(recording, "/transceivers")
     referenced = set()
@@ -111,6 +112,7 @@ def _build_name_index(dict_ports):
 
     Returns:
         dict[str, dict]: Ports keyed by unambiguous names.
+
     """
     by_name: dict = {}
     ambiguous_names: set = set()
@@ -140,6 +142,7 @@ def _add_base_name_ports(dict_ports, by_name, keep_ids):
         dict_ports (list[dict]): Ports to scan for kept sub-unit names.
         by_name (dict[str, dict]): Ports keyed by unambiguous names.
         keep_ids (set[str]): Port ids to extend with resolved base ports.
+
     """
     changed = True
     while changed:
@@ -193,6 +196,7 @@ def compress_recording(recording):
     Returns:
         dict: A new recording. When ports were trimmed, ``meta["compressed_ports"]`` records
             ``{"from": <original count>, "to": <kept count>}``; the input is never mutated.
+
     """
     # Target the MAIN device's ports route. A recording may carry a second /ports route for a linked
     # OOB controller (devices/<oob_id>/ports); compress only the host's ports (the OOB controller's

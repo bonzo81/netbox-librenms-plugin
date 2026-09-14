@@ -137,6 +137,7 @@ class BaseVLANTableView(
 
         Returns:
             tuple: (success: bool, error_message: str or None)
+
         """
         # Fetch device VLANs
         success, vlans_data = self.librenms_api.get_device_vlans(self.librenms_id)
@@ -179,6 +180,7 @@ class BaseVLANTableView(
                 - ``vlan_table``: LibreNMSVLANTable instance.
                 - ``vlan_groups``: QuerySet of available VLAN groups.
                 - ``hidden_ipam_permissions``: IPAM view permissions the caller is missing.
+
         """
         vlan_table = None
         # The tab gate checks the object's own view permission only, and the table serialises VLAN
@@ -279,6 +281,7 @@ class BaseVLANTableView(
 
         Returns:
             dict: The render context for the VLAN error fragment.
+
         """
         resolved = getattr(self.librenms_api, "server_key", None) if server_key is _SERVER_KEY_UNSET else server_key
         # The fragment renders the same group list as the table, so scope it the same way. This
@@ -311,6 +314,7 @@ class BaseVLANTableView(
         - auto_selected_group_id: ID of auto-selected group or None
         - auto_selected_group_name: Name of auto-selected group or None
         - is_ambiguous: bool - True if VID exists in multiple groups with no clear priority
+
         """
         lookup_maps = lookup_maps or {}
         vid_to_groups = lookup_maps.get("vid_to_groups", {})

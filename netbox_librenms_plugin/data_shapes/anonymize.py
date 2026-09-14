@@ -327,6 +327,7 @@ def pseudonymize_os(os_name):
 
     Returns:
         The ``os-<hash>`` token, or the input unchanged when it is empty/non-string/already hashed.
+
     """
     if not isinstance(os_name, str) or not os_name:
         return os_name
@@ -375,6 +376,7 @@ def _anon_interface_name(value, rules):
 
     Returns:
         str: The preserved token, or a stable pseudonym.
+
     """
     match = _PORT_TOKEN_RE.match(value)
     if match:
@@ -418,6 +420,7 @@ def _anon_serial_label(value, rules):
 
     Returns:
         str: The preserved default label, or a stable hostname pseudonym.
+
     """
     # The recording's own serial_type_patterns come first: THEY define what the default port name
     # is (the seeded Cisco map is "Line {N}", which the built-in prefix list below does not know).
@@ -526,6 +529,7 @@ def _compile_serial_default_labels(recording):
     Returns:
         tuple[re.Pattern, ...]: Matchers accepting the rendered name, with LibreNMS's optional
             trailing " Status" suffix.
+
     """
     patterns = recording.get("serial_type_patterns")
     patterns = patterns if isinstance(patterns, dict) else {}
@@ -565,6 +569,7 @@ def anonymize_recording(recording, *, salt=""):
 
     Returns:
         dict: A new recording with anonymized ``responses`` and a neutral name/description.
+
     """
     out = dict(recording)
     # The recording's own LAG / serial-label patterns decide which names are logic-bearing, so they
@@ -617,6 +622,7 @@ def find_pii(recording):
     Returns:
         list[dict]: One ``{"path", "kind", "value"}`` entry per residual match. Credential-key
             findings report ``value`` as ``"<redacted>"`` so the secret itself isn't echoed.
+
     """
     findings = []
 

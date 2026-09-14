@@ -62,6 +62,7 @@ def _os_family(os_name):
 
     Returns:
         str | None: The vendor family, a pseudonymized OS token, or None for a missing OS name.
+
     """
     if not isinstance(os_name, str) or not os_name:
         return None
@@ -82,6 +83,7 @@ def _body(recording, predicate):
 
     Returns:
         object | None: The first matching successful response body, or None if no usable body exists.
+
     """
     for key, value in recording.get("responses", {}).items():
         if predicate(key):
@@ -126,6 +128,7 @@ def compute_shape_signature(recording):
         dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base},
             lag:{present,ieee8023ad,name_prefix}, sub_interfaces:{present,styles}, port_stack,
             vlans, transceivers, serial, oob}``.
+
     """
     device_id = recording.get("device_id")
     dev_body = _body(recording, lambda k: k == f"GET /api/v0/devices/{device_id}")
@@ -356,6 +359,7 @@ def classify_novelty(signature, manifest):
     Returns:
         dict: ``{"verdict": "likely-covered" | "similar" | "new", "closest": <name|None>,
             "why": <str>}``.
+
     """
     target_shape = _structural_axes(signature)
     target_os = pseudonymize_os(signature.get("os"))

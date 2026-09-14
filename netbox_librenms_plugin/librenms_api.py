@@ -721,6 +721,7 @@ class LibreNMSAPI:
 
         Returns:
             tuple: ``(status_code, body)`` where body is the parsed JSON (dict/list/scalar) or None.
+
         """
         url = f"{self.librenms_url}/api/v0/{path.lstrip('/')}"
         try:

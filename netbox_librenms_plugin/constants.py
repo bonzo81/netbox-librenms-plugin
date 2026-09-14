@@ -67,6 +67,7 @@ def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:
         normalize_oob_type("oob", "iDRAC9")   → "idrac"
         normalize_oob_type("ilo", "")         → "ilo"
         normalize_oob_type("ubuntu", "")      → None
+
     """
     generic = None
     for text in (os_str or "", hardware_str or ""):

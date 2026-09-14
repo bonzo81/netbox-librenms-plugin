@@ -30,6 +30,7 @@ def _select_parent_index(root_items):
     Returns:
         The chosen ``entPhysicalIndex`` (stack class wins over chassis), or None when neither
         a stack nor a chassis root entry is present.
+
     """
     stack_index = None
     chassis_index = None
@@ -64,6 +65,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             JSON body verbatim for a 2xx, or a tagged status envelope
             (:func:`~netbox_librenms_plugin.data_shapes.envelope.wrap_response`) otherwise so
             non-OK responses replay faithfully.
+
     """
     responses = {}
 
@@ -162,6 +164,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
 
         Raises:
             RuntimeError: The filtered or fallback request has no definitive valid response.
+
         """
         _, body = record(f"inventory/{device_id}", query_params, required=True, row_field="inventory")
         items = body["inventory"]

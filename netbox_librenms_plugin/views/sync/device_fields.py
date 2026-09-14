@@ -134,6 +134,7 @@ def _device_sync_redirect(request, pk, server_key):
 
     Returns:
         HttpResponseRedirect: The redirect to the device sync tab.
+
     """
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
     return redirect_with_server_key(request, url, server_key)
@@ -774,6 +775,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         Returns:
             HttpResponseRedirect: A redirect to the sync tab, with the validated
                 ``server_key`` query param when one matches a configured server.
+
         """
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         requested = (request.POST.get("server_key") or "").strip() or (fallback_server_key or "").strip()
