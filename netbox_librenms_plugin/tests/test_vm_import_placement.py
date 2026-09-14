@@ -664,8 +664,8 @@ def test_background_import_plan_rejects_contradictory_targets(payload):
         deserialize_import_plans([payload])
 
 
-def test_import_row_htmx_requests_share_the_complete_selector():
-    """Every row update and mapping form must use one complete import-state selector."""
+def test_import_row_hx_include_covers_the_complete_state():
+    """The shared selector must include every import-row control."""
     from netbox_librenms_plugin.import_plan import import_row_hx_include
 
     assert import_row_hx_include(7316).split(", ") == [
@@ -678,9 +678,69 @@ def test_import_row_htmx_requests_share_the_complete_selector():
         "#use-sysname-toggle",
         "#strip-domain-toggle",
     ]
-    template_root = Path(__file__).parents[1] / "templates" / "netbox_librenms_plugin" / "htmx"
-    assert 'hx-include="{{ import_row_hx_include }}"' in (template_root / "_dt_mapping_form.html").read_text()
-    assert 'hx-include="{{ htmx_include }}"' in (template_root / "_platform_mapping_form.html").read_text()
+
+
+@pytest.mark.django_db
+def test_import_mapping_forms_render_the_complete_row_state(client, monkeypatch, settings):
+    """Both mapping views must render the canonical selector instead of an empty include."""
+    from netbox_librenms_plugin.import_plan import import_row_hx_include
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    source_device_id = 7316
+    placement_source = make_device("import-row-state-source")
+    query = {
+        "server_key": "row-state",
+        f"object_type_{source_device_id}": "device",
+    }
+
+    with librenms_mock_server() as server:
+        configure_servers(
+            settings,
+            {
+                "row-state": {
+                    "librenms_url": server.url,
+                    "api_token": "test-token",
+                    "verify_ssl": False,
+                }
+            },
+        )
+        server.device_info_response(
+            device_id=source_device_id,
+            hostname="import-row-state.example.test",
+            hardware="UNMAPPED-ROW-STATE-HARDWARE",
+            os="unmapped-row-state-os",
+            serial="",
+            ip="198.18.7.46",
+            location=placement_source.site.name,
+        )
+        server.vc_inventory_callable(source_device_id, [], {})
+        client.force_login(make_superuser("import-row-state-user"))
+
+        details_response = client.get(
+            _plugin_url("device_validation_details", kwargs={"device_id": source_device_id}),
+            query,
+            HTTP_HX_REQUEST="true",
+        )
+        platform_response = client.get(
+            _plugin_url("create_platform_from_import", kwargs={"device_id": source_device_id}),
+            query,
+            HTTP_HX_REQUEST="true",
+        )
+
+    expected_include = import_row_hx_include(source_device_id)
+    assert details_response.status_code == 200
+    details_forms = {
+        form.get("id"): form for form in open_tags(details_response.content.decode(), "form") if form.get("id")
+    }
+    assert details_forms[f"dt-mapping-form-{source_device_id}"]["hx-include"] == expected_include
+    assert platform_response.status_code == 200
+    platform_forms = {
+        form.get("id"): form for form in open_tags(platform_response.content.decode(), "form") if form.get("id")
+    }
+    assert platform_forms[f"plat-mapping-form-{source_device_id}"]["hx-include"] == expected_include
 
 
 def test_import_dispatch_does_not_derive_model_from_placement_truthiness():
