@@ -145,7 +145,7 @@ class SingleInterfaceVerifyView(
     # Read-only verify endpoint: require object-view permission (mirrors SingleModuleVerifyView).
     required_object_permissions = {"POST": [("view", Device)]}
 
-    def post(self, request):
+    def post(self, request):  # noqa: C901
         """Verify interface data against cached LibreNMS ports for a device."""
         # Bind the request so require_object_permissions_json() (which reads self.request)
         # works even when post() is invoked directly rather than through dispatch().

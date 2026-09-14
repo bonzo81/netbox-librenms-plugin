@@ -320,6 +320,7 @@ class LibreNMSModuleTable(tables.Table):
 
         Returns:
             SafeString: The live status badge and hidden in-flight spinner badge.
+
         """
         # An update action (Update Serial / Update Interface) acts on an already-installed module
         # and a row never offers it alongside an install-flavoured action, so a row with an update
@@ -489,6 +490,7 @@ class LibreNMSModuleTable(tables.Table):
 
         Returns:
             SafeString: The HTMX button, empty safe string, linked fallback, or non-interactive fallback markup.
+
         """
         device = getattr(self, "device", None)
         can_add_template = getattr(self, "can_add_module_bay_template", False)

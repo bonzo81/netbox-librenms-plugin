@@ -81,6 +81,7 @@ def _modules_redirect_response(request, sync_url, server_key=None):
 
     Returns:
         HttpResponse: A Django redirect to the modules tab.
+
     """
     if server_key is None:
         server_key = request.POST.get("server_key") or request.GET.get("server_key") or ""
@@ -111,6 +112,7 @@ def _modules_action_response(request, page_device, server_key=None):
 
     Returns:
         HttpResponse: The module tab fragment for an HTMX post, or a Django redirect.
+
     """
     sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": page_device.pk})
     if request.headers.get("HX-Request") != "true":
@@ -165,6 +167,7 @@ def _extract_inventory_list(cached_payload):
 
     Returns:
         list[dict] | None: The inventory rows, or ``None`` when the payload is unusable.
+
     """
     if not isinstance(cached_payload, dict):
         return None
@@ -226,6 +229,7 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
 
     Returns:
         list[dict] | None: The cached inventory, or ``None`` when it is absent or stale.
+
     """
     cached_payload = cache.get(get_cache_key(sync_device, "inventory", server_key=server_key))
     inventory = _extract_inventory_list(cached_payload)
@@ -309,6 +313,7 @@ class _ModuleComponentAdoptionUnavailable(Exception):
 
     Args:
         component_model: The component model that could not be adopted, when known.
+
     """
 
     def __init__(self, component_model=None):
@@ -574,6 +579,7 @@ def _module_interface_update_message(bind_result, location):
 
     Returns:
         str: The composed success message.
+
     """
     interface_name = bind_result.get("interface")
     adopted_count = bind_result.get("adopted_count") or 0
@@ -631,6 +637,7 @@ def _normalize_module_interface_names_for_vc_member(
 
     Returns:
         dict[str, int]: The counts of renamed, adopted, removed, and skipped interfaces.
+
     """
     result = {
         "renamed": 0,
@@ -728,6 +735,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
 
     Returns:
         dict | None: The binding outcome, or ``None`` when the item has no port ID.
+
     """
     from dcim.models import Interface
 
@@ -1219,6 +1227,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         Returns:
             list[dict]: The collected items in parent-first install order.
+
         """
         items = []
         parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
@@ -1273,6 +1282,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             ignore_rules (list[dict] | None): The optional inventory ignore rules.
             device_serial (str): The device serial used to evaluate ignore rules.
             index_map (dict | None): The inventory items keyed by index.
+
         """
         if visited is None:
             visited = set()
@@ -1346,6 +1356,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         Returns:
             dict: The install status and its result details.
+
         """
         from dcim.models import Module
 
@@ -1489,6 +1500,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             device_bays: Pre-fetched queryset/list of ModuleBay objects for the device.
             exact_mappings: Pre-filtered list of exact ModuleBayMapping objects.
             regex_mappings: Pre-filtered list of regex ModuleBayMapping objects.
+
         """
         current = item
         # Build bay name → list of bays for duplicate-name disambiguation
@@ -1600,6 +1612,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         Returns:
             dict: A ``name -> bay`` mapping to match the inventory item against.
+
         """
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
@@ -2746,6 +2759,7 @@ class AddBayTemplateView(
 
         Returns:
             int: The number of module bays created on existing instances.
+
         """
         from dcim.models import Device, Module, ModuleBay
 
@@ -2868,6 +2882,7 @@ class AddBayTemplateView(
 
         Returns:
             bool: Whether an existing regular expression mapping covers the name and scope.
+
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
 
@@ -2906,6 +2921,7 @@ class AddBayTemplateView(
 
         Returns:
             bool: Whether an existing exact mapping covers the name, class, and scope.
+
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
 
