@@ -156,6 +156,7 @@ class TestSingleModuleVerifyRow:
         from dcim.models import ModuleType
 
         from netbox_librenms_plugin.models import CarrierAutoInstallRule
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_superuser
 
         device = make_device_with_module_bays("module-verify-carrier", ["Carrier Bay"])
         device.custom_field_data["librenms_id"] = {SERVER_KEY: LIBRENMS_ID}
