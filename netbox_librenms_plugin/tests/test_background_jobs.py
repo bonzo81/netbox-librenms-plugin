@@ -71,13 +71,13 @@ def _job(user, tag):
 
 def _import_user(tag, *, devices=True, vms=True):
     from dcim.models import Device
-    from virtualization.models import VirtualMachine
+    from virtualization.models import Cluster, VirtualMachine
 
     permissions = []
     if devices:
         permissions.extend([("add", Device), ("change", Device)])
     if vms:
-        permissions.append(("add", VirtualMachine))
+        permissions.extend([("add", VirtualMachine), ("view", Cluster)])
     return make_user_with_perms(f"background-import-{tag}", permissions)
 
 

@@ -279,6 +279,21 @@ class TestDeviceImportTable:
             in select_html
         )
 
+    def test_cluster_dropdown_only_caches_clusters_the_user_can_view(self):
+        """The import table must not disclose clusters outside the viewer's object scope."""
+        from virtualization.models import Cluster
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        visible = make_cluster("Visible import table cluster")
+        make_cluster("Hidden import table cluster")
+        user = make_user_with_perms("cluster-scoped-import-table-user", [])
+        user = grant(user, "view", Cluster, constraints={"pk": visible.pk})
+
+        table = self._table(user=user)
+
+        assert table._cached_clusters == [visible]
+
     def test_clusterless_vm_is_rendered_without_dereferencing_a_cluster(self):
         vm = make_vm("import-table-standalone-vm")
         vm.cluster = None

@@ -1022,7 +1022,7 @@ def _apply_import_intent_to_validation(
                     "VM placement requires a LibreNMS location that matches a NetBox site",
                 )
         elif method is VMPlacementMethod.CLUSTER:
-            cluster = fetch_model_by_id(Cluster, intent.cluster_id)
+            cluster = Cluster.objects.restrict(user, "view").filter(pk=intent.cluster_id).first()
             if cluster:
                 apply_cluster_to_validation(validation, cluster)
             else:
@@ -1170,7 +1170,9 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     else "host"
                 )
                 if isinstance(target.placement, ClusterPlacement):
-                    cluster = fetch_model_by_id(Cluster, target.placement.cluster_id)
+                    cluster = (
+                        Cluster.objects.restrict(request.user, "view").filter(pk=target.placement.cluster_id).first()
+                    )
                 elif isinstance(target.placement, HostPlacement):
                     from dcim.models import Device
 

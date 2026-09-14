@@ -129,7 +129,7 @@ class DeviceImportTable(tables.Table):
         from dcim.models import DeviceRole
         from virtualization.models import Cluster
 
-        self._cached_clusters = list(Cluster.objects.all().order_by("name"))
+        self._cached_clusters = list(Cluster.objects.restrict(user, "view").order_by("name"))
         self._cached_roles = list(DeviceRole.objects.all().order_by("name"))
 
         # Apply sorting if order_by is specified

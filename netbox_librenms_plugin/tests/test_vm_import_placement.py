@@ -230,13 +230,16 @@ def test_search_row_offers_netbox_host_selector(client, monkeypatch, settings):
 @pytest.mark.django_db
 def test_sync_import_post_creates_cluster_placed_vm(client, monkeypatch, settings):
     """An explicit cluster placement must work when the LibreNMS site does not match."""
-    from virtualization.models import VirtualMachine
+    from virtualization.models import Cluster, VirtualMachine
 
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     source_device_id = 7304
     cluster = make_cluster("vm-explicit-placement-cluster")
-    user = make_user_with_perms("vm-cluster-placement-user", [("add", VirtualMachine)])
+    user = make_user_with_perms(
+        "vm-cluster-placement-user",
+        [("add", VirtualMachine), ("view", Cluster)],
+    )
 
     with librenms_mock_server() as server:
         configure_servers(

@@ -88,7 +88,7 @@ def _make_api():
 
 
 def _constrained_device_writer(constraints, username):
-    """A real non-superuser with plugin write access and a ``constraints``-scoped change_device grant."""
+    """Return a real user with plugin write access and a constrained change-device grant."""
     from core.models import ObjectType
     from dcim.models import Device
     from django.apps import apps
@@ -114,7 +114,7 @@ def _constrained_device_writer(constraints, username):
 
 
 def _scoped_device_writer(in_scope_device, username):
-    """A real non-superuser whose change_device grant covers only *in_scope_device*."""
+    """Return a real user whose change-device grant covers only *in_scope_device*."""
     return _constrained_device_writer({"pk": in_scope_device.pk}, username)
 
 
@@ -804,6 +804,7 @@ class TestBulkImportConfirmViewIntegration:
     def test_vm_row_shows_selected_cluster_and_role(self, settings, librenms_server):
         """A VM confirmation row shows its selected cluster and role in their own fields."""
         from dcim.models import DeviceRole
+        from virtualization.models import Cluster
 
         placement_issue = "VM placement requires a matching site, selected cluster, or selected host device"
         server_key = "confirm-integration-vm-selections"
@@ -822,7 +823,7 @@ class TestBulkImportConfirmViewIntegration:
             ip="198.18.0.31",
         )
         view = self._make_view(settings, librenms_server, server_key)
-        user = make_view_user("confirm-integration-vm-selections-user", [])
+        user = make_view_user("confirm-integration-vm-selections-user", [("view", Cluster)])
         request = make_view_request(
             "post",
             {
@@ -856,6 +857,45 @@ class TestBulkImportConfirmViewIntegration:
         assert f'name="cluster_31" value="{cluster.pk}"'.encode() in response.content
         assert f'name="role_31" value="{role.pk}"'.encode() in response.content
         assert view_message_texts(request, "error") == []
+
+    def test_vm_confirmation_rejects_a_cluster_outside_the_user_view_scope(self, settings, librenms_server):
+        """A forged hidden cluster must not appear in the confirmation modal."""
+        from virtualization.models import Cluster
+
+        server_key = "confirm-integration-hidden-cluster"
+        visible = make_cluster("Visible confirmation cluster")
+        hidden = make_cluster("Hidden confirmation cluster")
+        librenms_server.device_info_response(
+            device_id=32,
+            hostname="confirm-integration-hidden-cluster",
+            hardware="Test VM hardware",
+            os="test-vm-os",
+            serial="CONFIRM-INTEGRATION-HIDDEN-CLUSTER-SERIAL",
+            ip="198.18.0.32",
+        )
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-hidden-cluster-user", [])
+        user = grant_view_permission(user, "view", Cluster, constraints={"pk": visible.pk})
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["32"],
+                "object_type_32": "virtualmachine",
+                "vm_placement_32": "cluster",
+                "cluster_32": str(hidden.pk),
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"unavailable cluster selection" in response.content
+        assert hidden.name.encode() not in response.content
 
     def test_device_row_shows_selected_role_and_rack(self, settings, librenms_server):
         """A device confirmation row shows its selected role and rack in their own fields."""
@@ -2184,6 +2224,41 @@ class TestApplyImportIntentToValidation:
         assert validation["issues"] == []
         assert validation["can_import"] is True
         assert validation["is_ready"] is True
+
+    def test_vm_rejects_a_cluster_outside_the_user_view_scope(self):
+        """A forged cluster selection must stay unavailable during row validation."""
+        from virtualization.models import Cluster
+
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent, VMPlacementMethod
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
+
+        visible = make_cluster("Visible row validation cluster")
+        hidden = make_cluster("Hidden row validation cluster")
+        user = make_view_user("cluster-scoped-row-validation-user", [])
+        user = grant_view_permission(user, "view", Cluster, constraints={"pk": visible.pk})
+        validation = {
+            "cluster": {"found": False, "cluster": None},
+            "vm_placement": {"method": "site", "found": False, "host_device": None},
+            "issues": ["VM placement requires a selected cluster"],
+        }
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.VIRTUAL_MACHINE,
+            vm_placement_method=VMPlacementMethod.CLUSTER,
+            cluster_id=hidden.pk,
+        )
+
+        _apply_import_intent_to_validation(validation, intent, is_vm=True, user=user)
+
+        assert validation["cluster"]["found"] is False
+        assert validation["cluster"]["cluster"] is None
+        assert hidden not in validation["cluster"].get("available_clusters", [])
+        assert validation["vm_placement"] == {
+            "method": "cluster",
+            "found": False,
+            "host_device": None,
+        }
+        assert validation["can_import"] is False
 
     def test_standalone_host_placement_clears_a_stale_cluster(self, monkeypatch):
         from netbox_librenms_plugin.import_validation_helpers import apply_host_to_validation
@@ -3673,9 +3748,9 @@ class TestBulkImportDevicesMorePaths:
 
     @staticmethod
     def _vm_import_user(username):
-        from virtualization.models import VirtualMachine
+        from virtualization.models import Cluster, VirtualMachine
 
-        return make_view_user(username, [("add", VirtualMachine)])
+        return make_view_user(username, [("add", VirtualMachine), ("view", Cluster)])
 
     def _make_base_request(
         self,
@@ -3890,9 +3965,9 @@ class TestBulkImportEdgePaths:
 
     @staticmethod
     def _vm_import_user(username):
-        from virtualization.models import VirtualMachine
+        from virtualization.models import Cluster, VirtualMachine
 
-        return make_view_user(username, [("add", VirtualMachine)])
+        return make_view_user(username, [("add", VirtualMachine), ("view", Cluster)])
 
     def test_cluster_with_role_applies_role_to_vm(self, settings, monkeypatch):
         """The VM importer persists both selected mappings."""
@@ -7263,7 +7338,7 @@ class TestConflictActionsObjectScope:
 
     @staticmethod
     def _vc_pair(name, *, sync_cf):
-        """A real 2-member VirtualChassis whose m1 holds ``sync_cf`` (so it is the sync device)."""
+        """Create a two-member chassis whose first member is the sync device."""
         from dcim.models import VirtualChassis
 
         vc = VirtualChassis.objects.create(name=name)
