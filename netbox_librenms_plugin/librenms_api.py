@@ -34,7 +34,7 @@ def _validate_api_url(url):
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("LibreNMS API URLs must use HTTP or HTTPS and include a host.")
-    if parsed.query or parsed.fragment:
+    if "?" in url or "#" in url:
         raise ValueError("LibreNMS API URLs must not include a query or fragment.")
 
 

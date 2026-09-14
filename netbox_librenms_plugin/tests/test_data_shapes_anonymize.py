@@ -373,9 +373,7 @@ def test_asset_id_and_alias_scrubbed():
 
 def test_find_pii_still_flags_a_real_ip_next_to_text():
     """A genuine IPv4 embedded in free-form text is still caught."""
-    rec = _ports(
-        {"port_id": 1, "ifName": "Gi0/1", "ifType": "ethernetCsmacd", "entPhysicalName": "uplink 10.7.8.9 core"}
-    )
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "ifType": "ethernetCsmacd", "custom_note": "host 10.7.8.9"})
     anon = anonymize_recording(rec)
     assert any(f["kind"] == "ipv4" and f["value"] == "10.7.8.9" for f in find_pii(anon))
 
@@ -418,6 +416,65 @@ def test_entphysical_name_and_descr_are_pseudonymized():
     assert item["entPhysicalName"].startswith("entity-")
     assert item["entPhysicalDescr"].startswith("entity-")
     assert item["entPhysicalName"] != item["entPhysicalDescr"]
+
+
+def test_entity_text_preserves_only_supported_terminal_locators():
+    """Entity text keeps hierarchy locators but not hostname-like slash labels."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/inventory/1/all"] = {
+        "status": "ok",
+        "inventory": [
+            {"entPhysicalIndex": 1, "entPhysicalName": "MDA 1/1"},
+            {"entPhysicalIndex": 2, "entPhysicalName": "XIOM 2/x1"},
+            {"entPhysicalIndex": 3, "entPhysicalName": "rack12/server3"},
+            {"entPhysicalIndex": 4, "entPhysicalName": "1/1/c1"},
+        ],
+    }
+
+    key = "GET /api/v0/inventory/1/all"
+    names = [item["entPhysicalName"] for item in anonymize_recording(rec)["responses"][key]["inventory"]]
+
+    assert names[0].startswith("entity-") and names[0].endswith(" 1/1")
+    assert names[1].startswith("entity-") and names[1].endswith(" 2/x1")
+    assert names[2].startswith("entity-") and "rack12/server3" not in names[2]
+    assert names[3] == "1/1/c1"
+
+
+def test_entity_locator_anonymization_preserves_transceiver_nesting_and_is_idempotent():
+    """Opaque entity labels must keep the hierarchy used by the real nesting consumer."""
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    inventory = [
+        {"entPhysicalIndex": 10, "entPhysicalName": "MDA 1/1", "entPhysicalContainedIn": 0},
+        {"entPhysicalIndex": 20, "entPhysicalName": "XIOM 2/x1", "entPhysicalContainedIn": 0},
+        {
+            "entPhysicalIndex": 30,
+            "entPhysicalName": "1/1/c1",
+            "entPhysicalContainedIn": 0,
+            "_from_transceiver_api": True,
+        },
+        {
+            "entPhysicalIndex": 40,
+            "entPhysicalName": "2/x1/1/c2",
+            "entPhysicalContainedIn": 0,
+            "_from_transceiver_api": True,
+        },
+    ]
+    rec = _ports()
+    rec["responses"]["GET /api/v0/inventory/1/all"] = {"status": "ok", "inventory": inventory}
+
+    first = anonymize_recording(rec)
+    second = anonymize_recording(first)
+    anonymized_inventory = first["responses"]["GET /api/v0/inventory/1/all"]["inventory"]
+    second_inventory = second["responses"]["GET /api/v0/inventory/1/all"]["inventory"]
+    assert [item["entPhysicalName"] for item in second_inventory] == [
+        item["entPhysicalName"] for item in anonymized_inventory
+    ]
+
+    BaseModuleTableView._nest_synthetic_transceivers(anonymized_inventory)
+
+    assert anonymized_inventory[2]["entPhysicalContainedIn"] == 10
+    assert anonymized_inventory[3]["entPhysicalContainedIn"] == 20
 
 
 def test_entity_names_are_pseudonymized_with_cross_field_correlation():

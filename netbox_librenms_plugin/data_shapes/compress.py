@@ -216,7 +216,6 @@ def compress_recording(recording):
     # base-level ports their ``.N`` names resolve to.
     referenced = _port_stack_referenced(recording) | _transceiver_referenced(recording)
     keep_ids = {str(p.get("port_id")) for p in dict_ports if str(p.get("port_id")) in referenced}
-    _add_base_name_ports(dict_ports, by_name, keep_ids)
 
     # One representative per distinct fingerprint preserves every shape the signature reads while
     # collapsing redundant cardinality. Iterate in original order so the first ieee8023adLag port
@@ -228,6 +227,9 @@ def compress_recording(recording):
         if fp not in seen_fingerprints:
             seen_fingerprints.add(fp)
             keep_ids.add(str(p.get("port_id")))
+    # Representatives can themselves be name-derived sub-interfaces. Select them before growing
+    # the parent closure, or their unreferenced base ports can be discarded.
+    _add_base_name_ports(dict_ports, by_name, keep_ids)
 
     kept = [p for p in ports if isinstance(p, dict) and str(p.get("port_id")) in keep_ids]
     if len(kept) == len(dict_ports):

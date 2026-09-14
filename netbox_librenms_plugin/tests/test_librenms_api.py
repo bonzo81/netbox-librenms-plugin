@@ -134,7 +134,9 @@ class TestLibreNMSAPIInit:
         "url",
         [
             "http://librenms.example.test?tenant=test",
+            "http://librenms.example.test?",
             "https://librenms.example.test#fragment",
+            "https://librenms.example.test#",
         ],
     )
     def test_init_rejects_query_and_fragment_in_base_url(self, mock_librenms_config, url):

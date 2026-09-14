@@ -45,6 +45,19 @@ test-useful while losing identifying detail:
 `find_pii()` is a regex safety-net that flags any IP/MAC/email the field rules missed. The capture
 modal surfaces its findings; **review them before submitting.**
 
+### ENTITY-MIB text boundary
+
+Schema version 1 treats `entPhysicalName` and `entPhysicalDescr` as private display text. It
+replaces the text with a deterministic `entity-...` token. It preserves only a bounded terminal
+slash locator, such as `1/1` or `2/x1`, when the module hierarchy reader needs that locator. This
+keeps synthetic transceivers nested without publishing the surrounding label. Public catalog
+values stay in the separate `entPhysicalModelName` field.
+
+Schema version 1 does not capture operator-specific inventory-ignore rules or module-bay mappings.
+It therefore does not promise to replay arbitrary name-based rules. A future schema that declares
+those outcomes must store typed, safe interpretation results and use one interpreter for live and
+recorded data. It must not publish or rewrite private labels and regular expressions.
+
 ## Promoting a submission to a recording (maintainers)
 
 1. Save the anonymized JSON to `netbox_librenms_plugin/data_shapes/recordings/<name>.json`.

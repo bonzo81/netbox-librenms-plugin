@@ -101,6 +101,38 @@ def test_compression_preserves_relationship_outcome(recording_server):
     assert full_sub == {"206": "205", "301": "300", "303": "302"}
 
 
+def test_compression_keeps_name_parent_of_a_fingerprint_representative(recording_server):
+    """A retained sub-interface must keep the parent that only its name identifies."""
+    rec = {
+        "schema_version": 1,
+        "name": "name-parent",
+        "device_id": 7,
+        "responses": {
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Gi0/1", "ethernetCsmacd"),
+                    _port(2, "Gi0/2", "ethernetCsmacd"),
+                    _port(3, "Gi0/2.10", "l2vlan"),
+                ],
+            },
+            "GET /api/v0/devices/7/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+
+    full_lag, full_sub = _resolve(rec, recording_server)
+    compressed = compress_recording(rec)
+    compressed_lag, compressed_sub = _resolve(compressed, recording_server)
+
+    assert full_lag == compressed_lag == {}
+    assert full_sub == compressed_sub == {"3": "2"}
+    assert {port["port_id"] for port in compressed["responses"]["GET /api/v0/devices/7/ports"]["ports"]} == {
+        1,
+        2,
+        3,
+    }
+
+
 def test_compression_preserves_signature():
     """The novelty signature is identical for the full and compressed recordings."""
     rec = _large_recording()

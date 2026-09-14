@@ -310,7 +310,10 @@ def _hash(value, salt, length=6):
 
 # A pseudonymized OS token, e.g. "os-1a2b3c". Used to recognize an already-anonymized value.
 _OS_TOKEN_RE = re.compile(r"^os-[0-9a-f]{6}$")
-_ENTITY_TOKEN_RE = re.compile(r"^entity-[0-9a-f]{6}$")
+_ENTITY_LOCATOR = r"\d+(?:/(?:\d+|[xc]\d+))+"
+_ENTITY_LOCATOR_RE = re.compile(rf"^{_ENTITY_LOCATOR}$")
+_ENTITY_LOCATOR_SUFFIX_RE = re.compile(rf"(?<![A-Za-z0-9])(?P<locator>{_ENTITY_LOCATOR})$")
+_ENTITY_TOKEN_RE = re.compile(rf"^entity-[0-9a-f]{{6}}(?: {_ENTITY_LOCATOR})?$")
 
 
 def pseudonymize_os(os_name):
@@ -433,6 +436,17 @@ def _anon_serial_label(value, rules):
     return f"device-{_hash(value, rules.salt)}"
 
 
+def _anon_entity_text(value, rules):
+    """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
+    if _ENTITY_TOKEN_RE.fullmatch(value) or _ENTITY_LOCATOR_RE.fullmatch(value):
+        return value
+    locator_match = _ENTITY_LOCATOR_SUFFIX_RE.search(value)
+    token = f"entity-{_hash(value, rules.salt)}"
+    if locator_match:
+        return f"{token} {locator_match.group('locator')}"
+    return token
+
+
 def _anon_oid(value, salt):
     """Map an SNMP OID to a deterministic OID under the example-enterprise arc (hides the vendor)."""
     prefix = "." if value.startswith(".") else ""
@@ -476,7 +490,7 @@ def _anon_value(key, value, rules):  # noqa: C901
     if key in MFG_KEYS:
         return f"MFG-{_hash(value, salt)}"
     if key in ENTITY_TEXT_KEYS:
-        return value if _ENTITY_TOKEN_RE.fullmatch(value) else f"entity-{_hash(value, salt)}"
+        return _anon_entity_text(value, rules)
     if key in VERSION_KEYS:
         return f"fw-{_hash(value, salt)}"
     if key == "os":
