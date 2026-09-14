@@ -130,6 +130,22 @@ class TestLibreNMSAPIInit:
 
         assert LibreNMSAPI(server_key="default").librenms_url == "http://127.0.0.1:8000"
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://librenms.example.test?tenant=test",
+            "https://librenms.example.test#fragment",
+        ],
+    )
+    def test_init_rejects_query_and_fragment_in_base_url(self, mock_librenms_config, url):
+        """A query or fragment must not absorb the API path appended to the base URL."""
+        mock_librenms_config["mock_config"].return_value = {"default": {"librenms_url": url, "api_token": "test-token"}}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(ValueError, match="must not include a query or fragment"):
+            LibreNMSAPI(server_key="default")
+
     def test_init_with_multi_server_config(self, mock_librenms_config):
         """Verify initialization with multi-server configuration."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI

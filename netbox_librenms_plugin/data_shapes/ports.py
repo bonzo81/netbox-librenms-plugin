@@ -10,6 +10,10 @@ them, and depends on nothing else in the package so every consumer can import it
 import re
 
 
+ANON_INTERFACE_NAME_PREFIX = "iface-"
+ANON_INTERFACE_NAME_RE = re.compile(rf"^{re.escape(ANON_INTERFACE_NAME_PREFIX)}[0-9a-f]{{6}}$")
+
+
 def port_has_vlan(port):
     """
     Return whether a port row carries real VLAN data (the signature's ``vlans`` axis predicate).

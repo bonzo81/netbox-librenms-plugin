@@ -58,10 +58,10 @@ def test_validate_uses_shipped_manifest_not_bundled_recordings(tmp_path, monkeyp
 
 
 def test_validate_rejects_residual_pii(tmp_path):
-    """A recording with residual PII (an IP in a preserved label) is rejected."""
+    """A recording with residual PII in an unknown field is rejected."""
     rec = load_recording("cisco-stackwise-3member")
-    rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["entPhysicalName"] = "core 10.7.8.9"
-    rec = anonymize_recording(rec)  # entPhysicalName is preserved, so the IP survives
+    rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["custom_note"] = "endpoint 10.7.8.9"
+    rec = anonymize_recording(rec)
     path = tmp_path / "rec.json"
     path.write_text(json.dumps(rec))
 
@@ -72,7 +72,7 @@ def test_validate_rejects_residual_pii(tmp_path):
 def test_validate_pii_error_omits_raw_value(tmp_path):
     """The PII-rejection error reports only the kind + JSON path, never the raw sensitive value — this command runs in CI, so echoing the value would leak exactly what the scan exists to catch."""
     rec = load_recording("cisco-stackwise-3member")
-    rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["entPhysicalName"] = "core 10.7.8.9"
+    rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["custom_note"] = "endpoint 10.7.8.9"
     rec = anonymize_recording(rec)
     path = tmp_path / "rec.json"
     path.write_text(json.dumps(rec))
@@ -82,7 +82,7 @@ def test_validate_pii_error_omits_raw_value(tmp_path):
 
     msg = str(exc.value)
     assert "10.7.8.9" not in msg  # the raw PII value must not appear in the error
-    assert "entPhysicalName" in msg  # the JSON path is still reported so the finding is locatable
+    assert "custom_note" in msg  # the JSON path is still reported so the finding is locatable
 
 
 def test_action_flags_are_mutually_exclusive():

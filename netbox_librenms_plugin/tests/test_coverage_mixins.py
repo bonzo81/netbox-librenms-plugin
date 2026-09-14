@@ -545,6 +545,26 @@ class TestGetVlanGroupsForDeviceInnerBranches:
         assert unrelated not in groups
         assert [group.name.lower() for group in groups] == sorted(group.name.lower() for group in groups)
 
+    @pytest.mark.django_db
+    def test_scope_comparison_reuses_the_supplied_scoped_groups(self, django_user_model):
+        """A caller-provided scoped group list must prevent a duplicate scoped lookup."""
+        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
+
+        class TrackingVlanAssignmentMixin(VlanAssignmentMixin):
+            def __init__(self):
+                self.scope_users = []
+
+            def get_vlan_groups_for_devices(self, devices, user=None):
+                self.scope_users.append(user)
+                return super().get_vlan_groups_for_devices(devices, user=user)
+
+        user = django_user_model.objects.create_user(username="scope-cache-user")
+        mixin = TrackingVlanAssignmentMixin()
+
+        mixin.vlan_scope_is_incomplete([], user, scoped_groups=[])
+
+        assert mixin.scope_users == [None]
+
 
 # =============================================================================
 # VlanAssignmentMixin._build_vlan_lookup_maps

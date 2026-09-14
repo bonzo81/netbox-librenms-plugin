@@ -13,6 +13,7 @@ import re
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
 from netbox_librenms_plugin.data_shapes.ports import (
+    ANON_INTERFACE_NAME_RE,
     compile_lag_patterns,
     name_matches_lag_pattern,
     port_has_vlan,
@@ -181,7 +182,10 @@ def compute_shape_signature(recording):
     # name_prefix is the LAG naming CONVENTION. Strip a trailing sub-unit (".N") BEFORE the aggregate
     # number so a first LAG port of "ae1.0" yields "ae" (like "ae2.0"), not "ae1." — the arbitrary
     # aggregate number is not a structural difference between two ae<N>.<unit> devices.
-    name_prefix = re.sub(r"\d+$", "", re.sub(r"\.\d+$", "", lag_port_names[0])) if lag_port_names else None
+    if lag_port_names and ANON_INTERFACE_NAME_RE.fullmatch(lag_port_names[0]):
+        name_prefix = "custom"
+    else:
+        name_prefix = re.sub(r"\d+$", "", re.sub(r"\.\d+$", "", lag_port_names[0])) if lag_port_names else None
     sub_styles = set()
     for p in ports:
         # Scan BOTH name fields (port_names) like every neighbouring detector: on ifDescr-mode

@@ -62,7 +62,7 @@ def load_recording(name: str) -> dict:
 
 def iter_recordings() -> list[dict]:
     """Load and return every bundled recording (excluding the manifest), sorted by path."""
-    return [json.loads(p.read_text()) for p in iter_recording_paths()]
+    return [load_recording(path.name) for path in iter_recording_paths()]
 
 
 # Back-compat alias used by the management command / novelty manifest builder.

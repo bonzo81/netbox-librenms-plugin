@@ -154,18 +154,17 @@ def test_find_pii_passes_clean_anonymized_recording():
     assert find_pii(anon) == []
 
 
-def test_find_pii_flags_residual_pii_in_unexpected_field():
-    """The safety net catches PII the field rules don't cover (e.g. an IP/email in a description)."""
+def test_entity_name_rule_removes_residual_pii():
+    """ENTITY-MIB display text must be scrubbed before the residual PII scan."""
     rec = _ports({"port_id": 1, "ifName": "Gi0/1", "ifType": "ethernetCsmacd", "entPhysicalName": "mgmt 10.4.5.6"})
     rec["responses"]["GET /api/v0/devices/1"] = {
         "status": "ok",
         "devices": [{"device_id": 1, "sysContact": "noc@example.com"}],
     }
-    anon = anonymize_recording(rec)  # sysContact is scrubbed, but entPhysicalName is preserved
+    anon = anonymize_recording(rec)
 
     kinds = {(f["kind"], f["value"]) for f in find_pii(anon)}
-    assert ("ipv4", "10.4.5.6") in kinds  # residual IP in a preserved free-form label is flagged
-    # sysContact email was scrubbed to "" by the field rule, so it must NOT appear.
+    assert ("ipv4", "10.4.5.6") not in kinds
     assert not any(f["kind"] == "email" for f in find_pii(anon))
 
 
@@ -185,13 +184,13 @@ def test_find_pii_flags_ip_and_fqdn_in_sysdescr():
     assert ("fqdn", "router.corp.example.net") in kinds
 
 
-def test_find_pii_flags_dotless_domain_email_in_preserved_field():
-    """A dotless-domain email (user@host) in a preserved free-text field must still be flagged as email."""
+def test_entity_name_rule_removes_dotless_domain_email():
+    """An ENTITY-MIB display name must not retain a dotless-domain email."""
     rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": "maintained by netops@corp"})
-    anon = anonymize_recording(rec)  # entPhysicalName is preserved verbatim, so find_pii is the only net
+    anon = anonymize_recording(rec)
 
     emails = {f["value"] for f in find_pii(anon) if f["kind"] == "email"}
-    assert "netops@corp" in emails
+    assert "netops@corp" not in emails
 
 
 def test_email_regex_is_not_redos_prone():
@@ -407,8 +406,8 @@ def test_entphysical_mfg_name_and_date_anonymized():
     assert find_pii(anonymize_recording(rec)) == []
 
 
-def test_entphysical_name_and_descr_preserved_for_matching():
-    """Logic-bearing entPhysicalName/entPhysicalDescr (module-type, VC-member and transceiver matching read them) survive verbatim; residual free-text PII there is the find_pii net's job, not a scrub."""
+def test_entphysical_name_and_descr_are_pseudonymized():
+    """ENTITY-MIB display text is identifying data, not a public catalog key."""
     rec = _ports()
     rec["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"] = {
         "status": "ok",
@@ -416,12 +415,36 @@ def test_entphysical_name_and_descr_preserved_for_matching():
     }
     key = "GET /api/v0/inventory/1?entPhysicalContainedIn=0"
     item = anonymize_recording(rec)["responses"][key]["inventory"][0]
-    assert item["entPhysicalName"] == "FPC 1"
-    assert item["entPhysicalDescr"] == "10GBASE-LR SFP+"
+    assert item["entPhysicalName"].startswith("entity-")
+    assert item["entPhysicalDescr"].startswith("entity-")
+    assert item["entPhysicalName"] != item["entPhysicalDescr"]
 
 
-def test_find_pii_flags_address_in_entphysical_descr():
-    """Preserved-verbatim entPhysicalDescr is not exempt from the IP/FQDN residual-PII scan: it's the only safety net for that logic-bearing free-text field, so an embedded address/hostname must be flagged."""
+def test_entity_names_are_pseudonymized_with_cross_field_correlation():
+    """ENTITY-MIB display text must not expose an internal label."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"] = {
+        "status": "ok",
+        "inventory": [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "internal-device-01",
+                "entPhysicalDescr": "internal-device-01",
+            }
+        ],
+    }
+
+    item = anonymize_recording(rec, salt="test-salt")["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"][
+        "inventory"
+    ][0]
+
+    assert item["entPhysicalName"] != "internal-device-01"
+    assert item["entPhysicalName"].startswith("entity-")
+    assert item["entPhysicalDescr"] == item["entPhysicalName"]
+
+
+def test_entphysical_descr_removes_an_embedded_address():
+    """ENTITY-MIB descriptions must remove addresses before a recording is shared."""
     rec = _ports()
     rec["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"] = {
         "status": "ok",
@@ -430,8 +453,9 @@ def test_find_pii_flags_address_in_entphysical_descr():
         ],
     }
     anon = anonymize_recording(rec)
-    # The descr is preserved verbatim, so the embedded address survives — find_pii must flag it.
-    assert any(f["kind"] == "ipv4" and f["value"] == "10.7.8.9" for f in find_pii(anon))
+    item = anon["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"]["inventory"][0]
+    assert item["entPhysicalDescr"].startswith("entity-")
+    assert not any(f["kind"] == "ipv4" and f["value"] == "10.7.8.9" for f in find_pii(anon))
 
 
 def test_snmp_credentials_scrubbed():

@@ -288,10 +288,9 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     #    would fingerprint pattern-LAG behavior production never applies.
     from netbox_librenms_plugin.models import PortStackLagPattern
 
-    pattern_qs = PortStackLagPattern.objects.all()
-    if device_os is not None:
-        os_filter = device_os.strip() if isinstance(device_os, str) else ""
-        pattern_qs = pattern_qs.filter(librenms_os__iexact=os_filter) if os_filter else pattern_qs.none()
+    pattern_qs = PortStackLagPattern._patterns_for_os_queryset(device_os)
+    if pattern_qs is None:
+        pattern_qs = PortStackLagPattern.objects.none()
     pattern_rows = list(pattern_qs)
     lag_patterns = {row.librenms_os: row.lag_name_pattern for row in pattern_rows if row.lag_name_pattern}
     # Same fidelity argument, over the other rule the same rows carry: a replay without the SAP

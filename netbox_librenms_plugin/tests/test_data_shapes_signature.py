@@ -540,6 +540,28 @@ def test_signature_lag_name_prefix_ignores_aggregate_number_for_sub_units():
     assert compute_shape_signature(_rec("ae7"))["lag"]["name_prefix"] == "ae"
 
 
+def test_signature_normalizes_salted_interface_pseudonyms():
+    """Equivalent custom LAG names must have one salt-independent signature."""
+    recording = {
+        "schema_version": 1,
+        "name": "custom-lag",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "customer-lag", "ifType": "ieee8023adLag"}],
+            }
+        },
+    }
+
+    first = compute_shape_signature(anonymize_recording(recording, salt="first"))
+    second = compute_shape_signature(anonymize_recording(recording, salt="second"))
+
+    assert first["lag"]["name_prefix"] == "custom"
+    assert second["lag"]["name_prefix"] == "custom"
+    assert first == second
+
+
 def test_is_redos_prone_flags_nested_quantifiers_but_not_real_lag_patterns():
     """The ReDoS guard flags nested unbounded quantifiers (the ^(a+)+$ class), not real LAG patterns."""
     from netbox_librenms_plugin.data_shapes import ports

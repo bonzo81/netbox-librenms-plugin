@@ -662,6 +662,34 @@ def test_capture_snapshots_os_scoped_lag_patterns():
 
 
 @pytest.mark.django_db
+def test_capture_uses_the_models_normalized_os_scope():
+    """Capture must include a stored OS rule whose surrounding whitespace is insignificant."""
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    pattern = PortStackLagPattern.objects.create(
+        librenms_os="captest-normalized",
+        lag_name_pattern=r"^Bundle\d+$",
+        sap_name_pattern=":",
+    )
+    PortStackLagPattern.objects.filter(pk=pattern.pk).update(librenms_os="  captest-normalized  ")
+    api = _StubApi(
+        {
+            "devices/87": (200, {"status": "ok", "devices": [{"device_id": 87, "os": "captest-normalized"}]}),
+            "inventory/87": (200, {"status": "ok", "inventory": []}),
+            "inventory/87/all": (200, {"status": "ok", "inventory": []}),
+            "devices/87/ports": (200, {"status": "ok", "ports": []}),
+            "devices/87/port_stack": (200, {"status": "ok", "mappings": []}),
+            "devices/87/transceivers": (200, {"status": "ok", "transceivers": []}),
+        }
+    )
+
+    recording = capture_device_recording(api, 87)
+
+    assert recording["lag_patterns"] == {"  captest-normalized  ": r"^Bundle\d+$"}
+    assert recording["sap_patterns"] == {"  captest-normalized  ": ":"}
+
+
+@pytest.mark.django_db
 def test_capture_omits_an_empty_lag_pattern():
     """A database-level blank must not become a regex that classifies every port as a LAG."""
     from netbox_librenms_plugin.models import PortStackLagPattern

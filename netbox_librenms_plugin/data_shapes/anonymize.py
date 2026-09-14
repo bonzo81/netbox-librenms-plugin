@@ -10,13 +10,13 @@ tests. Three strategies, by field:
   (entPhysicalModelName, transceiver model — keyed to NetBox ModuleType for module install).
   Anonymizing these would destroy the LAG/sub-interface/VC detection and module-matching the
   recordings exist to test.
-* **Pseudonymize deterministically** identifiers (serials, hostnames, the device chassis SKU,
-  firmware/software versions): the same input always maps to the same fake, so cross-references (a
-  device serial that equals a stack member serial) still match after anonymization. The OS string
-  is pseudonymized too, but *unsalted* (see :func:`pseudonymize_os`) so the same OS yields one
-  stable token across all recordings — the novelty matcher needs that to compare/relate platforms.
-  Vendor-naming SNMP OIDs (sysObjectID, sensor_oid, entPhysicalVendorType) are remapped under the
-  example-enterprise arc so they keep their shape without naming the vendor the OS hash hides.
+* **Pseudonymize deterministically** identifiers (serials, hostnames, ENTITY-MIB display text, the
+  device chassis SKU, firmware/software versions): the same input always maps to the same fake, so
+  cross-references still match after anonymization. The OS string is pseudonymized too, but
+  *unsalted* (see :func:`pseudonymize_os`) so the same OS yields one stable token across all
+  recordings. The novelty matcher needs that to compare platforms. Vendor-naming SNMP OIDs
+  (sysObjectID, sensor_oid, entPhysicalVendorType) are remapped under the example-enterprise arc so
+  they keep their shape without naming the vendor the OS hash hides.
 * **Scrub** PII to safe placeholders (IPs → RFC 5737/3849 documentation ranges, MACs → a
   synthetic ``02:00:00`` block, lat/lng → null, location → ``"Lab"``, free-text → "").
 
@@ -28,7 +28,11 @@ import hashlib
 import re
 from typing import NamedTuple
 
-from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, name_matches_lag_pattern
+from netbox_librenms_plugin.data_shapes.ports import (
+    ANON_INTERFACE_NAME_PREFIX,
+    compile_lag_patterns,
+    name_matches_lag_pattern,
+)
 
 # Logic-bearing fields the sync/detection/relationship code reads — never altered.
 # NOTE: ifName/ifDescr are NOT here — they carry real infra (custom names, "** host **"
@@ -58,14 +62,6 @@ PRESERVE_KEYS = frozenset(
         # it would foreclose recording-driven module-install outcome tests. (Device `hardware`,
         # the chassis SKU, is NOT a match key and stays pseudonymized via MODEL_KEYS.)
         "entPhysicalModelName",
-        # entPhysicalName/entPhysicalDescr are logic-bearing and preserved verbatim like the model
-        # SKU above: module-type matching reads entPhysicalName first (device_operations), VC member
-        # name/description come from both (virtual_chassis), and slot/MDA + transceiver matching
-        # fullmatch entPhysicalName / read entPhysicalDescr (modules_view). Scrubbing them would
-        # destroy the module-install / VC-detection outcomes the recordings exist to test; residual
-        # free-text PII in them is the find_pii safety net's responsibility, not a field scrub.
-        "entPhysicalName",
-        "entPhysicalDescr",
         # NOTE: `os` is NOT preserved — it's pseudonymized to a stable os-<hash> (see
         # pseudonymize_os) so a recording never advertises the exact platform.
         "device_id",
@@ -113,6 +109,10 @@ MODEL_KEYS = frozenset({"hardware"})
 # "vendor" is the transceiver vendor LibreNMS reports on /transceivers. Same shape and same
 # reasoning: it names the vendor the os-hash masks, and no sync logic reads it.
 MFG_KEYS = frozenset({"entPhysicalMfgName", "vendor"})
+# ENTITY-MIB names and descriptions are operator-visible display text. They can contain internal
+# hostnames or labels. The structural class, index, containment, position and public model SKU live
+# in separate preserved fields, so replace this free text while keeping equal values correlated.
+ENTITY_TEXT_KEYS = frozenset({"entPhysicalName", "entPhysicalDescr"})
 # The transceiver OUI is the IEEE-registered manufacturer prefix as an integer: 36965 is 0x009065,
 # Finisar. Where "vendor" is null it is the only vendor identifier on the row, so masking the name
 # alone would leave the vendor readable. Mapped to a deterministic 24-bit value, which keeps the
@@ -310,6 +310,7 @@ def _hash(value, salt, length=6):
 
 # A pseudonymized OS token, e.g. "os-1a2b3c". Used to recognize an already-anonymized value.
 _OS_TOKEN_RE = re.compile(r"^os-[0-9a-f]{6}$")
+_ENTITY_TOKEN_RE = re.compile(r"^entity-[0-9a-f]{6}$")
 
 
 def pseudonymize_os(os_name):
@@ -390,7 +391,7 @@ def _anon_interface_name(value, rules):
     # stops seeing the aggregate at all — the shape the recording exists to reproduce.
     if _LAG_NAME_SHAPE_RE.match(value) and name_matches_lag_pattern(value, rules.lag_patterns):
         return value
-    return f"iface-{_hash(value, rules.salt)}"
+    return f"{ANON_INTERFACE_NAME_PREFIX}{_hash(value, rules.salt)}"
 
 
 # A default Avocent serial-port label is a generic, device-agnostic port name: a known serial/console
@@ -474,6 +475,8 @@ def _anon_value(key, value, rules):  # noqa: C901
         return f"MODEL-{_hash(value, salt)}"
     if key in MFG_KEYS:
         return f"MFG-{_hash(value, salt)}"
+    if key in ENTITY_TEXT_KEYS:
+        return value if _ENTITY_TOKEN_RE.fullmatch(value) else f"entity-{_hash(value, salt)}"
     if key in VERSION_KEYS:
         return f"fw-{_hash(value, salt)}"
     if key == "os":

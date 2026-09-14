@@ -60,6 +60,17 @@ def test_load_recording_rejects_manifest_and_non_dict(monkeypatch, tmp_path):
         load_recording("listy")
 
 
+def test_iter_recordings_rejects_a_non_object_fixture(monkeypatch, tmp_path):
+    """Bulk loading must enforce the same object contract as single-record loading."""
+    from netbox_librenms_plugin.data_shapes import recordings_store
+
+    monkeypatch.setattr(recordings_store, "RECORDINGS_DIR", tmp_path)
+    (tmp_path / "listy.json").write_text("[1, 2, 3]")
+
+    with pytest.raises(ValueError, match="not a recording object"):
+        recordings_store.iter_recordings()
+
+
 def test_recording_schema_errors_rejects_bool_int_fields():
     """Bool is an int subclass; True/False for schema_version or device_id must be rejected — a bare `!= 1` / `isinstance(int)` check would otherwise let a malformed recording validate."""
     from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors

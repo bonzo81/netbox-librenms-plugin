@@ -199,15 +199,20 @@ class BaseVLANTableView(
                 # VLAN snapshot may still be cached until TTL — render empty scoped to the
                 # requested key instead of serving a removed server's VLANs as live data
                 # (mirrors the interfaces/modules/cables tabs' unresolved guards).
+                vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
                 return {
                     "object": obj,
                     "vlan_table": None,
-                    "vlan_groups": self.get_vlan_groups_for_device(obj, user=vlan_scope_user),
+                    "vlan_groups": vlan_groups,
                     "last_fetched": None,
                     "cache_expiry": None,
                     "server_key": server_key,
                     "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
-                    "vlan_scope_incomplete": self.vlan_scope_is_incomplete([obj], vlan_scope_user),
+                    "vlan_scope_incomplete": self.vlan_scope_is_incomplete(
+                        [obj],
+                        vlan_scope_user,
+                        scoped_groups=vlan_groups,
+                    ),
                 }
             # No buildable client → no valid server scope: degrade to None (empty table) instead of
             # the "default" placeholder resolve_get_render_server_key falls back to, mirroring the
@@ -260,7 +265,11 @@ class BaseVLANTableView(
             "cache_expiry": cache_expiry,
             "server_key": server_key,
             "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
-            "vlan_scope_incomplete": self.vlan_scope_is_incomplete([obj], vlan_scope_user),
+            "vlan_scope_incomplete": self.vlan_scope_is_incomplete(
+                [obj],
+                vlan_scope_user,
+                scoped_groups=vlan_groups,
+            ),
         }
 
     def _get_error_context(self, obj, error_message, server_key=_SERVER_KEY_UNSET):
@@ -287,14 +296,19 @@ class BaseVLANTableView(
         # The fragment renders the same group list as the table, so scope it the same way. This
         # path takes no request, so read the one bound on the view.
         vlan_scope_user = self.vlan_scope_user()
+        vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
         return {
             "object": obj,
             "error_message": error_message,
             "vlan_table": None,
-            "vlan_groups": self.get_vlan_groups_for_device(obj, user=vlan_scope_user),
+            "vlan_groups": vlan_groups,
             "server_key": resolved,
             "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
-            "vlan_scope_incomplete": self.vlan_scope_is_incomplete([obj], vlan_scope_user),
+            "vlan_scope_incomplete": self.vlan_scope_is_incomplete(
+                [obj],
+                vlan_scope_user,
+                scoped_groups=vlan_groups,
+            ),
         }
 
     def compare_vlans(self, librenms_vlans, lookup_maps=None, device=None):

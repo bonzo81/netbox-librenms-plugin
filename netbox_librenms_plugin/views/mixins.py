@@ -1139,7 +1139,7 @@ class VlanAssignmentMixin:
         """Get all VLAN groups relevant to one device."""
         return self.get_vlan_groups_for_devices([device], user=user)
 
-    def vlan_scope_is_incomplete(self, devices, user):
+    def vlan_scope_is_incomplete(self, devices, user, *, scoped_groups=None, unscoped_groups=None):
         """
         Return whether *user* sees fewer VLAN groups or VLANs than the unscoped scope holds.
 
@@ -1151,6 +1151,8 @@ class VlanAssignmentMixin:
         Args:
             devices: The devices whose VLAN scope the caller reads.
             user: The requesting user, or None when no request is bound.
+            scoped_groups: The groups already resolved for *user*, if available.
+            unscoped_groups: The groups already resolved without a user, if available.
 
         Returns:
             bool: True when any group or VLAN in the unscoped scope is hidden from *user*.
@@ -1160,8 +1162,10 @@ class VlanAssignmentMixin:
 
         if user is None:
             return False
-        unscoped_groups = self.get_vlan_groups_for_devices(devices)
-        scoped_groups = self.get_vlan_groups_for_devices(devices, user=user)
+        if unscoped_groups is None:
+            unscoped_groups = self.get_vlan_groups_for_devices(devices)
+        if scoped_groups is None:
+            scoped_groups = self.get_vlan_groups_for_devices(devices, user=user)
         if len(scoped_groups) != len(unscoped_groups):
             return True
         group_pks = [group.pk for group in unscoped_groups]

@@ -291,12 +291,12 @@ def test_capture_view_errors_on_stale_server_key(recording_server):
 
 @pytest.mark.django_db
 def test_capture_view_warns_on_residual_pii(recording_server):
-    """When anonymization leaves residual PII (an IP in a preserved label), the modal warns."""
+    """When anonymization leaves residual PII in an unknown field, the modal warns."""
     rec = load_recording("cisco-stackwise-3member")
     rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["sysName"] = "core"
-    # Plant an IP in a PRESERVED label so it survives anonymization and trips the safety-net.
+    # Plant an IP in an unknown field so it survives anonymization and trips the safety net.
     root_key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=0"
-    rec["responses"][root_key]["inventory"][0]["entPhysicalName"] = "stack mgmt 10.7.8.9"
+    rec["responses"][root_key]["inventory"][0]["custom_note"] = "endpoint 10.7.8.9"
     server, api = recording_server(rec)
     device = make_device("cap-dev-5", librenms_cf={"test": {"id": 1000}})
     view = _view_with_api(api)
