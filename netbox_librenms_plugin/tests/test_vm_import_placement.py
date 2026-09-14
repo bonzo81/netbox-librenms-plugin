@@ -763,12 +763,13 @@ def test_import_dispatch_does_not_derive_model_from_placement_truthiness():
 
         def visit_If(self, node):
             condition = ast.unparse(node.test).lower()
-            self.placement_conditions.append(any(token in condition for token in placement_tokens))
+            is_placement = any(token in condition for token in placement_tokens)
+            self.placement_conditions.append(is_placement)
             for statement in node.body:
                 self.visit(statement)
-            self.placement_conditions.pop()
             for statement in node.orelse:
                 self.visit(statement)
+            self.placement_conditions.pop()
 
         @classmethod
         def _assigned_names(cls, target):
@@ -788,6 +789,10 @@ def test_import_dispatch_does_not_derive_model_from_placement_truthiness():
             ):
                 self.violations.append((node.lineno, sorted(assigned_names & model_target_names)))
             self.generic_visit(node.value)
+
+    regression_visitor = ModelSelectionVisitor()
+    regression_visitor.visit(ast.parse("if plan.cluster_id:\n    pass\nelse:\n    is_vm = False\n"))
+    assert regression_visitor.violations == [(4, ["is_vm"])]
 
     violations = {}
     for path in workflow_paths:
