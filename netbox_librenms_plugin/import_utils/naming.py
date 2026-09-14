@@ -7,7 +7,9 @@ def _name_candidates(libre_device: dict) -> tuple[str | None, str | None]:
     """Return the sysName and hostname values that can name an object."""
     sysname = libre_device.get("sysName")
     hostname = libre_device.get("hostname")
-    return (sysname if isinstance(sysname, str) else None, hostname if isinstance(hostname, str) else None)
+    sysname = sysname.strip() if isinstance(sysname, str) else None
+    hostname = hostname.strip() if isinstance(hostname, str) else None
+    return sysname or None, hostname or None
 
 
 def _resolve_device_name(
