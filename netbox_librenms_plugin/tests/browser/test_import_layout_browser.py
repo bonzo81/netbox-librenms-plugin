@@ -1,14 +1,42 @@
 """Browser checks for the focused device-import table layout."""
 
+import importlib.util
 import json
 from pathlib import Path
-from runpy import run_path
+import sys
+from types import ModuleType
 
 import pytest
 
 
-ASSET_ROOT = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin"
-IMPORT_NAMING = Path(__file__).parents[2] / "import_utils" / "naming.py"
+PLUGIN_ROOT = Path(__file__).parents[2]
+ASSET_ROOT = PLUGIN_ROOT / "static" / "netbox_librenms_plugin"
+IMPORT_NAMING = PLUGIN_ROOT / "import_utils" / "naming.py"
+
+
+def _load_import_name_variants():
+    """Load the import naming helper without importing the NetBox plugin."""
+    package_name = "_browser_test_netbox_librenms_plugin"
+    package = ModuleType(package_name)
+    package.__path__ = [str(PLUGIN_ROOT)]
+    import_utils_package = ModuleType(f"{package_name}.import_utils")
+    import_utils_package.__path__ = [str(PLUGIN_ROOT / "import_utils")]
+    module_name = f"{package_name}.import_utils.naming"
+    spec = importlib.util.spec_from_file_location(module_name, IMPORT_NAMING)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load import naming helper from {IMPORT_NAMING}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[package_name] = package
+    sys.modules[import_utils_package.__name__] = import_utils_package
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        return module.import_name_variants
+    finally:
+        for loaded_name in tuple(sys.modules):
+            if loaded_name == package_name or loaded_name.startswith(f"{package_name}."):
+                del sys.modules[loaded_name]
 
 
 @pytest.mark.parametrize("viewport_width", [1280, 720])
@@ -87,7 +115,7 @@ def test_all_optional_columns_fit_the_import_results_card(page, viewport_width):
 )
 def test_import_name_preview_matches_backend_resolution(page, sysname, expected_name, expected_source):
     """The live preview must use the same resolved names as the importer."""
-    variants = run_path(IMPORT_NAMING)["import_name_variants"]({"device_id": 42, "sysName": sysname, "hostname": ""})
+    variants = _load_import_name_variants()({"device_id": 42, "sysName": sysname, "hostname": ""})
     page.set_content(
         f"""
         <input id="use-sysname-toggle-cb" type="checkbox" checked>
