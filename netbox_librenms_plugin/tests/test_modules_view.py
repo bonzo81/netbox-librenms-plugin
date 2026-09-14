@@ -162,6 +162,21 @@ class TestInventoryClassIncludeRule:
 
         assert [item["entPhysicalIndex"] for item in collected] == [38, 39]
 
+    def test_rule_admitted_row_uses_the_cached_inventory_digest(self, settings, librenms_server):
+        """Display annotations must not change the digest used to authorize a later action."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import module_inventory_row_digest
+
+        inventory = self._inventory()
+        expected_digest = module_inventory_row_digest(inventory[1])
+        view = _real_api_view(settings, librenms_server, librenms_id=304)
+
+        rows = _run_build_context_real(view, inventory, make_device("included-class-digest"))
+        row = next(row for row in rows if row["ent_physical_index"] == 38)
+
+        assert row["inventory_digest"] == expected_digest
+        assert "_class_included" not in inventory[1]
+
     def test_a_rule_for_another_class_admits_nothing(self):
         assert self._collect(self._inventory(), [self._include_rule(pattern="sensor")]) == []
 

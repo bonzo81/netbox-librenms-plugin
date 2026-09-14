@@ -26,7 +26,7 @@ def test_sync_import_post_creates_site_placed_vm_without_device_permissions(
     settings,
 ):
     """An explicit VM target must not depend on a selected cluster or Device permissions."""
-    from dcim.models import Device
+    from dcim.models import Device, Site
     from virtualization.models import VirtualMachine
 
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
@@ -35,7 +35,7 @@ def test_sync_import_post_creates_site_placed_vm_without_device_permissions(
     placement_source = make_device("vm-site-placement-source")
     user = make_user_with_perms(
         "vm-site-placement-user",
-        [("add", VirtualMachine)],
+        [("view", Site), ("add", VirtualMachine)],
     )
 
     with librenms_mock_server() as server:
@@ -490,13 +490,14 @@ def test_device_target_rejects_forged_vm_placement(client, settings):
 def test_background_job_deserializes_the_same_site_placement_plan(settings):
     """The queued path must consume the explicit plan without cluster-based classification."""
     from core.models import Job
+    from dcim.models import Site
     from virtualization.models import VirtualMachine
 
     from netbox_librenms_plugin.jobs import ImportDevicesJob
 
     source_device_id = 7308
     placement_source = make_device("vm-job-placement-source")
-    user = make_user_with_perms("vm-job-placement-user", [("add", VirtualMachine)])
+    user = make_user_with_perms("vm-job-placement-user", [("view", Site), ("add", VirtualMachine)])
     job = Job.objects.create(
         name="VM placement integration",
         user=user,

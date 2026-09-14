@@ -2,7 +2,7 @@
 
 import logging
 
-from dcim.models import Device, DeviceRole
+from dcim.models import Device, DeviceRole, Site
 from django.db import transaction
 from django.utils import timezone
 from virtualization.models import Cluster
@@ -32,6 +32,14 @@ def _apply_vm_placement(validation: dict, mappings: dict, user) -> str | None:
     if placement_method == VMPlacementMethod.SITE:
         if cluster_id or host_device_id:
             return "Matched-site placement cannot include a cluster or host"
+        site_match = validation.get("site", {})
+        matched_site = site_match.get("site")
+        if not site_match.get("found") or matched_site is None:
+            return "Matched site is unavailable"
+        site = Site.objects.restrict(user, "view").filter(pk=matched_site.pk).first()
+        if site is None:
+            return "Matched site is unavailable"
+        site_match["site"] = site
         return None
 
     if placement_method == VMPlacementMethod.CLUSTER:

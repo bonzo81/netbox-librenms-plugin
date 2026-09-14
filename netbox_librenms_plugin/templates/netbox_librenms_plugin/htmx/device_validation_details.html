@@ -449,7 +449,7 @@
                   {% elif validation.existing_device and validation.existing_device.site %}
                     Site: {{ validation.existing_device.site.name }}
                     <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
-                  {% elif validation.vm_placement.method == "host" and validation.vm_placement.host_device %}
+                  {% elif validation.vm_placement.method == "host" and validation.vm_placement.found and validation.vm_placement.host_device %}
                     Host: {{ validation.vm_placement.host_device.name }}
                     {% if validation.cluster.cluster %} ({{ validation.cluster.cluster.name }}){% endif %}
                     <span class="text-success"><i class="mdi mdi-check-circle"></i></span>

@@ -279,6 +279,99 @@ class TestDeviceImportTable:
             in select_html
         )
 
+    @pytest.mark.parametrize(
+        ("placement_method", "control_id"),
+        [("cluster", "cluster_4101"), ("host", "host_device_4101")],
+    )
+    def test_vm_import_setup_label_targets_the_primary_control(self, placement_method, control_id):
+        """The visible placement label must activate its cluster or host control."""
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+        cluster = make_cluster("Accessible import setup cluster")
+        host = make_device("accessible-import-setup-host")
+        validation = {
+            "import_as_vm": True,
+            "vm_placement": {
+                "method": placement_method,
+                "found": True,
+                "host_device": host if placement_method == "host" else None,
+            },
+            "cluster": {"found": placement_method == "cluster", "cluster": cluster},
+        }
+
+        html = str(self._table().render_import_setup(None, _import_record(**validation)))
+        primary_labels = [
+            label for label in open_tags(html, "label") if "import-source-label" in label.get("class", "")
+        ]
+        controls = open_tags(html, "select")
+
+        assert primary_labels == [{"class": "import-source-label text-secondary", "for": control_id}]
+        assert any(control.get("id") == control_id for control in controls)
+
+    def test_device_import_setup_label_targets_the_role_control(self):
+        """The required Device role label must activate its select control."""
+        from dcim.models import DeviceRole
+
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+        role = DeviceRole.objects.create(name="Accessible import role", slug="accessible-import-role")
+        html = str(
+            self._table().render_import_setup(
+                None,
+                _import_record(device_role={"found": True, "role": role}),
+            )
+        )
+        primary_label = next(
+            label for label in open_tags(html, "label") if "import-source-label" in label.get("class", "")
+        )
+
+        assert primary_label["for"] == "role_4101"
+        assert any(control.get("id") == "role_4101" for control in open_tags(html, "select"))
+
+    def test_import_option_labels_target_their_controls(self):
+        """Role and rack option labels must activate the corresponding select controls."""
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+        site = make_device("import-option-label-source").site
+        vm_html = str(
+            self._table().render_import_setup(
+                None,
+                _import_record(
+                    import_as_vm=True,
+                    vm_placement={"method": "cluster", "found": False, "host_device": None},
+                    cluster={"found": False, "cluster": None},
+                ),
+            )
+        )
+        device_html = str(
+            self._table().render_import_setup(
+                None,
+                _import_record(site={"found": True, "site": site}, rack={"rack": None, "available_racks": []}),
+            )
+        )
+
+        assert any(control.get("id") == "role_4101" for control in open_tags(vm_html, "select"))
+        assert any(control.get("id") == "rack_4101" for control in open_tags(device_html, "select"))
+
+    def test_matched_site_heading_is_not_a_label_for_an_unrelated_control(self):
+        """Static matched-site text must not identify the placement-method select as its control."""
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+        site = make_device("matched-site-heading-source").site
+        html = str(
+            self._table().render_import_setup(
+                None,
+                _import_record(
+                    import_as_vm=True,
+                    vm_placement={"method": "site", "found": True, "host_device": None},
+                    site={"found": True, "site": site},
+                ),
+            )
+        )
+
+        assert not any("import-source-label" in label.get("class", "") for label in open_tags(html, "label"))
+        assert any("import-source-label" in element.get("class", "") for element in open_tags(html, "div"))
+
     def test_cluster_dropdown_only_caches_clusters_the_user_can_view(self):
         """The import table must not disclose clusters outside the viewer's object scope."""
         from virtualization.models import Cluster

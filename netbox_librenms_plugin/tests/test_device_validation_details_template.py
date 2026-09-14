@@ -12,6 +12,59 @@ import pytest
 
 
 @pytest.mark.django_db
+def test_unresolved_host_placement_is_not_rendered_as_valid():
+    """A stale host object must not override the placement validator's failure state."""
+    from django.contrib.auth.models import AnonymousUser
+    from django.template.loader import render_to_string
+    from django.test import RequestFactory
+
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    host = make_device("invalid-placement-host")
+    request = RequestFactory().get("/")
+    request.user = AnonymousUser()
+    html = render_to_string(
+        "netbox_librenms_plugin/htmx/device_validation_details.html",
+        {
+            "validation": {
+                "can_import": False,
+                "issues": ["Selected host device is unavailable"],
+                "warnings": [],
+                "existing_device": None,
+                "import_as_vm": True,
+                "vm_placement": {"method": "host", "found": False, "host_device": host},
+                "cluster": {"found": False, "cluster": None},
+                "site": {"found": False, "site": None},
+                "device_type": {},
+                "device_role": {},
+                "platform": {},
+            },
+            "libre_device": {
+                "device_id": 5,
+                "sysName": "unresolved-host-vm",
+                "hostname": "unresolved-host-vm",
+                "serial": "",
+                "hardware": "Virtual machine",
+                "os": "linux",
+                "ip": "198.18.7.55",
+                "location": "Unmatched lab",
+                "status": True,
+            },
+            "server_key": "default",
+            "existing_device_model_name": None,
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        },
+        request=request,
+    )
+
+    assert "No valid placement" in html
+    assert f"Host: {host.name}" not in html
+
+
+@pytest.mark.django_db
 class TestDeviceValidationDetailsMergeBadge:
     def _render(self):
         from django.contrib.auth.models import AnonymousUser

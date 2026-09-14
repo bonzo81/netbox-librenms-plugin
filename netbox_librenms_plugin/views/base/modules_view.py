@@ -926,7 +926,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Mark only rows that reach the table at top level. A Cisco converter is class
             # "other" too, but it hangs under a container and keeps its own name.
             if admitted_by_rule:
-                item["_class_included"] = True
+                item = {**item, "_class_included": True}
             top_items.append(item)
         return top_items
 

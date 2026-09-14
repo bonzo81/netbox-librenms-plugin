@@ -365,6 +365,7 @@ class DeviceImportTable(tables.Table):
 
         intent = validation.get("_import_intent")
         is_vm = intent.is_vm if intent is not None else validation.get("import_as_vm", False)
+        device_id = record.get("device_id")
         if is_vm:
             placement = validation.get("vm_placement", {})
             legacy_cluster = validation.get("cluster", {}).get("cluster")
@@ -380,10 +381,13 @@ class DeviceImportTable(tables.Table):
             label_class = "text-secondary" if placement_found else "text-danger"
             primary_label = "Placement" if placement_found else "Placement required"
             if placement_method is VMPlacementMethod.CLUSTER:
+                primary_target = f"cluster_{device_id}"
                 primary_control = self.render_netbox_cluster(None, record)
             elif placement_method is VMPlacementMethod.HOST:
+                primary_target = f"host_device_{device_id}"
                 primary_control = self.render_netbox_host(None, record)
             else:
+                primary_target = None
                 site = validation.get("site", {}).get("site")
                 primary_control = format_html(
                     '<span class="badge {} import-placement-badge">{}</span>',
@@ -402,17 +406,18 @@ class DeviceImportTable(tables.Table):
                 '<span class="text-secondary">(optional)</span></label>{}'
                 '<hr class="my-2"><label class="form-label small" for="vm_placement_{}">Placement method</label>{}'
                 '<hr class="my-2"><label class="form-label small" for="object_type_{}">Object type</label>{}',
-                record.get("device_id"),
+                device_id,
                 role_control,
-                record.get("device_id"),
+                device_id,
                 placement_control,
-                record.get("device_id"),
+                device_id,
                 object_type_control,
             )
         else:
             role_found = bool(validation.get("device_role", {}).get("found"))
             label_class = "text-secondary" if role_found else "text-danger"
             primary_label = "Device role" if role_found else "Role required"
+            primary_target = f"role_{device_id}"
             primary_control = self.render_netbox_role(None, record)
             rack_control = self.render_netbox_rack(None, record)
             object_type_control = self.render_object_type(None, record)
@@ -422,9 +427,9 @@ class DeviceImportTable(tables.Table):
                 '<label class="form-label small" for="rack_{}">Rack</label>{}'
                 '<hr class="my-2"><div class="small fw-bold mb-2">Object type</div>'
                 '<label class="form-label small" for="object_type_{}">Object type</label>{}',
-                record.get("device_id"),
+                device_id,
                 rack_control,
-                record.get("device_id"),
+                device_id,
                 object_type_control,
             )
 
@@ -441,13 +446,18 @@ class DeviceImportTable(tables.Table):
             badge_html,
             menu_html,
         )
+        if primary_target is None:
+            primary_heading = format_html('<div class="import-source-label {}">{}</div>', label_class, primary_label)
+        else:
+            primary_heading = format_html(
+                '<label class="import-source-label {}" for="{}">{}</label>',
+                label_class,
+                primary_target,
+                primary_label,
+            )
         return format_html(
-            '<label class="import-source-label {}" for="{}_{}">{}</label>'
-            '<div class="d-flex gap-1 align-items-center">{}{}</div>',
-            label_class,
-            "vm_placement" if is_vm else "role",
-            record.get("device_id"),
-            primary_label,
+            '{}<div class="d-flex gap-1 align-items-center">{}{}</div>',
+            primary_heading,
             primary_control,
             options_html,
         )
@@ -569,7 +579,7 @@ class DeviceImportTable(tables.Table):
 
         select_html = (
             f'<select class="form-select form-select-sm cluster-select import-setup-select" '
-            f'name="cluster_{device_id}" '
+            f'id="cluster_{device_id}" name="cluster_{device_id}" '
             f'data-device-id="{device_id}" '
             f'hx-post="{self._row_update_url(device_id, validation)}" '
             f'hx-trigger="change" '
@@ -600,6 +610,7 @@ class DeviceImportTable(tables.Table):
         )
         field.widget.attrs.update(
             {
+                "id": field_name,
                 "class": "api-select form-select form-select-sm import-setup-select",
                 "hx-post": self._row_update_url(device_id, validation),
                 "hx-trigger": "change",
@@ -664,7 +675,7 @@ class DeviceImportTable(tables.Table):
 
         select_html = (
             f'<select class="form-select form-select-sm device-role-select import-setup-select" '
-            f'name="role_{device_id}" '
+            f'id="role_{device_id}" name="role_{device_id}" '
             f'data-device-id="{device_id}" '
             f'hx-post="{self._row_update_url(device_id, validation)}" '
             f'hx-trigger="change" '
@@ -734,7 +745,7 @@ class DeviceImportTable(tables.Table):
 
         select_html = (
             f'<select class="form-select form-select-sm rack-select import-option-select" '
-            f'name="rack_{device_id}" '
+            f'id="rack_{device_id}" name="rack_{device_id}" '
             f'data-device-id="{device_id}" '
             f'hx-post="{self._row_update_url(device_id, validation)}" '
             f'hx-trigger="change" '

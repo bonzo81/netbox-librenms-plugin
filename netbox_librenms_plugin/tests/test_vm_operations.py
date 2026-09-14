@@ -389,6 +389,45 @@ class TestBulkImportVms:
         assert str(hidden_cluster.pk) not in result["failed"][0]["error"]
         assert not VirtualMachine.objects.filter(name="vm-6212.example.test").exists()
 
+    @pytest.mark.parametrize("use_mapping", [False, True], ids=["exact", "mapping"])
+    def test_site_outside_the_view_grant_is_unavailable(self, librenms_api, use_mapping):
+        """An exact or mapped site match must not bypass the importer's object scope."""
+        from dcim.models import Site
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+        from netbox_librenms_plugin.models import LocationMapping
+
+        api, _server = librenms_api
+        visible_site = Site.objects.create(name="Visible VM import site", slug="visible-vm-import-site")
+        hidden_site = Site.objects.create(name="Hidden VM import site", slug="hidden-vm-import-site")
+        location = hidden_site.name
+        if use_mapping:
+            location = "Hidden VM site alias"
+            LocationMapping.objects.create(
+                field_type="site",
+                librenms_value=location,
+                netbox_object=hidden_site,
+            )
+        user = make_user_with_perms(
+            f"vm-import-writer-scoped-site-{use_mapping}",
+            [("add", VirtualMachine)],
+            plugin_write=False,
+        )
+        user = grant(user, "view", Site, constraints={"pk": visible_site.pk})
+
+        result = bulk_import_vms(
+            {6213: {"placement": "site"}},
+            api,
+            libre_devices_cache={6213: _payload(6213, location=location)},
+            user=user,
+        )
+
+        assert result["success"] == []
+        assert result["failed"] == [{"device_id": 6213, "error": "Matched site is unavailable"}]
+        assert hidden_site.name not in result["failed"][0]["error"]
+        assert not VirtualMachine.objects.filter(name="vm-6213.example.test").exists()
+
     def test_deleted_role_selection_fails_before_vm_creation(self, librenms_api):
         from dcim.models import DeviceRole
         from virtualization.models import VirtualMachine
