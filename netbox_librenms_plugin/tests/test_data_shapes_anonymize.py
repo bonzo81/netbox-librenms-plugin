@@ -308,6 +308,22 @@ def test_find_pii_ipv6_no_false_positive_on_time_or_doc_range():
     assert not any(f["kind"] == "ipv6" for f in find_pii(rec))
 
 
+def test_find_pii_ipv6_documentation_exemption_has_a_network_boundary():
+    """Only 2001:db8::/32 is documentation space, not adjacent db80 or db8f networks."""
+    rec = _ports(
+        {
+            "port_id": 1,
+            "ifName": "Gi0/1",
+            "unexpected_address": "safe 2001:0db8::1 unsafe 2001:db80::1 and 2001:db8f::1",
+        }
+    )
+
+    ipv6_values = {finding["value"].lower() for finding in find_pii(rec) if finding["kind"] == "ipv6"}
+
+    assert "2001:0db8::1" not in ipv6_values
+    assert ipv6_values == {"2001:db80::1", "2001:db8f::1"}
+
+
 def test_find_pii_ignores_oid_and_version_dotted_decimals():
     """SNMP object IDs and version strings are dotted-decimal but not IPs — the safety-net must not flag them."""
     rec = _ports()
@@ -904,6 +920,28 @@ def test_anonymization_preserves_port_relationships(recording_server, recording_
     assert raw_sub
     if expect_lag:
         assert raw_lag  # LAG coverage when the fixture includes a LAG aggregate
+
+
+def test_anonymization_preserves_a_custom_base_subinterface_relationship(recording_server):
+    """A private custom base and its numeric sub-unit must receive correlated pseudonyms."""
+    rec = _ports(
+        {"port_id": 1, "ifName": "tenantlink", "ifType": "ethernetCsmacd"},
+        {"port_id": 2, "ifName": "tenantlink.100", "ifType": "l2vlan"},
+    )
+    rec["responses"]["GET /api/v0/devices/1/port_stack"] = {"status": "ok", "mappings": []}
+
+    def resolve(recording):
+        _server, api = recording_server(recording)
+        _ports_ok, ports = api.get_ports(recording["device_id"])
+        _stack_ok, stack = api.get_port_stack(recording["device_id"])
+        return api.resolve_port_relationships(ports["ports"], stack, lag_patterns={})["sub_interfaces"]
+
+    anonymized = anonymize_recording(rec)
+    names = [port["ifName"] for port in anonymized["responses"]["GET /api/v0/devices/1/ports"]["ports"]]
+
+    assert resolve(rec) == resolve(anonymized) == {2: 1}
+    assert names[0].startswith("iface-") and names[1] == f"{names[0]}.100"
+    assert "tenantlink" not in str(anonymized)
 
 
 def test_transceiver_serial_pseudonymized_model_and_optics_preserved():

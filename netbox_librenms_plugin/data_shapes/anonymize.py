@@ -25,10 +25,12 @@ field rules missed, so a human (or the mgmt command) can catch leaks before publ
 """
 
 import hashlib
+import ipaddress
 import re
 from typing import NamedTuple
 
 from netbox_librenms_plugin.data_shapes.ports import (
+    ANON_INTERFACE_NAME_RE,
     ANON_INTERFACE_NAME_PREFIX,
     compile_lag_patterns,
     name_matches_lag_pattern,
@@ -183,7 +185,9 @@ _SECRET_KEY_HINTS = (
 )
 
 # Documentation/synthetic ranges this module emits — find_pii() allows them.
-_DOC_IP_PREFIXES = ("192.0.2.", "198.51.100.", "203.0.113.", "2001:db8")
+_DOC_IP_NETWORKS = tuple(
+    ipaddress.ip_network(network) for network in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
+)
 _SYNTH_MAC_PREFIX = "02:00:00"
 
 # Octet-validated (0-255) and bounded so dotted-decimal SNMP OIDs (1.3.6.1.4.1.9.1…) and
@@ -382,6 +386,8 @@ def _anon_interface_name(value, rules):
         str: The preserved token, or a stable pseudonym.
 
     """
+    if ANON_INTERFACE_NAME_RE.fullmatch(value):
+        return value
     match = _PORT_TOKEN_RE.match(value)
     if match:
         token = match.group(0)
@@ -394,6 +400,9 @@ def _anon_interface_name(value, rules):
     # stops seeing the aggregate at all — the shape the recording exists to reproduce.
     if _LAG_NAME_SHAPE_RE.match(value) and name_matches_lag_pattern(value, rules.lag_patterns):
         return value
+    base, separator, suffix = value.rpartition(".")
+    if separator and suffix.isdigit() and base:
+        return f"{_anon_interface_name(base, rules)}.{suffix}"
     return f"{ANON_INTERFACE_NAME_PREFIX}{_hash(value, rules.salt)}"
 
 
@@ -625,6 +634,15 @@ def anonymize_recording(recording, *, salt=""):
     return out
 
 
+def _is_documentation_address(value):
+    """Return whether an address belongs to an RFC documentation network."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return any(address in network for network in _DOC_IP_NETWORKS)
+
+
 def find_pii(recording):
     """
     Sweep a recording's responses for residual secrets the field rules missed.
@@ -675,7 +693,7 @@ def find_pii(recording):
                 for match in regex.findall(obj):
                     # IPv6 hex is case-insensitive, so lower-case before the documentation-range
                     # check (e.g. 2001:DB8::1 must still be exempted like 2001:db8::1).
-                    if kind in ("ipv4", "ipv6") and match.lower().startswith(_DOC_IP_PREFIXES):
+                    if kind in ("ipv4", "ipv6") and _is_documentation_address(match):
                         continue
                     # A 6-octet MAC also satisfies the loose IPv6 pattern; let the dedicated mac
                     # kind handle it so a synthetic MAC isn't double-reported as a bogus IPv6.
