@@ -813,8 +813,8 @@ class TestBulkImportDevicesShared:
         assert len(result["failed"]) == 1
         job.logger.error.assert_called()
 
-    def test_manual_mappings_applied_to_device(self):
-        """manual_mappings_per_device overrides are applied for the matching device."""
+    def test_manual_site_mapping_is_passed_to_device_import(self):
+        """Manual site mappings are passed to the matching device import."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         captured_mappings = {}
 
@@ -840,11 +840,11 @@ class TestBulkImportDevicesShared:
                 device_ids=[1],
                 user=MagicMock(),
                 libre_devices_cache=libre_cache,
-                manual_mappings_per_device={1: {"device_role_id": 42}},
+                manual_mappings_per_device={1: {"site_id": 42}},
             )
 
         assert result["success"]
-        assert captured_mappings.get("device_role_id") == 42
+        assert captured_mappings.get("site_id") == 42
 
     def test_device_skipped_when_already_exists(self):
         """result.success=False, result.device is truthy → device skipped."""

@@ -8,6 +8,7 @@ from django.http import QueryDict
 
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import grant as grant_view_permission
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 
@@ -278,13 +279,14 @@ class TestImportDevicesJob:
     def test_queued_legacy_payload_imports_real_objects_after_upgrade(self, librenms_server):
         """A queued pre-upgrade payload must retain its Device and VM import intent."""
         from core.choices import JobStatusChoices
-        from dcim.models import Device
+        from dcim.models import Device, DeviceRole
         from virtualization.models import VirtualMachine
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-legacy-import-infrastructure")
         cluster = make_cluster("background-legacy-import-cluster")
         user = _import_user("legacy-mixed")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": infrastructure.role_id})
         job = _job(user, "legacy-mixed-import")
         rows = {
             6411: _device_payload(
@@ -324,13 +326,14 @@ class TestImportDevicesJob:
         assert job.data["errors"] == []
 
     def test_mixed_device_and_vm_batch_imports_real_objects_and_persists_ids(self, librenms_server):
-        from dcim.models import Device
+        from dcim.models import Device, DeviceRole
         from virtualization.models import VirtualMachine
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-import-infrastructure")
         cluster = make_cluster("background-import-cluster")
         user = _import_user("mixed")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": infrastructure.role_id})
         job = _job(user, "mixed-import")
         rows = {
             6401: _device_payload(
@@ -378,11 +381,12 @@ class TestImportDevicesJob:
         assert job.data["completed"] is True
 
     def test_unresolved_row_is_skipped_while_a_checked_row_imports(self, librenms_server):
-        from dcim.models import Device
+        from dcim.models import Device, DeviceRole
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-unresolved-infrastructure")
         user = _import_user("unresolved", vms=False)
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": infrastructure.role_id})
         job = _job(user, "unresolved-import")
         librenms_server.register("/api/v0/devices/6403", {"status": "error"}, status=404)
         rows = {

@@ -3742,13 +3742,14 @@ class TestBulkImportDevicesViewBasicPaths:
 
     def test_sync_mode_import_runs(self, settings, monkeypatch):
         """The synchronous path fetches LibreNMS data and persists the imported device."""
-        from dcim.models import Device
+        from dcim.models import Device, DeviceRole
 
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
         monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         server_key = "bulk-basic-sync"
         mapping_source = make_device("bulk-basic-sync-mapping-source")
         user = self._device_import_user("bulk-basic-sync-user")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": mapping_source.role_id})
         with run_librenms_server() as server:
             server.device_info_response(
                 device_id=1,
@@ -3975,13 +3976,14 @@ class TestBulkImportDevicesMorePaths:
 
     def test_valid_role_and_rack_values_applied(self, settings, monkeypatch):
         """The importer persists the selected role and rack on the new device."""
-        from dcim.models import Device, Rack
+        from dcim.models import Device, DeviceRole, Rack
 
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
         monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         mapped_device = make_device("bulk-more-mapping-source")
         rack = Rack.objects.create(name="Bulk More Rack", site=mapped_device.site, status="active")
         user = self._device_import_user("bulk-more-valid-mapping-user")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": mapped_device.role_id})
 
         with run_librenms_server() as server:
             server.device_info_response(
