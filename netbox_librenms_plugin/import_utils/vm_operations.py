@@ -37,9 +37,9 @@ def _apply_vm_placement(validation: dict, mappings: dict, user) -> str | None:
     if placement_method == VMPlacementMethod.CLUSTER:
         if not cluster_id or host_device_id:
             return "Cluster placement requires one cluster and no host"
-        cluster = Cluster.objects.filter(id=cluster_id).first()
+        cluster = Cluster.objects.restrict(user, "view").filter(id=cluster_id).first()
         if cluster is None:
-            return f"Selected cluster (id={cluster_id}) no longer exists"
+            return "Selected cluster is unavailable"
         apply_cluster_to_validation(validation, cluster)
         return None
 

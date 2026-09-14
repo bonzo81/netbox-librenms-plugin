@@ -270,7 +270,13 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             raise ValueError("The VLAN scope is now ambiguous. Refresh the VLAN data and try again.")
 
         vlan.name = proposed_name
-        vlan.save(update_fields=["name"])
+        try:
+            with transaction.atomic():
+                vlan.save(update_fields=["name"])
+        except IntegrityError as exc:
+            raise ValueError(
+                "The proposed VLAN name already exists in the selected group. Refresh the VLAN data and try again."
+            ) from exc
         return vlan
 
     @staticmethod

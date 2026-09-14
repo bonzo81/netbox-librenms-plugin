@@ -220,6 +220,35 @@ def test_grouped_vlan_row_is_locked_before_the_rename():
     assert vlan.name == "librenms-name"
 
 
+@pytest.mark.django_db
+def test_grouped_vlan_name_collision_is_rejected_without_a_database_error():
+    """A confirmed rename must not violate the group's unique VLAN-name constraint."""
+    from ipam.models import VLAN, VLANGroup
+
+    device = make_device("vlan-rename-collision")
+    group = VLANGroup.objects.create(name="Rename-Collision", slug="rename-collision")
+    vlan = VLAN.objects.create(vid=51, group=group, name="old-name", status="active")
+    VLAN.objects.create(vid=52, group=group, name="claimed-name", status="active")
+    user = make_user_with_perms(
+        "vlan-rename-collision-user",
+        [("view", type(device)), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)],
+    )
+    intent = _rename_intent(vlan, device, "claimed-name")
+
+    recorded_messages = _drive_grouped_sync(
+        device,
+        user,
+        group,
+        vid=51,
+        librenms_name="claimed-name",
+        intent=intent,
+    )
+
+    vlan.refresh_from_db()
+    assert vlan.name == "old-name"
+    assert any(level == "error" and "name already exists" in message for level, message in recorded_messages)
+
+
 class _ScopedVLANReadGate:
     """
     Hold the sync between its scoped VLAN read and whatever it does next.

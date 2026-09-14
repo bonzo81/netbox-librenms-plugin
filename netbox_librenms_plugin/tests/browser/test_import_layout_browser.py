@@ -2,11 +2,13 @@
 
 import json
 from pathlib import Path
+from runpy import run_path
 
 import pytest
 
 
 ASSET_ROOT = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin"
+IMPORT_NAMING = Path(__file__).parents[2] / "import_utils" / "naming.py"
 
 
 @pytest.mark.parametrize("viewport_width", [1280, 720])
@@ -85,13 +87,7 @@ def test_all_optional_columns_fit_the_import_results_card(page, viewport_width):
 )
 def test_import_name_preview_matches_backend_resolution(page, sysname, expected_name, expected_source):
     """The live preview must use the same resolved names as the importer."""
-    variants = {
-        "sysname_full": {"name": sysname, "source": "sysName"},
-        "sysname_stripped": {
-            "name": expected_name,
-            "source": expected_source.removeprefix("From ").removesuffix(", domain removed"),
-        },
-    }
+    variants = run_path(IMPORT_NAMING)["import_name_variants"]({"device_id": 42, "sysName": sysname, "hostname": ""})
     page.set_content(
         f"""
         <input id="use-sysname-toggle-cb" type="checkbox" checked>

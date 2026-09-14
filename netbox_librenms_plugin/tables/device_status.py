@@ -12,7 +12,7 @@ from netbox.tables.columns import ToggleColumn
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
-from netbox_librenms_plugin.import_utils.device_operations import _resolve_device_name
+from netbox_librenms_plugin.import_utils.naming import import_name_variants
 from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod
 from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
@@ -21,24 +21,6 @@ from netbox_librenms_plugin.utils import (
 )
 
 _IMPORT_NAMING_INCLUDE = "#use-sysname-toggle, #strip-domain-toggle"
-
-
-def _import_name_variants(record):
-    """Return every preference-controlled name through the importer's resolver."""
-    variants = {}
-    for source_key, use_sysname in (("sysname", True), ("hostname", False)):
-        for suffix, strip_domain in (("full", False), ("stripped", True)):
-            name, source = _resolve_device_name(
-                record,
-                use_sysname=use_sysname,
-                strip_domain=strip_domain,
-                device_id=record.get("device_id"),
-            )
-            variants[f"{source_key}_{suffix}"] = {
-                "name": name,
-                "source": {"sysname": "sysName", "hostname": "hostname"}.get(source, "fallback name"),
-            }
-    return variants
 
 
 class DeviceStatusTable(DeviceTable):
@@ -333,7 +315,7 @@ class DeviceImportTable(tables.Table):
             )
             name_html = format_html(
                 '<strong data-import-name data-import-name-variants="{}">{}</strong>',
-                json.dumps(_import_name_variants(record), separators=(",", ":")),
+                json.dumps(import_name_variants(record), separators=(",", ":")),
                 resolved_name,
             )
             criteria = validation.get("naming_criteria") or {}
