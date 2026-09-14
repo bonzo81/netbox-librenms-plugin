@@ -197,6 +197,37 @@ class TestSingleModuleVerifyRow:
         actions = response.json()["formatted_row"]["actions"]
         assert "Install Verify Carrier into &#39;Carrier Bay&#39;" in actions
 
+    def test_a_manual_chassis_member_selection_overrides_inventory_position(self, client, librenms_server):
+        """Row verification must bind actions to the member selected in the row dropdown."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+
+        first = make_device_with_module_bays("module-verify-vc-first", ["Bay 1"], serial="VERIFY-VC-FIRST")
+        selected = make_device_with_module_bays("module-verify-vc-selected", ["Bay 1"], serial="VERIFY-VC-SELECTED")
+        chassis = VirtualChassis.objects.create(name="module-verify-vc", master=first)
+        for position, member in ((1, first), (2, selected)):
+            member.virtual_chassis = chassis
+            member.vc_position = position
+            member.save(update_fields=["virtual_chassis", "vc_position"])
+        first.custom_field_data["librenms_id"] = {SERVER_KEY: LIBRENMS_ID}
+        first.save()
+        make_module_type("LC-24")
+        inventory = [{**INVENTORY[0], "entPhysicalParentRelPos": 1}]
+        _register_inventory(librenms_server, inventory)
+        client.force_login(make_superuser("module-verify-vc-user"))
+
+        assert _refresh_modules(client, first).status_code == 200
+
+        response = _verify_module(
+            client,
+            {"device_id": selected.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
+        )
+
+        assert response.status_code == 200
+        actions = response.json()["formatted_row"]["actions"]
+        assert f'name="selected_device_id" value="{selected.pk}"' in actions
+
 
 @pytest.mark.django_db
 class TestSingleInterfaceVerifyChassisGuard:

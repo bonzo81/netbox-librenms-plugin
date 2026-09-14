@@ -395,6 +395,7 @@ class SingleModuleVerifyView(
             module_table_view.request,
             selected_device,
             server_key=server_key,
+            pin_rows_to_object=True,
         )
         table = context.get("table")
         if table is None:
