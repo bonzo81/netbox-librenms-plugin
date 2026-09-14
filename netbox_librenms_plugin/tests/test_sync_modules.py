@@ -6013,7 +6013,16 @@ class TestModulesActionResponse:
             {self.SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}},
         )
 
-    def _seed_inventory(self, device, bay, module_type, *, serial="ACTION-1", librenms_id=9201):
+    def _seed_inventory(
+        self,
+        device,
+        bay,
+        module_type,
+        *,
+        serial="ACTION-1",
+        librenms_id=9201,
+        inventory_metadata=None,
+    ):
         """Seed one inventory row matching *bay* and *module_type* under the module tab's cache key."""
         from django.core.cache import cache
 
@@ -6027,6 +6036,7 @@ class TestModulesActionResponse:
             "entPhysicalName": bay.name,
             "entPhysicalSerialNum": serial,
         }
+        inventory_item.update(inventory_metadata or {})
         payload = trusted_module_inventory_payload(
             device,
             [inventory_item],
@@ -6056,7 +6066,12 @@ class TestModulesActionResponse:
         device = make_device("modules-action-install")
         bay = make_module_bay(device, "Action Bay")
         module_type = make_module_type("ACTION-CARD")
-        inventory_item = self._seed_inventory(device, bay, module_type)
+        inventory_item = self._seed_inventory(
+            device,
+            bay,
+            module_type,
+            inventory_metadata={"_binding_source": "post_fallback"},
+        )
         client.force_login(make_superuser("modules-action-install-user"))
         url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
 
@@ -6092,6 +6107,7 @@ class TestModulesActionResponse:
         assert 'id="librenms-module-table"' in body
         assert f'name="server_key" value="{self.SERVER_KEY}"' in body
         assert f"Installed {module_type.model} in {bay.name}" in body
+        assert "Interface identity fallback used" not in body
         assert '<span class="badge bg-success text-white">Installed</span>' in body
         assert Module.objects.filter(device=device, module_bay=bay, module_type=module_type).exists()
 

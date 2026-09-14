@@ -1028,12 +1028,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     request,
                     f"VC member interface normalization applied: {vc_summary}.",
                 )
-            if bind_item and bind_item.get("_binding_source") == "post_fallback":
-                messages.warning(
-                    request,
-                    "Interface identity fallback used posted row metadata because a matching cached "
-                    "inventory row was unavailable. Verify the resulting binding.",
-                )
             if bind_result and bind_result.get("status") == "bound":
                 messages.info(
                     request,
