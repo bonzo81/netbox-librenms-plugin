@@ -1,26 +1,28 @@
 """End-to-end checks for confirmation-required VLAN synchronization changes."""
 
 import pytest
-from django.core.cache import cache
-from django.urls import reverse
-from ipam.models import VLAN, VLANGroup
 
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
     make_superuser,
 )
-from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
 
 def _seed_vlan_snapshot(device, rows, server_key="default"):
     """Store VLAN source rows under the real synchronization cache key."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
     view = SyncVLANsView()
     cache.set(view.get_cache_key(device, "vlans", server_key), rows, timeout=60)
 
 
 def _sync_url(device):
     """Return the public VLAN synchronization endpoint for a device."""
+    from django.urls import reverse
+
     return reverse(
         "plugins:netbox_librenms_plugin:sync_selected_vlans",
         kwargs={"object_type": "device", "object_id": device.pk},
@@ -30,6 +32,8 @@ def _sync_url(device):
 @pytest.mark.django_db
 def test_selected_grouped_vlan_requires_confirmation_before_rename(client, settings):
     """A selected VID must not silently replace an existing VLAN name in its group."""
+    from ipam.models import VLAN, VLANGroup
+
     configure_default_librenms_server(settings)
     device = make_device("vlan-conflict-device", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name="Conflict group", slug="conflict-group")
@@ -60,6 +64,8 @@ def test_selected_grouped_vlan_requires_confirmation_before_rename(client, setti
 @pytest.mark.django_db
 def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settings):
     """A valid confirmation must rename only the VLAN named by its signed intent."""
+    from ipam.models import VLAN, VLANGroup
+
     configure_default_librenms_server(settings)
     device = make_device("vlan-confirm-device", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name="Confirm group", slug="confirm-group")
@@ -103,6 +109,8 @@ def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settin
 @pytest.mark.django_db
 def test_stale_vlan_confirmation_fails_closed(client, settings):
     """A confirmation must not replace a VLAN name changed after disclosure."""
+    from ipam.models import VLAN, VLANGroup
+
     configure_default_librenms_server(settings)
     device = make_device("vlan-stale-device", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name="Stale group", slug="stale-group")
@@ -148,6 +156,8 @@ def test_stale_vlan_confirmation_fails_closed(client, settings):
 @pytest.mark.django_db
 def test_tampered_vlan_confirmation_syncs_nothing(client, settings):
     """An invalid intent must not fall back to the unsigned row fields."""
+    from ipam.models import VLAN, VLANGroup
+
     configure_default_librenms_server(settings)
     device = make_device("vlan-tampered-device", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name="Tampered group", slug="tampered-group")
@@ -181,6 +191,8 @@ def test_tampered_vlan_confirmation_syncs_nothing(client, settings):
 @pytest.mark.django_db
 def test_native_vlan_conflict_renders_a_complete_page(client, settings):
     """A native conflict response must render a full page around the confirmation form."""
+    from ipam.models import VLAN, VLANGroup
+
     configure_default_librenms_server(settings)
     device = make_device("vlan-native-device", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name="Native group", slug="native-group")
@@ -212,6 +224,11 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
     django_capture_on_commit_callbacks,
 ):
     """A safe row must commit while a conflicting rename remains pending."""
+    from django.core.cache import cache
+    from ipam.models import VLAN, VLANGroup
+
+    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
     configure_default_librenms_server(settings)
     device = make_device("vlan-bulk-device", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name="Bulk group", slug="bulk-group")

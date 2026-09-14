@@ -54,6 +54,7 @@ from netbox_librenms_plugin.import_plan import (
     InvalidImportIntent,
     MatchedSitePlacement,
     VMPlacementMethod,
+    import_row_hx_include,
     partition_import_plans,
     parse_import_row_intent,
     parse_import_row_plan,
@@ -1859,6 +1860,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
             "server_key": self.librenms_api.server_key,
+            "import_row_hx_include": import_row_hx_include(device_id),
         }
 
         # Add sync comparison data for existing devices
@@ -2646,12 +2648,7 @@ class CreatePlatformFromImportView(
                 if device_type:
                     selected_manufacturer_pk = device_type.manufacturer_id
 
-        htmx_include = (
-            f"[name=object_type_{device_id}], [name=vm_placement_{device_id}], "
-            f"[name=role_{device_id}], [name=rack_{device_id}], "
-            f"[name=cluster_{device_id}], [name=host_device_{device_id}], "
-            "#use-sysname-toggle, #strip-domain-toggle"
-        )
+        htmx_include = import_row_hx_include(device_id)
 
         return render(
             request,

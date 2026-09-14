@@ -13,7 +13,7 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
-from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod
+from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod, import_row_hx_include
 from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_librenms_sync_device,
@@ -462,16 +462,6 @@ class DeviceImportTable(tables.Table):
             return f"{update_url}?enable_vc_detection=true"
         return update_url
 
-    @staticmethod
-    def _row_intent_include(device_id):
-        """Return the complete row-state selector list for HTMX requests."""
-        return (
-            f"[name=object_type_{device_id}], [name=vm_placement_{device_id}], "
-            f"[name=cluster_{device_id}], [name=host_device_{device_id}], "
-            f"[name=role_{device_id}], [name=rack_{device_id}], "
-            f"{_IMPORT_NAMING_INCLUDE}"
-        )
-
     def render_object_type(self, value, record):
         """Render the explicit NetBox object-type selector."""
         device_id = record.get("device_id")
@@ -495,7 +485,7 @@ class DeviceImportTable(tables.Table):
             f'<select class="form-select form-select-sm import-option-select" '
             f'id="object_type_{device_id}" name="object_type_{device_id}" '
             f'hx-post="{self._row_update_url(device_id, validation)}" hx-trigger="change" hx-swap="none" '
-            f'{self._server_key_hx_vals()}hx-include="{self._row_intent_include(device_id)}">'
+            f'{self._server_key_hx_vals()}hx-include="{import_row_hx_include(device_id)}">'
             f"{''.join(options)}</select>"
         )
 
@@ -527,7 +517,7 @@ class DeviceImportTable(tables.Table):
             f'<select class="form-select form-select-sm import-option-select" '
             f'id="vm_placement_{device_id}" name="vm_placement_{device_id}" '
             f'hx-post="{self._row_update_url(device_id, validation)}" hx-trigger="change" hx-swap="none" '
-            f'{self._server_key_hx_vals()}hx-include="{self._row_intent_include(device_id)}">'
+            f'{self._server_key_hx_vals()}hx-include="{import_row_hx_include(device_id)}">'
             f"{''.join(options)}</select>"
         )
 
@@ -585,7 +575,7 @@ class DeviceImportTable(tables.Table):
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="{self._row_intent_include(device_id)}">'
+            f'hx-include="{import_row_hx_include(device_id)}">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -614,7 +604,7 @@ class DeviceImportTable(tables.Table):
                 "hx-post": self._row_update_url(device_id, validation),
                 "hx-trigger": "change",
                 "hx-swap": "none",
-                "hx-include": self._row_intent_include(device_id),
+                "hx-include": import_row_hx_include(device_id),
             }
         )
         if self.server_key:
@@ -680,7 +670,7 @@ class DeviceImportTable(tables.Table):
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="{self._row_intent_include(device_id)}">'
+            f'hx-include="{import_row_hx_include(device_id)}">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -750,7 +740,7 @@ class DeviceImportTable(tables.Table):
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="{self._row_intent_include(device_id)}">'
+            f'hx-include="{import_row_hx_include(device_id)}">'
             f"{''.join(options)}"
             f"</select>"
         )

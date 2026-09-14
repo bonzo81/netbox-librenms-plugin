@@ -5,13 +5,18 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from django.http import QueryDict
-from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+
+def _plugin_url(view_name, *, kwargs=None):
+    """Resolve one plugin URL without initializing Django during test collection."""
+    from django.urls import reverse
+
+    return reverse(f"plugins:netbox_librenms_plugin:{view_name}", kwargs=kwargs)
 
 
 @pytest.mark.django_db
@@ -55,7 +60,7 @@ def test_sync_import_post_creates_site_placed_vm_without_device_permissions(
         client.force_login(user)
 
         response = client.post(
-            reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+            _plugin_url("bulk_import_devices"),
             {
                 "server_key": "vm-site",
                 "select": [str(source_device_id)],
@@ -104,7 +109,7 @@ def test_confirmation_preserves_site_placed_vm_intent(client, monkeypatch, setti
         client.force_login(user)
 
         response = client.post(
-            reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+            _plugin_url("bulk_import_confirm"),
             {
                 "server_key": "vm-confirm",
                 "select": [str(source_device_id)],
@@ -152,10 +157,7 @@ def test_search_row_switches_to_ready_site_placed_vm(client, monkeypatch, settin
         client.force_login(user)
 
         response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:device_import_plan_update",
-                kwargs={"device_id": source_device_id},
-            ),
+            _plugin_url("device_import_plan_update", kwargs={"device_id": source_device_id}),
             {
                 "server_key": "vm-row",
                 f"object_type_{source_device_id}": "virtualmachine",
@@ -207,10 +209,7 @@ def test_search_row_offers_netbox_host_selector(client, monkeypatch, settings):
         client.force_login(user)
 
         response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:device_import_plan_update",
-                kwargs={"device_id": source_device_id},
-            ),
+            _plugin_url("device_import_plan_update", kwargs={"device_id": source_device_id}),
             {
                 "server_key": "vm-host-selector",
                 f"object_type_{source_device_id}": "virtualmachine",
@@ -263,7 +262,7 @@ def test_sync_import_post_creates_cluster_placed_vm(client, monkeypatch, setting
         client.force_login(user)
 
         response = client.post(
-            reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+            _plugin_url("bulk_import_devices"),
             {
                 "server_key": "vm-cluster",
                 "select": [str(source_device_id)],
@@ -327,7 +326,7 @@ def test_sync_import_post_creates_host_placed_vm(
         client.force_login(user)
 
         response = client.post(
-            reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+            _plugin_url("bulk_import_devices"),
             {
                 "server_key": "vm-host",
                 "select": [str(source_device_id)],
@@ -381,7 +380,7 @@ def test_confirmation_preserves_host_placement(client, monkeypatch, settings):
         client.force_login(user)
 
         response = client.post(
-            reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+            _plugin_url("bulk_import_confirm"),
             {
                 "server_key": "vm-confirm-host",
                 "select": [str(source_device_id)],
@@ -431,7 +430,7 @@ def test_sync_import_rejects_host_outside_user_scope(client, monkeypatch, settin
         client.force_login(user)
 
         response = client.post(
-            reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+            _plugin_url("bulk_import_devices"),
             {
                 "server_key": "vm-hidden-host",
                 "select": [str(source_device_id)],
@@ -470,7 +469,7 @@ def test_device_target_rejects_forged_vm_placement(client, settings):
     client.force_login(user)
 
     response = client.post(
-        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        _plugin_url("bulk_import_devices"),
         {
             "server_key": "vm-forged",
             "select": [str(source_device_id)],
@@ -621,6 +620,8 @@ def test_background_job_applies_host_placement(settings):
 
 def test_import_intent_rejects_duplicate_object_type_values():
     """Duplicate controls must not make the model target ambiguous."""
+    from django.http import QueryDict
+
     from netbox_librenms_plugin.import_plan import InvalidImportIntent, parse_import_row_intent
 
     data = QueryDict("object_type_7312=device&object_type_7312=virtualmachine")
@@ -632,6 +633,8 @@ def test_import_intent_rejects_duplicate_object_type_values():
 @pytest.mark.parametrize("source_device_id", [0, -1])
 def test_import_intent_rejects_non_positive_source_device_ids(source_device_id):
     """Synchronous imports must reject source IDs that jobs cannot deserialize."""
+    from django.http import QueryDict
+
     from netbox_librenms_plugin.import_plan import InvalidImportIntent, parse_import_row_intent
 
     with pytest.raises(InvalidImportIntent, match="Source device ID must be a positive integer"):
@@ -659,6 +662,25 @@ def test_background_import_plan_rejects_contradictory_targets(payload):
 
     with pytest.raises(InvalidImportIntent):
         deserialize_import_plans([payload])
+
+
+def test_import_row_htmx_requests_share_the_complete_selector():
+    """Every row update and mapping form must use one complete import-state selector."""
+    from netbox_librenms_plugin.import_plan import import_row_hx_include
+
+    assert import_row_hx_include(7316).split(", ") == [
+        "[name=object_type_7316]",
+        "[name=vm_placement_7316]",
+        "[name=role_7316]",
+        "[name=rack_7316]",
+        "[name=cluster_7316]",
+        "[name=host_device_7316]",
+        "#use-sysname-toggle",
+        "#strip-domain-toggle",
+    ]
+    template_root = Path(__file__).parents[1] / "templates" / "netbox_librenms_plugin" / "htmx"
+    assert 'hx-include="{{ import_row_hx_include }}"' in (template_root / "_dt_mapping_form.html").read_text()
+    assert 'hx-include="{{ htmx_include }}"' in (template_root / "_platform_mapping_form.html").read_text()
 
 
 def test_import_dispatch_does_not_derive_model_from_placement_truthiness():

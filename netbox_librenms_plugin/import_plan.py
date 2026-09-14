@@ -5,6 +5,23 @@ from enum import StrEnum
 
 from netbox_librenms_plugin.utils import coerce_model_pk, coerce_positive_int
 
+_IMPORT_ROW_CONTROL_PREFIXES = (
+    "object_type",
+    "vm_placement",
+    "role",
+    "rack",
+    "cluster",
+    "host_device",
+)
+_IMPORT_NAMING_CONTROL_SELECTORS = ("#use-sysname-toggle", "#strip-domain-toggle")
+
+
+def import_row_hx_include(source_device_id: int) -> str:
+    """Return the complete selector list for one import row's HTMX requests."""
+    source_device_id = coerce_positive_int(source_device_id)
+    selectors = [f"[name={prefix}_{source_device_id}]" for prefix in _IMPORT_ROW_CONTROL_PREFIXES]
+    return ", ".join((*selectors, *_IMPORT_NAMING_CONTROL_SELECTORS))
+
 
 class ImportObjectType(StrEnum):
     """Identify the NetBox model requested for an import row."""

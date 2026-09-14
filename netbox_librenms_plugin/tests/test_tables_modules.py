@@ -907,10 +907,12 @@ class TestLibreNMSModuleTable:
         assert "Install" not in result
         assert "Update Serial" in result
 
+    @pytest.mark.django_db
     def test_render_actions_install_hidden_without_an_inventory_index(self):
         """InstallModuleView resolves the row by index, so a row with no index has no standard action."""
-        device = MagicMock()
-        device.pk = 25
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("module-actions-missing-install-index")
         table = self._make_table(device=device)
         record = {
             "can_install": True,
@@ -923,10 +925,12 @@ class TestLibreNMSModuleTable:
 
         assert "Install" not in result
 
+    @pytest.mark.django_db
     def test_render_actions_update_serial_hidden_without_an_inventory_index(self):
         """UpdateModuleSerialView reads the serial from the cached row, so a row with no index has no action."""
-        device = MagicMock()
-        device.pk = 23
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("module-actions-missing-serial-index")
         table = self._make_table(device=device)
         record = {
             "can_update_serial": True,
@@ -938,10 +942,12 @@ class TestLibreNMSModuleTable:
 
         assert "Update Serial" not in result
 
+    @pytest.mark.django_db
     def test_render_actions_update_interface_hidden_without_an_inventory_index(self):
         """The bind reads its metadata from the cached row, so a row with no index has no action."""
-        device = MagicMock()
-        device.pk = 24
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("module-actions-missing-interface-index")
         table = self._make_table(device=device, can_change_interface=True)
         record = {
             "can_update_interface_binding": True,

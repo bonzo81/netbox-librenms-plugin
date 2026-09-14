@@ -6021,7 +6021,6 @@ class TestModulesActionResponse:
         *,
         serial="ACTION-1",
         librenms_id=9201,
-        inventory_metadata=None,
     ):
         """Seed one inventory row matching *bay* and *module_type* under the module tab's cache key."""
         from django.core.cache import cache
@@ -6036,7 +6035,6 @@ class TestModulesActionResponse:
             "entPhysicalName": bay.name,
             "entPhysicalSerialNum": serial,
         }
-        inventory_item.update(inventory_metadata or {})
         payload = trusted_module_inventory_payload(
             device,
             [inventory_item],
@@ -6066,12 +6064,7 @@ class TestModulesActionResponse:
         device = make_device("modules-action-install")
         bay = make_module_bay(device, "Action Bay")
         module_type = make_module_type("ACTION-CARD")
-        inventory_item = self._seed_inventory(
-            device,
-            bay,
-            module_type,
-            inventory_metadata={"_binding_source": "post_fallback"},
-        )
+        inventory_item = self._seed_inventory(device, bay, module_type)
         client.force_login(make_superuser("modules-action-install-user"))
         url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
 
@@ -6107,9 +6100,75 @@ class TestModulesActionResponse:
         assert 'id="librenms-module-table"' in body
         assert f'name="server_key" value="{self.SERVER_KEY}"' in body
         assert f"Installed {module_type.model} in {bay.name}" in body
-        assert "Interface identity fallback used" not in body
         assert '<span class="badge bg-success text-white">Installed</span>' in body
         assert Module.objects.filter(device=device, module_bay=bay, module_type=module_type).exists()
+
+    def test_legacy_binding_source_metadata_does_not_render_a_warning(
+        self,
+        client,
+        settings,
+        django_capture_on_commit_callbacks,
+    ):
+        """Obsolete cached binding metadata must not add a warning to a successful install."""
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        self._configure_server(settings)
+        device = make_device("modules-action-legacy-binding-source")
+        bay = make_module_bay(device, "Legacy Bay")
+        module_type = make_module_type("LEGACY-CARD")
+        # Current producers cannot write this marker. A cache from an older process can still carry it
+        # during deployment, so the consumer must ignore it instead of reviving the removed warning.
+        inventory_item = {
+            "entPhysicalIndex": 8201,
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalName": bay.name,
+            "entPhysicalSerialNum": "LEGACY-ACTION-1",
+            "_binding_source": "post_fallback",
+        }
+        payload = trusted_module_inventory_payload(
+            device,
+            [inventory_item],
+            server_key=self.SERVER_KEY,
+            librenms_id=9205,
+        )
+        cache_key = DeviceModuleTableView().get_cache_key(device, "inventory", server_key=self.SERVER_KEY)
+        cache.set(cache_key, payload, 300)
+        client.force_login(make_superuser("modules-action-legacy-binding-source-user"))
+
+        with django_capture_on_commit_callbacks(execute=True):
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk}),
+                {
+                    "server_key": self.SERVER_KEY,
+                    "module_bay_id": str(bay.pk),
+                    "module_type_id": str(module_type.pk),
+                    "ent_index": "8201",
+                    "inventory_binding": module_inventory_binding_token(
+                        device.pk,
+                        self.SERVER_KEY,
+                        "install_module",
+                        {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+                        8201,
+                        module_inventory_row_digest(inventory_item),
+                    ),
+                },
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert response.status_code == 200
+        assert "Interface identity fallback used" not in response.content.decode()
 
     def test_htmx_action_keeps_the_page_and_sort_of_the_current_url(self, client, settings):
         """The re-rendered table honours the page's own query (page, per_page), not the action URL's empty one."""
