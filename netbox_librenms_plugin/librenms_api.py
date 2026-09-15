@@ -780,7 +780,9 @@ class LibreNMSAPI:
           3. Strip a '.N' suffix in the active name field to resolve a physical-level port.
           4. A pair in the active name field where one name is the other plus a numeric '.N'
              suffix is a parent/child pair. The child may be on either side.
-          5. A configured bridge-name pattern identifies the bridge side of a remaining pair.
+          5. A configured bridge-name pattern identifies the bridge side from ifName or ifDescr.
+             This classification is stable across name-field fallback, so one pair cannot be
+             reinterpreted as a different relationship kind.
 
         Configurable via PortStackLagPattern model:
           - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
@@ -949,8 +951,12 @@ class LibreNMSAPI:
                 return isinstance(name, str) and any(pattern.search(name) for pattern in compiled_patterns)
 
             def _is_bridge(port: dict) -> bool:
-                name = port.get(field)
-                return isinstance(name, str) and any(pattern.search(name) for pattern in compiled_bridge_patterns)
+                return any(
+                    pattern.search(name)
+                    for name_field in INTERFACE_NAME_FIELDS
+                    if isinstance(name := port.get(name_field), str)
+                    for pattern in compiled_bridge_patterns
+                )
 
             def _relate(mapping: dict, conflicted_keys: set, key_port: dict, value_port: dict) -> None:
                 """Store a normalized edge and drop keys that have conflicting targets."""

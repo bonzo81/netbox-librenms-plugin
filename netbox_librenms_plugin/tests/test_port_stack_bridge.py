@@ -38,6 +38,36 @@ def test_bridge_members_are_independent_from_parent_relationships(mock_librenms_
     }
 
 
+def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback(mock_librenms_api):
+    """Keep one relationship kind when bridge names differ between canonical fields."""
+    relationships = mock_librenms_api.resolve_port_relationships(
+        [
+            {
+                "port_id": 100,
+                "ifName": "vmbr0",
+                "ifDescr": "LAN bridge",
+                "ifType": "ethernetCsmacd",
+            },
+            {
+                "port_id": 101,
+                "ifName": "bond0",
+                "ifDescr": "uplink",
+                "ifType": "ieee8023adLag",
+            },
+        ],
+        [{"high_port_id": 100, "low_port_id": 101}],
+        lag_patterns={},
+        bridge_patterns={"linux": r"^(vmbr|br|bridge)\d+$"},
+        compiled_sap_patterns=[],
+    )
+
+    assert relationships == {
+        "lag_members": {},
+        "sub_interfaces": {},
+        "bridge_members": {101: 100},
+    }
+
+
 def test_bridge_pattern_is_stored_with_the_existing_port_stack_mapping():
     """Store all name-based port-stack rules in the existing per-OS mapping row."""
     from netbox_librenms_plugin.models import PortStackLagPattern
