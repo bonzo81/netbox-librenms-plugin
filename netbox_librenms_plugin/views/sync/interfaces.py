@@ -1527,8 +1527,11 @@ def _promote_lag_aggregate(agg, *, with_restore):
     agg.type = "lag"
 
     def _persist():
-        # The aggregate can already be a virtual child. Validate its prepared type too,
-        # otherwise the member validates but this save creates an invalid lag + parent row.
+        # NetBox 4.4 can crash while it validates a cross-member parent before it reports
+        # the type conflict. Reject the invalid aggregate state before calling clean().
+        if agg.parent_id is not None:
+            raise ValidationError({"type": "A LAG aggregate cannot have a parent interface."})
+        # Validate the rest of the prepared aggregate state before saving its new type.
         agg.clean()
         agg.save(update_fields=["type"])
         logger.info("Set interface %s type=lag", agg.name)

@@ -289,6 +289,75 @@ def test_inline_lag_sync_does_not_replace_a_parent_child_role():
     assert member.lag_id is None
 
 
+def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch):
+    """Reject an invalid LAG target before NetBox 4.4 reaches its VC validation bug."""
+    from types import SimpleNamespace
+
+    from dcim.models import Interface
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+    _virtual_chassis, (parent_device, target_device) = make_virtual_chassis_members("lag-target-cross-member-parent")
+    parent = make_interface(parent_device, "bond0")
+    target = make_interface(target_device, "bond0.110", iface_type="virtual")
+    target.parent = parent
+    target.save(update_fields=["parent"])
+    member = make_interface(target_device, "nic0")
+    for interface, port_id in ((target, 100), (member, 102)):
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save()
+
+    view = SyncInterfaceLagView()
+    view._librenms_api = SimpleNamespace(server_key="default")
+    cache.set(
+        view.get_cache_key(parent_device, "ports", "default"),
+        {
+            "ports": [
+                {"port_id": 100, "ifName": target.name},
+                {"port_id": 102, "ifName": member.name},
+            ],
+            "port_stack_relationships": {
+                "lag_members": {102: 100},
+                "sub_interfaces": {},
+                "bridge_members": {},
+            },
+        },
+    )
+
+    original_clean = Interface.clean
+
+    def netbox_44_clean(interface):
+        if interface.pk == target.pk:
+            raise AttributeError(
+                "'Interface' object has no attribute 'virtual_chassis'",
+                name="virtual_chassis",
+            )
+        return original_clean(interface)
+
+    monkeypatch.setattr(Interface, "clean", netbox_44_clean)
+
+    response = post(
+        view,
+        make_request(
+            "post",
+            {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
+        ),
+        object_type="device",
+        object_id=target_device.pk,
+    )
+
+    assert response.status_code == 409, response.content
+    assert b"NetBox rejected the LAG relationship" in response.content
+    target.refresh_from_db()
+    member.refresh_from_db()
+    assert target.type == "virtual"
+    assert target.parent_id == parent.pk
+    assert member.lag_id is None
+
+
 def test_parent_promotion_preserves_a_channel_sub_interface():
     """Keep channel subinterfaces unchanged across supported NetBox versions."""
     from netbox_librenms_plugin.views.sync.interfaces import _parent_child_needs_promotion
