@@ -64,6 +64,8 @@ def test_selected_grouped_vlan_requires_confirmation_before_rename(client, setti
 @pytest.mark.django_db
 def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settings):
     """A valid confirmation must rename only the VLAN named by its signed intent."""
+    from core.models import ObjectChange
+    from django.contrib.contenttypes.models import ContentType
     from ipam.models import VLAN, VLANGroup
 
     configure_default_librenms_server(settings)
@@ -104,6 +106,12 @@ def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settin
     assert response.headers["HX-Redirect"]
     existing.refresh_from_db()
     assert existing.name == "Confirmed name"
+    change = ObjectChange.objects.get(
+        changed_object_type=ContentType.objects.get_for_model(VLAN),
+        changed_object_id=existing.pk,
+    )
+    assert change.prechange_data["name"] == "Current name"
+    assert change.postchange_data["name"] == "Confirmed name"
 
 
 @pytest.mark.django_db

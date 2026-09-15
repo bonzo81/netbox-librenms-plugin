@@ -269,6 +269,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         if VLAN.objects.filter(vid=vid, group=row_vlan_group).exclude(pk=vlan.pk).exists():
             raise ValueError("The VLAN scope is now ambiguous. Refresh the VLAN data and try again.")
 
+        vlan.snapshot()
         vlan.name = proposed_name
         try:
             with transaction.atomic():
