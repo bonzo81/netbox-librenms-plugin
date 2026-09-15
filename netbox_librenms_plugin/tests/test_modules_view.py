@@ -5581,6 +5581,7 @@ class TestRenderActionsPortIdentityFields:
         # Posted identity fields carry no _source marker, so they must not reach the view at all.
         assert 'name="ent_index" value="77"' in html
         assert 'name="inventory_binding"' in html
+        assert 'name="inventory_binding" value=""' not in html
         assert "librenms_ifname" not in html
         assert "librenms_ifdescr" not in html
 
