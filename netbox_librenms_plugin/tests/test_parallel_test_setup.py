@@ -838,6 +838,28 @@ def test_reused_database_restores_inventory_and_serial_seed_rules():
 
 
 @pytest.mark.django_db
+def test_seed_intactness_requires_the_bridge_seed_identity():
+    """A different OS with matching values cannot replace the Linux bridge seed."""
+    import importlib
+
+    from netbox_librenms_plugin.models import PortStackLagPattern
+    from netbox_librenms_plugin.tests.conftest import _seeds_are_intact
+
+    migration = importlib.import_module(
+        "netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern"
+    )
+    PortStackLagPattern.objects.filter(librenms_os=migration.BRIDGE_OS).delete()
+    PortStackLagPattern.objects.create(
+        librenms_os="test-bridge-os",
+        lag_name_pattern=migration.LAG_PATTERN,
+        bridge_name_pattern=migration.BRIDGE_PATTERN,
+        description=migration.SEEDED_DESCRIPTION,
+    )
+
+    assert not _seeds_are_intact()
+
+
+@pytest.mark.django_db
 def test_reverse_of_the_inventory_seed_keeps_a_disabled_operator_rule():
     """The 0010 rollback matches seeded rows on a signature of non-free-text fields.
 

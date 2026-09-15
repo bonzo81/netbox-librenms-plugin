@@ -179,8 +179,8 @@ def _seeds_are_intact():
         if not stored.issuperset(rows):
             return False
 
-    for model, _lookup, defaults in _seeded_rule_rows():
-        if not model.objects.filter(**defaults).exists():
+    for model, lookup, defaults in _seeded_rule_rows():
+        if not model.objects.filter(**lookup).filter(**defaults).exists():
             return False
 
     custom_field = CustomField.objects.filter(name="librenms_id", type="json").first()

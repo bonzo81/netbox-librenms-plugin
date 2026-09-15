@@ -39,6 +39,20 @@ def test_migration_0014_librenms_os_help_text_matches_model():
     assert alter_op.field.help_text == model_help, "0014 AlterField librenms_os help_text drifted from the model"
 
 
+def test_migration_0019_bridge_help_text_matches_model():
+    """Migration 0019 must keep the bridge field state equal to the model."""
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    add_op = next(
+        op
+        for op in mod.Migration.operations
+        if op.__class__.__name__ == "AddField" and op.model_name == "portstacklagpattern"
+    )
+    model_help = PortStackLagPattern._meta.get_field("bridge_name_pattern").help_text
+    assert add_op.field.help_text == model_help, "0019 bridge_name_pattern help_text drifted from the model"
+
+
 @pytest.mark.django_db
 def test_plugin_migrations_do_not_redeclare_squashed_core_ancestors():
     """A plugin migration must not repeat a squashed core dependency from its plugin parent."""

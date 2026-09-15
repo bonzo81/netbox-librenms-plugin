@@ -60,7 +60,16 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="portstacklagpattern",
             name="bridge_name_pattern",
-            field=models.CharField(blank=True, default="", max_length=200),
+            field=models.CharField(
+                blank=True,
+                default="",
+                help_text=(
+                    "Regular expression matching bridge interface names. "
+                    "A matching side of a port-stack pair is the bridge for the other side. "
+                    r"Example: ^(vmbr|br|bridge)\d+$"
+                ),
+                max_length=200,
+            ),
         ),
         migrations.RunPython(populate_bridge_pattern, clear_bridge_pattern),
     ]
