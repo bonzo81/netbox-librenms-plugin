@@ -1675,6 +1675,21 @@ class TestDeviceModuleTableView:
 
         assert mock_table.htmx_url == "/dcim/devices/1/librenms-sync/?tab=modules&server_key=prod-server"
 
+    def test_get_table_uses_the_active_render_server(self):
+        """The table and its refresh URL must use the server that supplied the rendered rows."""
+        view = self._make_view()
+        view._active_server_key = "secondary"
+        obj = MagicMock()
+        obj.virtual_chassis = None
+
+        with patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSModuleTable") as mock_table_cls:
+            mock_table = MagicMock()
+            mock_table_cls.return_value = mock_table
+            view.get_table([], obj)
+
+        assert mock_table_cls.call_args.kwargs["server_key"] == "secondary"
+        assert mock_table.htmx_url == "/dcim/devices/1/librenms-sync/?tab=modules&server_key=secondary"
+
 
 # ---------------------------------------------------------------------------
 # DeviceIPAddressTableView cached-snapshot handling (real DB + real cache)

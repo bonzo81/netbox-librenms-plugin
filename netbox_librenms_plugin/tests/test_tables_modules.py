@@ -552,6 +552,22 @@ class TestLibreNMSModuleTable:
             "test-snapshot-digest",
         )
 
+    def test_render_actions_without_snapshot_digest_skips_branch_button(self):
+        """The branch action must not render without a signed snapshot source."""
+        device = MagicMock()
+        device.pk = 2
+        table = self._make_table(device=device)
+        table.inventory_snapshot_digest = ""
+        record = {
+            "has_installable_children": True,
+            "ent_physical_index": 42,
+        }
+
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/branch-url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Install Branch" not in result
+
     def test_render_actions_both_buttons_rendered(self):
         """Both Install and Install Branch buttons render when both flags are set."""
         device = MagicMock()

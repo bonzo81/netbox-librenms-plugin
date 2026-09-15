@@ -717,11 +717,12 @@ class DeviceModuleTableView(BaseModuleTableView):
         """Return the module sync table."""
         user = self.request.user
         has_write_permission = self.has_write_permission()
+        server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
         table_class = VCModuleTable if hasattr(obj, "virtual_chassis") and obj.virtual_chassis else LibreNMSModuleTable
         table = table_class(
             data,
             device=obj,
-            server_key=self.librenms_api.server_key,
+            server_key=server_key,
             has_write_permission=has_write_permission,
             can_add_module=has_write_permission and user.has_perm("dcim.add_module"),
             can_change_module=has_write_permission and user.has_perm("dcim.change_module"),
@@ -739,6 +740,5 @@ class DeviceModuleTableView(BaseModuleTableView):
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
             ),
         )
-        server_key = self.librenms_api.server_key
         table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
         return table

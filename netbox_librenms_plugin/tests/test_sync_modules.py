@@ -16,6 +16,8 @@ import pytest
 
 from netbox_librenms_plugin.tests.view_test_helpers import (
     get as _get,
+    message_texts,
+    module_row_binding,
     post as _post,
     trusted_module_inventory_payload,
 )
@@ -3264,9 +3266,24 @@ class TestModuleMutationScopes:
         hidden.save()
         user = make_user_with_perms("module-interface-scope", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
+        inventory_item = {
+            "entPhysicalIndex": 77,
+            "_librenms_port_id": 42,
+            "_librenms_ifname": hidden.name,
+        }
         request = make_request(
             "post",
-            {"module_id": str(module.pk), "server_key": "default", "ent_index": "77"},
+            {
+                "module_id": str(module.pk),
+                "server_key": "default",
+                "ent_index": "77",
+                "inventory_binding": module_row_binding(
+                    device,
+                    "update_module_interface",
+                    inventory_item,
+                    action_target={"module_id": module.pk},
+                ),
+            },
             user=user,
         )
         view = UpdateModuleInterfaceView()
@@ -3275,22 +3292,18 @@ class TestModuleMutationScopes:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
-                    {
-                        "entPhysicalIndex": 77,
-                        "_librenms_port_id": 42,
-                        "_librenms_ifname": hidden.name,
-                    }
-                ]
-            },
+            trusted_module_inventory_payload(device, [inventory_item]),
             timeout=300,
         )
         try:
-            view.post(request, pk=device.pk)
+            response = view.post(request, pk=device.pk)
         finally:
             cache.delete(cache_key)
 
+        assert response.status_code in {200, 302}
+        reported_messages = message_texts(request)
+        assert any("matching interface is not available for port_id 42" in text for text in reported_messages)
+        assert "No cached inventory data" not in " ".join(reported_messages)
         hidden.refresh_from_db()
         assert hidden.module_id is None
 
