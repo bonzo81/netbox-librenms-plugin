@@ -80,6 +80,7 @@ Filter fields: `librenms_location`, `librenms_type`, `librenms_os`, `librenms_ho
 - `virtual_chassis.py` — `create_virtual_chassis_with_members()`, `_sync_module_bay_counter()`.
 
 ## Import Validation and Plans
+
 `import_validation_helpers.py` centralizes validation state mutation used by the role, placement, and rack update views:
 - `apply_role_to_validation()`, `apply_cluster_to_validation()`, `apply_host_to_validation()`, and `apply_rack_to_validation()` update validation state when a user changes an import selection.
 - `remove_validation_issue()` and `recalculate_validation_status()` maintain the issue list and overall status.
