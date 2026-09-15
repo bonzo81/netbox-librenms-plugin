@@ -941,6 +941,47 @@ class TestBulkImportConfirmViewIntegration:
         assert hidden.name.encode() not in response.content
         assert f'value="{hidden.pk}"'.encode() not in response.content
 
+    def test_device_confirmation_rejects_a_rack_outside_the_user_view_scope(self, settings, librenms_server):
+        """A forged hidden rack must not appear in the confirmation modal."""
+        from dcim.models import Rack
+
+        server_key = "confirm-integration-hidden-rack"
+        source = make_device("confirm-integration-hidden-rack-source")
+        visible = Rack.objects.create(name="Visible confirmation rack", site=source.site, status="active")
+        hidden = Rack.objects.create(name="Hidden confirmation rack", site=source.site, status="active")
+        librenms_server.device_info_response(
+            device_id=34,
+            hostname="confirm-integration-hidden-rack",
+            hardware=source.device_type.model,
+            os="test-device-os",
+            serial="CONFIRM-INTEGRATION-HIDDEN-RACK-SERIAL",
+            ip="198.18.0.34",
+            location=source.site.name,
+        )
+        librenms_server.vc_inventory_callable(34, [], {})
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-hidden-rack-user", [])
+        user = grant_view_permission(user, "view", Rack, constraints={"pk": visible.pk})
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["34"],
+                "rack_34": str(hidden.pk),
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"unavailable rack selection" in response.content
+        assert hidden.name.encode() not in response.content
+        assert f'value="{hidden.pk}"'.encode() not in response.content
+
     def test_device_row_shows_selected_role_and_rack(self, settings, librenms_server):
         """A device confirmation row shows its selected role and rack in their own fields."""
         from dcim.models import DeviceRole, Rack
@@ -971,6 +1012,7 @@ class TestBulkImportConfirmViewIntegration:
         view = self._make_view(settings, librenms_server, server_key)
         user = make_view_user("confirm-integration-device-selections-user", [])
         user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": role.pk})
+        user = grant_view_permission(user, "view", Rack, constraints={"pk": rack.pk})
         request = make_view_request(
             "post",
             {
@@ -2426,6 +2468,36 @@ class TestApplyImportIntentToValidation:
         assert validation["issues"] == []
         assert validation["can_import"] is True
         assert validation["is_ready"] is True
+
+    def test_device_rejects_a_rack_outside_the_user_view_scope(self):
+        """A forged rack selection must stay unavailable during row validation."""
+        from dcim.models import Rack
+
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
+
+        source = make_device("selection-hidden-rack-source")
+        visible = Rack.objects.create(name="Visible row validation rack", site=source.site, status="active")
+        hidden = Rack.objects.create(name="Hidden row validation rack", site=source.site, status="active")
+        user = make_view_user("rack-scoped-row-validation-user", [])
+        user = grant_view_permission(user, "view", Rack, constraints={"pk": visible.pk})
+        validation = {
+            "site": {"found": True},
+            "device_type": {"found": True},
+            "device_role": {"found": True, "role": source.role},
+            "rack": {"found": False, "rack": None},
+            "issues": [],
+        }
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.DEVICE,
+            rack_id=hidden.pk,
+        )
+
+        _apply_import_intent_to_validation(validation, intent, is_vm=False, user=user)
+
+        assert validation["rack"] == {"found": False, "rack": None}
+        assert hidden.name not in str(validation)
 
 
 @pytest.mark.django_db
@@ -3984,6 +4056,7 @@ class TestBulkImportDevicesMorePaths:
         rack = Rack.objects.create(name="Bulk More Rack", site=mapped_device.site, status="active")
         user = self._device_import_user("bulk-more-valid-mapping-user")
         user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": mapped_device.role_id})
+        user = grant_view_permission(user, "view", Rack, constraints={"pk": rack.pk})
 
         with run_librenms_server() as server:
             server.device_info_response(

@@ -571,6 +571,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 sync_options=sync_options,
                 manual_mappings=device_mappings if device_mappings else None,
                 libre_device=libre_device,
+                user=user,
             )
 
             if result["success"]:

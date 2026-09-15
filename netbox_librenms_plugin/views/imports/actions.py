@@ -65,7 +65,6 @@ from netbox_librenms_plugin.import_validation_helpers import (
     apply_host_to_validation,
     apply_rack_to_validation,
     apply_role_to_validation,
-    fetch_model_by_id,
     merge_candidate_pks,
     reset_cluster,
 )
@@ -1064,7 +1063,7 @@ def _apply_import_intent_to_validation(
 
         # Handle rack selection (device only, optional)
         if intent.rack_id:
-            rack = fetch_model_by_id(Rack, intent.rack_id)
+            rack = Rack.objects.restrict(user, "view").filter(pk=intent.rack_id).first()
             if rack:
                 apply_rack_to_validation(validation, rack)
 
@@ -1164,7 +1163,14 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             host_device = None
             placement_method = None
             if isinstance(target, DeviceTarget):
-                rack = fetch_model_by_id(Rack, target.rack_id) if target.rack_id else None
+                rack = (
+                    Rack.objects.restrict(request.user, "view").filter(pk=target.rack_id).first()
+                    if target.rack_id
+                    else None
+                )
+                if target.rack_id and rack is None:
+                    errors.append(f"Device ID {device_id} has an unavailable rack selection")
+                    continue
             else:
                 placement_method = (
                     "site"

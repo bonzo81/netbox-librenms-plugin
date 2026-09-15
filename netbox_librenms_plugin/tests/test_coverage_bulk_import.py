@@ -813,13 +813,16 @@ class TestBulkImportDevicesShared:
         assert len(result["failed"]) == 1
         job.logger.error.assert_called()
 
-    def test_manual_site_mapping_is_passed_to_device_import(self):
-        """Manual site mappings are passed to the matching device import."""
+    def test_manual_site_mapping_and_user_are_passed_to_device_import(self):
+        """Manual site mappings and the importing user reach the device import."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         captured_mappings = {}
+        captured_users = []
+        import_user = MagicMock()
 
-        def capture_import(device_id, server_key, validation, sync_options, manual_mappings, libre_device):
+        def capture_import(device_id, server_key, validation, sync_options, manual_mappings, libre_device, user):
             captured_mappings.update(manual_mappings or {})
+            captured_users.append(user)
             return _make_import_result()
 
         with (
@@ -838,13 +841,14 @@ class TestBulkImportDevicesShared:
 
             result = bulk_import_devices_shared(
                 device_ids=[1],
-                user=MagicMock(),
+                user=import_user,
                 libre_devices_cache=libre_cache,
                 manual_mappings_per_device={1: {"site_id": 42}},
             )
 
         assert result["success"]
         assert captured_mappings.get("site_id") == 42
+        assert captured_users == [import_user]
 
     def test_device_skipped_when_already_exists(self):
         """result.success=False, result.device is truthy → device skipped."""

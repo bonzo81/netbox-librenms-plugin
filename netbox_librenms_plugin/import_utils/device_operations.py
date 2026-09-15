@@ -1633,6 +1633,7 @@ def import_single_device(  # noqa: C901
     manual_mappings: dict = None,
     sync_options: dict = None,
     libre_device: dict = None,
+    user=None,
 ) -> dict:
     """
     Import a single LibreNMS device to NetBox.
@@ -1653,6 +1654,7 @@ def import_single_device(  # noqa: C901
             - sync_fields: bool (default True)
         libre_device: Pre-fetched LibreNMS device data (optional).
             If provided, skips API call to fetch device info.
+        user: User whose view scope authorizes explicit object selections.
 
     Returns:
         dict: Import result with structure:
@@ -1761,8 +1763,20 @@ def import_single_device(  # noqa: C901
 
             rack_id = manual_mappings.get("rack_id")
             if rack_id:
-                rack = Rack.objects.select_related("location", "site").filter(id=rack_id).first()
-                rack_explicitly_selected = rack is not None
+                rack = (
+                    Rack.objects.restrict(user, "view").select_related("location", "site").filter(id=rack_id).first()
+                    if user is not None
+                    else None
+                )
+                if rack is None:
+                    return {
+                        "success": False,
+                        "device": None,
+                        "message": "",
+                        "error": "Selected rack is unavailable",
+                        "synced": {},
+                    }
+                rack_explicitly_selected = True
 
         # Validate required fields
         if not site:
