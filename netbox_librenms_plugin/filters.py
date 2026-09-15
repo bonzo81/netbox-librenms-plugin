@@ -168,6 +168,7 @@ class PortStackLagPatternFilterSet(django_filters.FilterSet):
     q = django_filters.CharFilter(method="search")
     librenms_os = django_filters.CharFilter(lookup_expr="icontains")
     lag_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    bridge_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
     sap_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
     description = django_filters.CharFilter(lookup_expr="icontains")
 
@@ -176,6 +177,7 @@ class PortStackLagPatternFilterSet(django_filters.FilterSet):
         return queryset.filter(
             Q(librenms_os__icontains=value)
             | Q(lag_name_pattern__icontains=value)
+            | Q(bridge_name_pattern__icontains=value)
             | Q(sap_name_pattern__icontains=value)
             | Q(description__icontains=value)
         )
@@ -184,4 +186,4 @@ class PortStackLagPatternFilterSet(django_filters.FilterSet):
         """Meta options."""
 
         model = PortStackLagPattern
-        fields = ["librenms_os", "lag_name_pattern", "sap_name_pattern", "description"]
+        fields = ["librenms_os", "lag_name_pattern", "bridge_name_pattern", "sap_name_pattern", "description"]

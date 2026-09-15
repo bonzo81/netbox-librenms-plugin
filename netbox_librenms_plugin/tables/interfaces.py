@@ -30,7 +30,7 @@ from netbox_librenms_plugin.utils import (
 
 # (colour, mdi icon, full status text) per relationship sync status. Colour + icon read at a
 # glance; the text is the badge tooltip. Module-level so it isn't re-allocated on every
-# _render_relationship_column call (up to twice per table row — LAG + Parent).
+# _render_relationship_column call (up to three times per row).
 _RELATIONSHIP_STATUS_MAP = {
     "match": ("success", "mdi-check-circle", "Match"),
     "mismatch": ("warning", "mdi-alert-circle", "Mismatch"),
@@ -79,7 +79,7 @@ class LibreNMSInterfaceTable(tables.Table):
         # falls back to the "default" server entry; a None key would miss {"default": 42} values.
         self.server_key = server_key or "default"
         # Donor "migrated mode": when set, the bulk sync form is hidden and donors must
-        # not mutate relationship state. Suppress the per-row LAG/parent sync buttons too,
+        # not mutate relationship state. Suppress the per-row relationship sync buttons too,
         # otherwise librenms_sync.js could still POST them and sync a migrated donor.
         self.migrated_to_marker = False
         # Lazily-built {(librenms_type, librenms_speed): mapping} cache so render_type doesn't run
@@ -110,6 +110,8 @@ class LibreNMSInterfaceTable(tables.Table):
                 "data-lag-name": lambda record: str(record.get("librenms_lag_name") or ""),
                 "data-parent-port-id": lambda record: str(record.get("librenms_parent_port_id") or ""),
                 "data-parent-name": lambda record: str(record.get("librenms_parent_name") or ""),
+                "data-bridge-port-id": lambda record: str(record.get("librenms_bridge_port_id") or ""),
+                "data-bridge-name": lambda record: str(record.get("librenms_bridge_name") or ""),
             },
             **kwargs,
         )
@@ -153,7 +155,7 @@ class LibreNMSInterfaceTable(tables.Table):
         attrs={"td": {"data-col": "librenms_id"}},
     )
     parent = tables.Column(
-        verbose_name="Parent / LAG",
+        verbose_name="Relationships",
         orderable=False,
         empty_values=(),
         attrs={"td": {"data-col": "parent"}},
@@ -466,17 +468,16 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_parent(self, value, record):
         """
-        Render the combined Parent / LAG relationship column.
+        Render the combined relationship column.
 
-        Shows LAG membership (if any) and parent interface (if any) stacked vertically,
+        Show LAG, parent, and bridge relationships stacked vertically.
         each rendered as a single compact badge combining the relationship type, LibreNMS
         name, and status icon (see ``_render_relationship_column``). The sync buttons keep
-        their existing CSS classes (lag-sync-btn / parent-sync-btn) so the JS handler still
-        works without changes.
+        Each item keeps its relationship-specific CSS class for the shared JavaScript handler.
 
         Args:
             value: The cell value (unused; the row drives rendering).
-            record (dict): The table row, read for LAG/parent sync status and names.
+            record (dict): The table row with relationship status and name fields.
 
         Returns:
             SafeString: The stacked relationship markup, or empty when neither LAG nor
@@ -514,6 +515,21 @@ class LibreNMSInterfaceTable(tables.Table):
                     btn_class="parent-sync-btn",
                     data_related_key="data-parent-port-id",
                     target_resolvable=record.get("parent_target_resolvable", True),
+                )
+            )
+
+        bridge_status = record.get("bridge_sync_status")
+        if bridge_status is not None:
+            parts.append(
+                self._render_relationship_column(
+                    type_label="Bridge",
+                    lnms_name=record.get("librenms_bridge_name"),
+                    lnms_port_id=record.get("librenms_bridge_port_id"),
+                    sync_status=bridge_status,
+                    record=record,
+                    btn_class="bridge-sync-btn",
+                    data_related_key="data-bridge-port-id",
+                    target_resolvable=record.get("bridge_target_resolvable", True),
                 )
             )
 
@@ -595,7 +611,7 @@ class LibreNMSInterfaceTable(tables.Table):
         target_resolvable=True,
     ):
         """
-        Render one compact pill for a LAG or Parent relationship line.
+        Render one compact relationship pill.
 
         Renders a Tabler light (``-lt``) badge holding a status icon + the relationship
         ``type_label`` + the LibreNMS name, with the full status text in the badge
@@ -612,7 +628,7 @@ class LibreNMSInterfaceTable(tables.Table):
             sync_status: The relationship sync status (match/mismatch/missing_nb/
                 missing_lnms), or None to render nothing.
             record (dict): The table row, read for port/interface context.
-            btn_class (str): The sync-button CSS class (lag-sync-btn / parent-sync-btn).
+            btn_class (str): The sync-button CSS class.
             data_related_key (str): The data attribute carrying the related port_id.
             type_label (str): The short relationship label ("LAG" / "Parent").
 
@@ -650,7 +666,7 @@ class LibreNMSInterfaceTable(tables.Table):
         # set) and NetBox either lacks it (missing_nb) or holds a DIFFERENT one (mismatch) —
         # in both cases the row can be reconciled to the LibreNMS value from here. missing_lnms
         # is excluded by the lnms_port_id guard (nothing to sync to), and a migrated donor page
-        # suppresses the control entirely: the per-row .lag-sync-btn/.parent-sync-btn POST
+        # suppresses the control entirely: the per-row relationship buttons POST
         # directly via librenms_sync.js, so leaving it active would let a migrated donor mutate
         # parent/LAG state despite the bulk form being hidden.
         if (
@@ -671,12 +687,16 @@ class LibreNMSInterfaceTable(tables.Table):
                 # whole table render, so degrade this one cell the way target_resolvable does.
                 return format_html('<div class="text-nowrap lh-sm">{}</div>', badge)
             object_type = record.get("selected_object_type") or self.sync_object_type
-            route_name = "sync_interface_lag" if btn_class == "lag-sync-btn" else "sync_interface_parent"
+            route_name = {
+                "lag-sync-btn": "sync_interface_lag",
+                "parent-sync-btn": "sync_interface_parent",
+                "bridge-sync-btn": "sync_interface_bridge",
+            }[btn_class]
             sync_url = reverse(
                 f"plugins:netbox_librenms_plugin:{route_name}",
                 kwargs={"object_type": object_type, "object_id": object_id},
             )
-            # A mismatch click OVERWRITES the differing NetBox lag/parent with the LibreNMS
+            # A mismatch click overwrites the differing NetBox relationship with the LibreNMS
             # value, so spell that out in the tooltip rather than the generic "Sync".
             sync_title = (
                 f"Update {type_label or 'relationship'} to match LibreNMS"
@@ -866,7 +886,7 @@ class LibreNMSInterfaceTable(tables.Table):
             # switch must repaint it too — otherwise it keeps the previous member's
             # match/mismatch state. The column accessor is "port_id" (see the column def).
             "librenms_id": self.render_librenms_id(port_data.get("port_id"), port_data),
-            # Renders from the lag/parent enrichment keys the caller stamps onto
+            # Render from the relationship enrichment keys the caller stamps onto
             # port_data; absent enrichment it returns "" (safe empty cell).
             "parent": self.render_parent(None, port_data),
         }

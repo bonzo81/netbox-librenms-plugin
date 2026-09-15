@@ -470,10 +470,11 @@ class TestConversionHelpers:
     def test_normalize_relationship_maps_normalizes_and_guards(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps
 
-        # JSON-round-tripped string keys are normalized to int; both maps returned.
-        lag, sub = normalize_relationship_maps({"lag_members": {"10": 100}, "sub_interfaces": {"5": 7}})
+        # JSON-round-tripped string keys are normalized to int; all maps are returned.
+        lag, sub, bridge = normalize_relationship_maps({"lag_members": {"10": 100}, "sub_interfaces": {"5": 7}})
         assert lag == {10: 100}
         assert sub == {5: 7}
+        assert bridge == {}
 
     def test_normalize_relationship_maps_drops_unresolvable_keys(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps
@@ -483,10 +484,11 @@ class TestConversionHelpers:
             "sub_interfaces": {"0": 7, False: 8, "5": 9},
         }
 
-        lag, sub = normalize_relationship_maps(relationships)
+        lag, sub, bridge = normalize_relationship_maps(relationships)
 
         assert lag == {10: 103}
         assert sub == {5: 9}
+        assert bridge == {}
 
     def test_normalize_relationship_maps_normalizes_values_and_drops_invalid_edges(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps
@@ -496,7 +498,7 @@ class TestConversionHelpers:
             "sub_interfaces": {"20": "21", "22": None, "23": False},
         }
 
-        assert normalize_relationship_maps(relationships) == ({10: 100}, {20: 21})
+        assert normalize_relationship_maps(relationships) == ({10: 100}, {20: 21}, {})
 
     def test_normalize_relationship_maps_drops_conflicting_canonical_sources(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps
@@ -504,17 +506,17 @@ class TestConversionHelpers:
         first = {"lag_members": {"10": 20, "010": 30}, "sub_interfaces": {}}
         reversed_order = {"lag_members": {"010": 30, "10": 20}, "sub_interfaces": {}}
 
-        assert normalize_relationship_maps(first) == ({}, {})
-        assert normalize_relationship_maps(reversed_order) == ({}, {})
+        assert normalize_relationship_maps(first) == ({}, {}, {})
+        assert normalize_relationship_maps(reversed_order) == ({}, {}, {})
 
     def test_normalize_relationship_maps_coerces_corrupt_shapes_to_empty(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps
 
         # A non-dict relationships (corrupt / partial-write cache) must not raise.
-        assert normalize_relationship_maps(["garbage"]) == ({}, {})
-        assert normalize_relationship_maps(None) == ({}, {})
+        assert normalize_relationship_maps(["garbage"]) == ({}, {}, {})
+        assert normalize_relationship_maps(None) == ({}, {}, {})
         # Present-but-non-dict nested maps collapse to {} instead of AttributeError on .items().
-        assert normalize_relationship_maps({"lag_members": None, "sub_interfaces": [1, 2]}) == ({}, {})
+        assert normalize_relationship_maps({"lag_members": None, "sub_interfaces": [1, 2]}) == ({}, {}, {})
 
 
 # =============================================================================

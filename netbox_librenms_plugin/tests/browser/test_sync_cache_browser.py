@@ -51,6 +51,10 @@ def _selection_row_markup(row):
         attrs.append(f'data-member-of-lag="{esc(row["lag"])}"')
     if row.get("lag_name"):
         attrs.append(f'data-lag-name="{esc(row["lag_name"])}"')
+    if row.get("bridge"):
+        attrs.append(f'data-bridge-port-id="{esc(row["bridge"])}"')
+    if row.get("bridge_name"):
+        attrs.append(f'data-bridge-name="{esc(row["bridge_name"])}"')
     companion = (
         f'<select name="device_selection_{esc(row["port_id"])}"><option value="7">m7</option></select>'
         if row.get("companion")
@@ -136,6 +140,17 @@ class TestRequirementCascade:
         page.check("#cb-4304")
 
         assert _checked_values(page) == {"4304", "4303"}
+
+    def test_bridge_member_pulls_in_its_bridge(self, page):
+        rows = [
+            {"port_id": "100", "name": "vmbr0"},
+            {"port_id": "103", "name": "nic0", "bridge": "100"},
+        ]
+        _load_selection_page(page, rows)
+
+        page.check("#cb-103")
+
+        assert _checked_values(page) == {"100", "103"}
 
     def test_clearing_the_last_dependent_releases_the_whole_chain(self, page):
         _load_selection_page(page, JUNOS_ROWS)
@@ -233,6 +248,16 @@ class TestRequirementCascade:
         notice = page.locator("#parent-cross-page-notices").inner_text()
         assert "LAG interface" in notice
         assert "ae2" in notice
+
+    def test_a_bridge_on_another_page_is_named_as_a_bridge(self, page):
+        rows = [{"port_id": "103", "name": "nic0", "bridge": "100", "bridge_name": "vmbr0"}]
+        _load_selection_page(page, rows)
+
+        page.check("#cb-103")
+
+        notice = page.locator("#parent-cross-page-notices").inner_text()
+        assert "Bridge interface" in notice
+        assert "vmbr0" in notice
 
     def test_turning_the_toggle_back_on_re_derives_the_chain(self, page):
         _load_selection_page(page, JUNOS_ROWS)

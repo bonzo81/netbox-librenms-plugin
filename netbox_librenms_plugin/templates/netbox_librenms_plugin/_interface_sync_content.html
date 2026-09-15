@@ -17,7 +17,7 @@
 {% if interface_sync.relationship_data_incomplete %}
 <div class="alert alert-warning d-flex align-items-center noprint" role="alert">
     <i class="mdi mdi-alert me-2"></i>
-    <div>LAG / sub-interface relationship data could not be fetched from LibreNMS on the last refresh, so the Parent / LAG column may be incomplete. Refresh again to retry.</div>
+    <div>Interface relationship data could not be fetched from LibreNMS on the last refresh, so the Relationships column may be incomplete. Refresh again to retry.</div>
 </div>
 {% endif %}
 
@@ -69,12 +69,12 @@
                 </button>
                 <div class="dropdown-menu p-3 interface-sync-options-menu">
                     <div class="form-check form-switch mb-2"
-                        title="When enabled, checking a LAG/portchannel row also checks all its member interfaces, and checking a sub-interface also selects its parent interface">
+                        title="Select interface rows that are required by LAG, parent, or bridge relationships">
                         <input class="form-check-input interface-sync-option" type="checkbox"
                             id="autoSelectLagMembers" name="auto_select_lag_members" value="1"
                             data-default-checked="true" checked>
                         <label class="form-check-label small" for="autoSelectLagMembers">
-                            Auto-select LAG members &amp; parents
+                            Auto-select related interfaces
                         </label>
                     </div>
                     <hr class="my-2">

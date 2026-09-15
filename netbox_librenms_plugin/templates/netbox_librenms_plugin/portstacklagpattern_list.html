@@ -7,13 +7,10 @@
 
 {% block content %}
     <div class="alert alert-info">
-        <h4>Port Stack LAG Patterns</h4>
-        <p>Define regular expression patterns to identify LAG (Link Aggregation Group) aggregate
-           interfaces by operating system when the interface type is not <code>ieee8023adLag</code>.
-           These patterns are used as a fallback during interface synchronization to correctly
-           identify parent-child relationships in port stacks.</p>
-        <p>Example: Cisco IOS port-channels have <code>ifType='propVirtual'</code> and need
-           name-based identification via pattern <code>^Po\d+$</code>.</p>
+        <h4>Port Stack Patterns</h4>
+        <p>Define operating-system-specific patterns for LAG aggregates, bridge interfaces,
+           and service access points. Interface synchronization uses these patterns to classify
+           LibreNMS port-stack relationships.</p>
     </div>
     {{ block.super }}
 {% endblock %}

@@ -28,6 +28,8 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_view,
     message_texts,
     missing_pk,
+)
+from netbox_librenms_plugin.tests.view_test_helpers import (
     post as _post,
 )
 
@@ -88,24 +90,27 @@ def _cache_relationship(view, obj, relation_field, source_id, related_id, source
 
 class TestSyncInterfacesViewPermissions:
     def test_device_type_returns_interface_perms(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
         from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
         perms = view.get_required_permissions_for_object_type("device")
         assert ("change", Interface) in perms
 
     def test_vm_type_returns_vminterface_perms(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
         from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
         perms = view.get_required_permissions_for_object_type("virtualmachine")
         assert ("change", VMInterface) in perms
 
     def test_invalid_type_raises_http404(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
         from django.http import Http404
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
         with pytest.raises(Http404):
@@ -150,9 +155,10 @@ class TestSyncInterfaceParentViewPermissions:
         assert child.parent_id == parent.pk
 
     def test_invalid_type_raises_http404(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
-        from django.http import Http404
         import pytest
+        from django.http import Http404
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         view = SyncInterfaceParentView()
         with pytest.raises(Http404):
@@ -162,6 +168,7 @@ class TestSyncInterfaceParentViewPermissions:
 class TestSyncInterfaceLagViewPermissions:
     def test_vm_post_is_rejected_before_any_lookup(self):
         from django.http import Http404
+
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         with pytest.raises(Http404):
@@ -191,7 +198,7 @@ def _js_block(source, start_anchor, end_anchor=None):
 def test_relationship_handler_reuses_shared_csrf_helper():
     import re
 
-    handler = _js_block(_js_source(), "// Event delegation for LAG and parent interface sync buttons.")
+    handler = _js_block(_js_source(), "// Event delegation for interface relationship sync buttons.")
     # Regexes tolerate spacing/quote reformatting; the tokens themselves are the contract.
     assert re.search(r"const\s+csrf\s*=\s*getCsrfToken\(\)", handler), "handler must use the shared getCsrfToken()"
     assert not re.search(r"querySelector\(\s*['\"]\[name=csrfmiddlewaretoken\]", handler), (
@@ -360,8 +367,9 @@ class TestSyncInterfacesViewGetObject:
         assert result is mock_vm
 
     def test_invalid_type_raises_http404(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
         from django.http import Http404
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
         with pytest.raises(Http404):
@@ -1743,9 +1751,9 @@ class TestInterfaceContextVirtualChassisOwner:
         assert rendered_row["selected_object_id"] == page_device.pk
 
     def test_remote_vc_row_uses_its_owner_rack_vlan_group(self):
-        from django.core.cache import cache
-        from django.contrib.contenttypes.models import ContentType
         from dcim.models import Rack
+        from django.contrib.contenttypes.models import ContentType
+        from django.core.cache import cache
         from ipam.models import VLAN, VLANGroup
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -1825,9 +1833,9 @@ class TestInterfaceContextVirtualChassisOwner:
     def test_remote_vc_target_sync_uses_its_rack_vlan_lookup(self):
         from types import SimpleNamespace
 
+        from dcim.models import Device, Interface, Rack
         from django.contrib.contenttypes.models import ContentType
         from django.core.cache import cache
-        from dcim.models import Device, Interface, Rack
         from ipam.models import VLAN, VLANGroup
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -2009,7 +2017,7 @@ class TestSyncInterfacesViewPost:
         try:
             with patch.object(
                 SyncInterfacesView,
-                "_sync_lag_and_parent_relationships",
+                "_sync_interface_relationships",
                 side_effect=IntegrityError("deferred FK violated at COMMIT"),
             ):
                 response = _post(view, request, object_type="device", object_id=device.pk)
@@ -2068,8 +2076,8 @@ class TestSyncInterfacesViewPost:
 
     def test_auto_selected_owner_materializes_only_port_id_candidates(self):
         """One inferred row must not hydrate every Interface in a large chassis."""
-        from django.db.models.signals import post_init
         from dcim.models import Interface
+        from django.db.models.signals import post_init
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -2451,12 +2459,12 @@ class TestSyncInterfacesViewPost:
         class QueryCheckedSyncInterfacesView(SyncInterfacesView):
             target_lookup_queries = None
 
-            def _sync_lag_and_parent_relationships(self, obj, *args, **kwargs):
+            def _sync_interface_relationships(self, obj, *args, **kwargs):
                 with CaptureQueriesContext(connection) as captured:
                     for port_id in self._selected_port_ids:
                         self._resolve_row_target_device(obj, port_id=port_id)
                 self.target_lookup_queries = len(captured)
-                return super()._sync_lag_and_parent_relationships(obj, *args, **kwargs)
+                return super()._sync_interface_relationships(obj, *args, **kwargs)
 
         view = QueryCheckedSyncInterfacesView()
         view._librenms_api = SimpleNamespace(server_key="default")
@@ -3973,6 +3981,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
     def test_port_id_calls_set_librenms_device_id(self):
         from dcim.models import Interface
+
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
         view = self._make_view()
@@ -3994,6 +4003,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
     def test_port_id_conflict_does_not_overwrite(self):
         from dcim.models import Interface
+
         from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 
         view = self._make_view()
@@ -4090,7 +4100,7 @@ class TestSyncInterfacesViewSyncInterfaceVlans:
 
 
 # ===========================================================================
-# SyncInterfacesView._sync_lag_and_parent_relationships
+# SyncInterfacesView._sync_interface_relationships
 # ===========================================================================
 
 
@@ -4126,6 +4136,7 @@ class TestSyncLagAndParentRelationships:
     @staticmethod
     def _vm_iface(vm, name, port_id):
         from virtualization.models import VMInterface
+
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
         iface = VMInterface.objects.create(virtual_machine=vm, name=name)
@@ -4138,7 +4149,9 @@ class TestSyncLagAndParentRelationships:
         VMInterface name limit. Interface and VMInterface both allow 64 in NetBox 4.7, so the
         gate reading the wrong model is only observable once the two differ."""
         from unittest.mock import patch
+
         from virtualization.models import VMInterface
+
         from netbox_librenms_plugin.tests.conftest import make_vm
 
         vm = make_vm("relgate-vm")
@@ -4152,10 +4165,10 @@ class TestSyncLagAndParentRelationships:
         view = self._make_view(selected_port_ids={11})
 
         if name_limit is None:
-            view._sync_lag_and_parent_relationships(vm, ports_data, relationships, "default")
+            view._sync_interface_relationships(vm, ports_data, relationships, "default")
         else:
             with patch.object(VMInterface._meta.get_field("name"), "max_length", name_limit):
-                view._sync_lag_and_parent_relationships(vm, ports_data, relationships, "default")
+                view._sync_interface_relationships(vm, ports_data, relationships, "default")
 
         child.refresh_from_db()
         return child, parent
@@ -4187,7 +4200,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifDescr", selected_port_ids={10})
-        view._sync_lag_and_parent_relationships(device, ports_data, relationships, "default")
+        view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         m1.refresh_from_db()
         m2.refresh_from_db()
@@ -4219,7 +4232,7 @@ class TestSyncLagAndParentRelationships:
             return execute(sql, params, many, context)
 
         with connection.execute_wrapper(capture_parameters):
-            view._sync_lag_and_parent_relationships(device, ports_data, relationships, "default")
+            view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         assert max(parameter_counts) < 2_000
         assert unrelated.pk not in locked_interface_parameters
@@ -4237,7 +4250,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"11"})
-        view._sync_lag_and_parent_relationships(device, ports_data, relationships, "default")
+        view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         member.refresh_from_db()
         assert member.lag_id == agg.pk
@@ -4254,7 +4267,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {12: 101}, "sub_interfaces": {}}
 
         view = self._make_view(selected_port_ids={"12"})
-        view._sync_lag_and_parent_relationships(device, ports_data, relationships, "default")
+        view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         member.refresh_from_db()
         assert member.lag_id == agg.pk
@@ -4279,7 +4292,7 @@ class TestSyncLagAndParentRelationships:
 
         view = self._make_view(selected_port_ids={"21"})
         view.request = make_request("post", {}, user=user)
-        view._sync_lag_and_parent_relationships(device, ports_data, relationships, "default")
+        view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         hidden_member.refresh_from_db()
         hidden_agg.refresh_from_db()
@@ -4294,7 +4307,7 @@ class TestSyncLagAndParentRelationships:
 
         view = self._make_view(name_field="ifName", selected_port_ids={"11"})
         # Must NOT raise AttributeError on the non-dict relationships.
-        view._sync_lag_and_parent_relationships(device, ports_data, ["garbage"], "default")
+        view._sync_interface_relationships(device, ports_data, ["garbage"], "default")
 
         member.refresh_from_db()
         assert member.lag_id is None  # nothing persisted from the corrupt map
@@ -4310,7 +4323,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {11: 11}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"11"})
-        view._sync_lag_and_parent_relationships(device, ports_data, relationships, "default")
+        view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         member.refresh_from_db()
         assert member.lag_id is None  # invalid self-LAG was not persisted
@@ -4332,7 +4345,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"10", "11"})
-        view._sync_lag_and_parent_relationships(device, ports_data, relationships, "default")
+        view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         member2.refresh_from_db()
         agg.refresh_from_db()
@@ -4518,7 +4531,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {"999": 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={999})
-        view._sync_lag_and_parent_relationships(device, ports_data, relationships, "default")
+        view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         oob_iface.refresh_from_db()
         assert oob_iface.lag_id is None  # OOB row skipped → no link persisted on the controller iface
@@ -4727,7 +4740,7 @@ class TestBulkRelationshipRobustness:
         view = object.__new__(SyncInterfacesView)
         # Mirrors the hardened relationship-map reader. Without the guard this raises
         # AttributeError ('list' object has no attribute 'items').
-        view._sync_lag_and_parent_relationships(device, [], {"lag_members": [1, 2], "sub_interfaces": ["x"]}, "default")
+        view._sync_interface_relationships(device, [], {"lag_members": [1, 2], "sub_interfaces": ["x"]}, "default")
 
     def test_bulk_lag_persist_does_not_clobber_concurrent_edits(self, db):
         """The bulk LAG persist writes only the changed FK/type columns, so a concurrent edit to other fields of the stale in-memory objects isn't lost (no full-row overwrite)."""
@@ -4911,8 +4924,8 @@ class TestSyncInterfaceLagViewRealDB:
         assert iface.lag_id is None
 
     def test_cross_member_aggregate_is_linked_within_virtual_chassis(self):
-        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         member1 = make_device("vc-lag-m1")

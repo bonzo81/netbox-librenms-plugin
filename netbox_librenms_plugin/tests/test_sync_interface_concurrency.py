@@ -1,9 +1,8 @@
 """Concurrency coverage for interface target validation."""
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-
-import os
 
 import pytest
 from django.apps import apps
@@ -434,7 +433,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution():
     """A second VM sync must not resolve the same unbound natural-key row concurrently."""
     from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection
-    from virtualization.models import VMInterface, VirtualMachine
+    from virtualization.models import VirtualMachine, VMInterface
 
     from netbox_librenms_plugin.tests.conftest import make_vm
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
@@ -823,7 +822,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges():
             view = make_view(SyncInterfacesView, request)
             view.interface_name_field = "ifName"
             view._selected_port_ids = {10}
-            view._sync_lag_and_parent_relationships(
+            view._sync_interface_relationships(
                 thread_device,
                 ports,
                 {"lag_members": {}, "sub_interfaces": {20: 30}},
@@ -881,7 +880,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
             view._selected_port_ids = {10}
             view._auto_selected_port_ids = set()
             view._auto_selected_target_ids = {}
-            view._sync_lag_and_parent_relationships(
+            view._sync_interface_relationships(
                 thread_device,
                 ports,
                 {"lag_members": {}, "sub_interfaces": {10: 20}},
