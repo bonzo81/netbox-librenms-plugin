@@ -4389,10 +4389,16 @@ class TestSyncLagAndParentRelationships:
         _vc, (member1, member2) = make_virtual_chassis_members("relationship-vc-clean-bug")
         child = make_interface(member2, "Ethernet4.100", iface_type="virtual")
         parent = make_interface(member1, "Ethernet4")
+        original_clean = Interface.clean
+
+        def netbox_44_clean(interface):
+            if interface.parent_id is not None and interface.parent.device_id != interface.device_id:
+                raise self._CORE_VC_BUG
+            return original_clean(interface)
 
         with (
             patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)),
-            patch.object(Interface, "clean", side_effect=self._CORE_VC_BUG),
+            patch.object(Interface, "clean", netbox_44_clean),
         ):
             _apply_interface_relationship(child, "parent", parent)
 

@@ -1562,20 +1562,21 @@ def _promote_parent_child(child, *, with_restore):
     return _persist
 
 
-def _validate_relationship(source_iface, relation_field, related_iface):
+def _validate_relationship(source_iface, relation_field):
     """
     Run NetBox's model validation for the new relationship FK.
 
     NetBox 4.4.x reads ``self.parent.virtual_chassis`` when the parent sits on another device.
-    ``Interface`` has no such attribute (4.6 reads ``self.device.virtual_chassis``), so the
-    validation NetBox means to run raises AttributeError instead. Tolerate it only for the edge
-    that comparison exists to allow, two interfaces on members of one virtual chassis, and only
-    when the failure really is that attribute.
+    ``Interface`` has no such attribute (4.4.1 fixed the dereference), so the validation NetBox
+    means to run raises AttributeError instead. Work around it only when the
+    source has that exact cross-member parent state and the failure really is that attribute.
+    The failing parent check also runs when this call validates a different relationship, such
+    as adding the same sub-interface to a bridge. After proving the parent is valid, rerun
+    validation without it so NetBox still checks the relationship being written.
 
     Args:
         source_iface: The interface whose FK was set.
-        relation_field: The FK attribute that changed (``"lag"`` | ``"parent"``).
-        related_iface: The interface the FK now points at.
+        relation_field: The FK attribute that changed (``"lag"`` | ``"parent"`` | ``"bridge"``).
 
     Raises:
         ValidationError: when NetBox rejects the relationship.
@@ -1584,23 +1585,32 @@ def _validate_relationship(source_iface, relation_field, related_iface):
     try:
         source_iface.clean()
     except AttributeError as exc:
-        source_chassis = getattr(getattr(source_iface, "device", None), "virtual_chassis_id", None)
-        related_chassis = getattr(getattr(related_iface, "device", None), "virtual_chassis_id", None)
+        source_device = getattr(source_iface, "device", None)
+        parent_iface = getattr(source_iface, "parent", None)
+        parent_device = getattr(parent_iface, "device", None)
+        source_chassis = getattr(source_device, "virtual_chassis_id", None)
+        parent_chassis = getattr(parent_device, "virtual_chassis_id", None)
         if not (
-            relation_field == "parent"
             # exc.name is the attribute the failed access asked for (Python 3.10+), so this
             # matches the one dereference rather than any message mentioning it.
-            and getattr(exc, "name", None) == "virtual_chassis"
+            getattr(exc, "name", None) == "virtual_chassis"
+            and getattr(source_iface, "device_id", None) != getattr(parent_iface, "device_id", None)
             and source_chassis is not None
-            and source_chassis == related_chassis
+            and source_chassis == parent_chassis
             and netbox_clean_reads_parent_virtual_chassis()
         ):
             raise
+        source_iface.parent_id = None
+        try:
+            source_iface.clean()
+        finally:
+            source_iface.parent = parent_iface
         logger.debug(
-            "Interface %s: this NetBox cannot validate a parent on another chassis member; "
-            "both interfaces belong to virtual chassis %s, so the edge is accepted.",
+            "Interface %s: this NetBox cannot validate its parent on another chassis member; "
+            "both interfaces belong to virtual chassis %s, so the %s edge is accepted.",
             source_iface.name,
             source_chassis,
+            relation_field,
         )
 
 
@@ -1659,7 +1669,7 @@ def _apply_interface_relationship(
         # NetBox's model clean() contains the cross-owner/type/self-link rules that matter here.
         # Running full_clean() would revalidate every unchanged FK and uniqueness constraint,
         # adding several SELECTs per edge while all relationship rows remain locked.
-        _validate_relationship(source_iface, relation_field, related_iface)
+        _validate_relationship(source_iface, relation_field)
         if persist_related:
             persist_related()
         if persist_source:

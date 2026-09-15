@@ -412,6 +412,155 @@ def test_inline_bridge_sync_sets_the_bridge_relationship():
     assert member.bridge_id == bridge.pk
 
 
+def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch):
+    """Keep a valid cross-member parent while NetBox 4.4 validates a bridge edge."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from dcim.models import Interface
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import utils
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
+
+    _virtual_chassis, (parent_device, child_device) = make_virtual_chassis_members("bridge-cross-member-parent")
+    parent = make_interface(parent_device, "bond0", iface_type="lag")
+    child = make_interface(child_device, "bond0.110", iface_type="virtual")
+    child.parent = parent
+    child.save(update_fields=["parent"])
+    bridge = make_interface(child_device, "vmbr0", iface_type="virtual")
+    for interface, port_id in ((parent, 101), (child, 102), (bridge, 100)):
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save()
+
+    view = SyncInterfaceBridgeView()
+    view._librenms_api = SimpleNamespace(server_key="default")
+    cache.set(
+        view.get_cache_key(parent_device, "ports", "default"),
+        {
+            "ports": [
+                {"port_id": 101, "ifName": parent.name},
+                {"port_id": 102, "ifName": child.name},
+                {"port_id": 100, "ifName": bridge.name},
+            ],
+            "port_stack_relationships": {
+                "lag_members": {},
+                "sub_interfaces": {102: 101},
+                "bridge_members": {102: 100},
+            },
+        },
+    )
+
+    original_clean = Interface.clean
+
+    def netbox_44_clean(interface):
+        if (
+            interface.pk == child.pk
+            and interface.parent_id is not None
+            and interface.parent.device_id != interface.device_id
+        ):
+            raise AttributeError(
+                "'Interface' object has no attribute 'virtual_chassis'",
+                name="virtual_chassis",
+            )
+        return original_clean(interface)
+
+    monkeypatch.setattr(Interface, "clean", netbox_44_clean)
+
+    with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)):
+        response = post(
+            view,
+            make_request(
+                "post",
+                {"port_id": "102", "bridge_port_id": "100", "interface_name_field": "ifName"},
+            ),
+            object_type="device",
+            object_id=child_device.pk,
+        )
+
+    assert response.status_code == 200, response.content
+    child.refresh_from_db()
+    assert child.parent_id == parent.pk
+    assert child.bridge_id == bridge.pk
+
+
+def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monkeypatch):
+    """Run the remaining validation after bypassing NetBox 4.4's parent defect."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from dcim.models import Interface
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import utils
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+    _virtual_chassis, (parent_device, child_device) = make_virtual_chassis_members("lag-cross-member-parented-member")
+    parent = make_interface(parent_device, "Ethernet1")
+    child = make_interface(child_device, "Ethernet1.110", iface_type="virtual")
+    child.parent = parent
+    child.save(update_fields=["parent"])
+    aggregate = make_interface(child_device, "bond0", iface_type="lag")
+    for interface, port_id in ((parent, 101), (child, 102), (aggregate, 100)):
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save()
+
+    view = SyncInterfaceLagView()
+    view._librenms_api = SimpleNamespace(server_key="default")
+    cache.set(
+        view.get_cache_key(parent_device, "ports", "default"),
+        {
+            "ports": [
+                {"port_id": 101, "ifName": parent.name},
+                {"port_id": 102, "ifName": child.name},
+                {"port_id": 100, "ifName": aggregate.name},
+            ],
+            "port_stack_relationships": {
+                "lag_members": {102: 100},
+                "sub_interfaces": {102: 101},
+                "bridge_members": {},
+            },
+        },
+    )
+
+    original_clean = Interface.clean
+
+    def netbox_44_clean(interface):
+        if (
+            interface.pk == child.pk
+            and interface.parent_id is not None
+            and interface.parent.device_id != interface.device_id
+        ):
+            raise AttributeError(
+                "'Interface' object has no attribute 'virtual_chassis'",
+                name="virtual_chassis",
+            )
+        return original_clean(interface)
+
+    monkeypatch.setattr(Interface, "clean", netbox_44_clean)
+
+    with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)):
+        response = post(
+            view,
+            make_request(
+                "post",
+                {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
+            ),
+            object_type="device",
+            object_id=child_device.pk,
+        )
+
+    assert response.status_code == 409, response.content
+    assert b"NetBox rejected the LAG relationship" in response.content
+    child.refresh_from_db()
+    assert child.parent_id == parent.pk
+    assert child.lag_id is None
+
+
 def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface():
     """Keep bridge membership independent from the child interface's parent edge."""
     from netbox_librenms_plugin.utils import set_librenms_device_id
