@@ -17,10 +17,8 @@ import pytest
 
 def _make_view():
     from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
     view = object.__new__(BaseCableTableView)
-    view._librenms_api = LibreNMSAPI(server_key="default")
     from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
     view.setup(make_request("get"))
