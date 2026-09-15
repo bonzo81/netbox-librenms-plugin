@@ -45,9 +45,9 @@ class Migration(migrations.Migration):
         # Generated against the supported NetBox 4.2 floor. SerialSensorTypePattern only
         # references extras.Tag and extras.TaggedItem, which are available on that floor.
         ("extras", "0122_charfield_null_choices"),
-        # Chain after the serial trim index, which itself chains after the include-rule
-        # migration. Without this the app graph has two leaves and Django refuses to migrate.
-        ("netbox_librenms_plugin", "0018_device_serial_trim_index"),
+        # Chain after the bridge pattern added by the preceding stacked change. This keeps
+        # the app graph linear when both changes are installed together.
+        ("netbox_librenms_plugin", "0019_portstacklagpattern_bridge_name_pattern"),
     ]
 
     operations = [
