@@ -331,7 +331,7 @@
         if (!savePrefUrl) {
             return;
         }
-        fetch(savePrefUrl, {
+        return fetch(savePrefUrl, {
             method: 'POST',
             credentials: 'same-origin',
             headers: {
@@ -339,6 +339,10 @@
                 'X-CSRFToken': csrfToken
             },
             body: JSON.stringify({ key: key, value: value })
+        }).then(function (response) {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
         }).catch(function (err) {
             console.debug('savePref: fetch failed:', err.message);
         });

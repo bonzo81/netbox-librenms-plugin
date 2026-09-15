@@ -12,6 +12,7 @@ import pytest
 PLUGIN_ROOT = Path(__file__).parents[2]
 ASSET_ROOT = PLUGIN_ROOT / "static" / "netbox_librenms_plugin"
 IMPORT_NAMING = PLUGIN_ROOT / "import_utils" / "naming.py"
+SAVE_PREF_URL = "https://plugin.example.com/save-pref"
 
 
 def _load_import_name_variants():
@@ -134,3 +135,25 @@ def test_import_name_preview_matches_backend_resolution(page, sysname, expected_
 
     assert page.locator("[data-import-name]").text_content() == expected_name
     assert page.locator("[data-import-name-source]").text_content() == expected_source
+
+
+def test_failed_import_preference_save_reports_the_http_status(page):
+    """A rejected preference write must enter the fetch error path."""
+    page.route(SAVE_PREF_URL, lambda route: route.fulfill(status=503, body="unavailable"))
+    page.set_content(
+        f"""
+        <input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">
+        <div data-save-pref-url="{SAVE_PREF_URL}"></div>
+        <input id="use-sysname-toggle-cb" type="checkbox" checked>
+        <input id="strip-domain-toggle-cb" type="checkbox">
+        <span id="import-name-summary"></span>
+        <span id="import-options-count"></span>
+        <div id="device-import-results"></div>
+        """
+    )
+    page.add_script_tag(path=ASSET_ROOT / "js" / "librenms_import.js")
+
+    with page.expect_console_message(
+        lambda message: message.type == "debug" and "savePref: fetch failed: HTTP 503" in message.text
+    ):
+        page.uncheck("#use-sysname-toggle-cb")
