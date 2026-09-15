@@ -186,7 +186,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert 'id="interface-sync-options-count"' in html
         assert 'id="reset-interface-sync-options"' in html
         assert 'data-bs-auto-close="outside"' in html
-        assert html.index("Sync Selected Interfaces") < html.index("Sync options") < html.index("info")
+        assert html.index("Sync Selected Interfaces") < html.index("Sync options") < html.index("mdi-help-circle")
 
     def test_normal_mode_keeps_choice_a_defaults_on_the_real_form_controls(self):
         html = self._render(migrated=None)
