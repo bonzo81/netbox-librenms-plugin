@@ -563,6 +563,7 @@ class TestDeviceImportTable:
             assert "server_key=server+with+space" in html
 
     def test_validation_url_preserves_vm_cluster_intent_and_request_scope(self):
+        """Preserve VM cluster placement and server scope in validation URLs."""
         cluster = make_cluster("Validation URL cluster")
         table = self._table(server_key="secondary server")
 
@@ -590,6 +591,7 @@ class TestDeviceImportTable:
         }
 
     def test_validation_url_preserves_device_role_intent(self):
+        """Preserve device role and rack selections in validation URLs."""
         from dcim.models import Rack
 
         source = make_device("validation-url-device")
@@ -609,6 +611,7 @@ class TestDeviceImportTable:
         }
 
     def test_validation_url_preserves_vm_host_intent(self):
+        """Preserve VM host placement in validation URLs."""
         host = make_device("Validation URL host")
         url = self._table()._build_validation_details_url(
             11,
@@ -625,6 +628,7 @@ class TestDeviceImportTable:
         }
 
     def test_validation_details_button_does_not_duplicate_url_intent_fields(self):
+        """Keep validation intent in the details URL without duplicate controls."""
         cluster = make_cluster("Validation details button cluster")
         html = str(
             self._table().render_actions(
