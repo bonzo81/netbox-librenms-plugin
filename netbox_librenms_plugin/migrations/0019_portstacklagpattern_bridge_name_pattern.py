@@ -35,6 +35,7 @@ def clear_bridge_pattern(apps, schema_editor):
     """Remove only the default bridge rule while preserving operator changes."""
     alias = schema_editor.connection.alias
     PortStackLagPattern = apps.get_model("netbox_librenms_plugin", "PortStackLagPattern")
+    TaggedItem = apps.get_model("extras", "TaggedItem")
     rows = PortStackLagPattern.objects.using(alias)
     existing = next((row for row in rows.all() if _normalized(row.librenms_os) == BRIDGE_OS), None)
     if existing is None or existing.bridge_name_pattern != BRIDGE_PATTERN:
@@ -44,9 +45,16 @@ def clear_bridge_pattern(apps, schema_editor):
         and existing.lag_name_pattern == LAG_PATTERN
         and not existing.sap_name_pattern
         and existing.description == SEEDED_DESCRIPTION
+        and not existing.custom_field_data
     ):
-        existing.delete(using=alias)
-        return
+        has_tags = TaggedItem.objects.using(alias).filter(
+            content_type__app_label="netbox_librenms_plugin",
+            content_type__model="portstacklagpattern",
+            object_id=existing.pk,
+        )
+        if not has_tags.exists():
+            existing.delete(using=alias)
+            return
     existing.bridge_name_pattern = ""
     existing.save(using=alias, update_fields=["bridge_name_pattern"])
 

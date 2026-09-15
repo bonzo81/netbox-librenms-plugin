@@ -54,6 +54,66 @@ def test_migration_0019_bridge_help_text_matches_model():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("operator_edit", ["custom-data", "tag"])
+def test_reverse_bridge_seed_preserves_operator_data(operator_edit):
+    """Rollback must keep a seeded row after an operator adds data."""
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+    from extras.models import Tag
+
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    row = PortStackLagPattern.objects.get(librenms_os=mod.BRIDGE_OS)
+    if operator_edit == "custom-data":
+        PortStackLagPattern.objects.filter(pk=row.pk).update(custom_field_data={"operator-note": "keep"})
+    else:
+        row.tags.add(Tag.objects.create(name="Bridge operator tag", slug="bridge-operator-tag"))
+
+    historical_apps = (
+        MigrationExecutor(connection)
+        .loader.project_state([("netbox_librenms_plugin", "0019_portstacklagpattern_bridge_name_pattern")])
+        .apps
+    )
+    with connection.schema_editor() as editor:
+        mod.clear_bridge_pattern(historical_apps, editor)
+
+    row.refresh_from_db()
+    if operator_edit == "custom-data":
+        assert row.custom_field_data == {"operator-note": "keep"}
+    else:
+        assert row.tags.filter(slug="bridge-operator-tag").exists()
+    assert row.bridge_name_pattern == ""
+
+
+@pytest.mark.django_db
+def test_reverse_bridge_seed_without_content_type():
+    """Rollback must work before post-migrate creates the plugin content type."""
+    from django.contrib.contenttypes.models import ContentType
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    row = PortStackLagPattern.objects.get(librenms_os=mod.BRIDGE_OS)
+    ContentType.objects.filter(
+        app_label="netbox_librenms_plugin",
+        model="portstacklagpattern",
+    ).delete()
+    historical_apps = (
+        MigrationExecutor(connection)
+        .loader.project_state([("netbox_librenms_plugin", "0019_portstacklagpattern_bridge_name_pattern")])
+        .apps
+    )
+
+    with connection.schema_editor() as editor:
+        mod.clear_bridge_pattern(historical_apps, editor)
+
+    assert not PortStackLagPattern.objects.filter(pk=row.pk).exists()
+
+
+@pytest.mark.django_db
 def test_plugin_migrations_do_not_redeclare_squashed_core_ancestors():
     """A plugin migration must not repeat a squashed core dependency from its plugin parent."""
     from django.db import connection
