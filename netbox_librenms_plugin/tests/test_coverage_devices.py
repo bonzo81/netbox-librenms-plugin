@@ -752,9 +752,7 @@ class TestSingleModuleVerifyView:
         view = object.__new__(SingleModuleVerifyView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
-        view.has_write_permission = MagicMock(return_value=True)
         view.require_object_permissions_json = MagicMock(return_value=None)
-        view.get_cache_key = MagicMock(return_value="test_key")
         return view
 
     def test_checks_permission_before_resolving_device(self):
@@ -777,44 +775,17 @@ class TestSingleModuleVerifyView:
         view.restrict_object_or_404.assert_not_called()  # device never resolved → no arbitrary-ID probing
 
     @pytest.mark.django_db
-    def test_success_propagates_can_change_interface_to_verify_table(self):
-        """Verify-row table keeps Update Interface available for a user with real change perms.
-
-        Device is resolved through the real restrict() lookup and every table flag is driven by the
-        view's REAL ``has_perm`` against a precise NetBox permission grant — only the module-inventory
-        pipeline / table render (a separate rendering boundary) stays stubbed.
-        """
+    def test_success_formats_the_row_from_the_public_table_context(self):
+        """The verify endpoint must use the concrete table view's public context."""
         import json
 
-        from dcim.models import Interface, Module, ModuleBayTemplate, ModuleType
         from django.http import JsonResponse
         from django.test import RequestFactory
 
-        from netbox_librenms_plugin.models import (
-            CarrierAutoInstallRule,
-            LibreNMSSettings,
-            ModuleBayMapping,
-            ModuleTypeMapping,
-        )
         from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
 
-        device = _make_real_device("mod-canchange")  # non-VC real device (with real device_type/manufacturer)
-        user = _user_with_perms(
-            "mod-canchange",
-            [
-                ("view", type(device)),  # dcim.Device — object-perm gate + restrict
-                ("change", LibreNMSSettings),  # plugin write (has_write_permission)
-                ("add", Module),
-                ("change", Module),
-                ("delete", Module),
-                ("change", Interface),
-                ("add", ModuleBayTemplate),
-                ("add", ModuleType),
-                ("add", CarrierAutoInstallRule),
-                ("add", ModuleBayMapping),
-                ("add", ModuleTypeMapping),
-            ],
-        )
+        device = _make_real_device("mod-public-context")
+        user = _user_with_perms("mod-public-context", [("view", type(device))])
 
         view = SingleModuleVerifyView()
         request = RequestFactory().post(
@@ -827,64 +798,36 @@ class TestSingleModuleVerifyView:
         view.kwargs = {}
         view.args = ()
 
-        inventory_data = [{"entPhysicalIndex": 10, "entPhysicalContainedIn": 0, "entPhysicalName": "Module 1"}]
-        row = {"ent_physical_index": 10, "depth": 0, "status": "Installed"}
+        row = {
+            "selected_device_id": device.pk,
+            "ent_physical_index": 10,
+            "depth": 0,
+            "status": "Installed",
+        }
         mock_table = MagicMock()
+        mock_table.data = [row]
         mock_table.format_module_data.return_value = "<tr>row</tr>"
 
         with (
             _configured_default(),
-            patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache,
-            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
-            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
-            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
             patch(
-                "netbox_librenms_plugin.views.object_sync.devices.LibreNMSModuleTable", return_value=mock_table
-            ) as mock_table_cls,
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._get_module_types",
-                return_value={},
-            ),
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._find_transparent_indices",
-                return_value=set(),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._collect_top_items",
-                return_value=inventory_data,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._build_table_rows_for_member",
-                return_value=[row],
-            ),
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._detect_serial_conflicts",
-                return_value=None,
-            ),
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView.get_context_data",
+                return_value={"table": mock_table},
+            ) as get_context,
         ):
-            mock_cache.get.return_value = {"inventory": inventory_data}
             response = view.post(request)
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 200
-        mock_table_cls.assert_called_once_with(
-            [],
-            device=device,
-            server_key="default",
-            has_write_permission=True,
-            can_add_module=True,
-            can_change_module=True,
-            can_change_interface=True,
-            can_delete_module=True,
-            can_add_module_bay_template=True,
-            can_add_module_type=True,
-            can_add_carrier_rule=True,
-            can_add_module_bay_mapping=True,
-            can_add_module_type_mapping=True,
-        )
+        context_request, context_device = get_context.call_args.args
+        assert context_request is not request
+        assert context_request.user == request.user
+        assert context_device == device
+        assert get_context.call_args.kwargs == {"server_key": "default"}
+        mock_table.format_module_data.assert_called_once_with(row)
 
-    def test_post_threads_active_server_key_into_row_builder(self):
-        """On a non-default LibreNMS server, the POST server_key must reach the row builder."""
+    def test_post_threads_active_server_key_into_table_context(self):
+        """A non-default server key must reach the concrete table view context."""
         import json
 
         view = self._make_view()
@@ -893,59 +836,35 @@ class TestSingleModuleVerifyView:
         request.user.has_perm = MagicMock(return_value=False)
 
         selected_device = MagicMock()
-        selected_device.virtual_chassis = None
-        selected_device.device_type = MagicMock()
-        selected_device.device_type.manufacturer = MagicMock()
-        inventory_data = [{"entPhysicalIndex": 10, "entPhysicalContainedIn": 0, "entPhysicalName": "Module 1"}]
-        row = {"ent_physical_index": 10, "depth": 0, "status": "Installed"}
+        selected_device.pk = 1
+        row = {"selected_device_id": 1, "ent_physical_index": 10, "depth": 0, "status": "Installed"}
 
         captured = {}
-
-        def _capture_server_key(child_view, *args, **kwargs):
-            # autospec=True passes the bound DeviceModuleTableView instance as the first arg.
-            captured["server_key"] = child_view._active_server_key
-            return [row]
-
         mock_table = MagicMock()
+        mock_table.data = [row]
         mock_table.format_module_data.return_value = "<tr>row</tr>"
+
+        def _capture_server_key(child_view, request, device, *, server_key):
+            captured["server_key"] = server_key
+            captured["cache_only"] = child_view.cache_only
+            return {"table": mock_table}
 
         with (
             patch.object(view, "restrict_object_or_404", return_value=selected_device),
             patch(
                 "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers", return_value={"prod": "Prod"}
             ),
-            patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache,
-            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
-            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
-            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
-            patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSModuleTable", return_value=mock_table),
             patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._get_module_types",
-                return_value={},
-            ),
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._find_transparent_indices",
-                return_value=set(),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._collect_top_items",
-                return_value=inventory_data,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._build_table_rows_for_member",
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView.get_context_data",
                 autospec=True,
                 side_effect=_capture_server_key,
             ),
-            patch(
-                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._detect_serial_conflicts",
-                return_value=None,
-            ),
         ):
-            mock_cache.get.return_value = {"inventory": inventory_data}
-            view.post(request)
+            response = view.post(request)
 
-        # The POST-resolved "prod" server_key (not the default) reached the row builder.
+        assert response.status_code == 200
         assert captured["server_key"] == "prod"
+        assert captured["cache_only"] is True
 
 
 class TestSingleVlanGroupVerifyView:
