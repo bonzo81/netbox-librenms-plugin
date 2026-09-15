@@ -68,6 +68,37 @@ def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback(mock_libr
     }
 
 
+def test_name_field_fallback_does_not_reclassify_a_sub_interface_pair_as_bridge(mock_librenms_api):
+    """Assign one relationship type to a port-stack pair across name-field fallback."""
+    relationships = mock_librenms_api.resolve_port_relationships(
+        [
+            {
+                "port_id": 100,
+                "ifName": "vmbr0.100",
+                "ifDescr": "VLAN 100",
+                "ifType": "ethernetCsmacd",
+            },
+            {
+                "port_id": 101,
+                "ifName": "vmbr0",
+                "ifDescr": "LAN bridge",
+                "ifType": "ethernetCsmacd",
+            },
+        ],
+        [{"high_port_id": 100, "low_port_id": 101}],
+        interface_name_field="ifName",
+        lag_patterns={},
+        bridge_patterns={"linux": r"^(vmbr|br|bridge)\d+$"},
+        compiled_sap_patterns=[],
+    )
+
+    assert relationships == {
+        "lag_members": {},
+        "sub_interfaces": {100: 101},
+        "bridge_members": {},
+    }
+
+
 def test_bridge_pattern_is_stored_with_the_existing_port_stack_mapping():
     """Store all name-based port-stack rules in the existing per-OS mapping row."""
     from netbox_librenms_plugin.models import PortStackLagPattern
@@ -139,6 +170,136 @@ def test_inline_parent_sync_promotes_a_physical_child_to_virtual():
     assert child.parent_id == parent.pk
 
 
+@pytest.mark.parametrize("role", ["lag", "bridge"])
+def test_inline_parent_sync_preserves_a_virtual_role_and_its_members(role):
+    """Reject a parent edge instead of silently replacing a LAG or bridge role."""
+    from types import SimpleNamespace
+
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
+
+    device = make_device(f"parent-{role}-preservation")
+    child = make_interface(device, f"target-{role}", iface_type=role)
+    role_member = make_interface(device, "nic0")
+    setattr(role_member, role, child)
+    role_member.save(update_fields=[role])
+    parent = make_interface(device, "Ethernet1")
+    for interface, port_id in ((child, 100), (parent, 101)):
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save()
+    request = make_request(
+        "post",
+        {"port_id": "100", "parent_port_id": "101", "interface_name_field": "ifName"},
+    )
+    view = SyncInterfaceParentView()
+    view._librenms_api = SimpleNamespace(server_key="default")
+    cache.set(
+        view.get_cache_key(device, "ports", "default"),
+        {
+            "ports": [
+                {"port_id": 100, "ifName": child.name},
+                {"port_id": 101, "ifName": parent.name},
+            ],
+            "port_stack_relationships": {
+                "lag_members": {},
+                "sub_interfaces": {100: 101},
+                "bridge_members": {},
+            },
+        },
+    )
+
+    response = post(view, request, object_type="device", object_id=device.pk)
+
+    assert response.status_code == 409, response.content
+    child.refresh_from_db()
+    role_member.refresh_from_db()
+    assert child.type == role
+    assert child.parent_id is None
+    assert getattr(role_member, f"{role}_id") == child.pk
+
+
+def test_inline_lag_sync_does_not_replace_a_parent_child_role():
+    """Reject LAG promotion when the target is already a virtual child."""
+    from types import SimpleNamespace
+
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import (
+        SyncInterfaceLagView,
+        SyncInterfaceParentView,
+    )
+
+    device = make_device("lag-target-parent-preservation")
+    target = make_interface(device, "bond0.110", iface_type="1000base-t")
+    parent = make_interface(device, "bond0")
+    member = make_interface(device, "nic0")
+    for interface, port_id in ((target, 100), (parent, 101), (member, 102)):
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save()
+
+    api = SimpleNamespace(server_key="default")
+    parent_view = SyncInterfaceParentView()
+    parent_view._librenms_api = api
+    lag_view = SyncInterfaceLagView()
+    lag_view._librenms_api = api
+    cache.set(
+        parent_view.get_cache_key(device, "ports", "default"),
+        {
+            "ports": [
+                {"port_id": 100, "ifName": target.name},
+                {"port_id": 101, "ifName": parent.name},
+                {"port_id": 102, "ifName": member.name},
+            ],
+            "port_stack_relationships": {
+                "lag_members": {102: 100},
+                "sub_interfaces": {100: 101},
+                "bridge_members": {},
+            },
+        },
+    )
+
+    parent_response = post(
+        parent_view,
+        make_request(
+            "post",
+            {"port_id": "100", "parent_port_id": "101", "interface_name_field": "ifName"},
+        ),
+        object_type="device",
+        object_id=device.pk,
+    )
+    lag_response = post(
+        lag_view,
+        make_request(
+            "post",
+            {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
+        ),
+        object_type="device",
+        object_id=device.pk,
+    )
+
+    assert parent_response.status_code == 200, parent_response.content
+    assert lag_response.status_code == 409, lag_response.content
+    target.refresh_from_db()
+    member.refresh_from_db()
+    assert target.type == "virtual"
+    assert target.parent_id == parent.pk
+    assert member.lag_id is None
+
+
+def test_parent_promotion_preserves_a_channel_sub_interface():
+    """Keep channel subinterfaces unchanged across supported NetBox versions."""
+    from netbox_librenms_plugin.views.sync.interfaces import _parent_child_needs_promotion
+
+    device = make_device("parent-channel-preservation")
+    child = make_interface(device, "Ethernet1:1")
+    child.channel_id = 1
+
+    assert not _parent_child_needs_promotion(child)
+
+
 def test_inline_bridge_sync_sets_the_bridge_relationship():
     """Apply a bridge edge through the same inline flow as LAG and parent edges."""
     from types import SimpleNamespace
@@ -189,7 +350,7 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface():
 
     device = make_device("bulk-parent-bridge-sync")
     child = make_interface(device, "bond0.110", iface_type="1000base-t")
-    parent = make_interface(device, "bond0")
+    parent = make_interface(device, "bond0", iface_type="lag")
     bridge = make_interface(device, "vmbr0", iface_type="virtual")
     for interface, port_id in ((child, 102), (parent, 101), (bridge, 100)):
         set_librenms_device_id(interface, port_id, "default")
@@ -219,6 +380,8 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface():
     assert child.type == "virtual"
     assert child.parent_id == parent.pk
     assert child.bridge_id == bridge.pk
+    parent.refresh_from_db()
+    assert parent.type == "lag"
 
 
 def test_failed_parent_sync_restores_the_source_type_and_relationship():

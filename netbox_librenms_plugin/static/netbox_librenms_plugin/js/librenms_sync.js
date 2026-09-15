@@ -2632,8 +2632,19 @@ function handleInterfaceChange(select, value) {
                 if (parentCell && typeof formattedRow.parent !== 'undefined') {
                     parentCell.innerHTML = formattedRow.parent;
                 }
+                [
+                    ['parentPortId', 'librenms_parent_port_id'],
+                    ['parentName', 'librenms_parent_name'],
+                    ['memberOfLag', 'librenms_lag_port_id'],
+                    ['lagName', 'librenms_lag_name'],
+                    ['bridgePortId', 'librenms_bridge_port_id'],
+                    ['bridgeName', 'librenms_bridge_name'],
+                ].forEach(([datasetKey, responseKey]) => {
+                    row.dataset[datasetKey] = formattedRow[responseKey] ?? '';
+                });
                 initializeVlanGroupSelects();
                 initializeFilters();
+                refreshRequiredSelections();
                 // This member is now server-confirmed: record it as the rollback target and
                 // re-enable the relationship controls (the row HTML now matches this member).
                 select._lastVerifiedMember = value;

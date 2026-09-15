@@ -152,6 +152,98 @@ class TestRequirementCascade:
 
         assert _checked_values(page) == {"100", "103"}
 
+    def test_member_verification_replaces_relationship_metadata(self, page):
+        """Use the selected VC member's dependencies after its row is verified."""
+        html = """<!doctype html><html><body>
+            <input name="csrfmiddlewaretoken" value="test-token">
+            <input name="server_key" value="stub">
+            <input type="radio" name="interface_name_field" value="ifName" checked>
+            <input type="checkbox" id="autoSelectLagMembers" checked>
+            <table id="librenms-interface-table" data-interface-origin-device-id="1"><tbody>
+              <tr data-port-id="10" data-parent-port-id="20" data-parent-name="old-parent"
+                  data-member-of-lag="30" data-lag-name="old-lag"
+                  data-bridge-port-id="40" data-bridge-name="old-bridge">
+                <td><input type="checkbox" name="select" value="10" checked></td>
+                <td><select class="vc-member-select" data-interface="Ethernet1.100">
+                  <option value="1" selected>member-1</option><option value="2">member-2</option>
+                </select></td>
+                <td data-col="name"></td><td data-col="type"></td><td data-col="speed"></td>
+                <td data-col="mac_address"></td><td data-col="mtu"></td><td data-col="enabled"></td>
+                <td data-col="description"></td><td data-col="vlans"></td>
+                <td data-col="librenms_id"></td><td data-col="parent"></td>
+              </tr>
+              <tr data-port-id="20"><td><input type="checkbox" name="select" value="20"></td></tr>
+              <tr data-port-id="21"><td><input type="checkbox" name="select" value="21"></td></tr>
+              <tr data-port-id="30"><td><input type="checkbox" name="select" value="30"></td></tr>
+              <tr data-port-id="40"><td><input type="checkbox" name="select" value="40"></td></tr>
+              <tr data-port-id="41"><td><input type="checkbox" name="select" value="41"></td></tr>
+            </tbody></table>
+        </body></html>"""
+        page.set_content(html)
+        page.route(
+            "**/plugins/librenms_plugin/verify-interface/",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "status": "success",
+                        "formatted_row": {
+                            "name": "Ethernet1.100",
+                            "type": "virtual",
+                            "speed": "1 Gbps",
+                            "mac_address": "",
+                            "mtu": "1500",
+                            "enabled": "yes",
+                            "description": "",
+                            "vlans": "",
+                            "librenms_id": "10",
+                            "parent": "relationships",
+                            "librenms_parent_port_id": 21,
+                            "librenms_parent_name": "new-parent",
+                            "librenms_lag_port_id": None,
+                            "librenms_lag_name": None,
+                            "librenms_bridge_port_id": 41,
+                            "librenms_bridge_name": "new-bridge",
+                        },
+                    }
+                ),
+            ),
+        )
+        _add_page_scripts(page)
+        page.evaluate("initializeCheckboxes()")
+        page.evaluate("refreshRequiredSelections()")
+
+        assert _checked_values(page) == {"10", "20", "30", "40"}
+
+        with page.expect_response("**/plugins/librenms_plugin/verify-interface/"):
+            page.evaluate(
+                """() => {
+                    const select = document.querySelector('.vc-member-select');
+                    handleInterfaceChange(select, '2');
+                }"""
+            )
+
+        relationship_data = page.locator("tr[data-port-id='10']").evaluate(
+            """row => ({
+                parentPortId: row.dataset.parentPortId,
+                parentName: row.dataset.parentName,
+                memberOfLag: row.dataset.memberOfLag,
+                lagName: row.dataset.lagName,
+                bridgePortId: row.dataset.bridgePortId,
+                bridgeName: row.dataset.bridgeName,
+            })"""
+        )
+        assert relationship_data == {
+            "parentPortId": "21",
+            "parentName": "new-parent",
+            "memberOfLag": "",
+            "lagName": "",
+            "bridgePortId": "41",
+            "bridgeName": "new-bridge",
+        }
+        assert _checked_values(page) == {"10", "21", "41"}
+
     def test_clearing_the_last_dependent_releases_the_whole_chain(self, page):
         _load_selection_page(page, JUNOS_ROWS)
 

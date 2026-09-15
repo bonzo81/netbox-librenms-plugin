@@ -1527,6 +1527,9 @@ def _promote_lag_aggregate(agg, *, with_restore):
     agg.type = "lag"
 
     def _persist():
+        # The aggregate can already be a virtual child. Validate its prepared type too,
+        # otherwise the member validates but this save creates an invalid lag + parent row.
+        agg.clean()
         agg.save(update_fields=["type"])
         logger.info("Set interface %s type=lag", agg.name)
 
@@ -1536,8 +1539,8 @@ def _promote_lag_aggregate(agg, *, with_restore):
 
 
 def _parent_child_needs_promotion(child):
-    """Return whether a device interface needs type=virtual before it can have a parent."""
-    return isinstance(child, Interface) and child.type != "virtual" and getattr(child, "channel_id", None) is None
+    """Return whether a physical device interface needs promotion before it can have a parent."""
+    return isinstance(child, Interface) and child.is_wired and getattr(child, "channel_id", None) is None
 
 
 def _promote_parent_child(child, *, with_restore):

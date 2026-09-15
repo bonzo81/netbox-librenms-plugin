@@ -890,6 +890,10 @@ class LibreNMSInterfaceTable(tables.Table):
             # port_data; absent enrichment it returns "" (safe empty cell).
             "parent": self.render_parent(None, port_data),
         }
+        for relation in ("lag", "parent", "bridge"):
+            for attribute in ("port_id", "name"):
+                key = f"librenms_{relation}_{attribute}"
+                formatted_data[key] = port_data.get(key)
 
         return formatted_data
 
