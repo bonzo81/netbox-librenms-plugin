@@ -425,7 +425,7 @@ class MembershipChecker(ast.NodeVisitor):
             return
 
 
-def collect_container_names(paths):
+def collect_container_names(paths):  # noqa: C901
     """Return the container names visible to each path, including imports."""
     paths = tuple(paths)
     names_by_path = {path: set() for path in paths}
