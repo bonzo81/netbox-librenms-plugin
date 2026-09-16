@@ -353,12 +353,36 @@ class BaseCableTableView(
         match = matches[0]
         return (match if match.pk in visible_ids else None), True
 
-    def _build_normal_link_context(self, links, obj, server_key):  # noqa: C901
+    def _build_normal_link_context(self, links, obj, server_key):
         """Load normal LLDP/CDP resolution and permission candidates once per snapshot."""
         normal_links = [link for link in links if link.get("_source") != "serial"]
         if not normal_links:
             return None
 
+        devices_by_name, devices_by_librenms_id, visible_device_ids = self._load_remote_device_catalog(
+            normal_links, server_key
+        )
+        remote_device_by_link = self._resolve_remote_devices(
+            normal_links, devices_by_name, devices_by_librenms_id, visible_device_ids
+        )
+        remote_owner_by_link = self._resolve_remote_owners(normal_links, remote_device_by_link)
+        chassis_members, local_owner_by_link = self._resolve_local_owners(normal_links, obj)
+        manual_ids, candidate_specs = self._collect_interface_candidates(
+            normal_links, local_owner_by_link, remote_owner_by_link
+        )
+        owner_ids = {device.pk for device in chassis_members}
+        owner_ids.update(device.pk for device in remote_owner_by_link.values() if device is not None)
+        context = self._load_interface_catalog(candidate_specs, manual_ids, owner_ids, server_key)
+        context["local_owner_by_link"] = local_owner_by_link
+        context["remote_device_by_link"] = remote_device_by_link
+        context["remote_owner_by_link"] = remote_owner_by_link
+        trace_paths = self._load_link_traces(normal_links, context, local_owner_by_link, remote_owner_by_link)
+        context["trace_paths"] = trace_paths
+        context["trace_visibility"] = self._build_trace_visibility(trace_paths.values())
+        return context
+
+    def _load_remote_device_catalog(self, normal_links, server_key):
+        """Load every device a normal row could name, indexed by name and by LibreNMS id."""
         remote_names = {name for link in normal_links if isinstance((name := link.get("remote_device")), str) and name}
         remote_names.update(name.split(".")[0] for name in tuple(remote_names))
         remote_ids = {
@@ -368,6 +392,7 @@ class BaseCableTableView(
         }
         device_pks = set(Device.objects.filter(name__in=remote_names).values_list("pk", flat=True))
         sorted_remote_ids = sorted(remote_ids)
+        # Chunked so a wide page cannot build one unbounded OR chain.
         for offset in range(0, len(sorted_remote_ids), 32):
             id_q = Q(pk__isnull=True) & Q(pk__isnull=False)
             for remote_id in sorted_remote_ids[offset : offset + 32]:
@@ -386,7 +411,10 @@ class BaseCableTableView(
             device_librenms_id = get_librenms_device_id(device, server_key, auto_save=False)
             if device_librenms_id is not None:
                 devices_by_librenms_id[device_librenms_id].append(device)
+        return devices_by_name, devices_by_librenms_id, visible_device_ids
 
+    def _resolve_remote_devices(self, normal_links, devices_by_name, devices_by_librenms_id, visible_device_ids):
+        """Resolve each row's remote device, LibreNMS id first, then exact name, then stripped name."""
         remote_device_by_link = {}
         for link in normal_links:
             remote_device = None
@@ -406,7 +434,10 @@ class BaseCableTableView(
                         devices_by_name.get(hostname.split(".")[0], []), visible_device_ids
                     )
             remote_device_by_link[id(link)] = remote_device
+        return remote_device_by_link
 
+    def _resolve_remote_owners(self, normal_links, remote_device_by_link):
+        """Resolve which chassis member actually owns each row's remote port."""
         remote_chassis_ids = {
             device.virtual_chassis_id
             for device in remote_device_by_link.values()
@@ -432,7 +463,10 @@ class BaseCableTableView(
                     return_device_on_failure=False,
                 )
             remote_owner_by_link[id(link)] = remote_owner
+        return remote_owner_by_link
 
+    def _resolve_local_owners(self, normal_links, obj):
+        """Resolve which chassis member owns each row's local port, and the page's member set."""
         if getattr(obj, "virtual_chassis_id", None):
             chassis_members = list(obj.virtual_chassis.members.all())
             members_by_position = {
@@ -448,14 +482,16 @@ class BaseCableTableView(
                 link.get("local_port"),
                 members_by_position=members_by_position,
             )
+        return chassis_members, local_owner_by_link
 
+    @staticmethod
+    def _collect_interface_candidates(normal_links, local_owner_by_link, remote_owner_by_link):
+        """Group the port names and LibreNMS ids each owning device must be searched for."""
         manual_ids = {
             manual_id
             for link in normal_links
             if (manual_id := coerce_librenms_id(link.get("manual_remote_id"))) is not None
         }
-        owner_ids = {device.pk for device in chassis_members}
-        owner_ids.update(device.pk for device in remote_owner_by_link.values() if device is not None)
         candidate_specs = defaultdict(lambda: {"names": set(), "ids": set()})
         for link in normal_links:
             local_owner = local_owner_by_link.get(id(link))
@@ -474,11 +510,15 @@ class BaseCableTableView(
                     candidate_specs[remote_owner.pk]["names"].add(remote_name)
                 if (remote_id := coerce_librenms_id(link.get("remote_port_id"))) is not None:
                     candidate_specs[remote_owner.pk]["ids"].add(remote_id)
+        return manual_ids, candidate_specs
 
+    def _load_interface_catalog(self, candidate_specs, manual_ids, owner_ids, server_key):
+        """Prefetch every candidate interface once and build the row lookup and permission sets."""
         candidate_pks = set(manual_ids)
         named_candidate_items = [
             (owner_id, evidence["names"]) for owner_id, evidence in sorted(candidate_specs.items()) if evidence["names"]
         ]
+        # Chunked so a wide page cannot build one unbounded OR chain.
         for offset in range(0, len(named_candidate_items), 64):
             candidate_q = Q(pk__isnull=True) & Q(pk__isnull=False)
             for owner_id, names in named_candidate_items[offset : offset + 64]:
@@ -499,6 +539,7 @@ class BaseCableTableView(
             .select_related("device", "cable")
             .prefetch_related("cable__tags", "cable__terminations__termination")
         )
+        # A manual pick can name an interface on a device no row resolved an owner for.
         owner_ids.update(interface.device_id for interface in catalog_interfaces if interface.pk in manual_ids)
         interface_ids_by_device = defaultdict(list)
         interfaces_by_name = defaultdict(list)
@@ -509,23 +550,24 @@ class BaseCableTableView(
             interface_librenms_id = get_librenms_device_id(interface, server_key, auto_save=False)
             if interface_librenms_id is not None:
                 interface_ids_by_device[(interface.device_id, interface_librenms_id)].append(interface)
-        visible_interface_ids = set(
-            self._viewable_queryset(Interface).filter(pk__in=interfaces_by_pk).values_list("pk", flat=True)
-        )
-        visible_owner_ids = set(self._viewable_queryset(Device).filter(pk__in=owner_ids).values_list("pk", flat=True))
         cable_ids = {interface.cable_id for interface in catalog_interfaces if interface.cable_id is not None}
-        visible_cable_ids = set(self._viewable_queryset(Cable).filter(pk__in=cable_ids).values_list("pk", flat=True))
-        context = {
-            "local_owner_by_link": local_owner_by_link,
-            "remote_device_by_link": remote_device_by_link,
-            "remote_owner_by_link": remote_owner_by_link,
+        return {
             "interfaces_by_pk": interfaces_by_pk,
             "interfaces_by_name": interfaces_by_name,
             "interface_ids_by_device": interface_ids_by_device,
-            "visible_interface_ids": visible_interface_ids,
-            "visible_owner_ids": visible_owner_ids,
-            "visible_cable_ids": visible_cable_ids,
+            "visible_interface_ids": set(
+                self._viewable_queryset(Interface).filter(pk__in=interfaces_by_pk).values_list("pk", flat=True)
+            ),
+            "visible_owner_ids": set(
+                self._viewable_queryset(Device).filter(pk__in=owner_ids).values_list("pk", flat=True)
+            ),
+            "visible_cable_ids": set(
+                self._viewable_queryset(Cable).filter(pk__in=cable_ids).values_list("pk", flat=True)
+            ),
         }
+
+    def _load_link_traces(self, normal_links, context, local_owner_by_link, remote_owner_by_link):
+        """Trace only the rows whose two ends sit on different cables the request may see."""
         trace_paths = {}
         for link in normal_links:
             local_interface = self._resolve_context_interface(
@@ -536,7 +578,7 @@ class BaseCableTableView(
             )
             manual_id = coerce_librenms_id(link.get("manual_remote_id"))
             if manual_id is not None:
-                remote_interface = interfaces_by_pk.get(manual_id)
+                remote_interface = context["interfaces_by_pk"].get(manual_id)
             else:
                 remote_interface = self._resolve_context_interface(
                     context,
@@ -544,20 +586,23 @@ class BaseCableTableView(
                     link.get("remote_port_id"),
                     [link.get("remote_port")],
                 )
-            if (
-                local_interface is not None
-                and remote_interface is not None
-                and local_interface.cable_id is not None
-                and remote_interface.cable_id is not None
-                and local_interface.cable_id != remote_interface.cable_id
-                and local_interface.cable_id in visible_cable_ids
-                and remote_interface.cable_id in visible_cable_ids
-            ):
+            if self._link_ends_conflict(local_interface, remote_interface, context["visible_cable_ids"]):
                 if local_interface.pk not in trace_paths:
                     trace_paths[local_interface.pk] = local_interface.trace()
-        context["trace_paths"] = trace_paths
-        context["trace_visibility"] = self._build_trace_visibility(trace_paths.values())
-        return context
+        return trace_paths
+
+    @staticmethod
+    def _link_ends_conflict(local_interface, remote_interface, visible_cable_ids):
+        """Return whether both ends are cabled, to different cables, and both are viewable."""
+        return (
+            local_interface is not None
+            and remote_interface is not None
+            and local_interface.cable_id is not None
+            and remote_interface.cable_id is not None
+            and local_interface.cable_id != remote_interface.cable_id
+            and local_interface.cable_id in visible_cable_ids
+            and remote_interface.cable_id in visible_cable_ids
+        )
 
     @staticmethod
     def _resolve_context_interface(context, device, port_id, name_candidates):
