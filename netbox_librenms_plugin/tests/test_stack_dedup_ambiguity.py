@@ -196,7 +196,7 @@ def test_a_lone_row_whose_stack_read_failed_is_not_imported_by_the_view(client, 
     assert detection["is_stack"] is False
 
     client.force_login(make_superuser("lone-stack-view-importer"))
-    client.post(
+    response = client.post(
         reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
         {
             "select": [str(device_id)],
@@ -206,4 +206,10 @@ def test_a_lone_row_whose_stack_read_failed_is_not_imported_by_the_view(client, 
         headers={"HX-Request": "true"},
     )
 
+    # Assert the skip, not only the absent device: an error response or a failed save would
+    # satisfy the database check on its own and hide a gate that never ran.
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert f"Skipped 1 selected row(s) (id(s): {device_id})" in body
+    assert "were not imported" in body
     assert not Device.objects.filter(name=hostname).exists()
