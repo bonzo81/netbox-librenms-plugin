@@ -67,7 +67,7 @@ def get_device_count_for_filters(
     return len(devices)
 
 
-def get_librenms_devices_for_import(
+def get_librenms_devices_for_import(  # noqa: C901
     api: LibreNMSAPI = None,
     filters: dict = None,
     server_key: str = None,

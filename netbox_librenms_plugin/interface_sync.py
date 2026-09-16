@@ -72,7 +72,7 @@ def assign_interface_mac(interface, mac_address):
     return changed
 
 
-def update_interface_from_port(
+def update_interface_from_port(  # noqa: C901
     interface,
     librenms_interface,
     *,
@@ -164,7 +164,7 @@ def update_interface_from_port(
 
 
 @transaction.atomic
-def resolve_or_create_interface_from_port(
+def resolve_or_create_interface_from_port(  # noqa: C901
     owner,
     librenms_interface,
     *,

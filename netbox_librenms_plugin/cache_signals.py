@@ -276,6 +276,7 @@ def _remember_owner(sender, instance, **kwargs):
     Args:
         sender: The model being instantiated.
         instance: The instance just loaded or built.
+        **kwargs: The remaining Django signal arguments, which this receiver ignores.
     """
     columns = OWNER_COLUMNS.get(instance._meta.label_lower, ())
     values = (
