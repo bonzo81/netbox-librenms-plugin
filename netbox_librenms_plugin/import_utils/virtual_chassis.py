@@ -19,6 +19,7 @@ def empty_virtual_chassis_data() -> dict:
         "is_stack": False,
         "member_count": 0,
         "members": [],
+        "detection_failed": False,
         "detection_error": None,
     }
 
@@ -45,11 +46,21 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
         "is_stack": bool(data.get("is_stack")),
         "member_count": member_count,
         "members": members,
+        "detection_failed": bool(data.get("detection_failed")),
         "detection_error": data.get("detection_error"),
     }
 
 
-_VC_CACHE_VERSION = "v1"
+def _failed_virtual_chassis_data(error: str) -> dict:
+    """Return a VC payload that distinguishes a failed read from a non-stack device."""
+
+    data = empty_virtual_chassis_data()
+    data["detection_failed"] = True
+    data["detection_error"] = error
+    return data
+
+
+_VC_CACHE_VERSION = "v2"
 
 
 def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
@@ -72,13 +83,14 @@ def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_re
 
     detection_data = detect_virtual_chassis_from_inventory(api, device_id)
     if detection_data is None:
-        # Non-stack device or transient API failure — cache the negative result so
-        # prefetch_vc_data_for_devices() can skip these on subsequent renders.
-        # Use force_refresh=True to bypass the cache if needed.
+        # Cache a confirmed non-stack result so subsequent renders skip repeated reads.
         empty = empty_virtual_chassis_data()
         if cache_timeout != 0:
             cache.set(cache_key, empty, timeout=cache_timeout)
         return _clone_virtual_chassis_data(empty)
+
+    if detection_data.get("detection_failed"):
+        return _clone_virtual_chassis_data(detection_data)
 
     if "detection_error" not in detection_data:
         detection_data["detection_error"] = None
@@ -142,6 +154,8 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         {
             'is_stack': bool,
             'member_count': int,
+            'detection_failed': bool,
+            'detection_error': str | None,
             'members': [
                 {
                     'serial': str,
@@ -154,7 +168,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
                 }
             ]
         }
-        Returns None if not a stack or detection fails.
+        Returns None when the inventory confirms that the device is not a stack. A failed
+        inventory read returns an empty payload with detection_failed=True so callers can
+        fail closed without caching the failure as a negative result.
 
     Detection Logic:
         1. Check root level (entPhysicalContainedIn=0) for parent container
@@ -171,9 +187,14 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             master_name = device_info.get("sysName") or device_info.get("hostname")
 
         # Step 1: Get root level items
-        success, root_items = api.get_inventory_filtered(device_id, ent_physical_contained_in=0)
+        # A device with no inventory rows answers 404, which is a real non-stack, not a failed read.
+        success, root_items = api.get_inventory_filtered(device_id, ent_physical_contained_in=0, missing_is_empty=True)
 
-        if not success or not root_items:
+        if not success:
+            logger.warning(f"Could not read root inventory items for device {device_id}")
+            return _failed_virtual_chassis_data("LibreNMS root inventory request failed")
+
+        if not root_items:
             logger.debug(f"No root inventory items found for device {device_id}")
             return None
 
@@ -200,10 +221,12 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             device_id,
             ent_physical_class="chassis",
             ent_physical_contained_in=parent_index,
+            missing_is_empty=True,
         )
 
         if not success:
-            return None
+            logger.warning(f"Could not read child chassis inventory for device {device_id}")
+            return _failed_virtual_chassis_data("LibreNMS child chassis inventory request failed")
 
         # Filter for chassis only (in case API filter didn't work)
         chassis_items = [item for item in (child_items or []) if item.get("entPhysicalClass") == "chassis"]
@@ -300,7 +323,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
 
     except Exception as e:
         logger.exception(f"Error detecting virtual chassis for device {device_id}: {e}")
-        return None
+        return _failed_virtual_chassis_data(str(e) or type(e).__name__)
 
 
 def _load_vc_member_name_pattern() -> str:

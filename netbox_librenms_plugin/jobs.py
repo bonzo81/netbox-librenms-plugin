@@ -291,10 +291,9 @@ class ImportDevicesJob(JobRunner):
         precheck_outcome = None
         skipped_id_set = set()
         if collision_check_ids:
-            # Defense-in-depth: block a batch where two LibreNMS rows resolve to the same NetBox
-            # device, mirroring the confirm-preview/sync-view gate so the async path can't import a
-            # colliding batch either. A single row can never collide, so skip the extra pass.
-            collisions, unresolved = (
+            # Block NetBox object collisions and ambiguous stack fingerprints on the async path.
+            # A single row cannot collide, so skip the extra pass.
+            collisions, unresolved, stack_ambiguities = (
                 detect_collisions_for_device_ids(
                     collision_check_ids,
                     api,
@@ -311,7 +310,7 @@ class ImportDevicesJob(JobRunner):
                     user=self.job.user,
                 )
                 if len(collision_check_ids) >= 2
-                else ([], [])
+                else ([], [], [])
             )
             if unresolved and _is_job_cancelled(self):
                 # A cancelled pre-check returns its unscanned remainder as unresolved. Cancellation
@@ -326,10 +325,14 @@ class ImportDevicesJob(JobRunner):
                 device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
                 batch_blocked_msg = msg
             else:
-                # Shared decision, identical to the sync view: genuine collisions block the whole
-                # batch; rows that couldn't be collision-checked are SKIPPED (not a whole-batch
-                # block) so a transient miss on one row doesn't drop the entire import.
-                precheck_outcome = classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports)
+                # Apply the same whole-batch blockers and unresolved-row skips as the sync view.
+                precheck_outcome = classify_bulk_precheck(
+                    collisions,
+                    unresolved,
+                    stack_ambiguities,
+                    device_ids,
+                    vm_imports,
+                )
                 skipped_id_set = set(precheck_outcome.skipped_ids)
                 if precheck_outcome.blocked:
                     self.logger.error(precheck_outcome.block_message)

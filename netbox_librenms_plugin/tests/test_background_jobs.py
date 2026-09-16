@@ -416,7 +416,7 @@ class TestImportDevicesJob:
         assert job.data["success_count"] == 1
         assert job.data["failed_count"] == 1
         assert job.data["errors"][0]["device_id"] == 6403
-        assert "couldn't be fetched to verify collisions" in job.data["errors"][0]["error"]
+        assert "couldn't be read to verify them" in job.data["errors"][0]["error"]
 
     def test_cross_mode_collision_blocks_the_whole_batch(self, librenms_server):
         from dcim.models import Device
