@@ -7,9 +7,7 @@ from virtualization.models import Cluster, VirtualMachine
 
 
 class SiteLocationFilterSet:
-    """
-    Filter sites and locations by search term.
-    """
+    """Filter sites and locations by search term."""
 
     def __init__(self, data, queryset):
         """Initialize with form data and queryset."""
@@ -44,9 +42,7 @@ class SiteLocationFilterSet:
         """Return a bound filter form instance."""
 
         class FilterForm(forms.Form):
-            """
-            Form to filter sites and locations by search term.
-            """
+            """Form to filter sites and locations by search term."""
 
             q = forms.CharField(
                 required=False,
@@ -58,9 +54,7 @@ class SiteLocationFilterSet:
 
 
 class DeviceStatusFilterSet(NetBoxModelFilterSet):
-    """
-    Filter devices by search term.
-    """
+    """Filter devices by search term."""
 
     device = django_filters.ModelMultipleChoiceFilter(
         field_name="name",
@@ -100,9 +94,7 @@ class DeviceStatusFilterSet(NetBoxModelFilterSet):
 
 
 class VMStatusFilterSet(NetBoxModelFilterSet):
-    """
-    Filter virtual machines by search term.
-    """
+    """Filter virtual machines by search term."""
 
     virtualmachine = django_filters.ModelMultipleChoiceFilter(
         field_name="name",

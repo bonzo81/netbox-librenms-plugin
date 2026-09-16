@@ -1,6 +1,7 @@
 """
-Stage 2b: per-row "Move to winner" actions on a donor device whose
-``librenms_id[server_key]`` carries a ``_migrated_to`` marker.
+Stage 2b: per-row "Move to winner" actions on a donor device.
+
+The donor's ``librenms_id[server_key]`` carries a ``_migrated_to`` marker.
 
 Each view validates the marker, looks up the winner Device, runs an
 atomic move under ``select_for_update`` ordering by primary key (to avoid
@@ -552,7 +553,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
     # model-level only, so Device must be in the declared boundary.
     required_object_permissions = {"POST": [("change", Interface), ("change", Device)]}
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         gate = self._gate(request)
         if gate is not None:
             return gate
@@ -758,8 +759,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
 
 class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
     """
-    Reassign ``IPAddress.assigned_object`` from a donor-owned target to
-    the winner's equivalent.
+    Reassign ``IPAddress.assigned_object`` from a donor-owned target to the winner's equivalent.
 
     Behaviour by current assignment:
 
@@ -869,8 +869,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
 
 class TransferDeviceIPView(_BaseMoveToWinnerView):
     """
-    One-shot transfer of a donor's primary IPv4/v6 or OOB IP to the
-    winner.
+    One-shot transfer of a donor's primary IPv4/v6 or OOB IP to the winner.
 
     Triggered with URL kwarg ``ip_kind`` ∈ ``{"primary4", "primary6",
     "oob"}``.  Refuses to overwrite a value already set on the winner —

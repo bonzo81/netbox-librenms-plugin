@@ -820,6 +820,8 @@ class SyncInterfacesView(
             related_iface (Interface | VMInterface): The interface assigned to the relationship field.
             prepare_related (callable | None): The hook that prepares the related interface before validation.
             log_kind (str): The relationship label used in log messages.
+            prepare_source (callable | None): The hook that prepares the source interface before
+                validation, mirroring ``prepare_related`` on the other side of the edge.
 
         Returns:
             bool: True when the relationship is saved, or False when validation or persistence fails.

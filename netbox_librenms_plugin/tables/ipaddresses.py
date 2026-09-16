@@ -7,9 +7,7 @@ from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_s
 
 
 class IPAddressTable(tables.Table):
-    """
-    Table for displaying LibreNMS IP address data.
-    """
+    """Table for displaying LibreNMS IP address data."""
 
     def __init__(self, *args, **kwargs):
         """Initialize IP address table."""
@@ -99,7 +97,7 @@ class IPAddressTable(tables.Table):
     )
 
     def render_status(self, value, record):
-        """Render the status column with appropriate buttons or text styling"""
+        """Render the status column with appropriate buttons or text styling."""
         row_id = record.get("row_id", record.get("ip_with_mask"))
         if row_id is None:
             return "Ambiguous source row"
@@ -120,19 +118,19 @@ class IPAddressTable(tables.Table):
         return mark_safe('<span class="text-muted">Missing NetBox Object</span>')
 
     def render_device(self, value, record):
-        """Render the device column with a link if available"""
+        """Render the device column with a link if available."""
         if url := record.get("device_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def render_interface_name(self, value, record):
-        """Render the interface column with a link if available"""
+        """Render the interface column with a link if available."""
         if url := record.get("interface_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def configure(self, request):
-        """Configure the table"""
+        """Configure the table."""
         paginate = {
             "paginator_class": EnhancedPaginator,
             "per_page": get_table_paginate_count(request, self.prefix),

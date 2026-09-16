@@ -53,7 +53,6 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
 
 def _failed_virtual_chassis_data(error: str) -> dict:
     """Return a VC payload that distinguishes a failed read from a non-stack device."""
-
     data = empty_virtual_chassis_data()
     data["detection_failed"] = True
     data["detection_error"] = error
