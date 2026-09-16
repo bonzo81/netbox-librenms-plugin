@@ -1607,7 +1607,7 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return False, str(e)
 
-    def get_device_inventory(self, device_id):
+    def get_device_inventory(self, device_id, missing_is_empty=False):
         """
         Fetch complete inventory for a device from LibreNMS.
 
@@ -1617,6 +1617,9 @@ class LibreNMSAPI:
 
         Args:
             device_id: LibreNMS device ID
+            missing_is_empty: Read a 404 as an empty inventory instead of a failure, matching
+                get_inventory_filtered(). A caller that has already established the device
+                exists opts in; the default stays fail-closed for a possibly stale device id.
 
         Returns:
             tuple: (success: bool, data: list). On success ``data`` is always a list of dicts —
@@ -1648,6 +1651,13 @@ class LibreNMSAPI:
                 logger.warning(f"Unexpected inventory response for device {device_id}: {inventory_data}")
                 return False, msg or "Unexpected response format: invalid 'inventory' payload"
             return True, inventory
+        except requests.exceptions.HTTPError as e:
+            # Opt-in only, exactly as in get_inventory_filtered: LibreNMS answers 404 for a
+            # device that holds no inventory rows as well as for one it does not have.
+            if missing_is_empty and e.response is not None and e.response.status_code == HTTP_NOT_FOUND:
+                logger.debug(f"Device {device_id} has no inventory entries")
+                return True, []
+            return False, str(e)
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
@@ -1819,7 +1829,7 @@ class LibreNMSAPI:
             # try /all endpoint and filter client-side
             if params:
                 logger.debug("Filtered inventory API returned no results, falling back to client-side filtering")
-                success, all_inventory = self.get_device_inventory(device_id)
+                success, all_inventory = self.get_device_inventory(device_id, missing_is_empty=missing_is_empty)
 
                 if not success:
                     return False, all_inventory

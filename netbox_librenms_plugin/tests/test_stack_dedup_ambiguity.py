@@ -213,3 +213,28 @@ def test_a_lone_row_whose_stack_read_failed_is_not_imported_by_the_view(client, 
     assert f"Skipped 1 selected row(s) (id(s): {device_id})" in body
     assert "were not imported" in body
     assert not Device.objects.filter(name=hostname).exists()
+
+
+@pytest.mark.django_db
+def test_an_empty_inventory_reads_as_empty_through_the_client_side_fallback(librenms_server, settings):
+    """A device that holds no inventory must not read as a failed detection."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+    configure_librenms_servers(
+        settings,
+        {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
+    )
+    device_id = 97141
+    # The filtered route answers with no rows, which sends the client to the /all fallback, and
+    # LibreNMS answers 404 there for a device that holds no inventory at all.
+    librenms_server.register(f"/api/v0/inventory/{device_id}", {"status": "ok", "inventory": []})
+    librenms_server.register(f"/api/v0/inventory/{device_id}/all", {"status": "error"}, status=404)
+
+    api = LibreNMSAPI(server_key="default")
+
+    assert api.get_inventory_filtered(device_id, ent_physical_contained_in=0, missing_is_empty=True) == (True, [])
+    # The default stays fail-closed: a caller that has not established the device exists must
+    # still see the 404 as a failure rather than an empty inventory.
+    success, _payload = api.get_inventory_filtered(device_id, ent_physical_contained_in=0)
+    assert success is False
