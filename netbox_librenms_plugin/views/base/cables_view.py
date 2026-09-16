@@ -1465,7 +1465,6 @@ class BaseCableTableView(
             None
 
         """
-
         csp = self._resolve_serial_local_csp(link, csp)
         if csp is None:
             return
