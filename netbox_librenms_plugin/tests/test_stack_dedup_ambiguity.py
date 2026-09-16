@@ -216,6 +216,24 @@ def test_a_lone_row_whose_stack_read_failed_is_not_imported_by_the_view(client, 
 
 
 @pytest.mark.django_db
+def test_ambiguous_stack_ids_are_listed_in_numeric_order():
+    """LibreNMS ids are numbers, so the blocked-batch message must not order them lexically."""
+    rows = {2: _row(2, "stack-low"), 10: _row(10, "stack-high")}
+    api = _StackBoundary(rows)
+
+    _collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
+        [10, 2],
+        api,
+        libre_devices_cache=rows,
+        sync_options={"use_sysname": True},
+    )
+    outcome = classify_bulk_precheck(_collisions, unresolved, stack_ambiguities, [10, 2], {})
+
+    assert stack_ambiguities[0]["device_ids"] == [2, 10]
+    assert "LibreNMS device ids 2, 10" in outcome.block_message
+
+
+@pytest.mark.django_db
 def test_an_empty_inventory_reads_as_empty_through_the_client_side_fallback(librenms_server, settings):
     """A device that holds no inventory must not read as a failed detection."""
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI

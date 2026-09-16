@@ -261,9 +261,7 @@ def detect_collisions_for_device_ids(
     if user is not None:
         collisions = scope_bulk_collisions(collisions, user)
     stack_ambiguities = [
-        {"key": key, "device_ids": sorted(ids, key=str)}
-        for key, ids in sorted(fingerprint_stack_ids.items())
-        if len(ids) >= 2
+        {"key": key, "device_ids": sorted(ids)} for key, ids in sorted(fingerprint_stack_ids.items()) if len(ids) >= 2
     ]
     return collisions, unresolved_ids, stack_ambiguities
 
