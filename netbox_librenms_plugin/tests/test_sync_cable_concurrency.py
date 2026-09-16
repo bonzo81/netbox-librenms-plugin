@@ -355,6 +355,103 @@ def test_locked_local_owner_must_still_belong_to_the_page_virtual_chassis():
     assert locked is None
 
 
+def _lock_view(username, *, initial_device=None, origin_device=None, cache_device=None):
+    """A sync view carrying the page/origin/cache devices the lock re-checks after locking."""
+    from django.contrib.auth import get_user_model
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    sync = object.__new__(SyncCablesView)
+    sync.request = SimpleNamespace(user=get_user_model().objects.create_superuser(username, "", "pw"))
+    if initial_device is not None:
+        sync._initial_device = initial_device
+    if origin_device is not None:
+        sync._origin_device = origin_device
+    if cache_device is not None:
+        sync._cache_device = cache_device
+    return sync
+
+
+def test_a_local_owner_that_no_longer_matches_the_confirmed_one_is_stale():
+    """The confirmation named an owner; a row that moved devices must not be cabled under it."""
+    from django.db import transaction
+
+    local = make_interface(make_device("cable-expect-local"), "Ethernet1")
+    remote = make_interface(make_device("cable-expect-remote"), "Ethernet9")
+    sync = _lock_view("cable-expect-local-user")
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote, expected_local_owner_id=local.device_id + 10_000)
+
+    assert locked is None
+    assert sync._termination_lock_failure == "stale"
+
+
+def test_a_remote_owner_that_no_longer_matches_the_confirmed_one_is_stale():
+    from django.db import transaction
+
+    local = make_interface(make_device("cable-expect2-local"), "Ethernet1")
+    remote = make_interface(make_device("cable-expect2-remote"), "Ethernet9")
+    sync = _lock_view("cable-expect2-user")
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(remote, local, expected_remote_owner_id=local.device_id + 10_000)
+
+    assert locked is None
+    assert sync._termination_lock_failure == "stale"
+
+
+def test_an_origin_device_outside_the_page_chassis_is_stale():
+    """The row's origin must still be the page device or one of its chassis members."""
+    from django.db import transaction
+
+    page = make_device("cable-origin-page")
+    stranger = make_device("cable-origin-stranger")
+    local = make_interface(page, "Ethernet1")
+    remote = make_interface(make_device("cable-origin-remote"), "Ethernet9")
+    sync = _lock_view("cable-origin-user", initial_device=page, origin_device=stranger)
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote)
+
+    assert locked is None
+    assert sync._termination_lock_failure == "stale"
+
+
+def test_an_origin_device_in_the_page_chassis_is_accepted():
+    """The guard must admit a genuine sibling member, not just reject everything."""
+    from django.db import transaction
+
+    page = make_device("cable-origin-ok-page")
+    sibling = make_device("cable-origin-ok-sibling")
+    make_virtual_chassis("cable-origin-ok-vc", page, sibling)
+    local = make_interface(page, "Ethernet1")
+    remote = make_interface(make_device("cable-origin-ok-remote"), "Ethernet9")
+    sync = _lock_view("cable-origin-ok-user", initial_device=page, origin_device=sibling)
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote)
+
+    assert locked is not None
+
+
+def test_a_cache_device_outside_the_page_chassis_is_stale():
+    """The snapshot the row came from must belong to the page device or its chassis."""
+    from django.db import transaction
+
+    page = make_device("cable-cache-page")
+    stranger = make_device("cable-cache-stranger")
+    local = make_interface(page, "Ethernet1")
+    remote = make_interface(make_device("cable-cache-remote"), "Ethernet9")
+    sync = _lock_view("cable-cache-user", initial_device=page, cache_device=stranger)
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote)
+
+    assert locked is None
+    assert sync._termination_lock_failure == "stale"
+
+
 def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together():
     """A stale settings form must rename the Tag selected by the current locked row."""
     from django.contrib.auth import get_user_model

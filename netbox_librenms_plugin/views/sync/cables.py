@@ -348,7 +348,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 sync_settings,
             )
 
-    def _lock_cable_terminations(  # noqa: C901
+    def _lock_cable_terminations(
         self,
         local_term,
         remote_term,
@@ -358,9 +358,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
     ):
         """Lock owners before terminations, then re-check scope and endpoint identity."""
         self._termination_lock_failure = "denied"
-        grouped = {}
-        for termination in (local_term, remote_term):
-            grouped.setdefault(type(termination), set()).add(termination.pk)
+        grouped, expected_owner_by_key = self._group_terminations(local_term, remote_term)
 
         # Check the submitted candidates before taking locks so a forged request cannot lock
         # rows that are outside its current object scope. The same check runs again after the
@@ -368,51 +366,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         # termination is a write, so change scope is what governs it: the POST gate does not ask
         # for view on the termination models either, and demanding it here would lock out a
         # change-only grant.
-        for model, requested_ids in grouped.items():
-            permitted_ids = set(
-                self.restricted_queryset(model, "change").filter(pk__in=requested_ids).values_list("pk", flat=True)
-            )
-            if permitted_ids != requested_ids:
-                return None
+        if not self._terminations_are_changeable(grouped):
+            return None
 
-        # Every cable writer locks Device owners before Interface/CSP/CP rows. Parent-child
-        # relationship sync uses the same order, so the two features cannot form a Device ↔
-        # Interface deadlock cycle. The termination owner IDs are candidate evidence only; the
-        # locked rows below must still have these exact owners.
-        expected_owner_by_key = {
-            (type(termination), termination.pk): termination.device_id for termination in (local_term, remote_term)
-        }
-        owner_ids = set(expected_owner_by_key.values())
         initial_device = getattr(self, "_initial_device", None)
-        if initial_device is not None:
-            owner_ids.add(initial_device.pk)
         origin_device = getattr(self, "_origin_device", None)
-        if origin_device is not None:
-            owner_ids.add(origin_device.pk)
         cache_device = getattr(self, "_cache_device", None)
-        if cache_device is not None:
-            owner_ids.add(cache_device.pk)
-        owner_ids = sorted(owner_ids)
-        visible_owner_ids = set(
-            self.restricted_queryset(Device, "view").filter(pk__in=owner_ids).values_list("pk", flat=True)
+        owner_ids = sorted(
+            set(expected_owner_by_key.values())
+            | {device.pk for device in (initial_device, origin_device, cache_device) if device is not None}
         )
-        if visible_owner_ids != set(owner_ids):
+        locked_owners_by_id = self._lock_owner_devices(owner_ids)
+        if locked_owners_by_id is None:
             return None
-        locked_owners = list(Device.objects.select_for_update().filter(pk__in=owner_ids).order_by("pk"))
-        locked_owners_by_id = {owner.pk: owner for owner in locked_owners}
-        if set(locked_owners_by_id) != set(owner_ids):
-            return None
-
-        locked_by_key = {}
-        for model in sorted(grouped, key=lambda item: item._meta.label_lower):
-            requested_ids = grouped[model]
-            locked = list(model.objects.select_for_update().filter(pk__in=requested_ids).order_by("pk"))
-            locked_by_key.update({(model, termination.pk): termination for termination in locked})
-        if set(locked_by_key) != set(expected_owner_by_key):
-            self._termination_lock_failure = "stale"
-            return None
-        if any(termination.device_id != expected_owner_by_key[key] for key, termination in locked_by_key.items()):
-            self._termination_lock_failure = "stale"
+        locked_by_key = self._lock_termination_rows(grouped, expected_owner_by_key)
+        if locked_by_key is None:
             return None
 
         self._locked_initial_device = locked_owners_by_id.get(getattr(initial_device, "pk", None))
@@ -420,65 +388,102 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         self._locked_cache_device = locked_owners_by_id.get(getattr(cache_device, "pk", None))
         locked_local = locked_by_key[(type(local_term), local_term.pk)]
         locked_remote = locked_by_key[(type(remote_term), remote_term.pk)]
-        locked_local_owner = locked_owners_by_id[locked_local.device_id]
-        locked_remote_owner = locked_owners_by_id[locked_remote.device_id]
-        self._locked_local_owner = locked_local_owner
-        self._locked_remote_owner = locked_remote_owner
-        if expected_local_owner_id is not None and locked_local_owner.pk != expected_local_owner_id:
+        self._locked_local_owner = locked_owners_by_id[locked_local.device_id]
+        self._locked_remote_owner = locked_owners_by_id[locked_remote.device_id]
+        if not self._locked_identity_still_matches(expected_local_owner_id, expected_remote_owner_id):
             self._termination_lock_failure = "stale"
-            return None
-        if expected_remote_owner_id is not None and locked_remote_owner.pk != expected_remote_owner_id:
-            self._termination_lock_failure = "stale"
-            return None
-        if (
-            self._locked_initial_device is not None
-            and self._locked_origin_device is not None
-            and self._locked_origin_device.pk != self._locked_initial_device.pk
-            and (
-                self._locked_origin_device.virtual_chassis_id is None
-                or self._locked_origin_device.virtual_chassis_id != self._locked_initial_device.virtual_chassis_id
-            )
-        ):
-            self._termination_lock_failure = "stale"
-            return None
-        if (
-            self._locked_initial_device is not None
-            and self._locked_cache_device is not None
-            and self._locked_cache_device.pk != self._locked_initial_device.pk
-            and (
-                self._locked_cache_device.virtual_chassis_id is None
-                or self._locked_cache_device.virtual_chassis_id != self._locked_initial_device.virtual_chassis_id
-            )
-        ):
-            self._termination_lock_failure = "stale"
-            return None
-        if (
-            self._locked_initial_device is not None
-            and locked_local_owner.pk != self._locked_initial_device.pk
-            and (
-                self._locked_initial_device.virtual_chassis_id is None
-                or locked_local_owner.virtual_chassis_id != self._locked_initial_device.virtual_chassis_id
-            )
-        ):
-            self._termination_lock_failure = "stale"
-            return None
-        visible_owner_ids = set(
-            self.restricted_queryset(Device, "view").filter(pk__in=owner_ids).values_list("pk", flat=True)
-        )
-        if visible_owner_ids != set(owner_ids):
             return None
 
-        for model, requested_ids in grouped.items():
-            permitted_after_lock = set(
-                self.restricted_queryset(model, "change").filter(pk__in=requested_ids).values_list("pk", flat=True)
-            )
-            if permitted_after_lock != requested_ids:
-                return None
+        # Re-check both scopes now the rows are locked: a constraint-based grant is mutable, so
+        # the pre-lock pass alone would authorize a scope the request has since lost.
+        if not self._owners_are_viewable(owner_ids) or not self._terminations_are_changeable(grouped):
+            return None
 
         return (
             locked_local,
             locked_remote,
         )
+
+    @staticmethod
+    def _group_terminations(local_term, remote_term):
+        """Group the submitted terminations by model, and record the owner each one claims."""
+        grouped = {}
+        expected_owner_by_key = {}
+        for termination in (local_term, remote_term):
+            grouped.setdefault(type(termination), set()).add(termination.pk)
+            # Candidate evidence only; the locked rows must still report these exact owners.
+            expected_owner_by_key[(type(termination), termination.pk)] = termination.device_id
+        return grouped, expected_owner_by_key
+
+    def _terminations_are_changeable(self, grouped):
+        """Return whether the request may change every submitted termination."""
+        for model, requested_ids in grouped.items():
+            permitted_ids = set(
+                self.restricted_queryset(model, "change").filter(pk__in=requested_ids).values_list("pk", flat=True)
+            )
+            if permitted_ids != requested_ids:
+                return False
+        return True
+
+    def _owners_are_viewable(self, owner_ids):
+        """Return whether the request may view every owning Device."""
+        visible_owner_ids = set(
+            self.restricted_queryset(Device, "view").filter(pk__in=owner_ids).values_list("pk", flat=True)
+        )
+        return visible_owner_ids == set(owner_ids)
+
+    def _lock_owner_devices(self, owner_ids):
+        """
+        Lock the owning Devices, or return None when they cannot all be locked in scope.
+
+        Every cable writer locks Device owners before Interface/CSP/CP rows. Parent-child
+        relationship sync uses the same order, so the two features cannot form a Device <->
+        Interface deadlock cycle.
+        """
+        if not self._owners_are_viewable(owner_ids):
+            return None
+        locked_owners = list(Device.objects.select_for_update().filter(pk__in=owner_ids).order_by("pk"))
+        locked_owners_by_id = {owner.pk: owner for owner in locked_owners}
+        if set(locked_owners_by_id) != set(owner_ids):
+            return None
+        return locked_owners_by_id
+
+    def _lock_termination_rows(self, grouped, expected_owner_by_key):
+        """Lock the termination rows, or return None when one vanished or changed owner."""
+        locked_by_key = {}
+        for model in sorted(grouped, key=lambda item: item._meta.label_lower):
+            locked = list(model.objects.select_for_update().filter(pk__in=grouped[model]).order_by("pk"))
+            locked_by_key.update({(model, termination.pk): termination for termination in locked})
+        if set(locked_by_key) != set(expected_owner_by_key):
+            self._termination_lock_failure = "stale"
+            return None
+        if any(termination.device_id != expected_owner_by_key[key] for key, termination in locked_by_key.items()):
+            self._termination_lock_failure = "stale"
+            return None
+        return locked_by_key
+
+    def _locked_identity_still_matches(self, expected_local_owner_id, expected_remote_owner_id):
+        """Return whether the locked rows still match the confirmed owners and the page chassis."""
+        if expected_local_owner_id is not None and self._locked_local_owner.pk != expected_local_owner_id:
+            return False
+        if expected_remote_owner_id is not None and self._locked_remote_owner.pk != expected_remote_owner_id:
+            return False
+        initial = self._locked_initial_device
+        if initial is None:
+            return True
+        # The row's origin, the snapshot it came from, and its local owner must each still be the
+        # page device or one of its chassis members; a former member is stale, not authorized.
+        return all(
+            self._shares_page_chassis(candidate, initial)
+            for candidate in (self._locked_origin_device, self._locked_cache_device, self._locked_local_owner)
+        )
+
+    @staticmethod
+    def _shares_page_chassis(candidate, initial):
+        """Return whether *candidate* is the page device itself or one of its chassis members."""
+        if candidate is None or candidate.pk == initial.pk:
+            return True
+        return candidate.virtual_chassis_id is not None and candidate.virtual_chassis_id == initial.virtual_chassis_id
 
     @staticmethod
     def _lock_current_cables(local_term, remote_term):
