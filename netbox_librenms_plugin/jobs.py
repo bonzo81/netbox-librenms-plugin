@@ -292,25 +292,22 @@ class ImportDevicesJob(JobRunner):
         skipped_id_set = set()
         if collision_check_ids:
             # Block NetBox object collisions and ambiguous stack fingerprints on the async path.
-            # A single row cannot collide, so skip the extra pass.
-            collisions, unresolved, stack_ambiguities = (
-                detect_collisions_for_device_ids(
-                    collision_check_ids,
-                    api,
-                    libre_devices_cache=libre_devices_cache,
-                    sync_options=sync_options,
-                    # Job context so a cancellation stops the scan itself — without it, a large
-                    # cache-miss batch keeps issuing LibreNMS calls until the whole pre-check
-                    # finishes and only the import loops below would honor the cancel.
-                    job=self,
-                    # Each row validates in its actual import mode: a VM row checked in Device
-                    # mode would run the serial/IP matching bulk_import_vms skips and could
-                    # fabricate a collision that blocks a valid batch.
-                    vm_device_ids=vm_imports,
-                    user=self.job.user,
-                )
-                if len(collision_check_ids) >= 2
-                else ([], [], [])
+            # Every non-empty batch runs it. One row cannot collide, but the scan also fails a row
+            # closed when its virtual-chassis inventory can't be read, and that check is per row.
+            collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
+                collision_check_ids,
+                api,
+                libre_devices_cache=libre_devices_cache,
+                sync_options=sync_options,
+                # Job context so a cancellation stops the scan itself — without it, a large
+                # cache-miss batch keeps issuing LibreNMS calls until the whole pre-check
+                # finishes and only the import loops below would honor the cancel.
+                job=self,
+                # Each row validates in its actual import mode: a VM row checked in Device
+                # mode would run the serial/IP matching bulk_import_vms skips and could
+                # fabricate a collision that blocks a valid batch.
+                vm_device_ids=vm_imports,
+                user=self.job.user,
             )
             if unresolved and _is_job_cancelled(self):
                 # A cancelled pre-check returns its unscanned remainder as unresolved. Cancellation

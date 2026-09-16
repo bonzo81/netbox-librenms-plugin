@@ -1513,10 +1513,11 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # directly, so the import path must enforce the same blockers. This runs on the SYNCHRONOUS
         # path only: it sits after the background-job dispatch above, so a batch that enqueued a job
         # doesn't pay this validation cost synchronously (ImportDevicesJob re-runs the same check).
-        # A single selected device can never collide (collisions need two distinct LibreNMS ids on
-        # one NetBox object), so skip the extra validation pass for the common single-row case.
+        # Every non-empty batch runs it. A single row can never collide (collisions need two
+        # distinct LibreNMS ids on one NetBox object), but the scan also fails a row closed when
+        # its virtual-chassis inventory can't be read, and that check is per row.
         precheck_skip_msg = None
-        if len(parsed_ids) >= 2:
+        if parsed_ids:
             collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
                 parsed_ids,
                 self.librenms_api,
