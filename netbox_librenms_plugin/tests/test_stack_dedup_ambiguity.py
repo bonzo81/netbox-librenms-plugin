@@ -157,3 +157,53 @@ def test_placeholder_member_serials_fall_back_to_ambiguous_fingerprint():
     assert unresolved == []
     assert outcome.blocked is True
     assert stack_ambiguities[0]["device_ids"] == [97121, 97122]
+
+
+@pytest.mark.django_db
+def test_a_lone_row_whose_stack_read_failed_is_not_imported_by_the_view(client, librenms_server, settings):
+    """The synchronous import runs the same pre-check for one row as for many."""
+    from dcim.models import Device
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_librenms_servers,
+        make_device,
+        make_superuser,
+    )
+
+    configure_librenms_servers(
+        settings,
+        {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
+    )
+    infrastructure = make_device("lone-stack-view-infrastructure")
+    device_id = 97131
+    hostname = "lone-stack-view-target"
+    row = {
+        **_row(device_id, hostname),
+        "hardware": infrastructure.device_type.model,
+        "location": infrastructure.site.name,
+    }
+    librenms_server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+    # A 500 is a failed read, unlike the 404 that means "this device holds no inventory".
+    librenms_server.register(f"/api/v0/inventory/{device_id}", {"status": "error"}, status=500)
+
+    # Precondition: the row really is an unreadable stack candidate. A fixture that served the
+    # inventory would import the device and read as the gate failing rather than the fixture.
+    detection = get_virtual_chassis_data(LibreNMSAPI(server_key="default"), device_id)
+    assert detection["detection_failed"] is True
+    assert detection["is_stack"] is False
+
+    client.force_login(make_superuser("lone-stack-view-importer"))
+    client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {
+            "select": [str(device_id)],
+            "server_key": "default",
+            f"role_{device_id}": str(infrastructure.role_id),
+        },
+        headers={"HX-Request": "true"},
+    )
+
+    assert not Device.objects.filter(name=hostname).exists()
