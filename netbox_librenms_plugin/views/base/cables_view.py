@@ -1381,7 +1381,7 @@ class BaseCableTableView(
             link["cable_status"] = "No Cable"
         return link
 
-    def enrich_serial_remote(self, link, claimed_cp_ids=None, csp=None, remote_context=None):  # noqa: C901
+    def enrich_serial_remote(self, link, claimed_cp_ids=None, csp=None, remote_context=None):
         """
         Resolve the remote ConsolePort for a serial row using the Avocent label.
 
@@ -1423,104 +1423,30 @@ class BaseCableTableView(
             None
 
         """
-        csp_id = link.get("netbox_local_interface_id")
-        # No resolved local end -> nothing to resolve a remote against (call sites gate on the
-        # id, so this is a defensive guard, not a reachable state on the render path).
-        if not csp_id:
-            return
-        if csp is None or csp.pk != csp_id:
-            try:
-                csp = self._viewable_queryset(ConsoleServerPort).get(pk=csp_id)
-            except ConsoleServerPort.DoesNotExist:
-                return
-        if link.get("_serial_cable_hidden") or link.get("_multi_termination_unsupported"):
+
+        csp = self._resolve_serial_local_csp(link, csp)
+        if csp is None:
             return
 
-        # A manual pick resolves at port level and skips label matching (see docstring). If the
-        # picked port is no longer available, fail closed. Falling back to the label would replace
-        # the user's explicit target with a different endpoint during sync.
         if "manual_remote_id" in link:
-            manual_pk = coerce_librenms_id(link.get("manual_remote_id"))
-            manual_cp = (remote_context or {}).get("manual_ports", {}).get(manual_pk)
-            if remote_context is None:
-                manual_cp = (
-                    self._viewable_queryset(ConsolePort)
-                    .filter(pk=manual_pk, device__in=self._viewable_queryset(Device))
-                    .select_related("device")
-                    .first()
-                )
-            if manual_cp is not None:
-                # Reserve the pick in the shared dedup set so a sibling auto-matched row cannot
-                # target the manually picked endpoint in the same batch.
-                manual_is_actionable = remote_context is None or (
-                    csp.pk in remote_context["changeable_console_server_port_ids"]
-                    and manual_cp.pk in remote_context["changeable_console_port_ids"]
-                )
-                if claimed_cp_ids is not None and manual_is_actionable:
-                    claimed_cp_ids.add(manual_cp.pk)
-                self._apply_serial_remote_target(
-                    link,
-                    csp,
-                    manual_cp,
-                    manual=True,
-                    remote_context=remote_context,
-                )
-                if not manual_is_actionable:
-                    link["can_create_cable"] = False
-                return
-            link.update(
-                {
-                    "manual_remote": True,
-                    "cable_status": "Selected remote port is no longer available",
-                    "can_create_cable": False,
-                }
-            )
+            self._resolve_manual_serial_remote(link, csp, claimed_cp_ids, remote_context)
             return
 
         # The default label on an unconfigured sensor identifies only the local appliance
-        # port. It is not evidence for a remote NetBox Device with the same name. Keep the
-        # manual picker available, but do not auto-select or write a remote endpoint.
+        # port. It is not evidence for a remote NetBox Device with the same name.
         if link.get("is_configured") is False:
-            if csp.cable is not None:
-                self._display_serial_cable_far_end(
-                    link,
-                    csp,
-                    path=(remote_context or {}).get("trace_paths", {}).get(csp.pk),
-                    visible_ids=(remote_context or {}).get("trace_visibility"),
-                )
+            self._display_serial_far_end_if_cabled(link, csp, remote_context)
             return
 
         label = link.get("remote_device")
         if not label:
-            # Cabled but no hint at all: still show where the cable really goes.
-            if csp.cable is not None:
-                self._display_serial_cable_far_end(
-                    link,
-                    csp,
-                    path=(remote_context or {}).get("trace_paths", {}).get(csp.pk),
-                    visible_ids=(remote_context or {}).get("trace_visibility"),
-                )
+            self._display_serial_far_end_if_cabled(link, csp, remote_context)
             return
 
-        if remote_context is not None:
-            device = remote_context["devices_by_label"].get(label)
-            found = device is not None
-        else:
-            device, found, _ = self.get_device_by_id_or_name(
-                None,
-                label,
-                queryset=self._viewable_queryset(Device),
-            )
-        if not found:
-            # A dead label must not leave a cabled row's remote columns empty — the cable
-            # knows its far end; show (and link) reality. Display only, no sync target.
-            if csp.cable is not None:
-                self._display_serial_cable_far_end(
-                    link,
-                    csp,
-                    path=(remote_context or {}).get("trace_paths", {}).get(csp.pk),
-                    visible_ids=(remote_context or {}).get("trace_visibility"),
-                )
+        device = self._lookup_serial_label_device(label, remote_context)
+        if device is None:
+            # A dead label must not leave a cabled row's remote columns empty.
+            self._display_serial_far_end_if_cabled(link, csp, remote_context)
             return
 
         link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
@@ -1536,6 +1462,91 @@ class BaseCableTableView(
         ):
             return
 
+        self._pick_free_console_port(link, csp, device, claimed_cp_ids, remote_context)
+
+    def _resolve_serial_local_csp(self, link, csp):
+        """Return the row's local ConsoleServerPort, or None when the row cannot be resolved."""
+        csp_id = link.get("netbox_local_interface_id")
+        # No resolved local end -> nothing to resolve a remote against (call sites gate on the
+        # id, so this is a defensive guard, not a reachable state on the render path).
+        if not csp_id:
+            return None
+        if csp is None or csp.pk != csp_id:
+            try:
+                csp = self._viewable_queryset(ConsoleServerPort).get(pk=csp_id)
+            except ConsoleServerPort.DoesNotExist:
+                return None
+        if link.get("_serial_cable_hidden") or link.get("_multi_termination_unsupported"):
+            return None
+        return csp
+
+    def _display_serial_far_end_if_cabled(self, link, csp, remote_context):
+        """Show where an already-cabled row really lands, with no sync target attached."""
+        if csp.cable is None:
+            return
+        self._display_serial_cable_far_end(
+            link,
+            csp,
+            path=(remote_context or {}).get("trace_paths", {}).get(csp.pk),
+            visible_ids=(remote_context or {}).get("trace_visibility"),
+        )
+
+    def _lookup_serial_label_device(self, label, remote_context):
+        """Resolve the Avocent label to one viewable Device, or None when it names nothing."""
+        if remote_context is not None:
+            return remote_context["devices_by_label"].get(label)
+        device, found, _error = self.get_device_by_id_or_name(
+            None,
+            label,
+            queryset=self._viewable_queryset(Device),
+        )
+        return device if found else None
+
+    def _resolve_manual_serial_remote(self, link, csp, claimed_cp_ids, remote_context):
+        """
+        Resolve a hand-picked remote at port level, or fail the row closed.
+
+        A manual pick carries the user's explicit intent, so a pick that is no longer available
+        must NOT fall back to the label: that would sync a different endpoint than was chosen.
+        """
+        manual_pk = coerce_librenms_id(link.get("manual_remote_id"))
+        manual_cp = (remote_context or {}).get("manual_ports", {}).get(manual_pk)
+        if remote_context is None:
+            manual_cp = (
+                self._viewable_queryset(ConsolePort)
+                .filter(pk=manual_pk, device__in=self._viewable_queryset(Device))
+                .select_related("device")
+                .first()
+            )
+        if manual_cp is None:
+            link.update(
+                {
+                    "manual_remote": True,
+                    "cable_status": "Selected remote port is no longer available",
+                    "can_create_cable": False,
+                }
+            )
+            return
+        manual_is_actionable = remote_context is None or (
+            csp.pk in remote_context["changeable_console_server_port_ids"]
+            and manual_cp.pk in remote_context["changeable_console_port_ids"]
+        )
+        # Reserve the pick in the shared dedup set so a sibling auto-matched row cannot
+        # target the manually picked endpoint in the same batch.
+        if claimed_cp_ids is not None and manual_is_actionable:
+            claimed_cp_ids.add(manual_cp.pk)
+        self._apply_serial_remote_target(
+            link,
+            csp,
+            manual_cp,
+            manual=True,
+            remote_context=remote_context,
+        )
+        if not manual_is_actionable:
+            link["can_create_cable"] = False
+
+    def _pick_free_console_port(self, link, csp, device, claimed_cp_ids, remote_context):
+        """Target the first free ConsolePort on the label device, skipping sibling rows' claims."""
         if claimed_cp_ids is None:
             claimed_cp_ids = set()
         # Order explicitly so the picked port is deterministic (the label is only a hint and
@@ -1561,19 +1572,19 @@ class BaseCableTableView(
                 .order_by("name")
                 .first()
             )
-        if uncabled_cp:
-            can_create = remote_context is None or (
-                csp.pk in remote_context["changeable_console_server_port_ids"]
-                and uncabled_cp.pk in remote_context["changeable_console_port_ids"]
-            )
-            if can_create:
-                claimed_cp_ids.add(uncabled_cp.pk)
-            link["netbox_remote_interface_id"] = uncabled_cp.pk
-            link["remote_port_name"] = uncabled_cp.name
-            link["remote_port_url"] = reverse("dcim:consoleport", args=[uncabled_cp.pk])
-            link["can_create_cable"] = can_create
-        else:
+        if not uncabled_cp:
             link["cable_status"] = "Console Port Not Found in NetBox"
+            return
+        can_create = remote_context is None or (
+            csp.pk in remote_context["changeable_console_server_port_ids"]
+            and uncabled_cp.pk in remote_context["changeable_console_port_ids"]
+        )
+        if can_create:
+            claimed_cp_ids.add(uncabled_cp.pk)
+        link["netbox_remote_interface_id"] = uncabled_cp.pk
+        link["remote_port_name"] = uncabled_cp.name
+        link["remote_port_url"] = reverse("dcim:consoleport", args=[uncabled_cp.pk])
+        link["can_create_cable"] = can_create
 
     def _resolve_cabled_serial_row(self, link, csp, device, remote_context=None) -> bool:
         """

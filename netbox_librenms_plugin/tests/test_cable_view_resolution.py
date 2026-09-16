@@ -307,3 +307,182 @@ class TestNormalLinkContextTraces:
         context = _view()._build_normal_link_context([link], obj, SERVER_KEY)
 
         assert context["trace_paths"] == {}
+
+
+# ---------------------------------------------------------------------------
+# enrich_serial_remote
+#
+# test_serial_cables_view.py already pins the plain label path (uncabled pick,
+# deterministic ordering, dead label, every port cabled). These cases pin the
+# branches it does NOT reach, which are the ones a split of this method could
+# move: the manual pick, the unconfigured sensor, the two early guards, the
+# sibling-row claim set, and the preloaded remote_context variants.
+# ---------------------------------------------------------------------------
+
+
+def _serial_view():
+    """The cable view bound to a real request, matching the serial suite's own driver."""
+    from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+    view = make_view(BaseCableTableView, make_request("get", user=make_superuser("serial-ctx-su")))
+    view._active_server_key = SERVER_KEY
+    view.librenms_id = 12
+    return view
+
+
+def _serial_link(csp, **overrides):
+    """A serial row whose local end already resolved to *csp*."""
+    row = {
+        "_source": "serial",
+        "local_port": csp.name,
+        "netbox_local_interface_id": csp.pk,
+        "is_configured": True,
+        "cable_status": "No Cable",
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.django_db
+class TestEnrichSerialRemoteGuards:
+    """The early exits that must leave the row untouched."""
+
+    def test_a_row_without_a_resolved_local_port_is_left_alone(self):
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        device, _, _ = make_serial_device("serial-guard-remote", cp_names=["con0"])
+        link = {"_source": "serial", "remote_device": device.name}
+
+        _serial_view().enrich_serial_remote(link)
+
+        assert link == {"_source": "serial", "remote_device": device.name}
+
+    def test_a_hidden_serial_cable_stops_resolution(self):
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        device, _, _ = make_serial_device("serial-hidden-remote", cp_names=["con0"])
+        _local, (csp,), _ = make_serial_device("serial-hidden-local", csp_names=["ttyS0"])
+        link = _serial_link(csp, remote_device=device.name, _serial_cable_hidden=True)
+
+        _serial_view().enrich_serial_remote(link)
+
+        assert "netbox_remote_interface_id" not in link
+        assert "can_create_cable" not in link
+
+    def test_an_unsupported_multi_termination_stops_resolution(self):
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        device, _, _ = make_serial_device("serial-multi-remote", cp_names=["con0"])
+        _local, (csp,), _ = make_serial_device("serial-multi-local", csp_names=["ttyS0"])
+        link = _serial_link(csp, remote_device=device.name, _multi_termination_unsupported=True)
+
+        _serial_view().enrich_serial_remote(link)
+
+        assert "netbox_remote_interface_id" not in link
+
+    def test_a_deleted_local_port_stops_resolution(self):
+        """The row carries a stale CSP pk, so the re-fetch must fail closed."""
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        device, _, _ = make_serial_device("serial-stale-remote", cp_names=["con0"])
+        _local, (csp,), _ = make_serial_device("serial-stale-local", csp_names=["ttyS0"])
+        stale_pk = csp.pk
+        csp.delete()
+        link = {"_source": "serial", "netbox_local_interface_id": stale_pk, "remote_device": device.name}
+
+        _serial_view().enrich_serial_remote(link)
+
+        assert "netbox_remote_interface_id" not in link
+
+    def test_an_unconfigured_sensor_never_auto_selects_a_remote(self):
+        """The default label names the local appliance port, so it is not evidence for a device."""
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        device, _, _ = make_serial_device("serial-unconfigured-remote", cp_names=["con0"])
+        _local, (csp,), _ = make_serial_device("serial-unconfigured-local", csp_names=["ttyS0"])
+        link = _serial_link(csp, remote_device=device.name, is_configured=False)
+
+        _serial_view().enrich_serial_remote(link)
+
+        assert "netbox_remote_interface_id" not in link
+        assert "netbox_remote_device_id" not in link
+
+
+@pytest.mark.django_db
+class TestEnrichSerialRemoteManualPick:
+    """A hand-picked remote wins over the label and resolves at port level."""
+
+    def test_a_manual_pick_resolves_to_the_picked_port(self):
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        picked_device, _, (picked,) = make_serial_device("serial-manual-picked", cp_names=["con9"])
+        # A different device the label names, to prove the pick wins over the label.
+        label_device, _, _ = make_serial_device("serial-manual-label", cp_names=["con0"])
+        _local, (csp,), _ = make_serial_device("serial-manual-local", csp_names=["ttyS0"])
+        link = _serial_link(csp, remote_device=label_device.name, manual_remote_id=picked.pk)
+
+        _serial_view().enrich_serial_remote(link)
+
+        assert link["netbox_remote_interface_id"] == picked.pk
+        assert link["netbox_remote_device_id"] == picked_device.pk
+        assert link["manual_remote"] is True
+
+    def test_a_manual_pick_is_reserved_against_sibling_rows(self):
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        _picked_device, _, (picked,) = make_serial_device("serial-claim-picked", cp_names=["con9"])
+        _local, (csp,), _ = make_serial_device("serial-claim-local", csp_names=["ttyS0"])
+        link = _serial_link(csp, manual_remote_id=picked.pk)
+        claimed = set()
+
+        _serial_view().enrich_serial_remote(link, claimed_cp_ids=claimed)
+
+        assert picked.pk in claimed
+
+    def test_a_vanished_manual_pick_fails_closed_instead_of_falling_back_to_the_label(self):
+        """Falling back would silently sync a different endpoint than the user chose."""
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        label_device, _, (label_port,) = make_serial_device("serial-vanished-label", cp_names=["con0"])
+        _picked_device, _, (picked,) = make_serial_device("serial-vanished-picked", cp_names=["con9"])
+        _local, (csp,), _ = make_serial_device("serial-vanished-local", csp_names=["ttyS0"])
+        vanished_pk = picked.pk
+        picked.delete()
+        link = _serial_link(csp, remote_device=label_device.name, manual_remote_id=vanished_pk)
+
+        _serial_view().enrich_serial_remote(link)
+
+        assert link["cable_status"] == "Selected remote port is no longer available"
+        assert link["can_create_cable"] is False
+        assert link["manual_remote"] is True
+        assert link.get("netbox_remote_interface_id") != label_port.pk
+
+
+@pytest.mark.django_db
+class TestEnrichSerialRemoteClaims:
+    """Two rows resolving to one device must not target the same free port."""
+
+    def test_a_claimed_port_is_skipped_for_the_next_row(self):
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        device, _, (first, second) = make_serial_device("serial-dedup-remote", cp_names=["con-a", "con-b"])
+        _local, (csp,), _ = make_serial_device("serial-dedup-local", csp_names=["ttyS0"])
+        link = _serial_link(csp, remote_device=device.name)
+        claimed = {first.pk}
+
+        _serial_view().enrich_serial_remote(link, claimed_cp_ids=claimed)
+
+        assert link["netbox_remote_interface_id"] == second.pk
+        assert claimed == {first.pk, second.pk}
+
+    def test_an_auto_pick_claims_its_port(self):
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+
+        device, _, (only,) = make_serial_device("serial-autoclaim-remote", cp_names=["con0"])
+        _local, (csp,), _ = make_serial_device("serial-autoclaim-local", csp_names=["ttyS0"])
+        link = _serial_link(csp, remote_device=device.name)
+        claimed = set()
+
+        _serial_view().enrich_serial_remote(link, claimed_cp_ids=claimed)
+
+        assert claimed == {only.pk}
