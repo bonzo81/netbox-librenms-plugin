@@ -1869,7 +1869,7 @@ class LibreNMSAPI:
             return True, []
         return self._fetch_serial_port_sensors(device_id, sensor_types=serial_types)
 
-    def _fetch_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:  # noqa: C901
+    def _fetch_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:
         """
         Fetch the serial-port sensors of one device from the instance-wide sensor table.
 
@@ -1899,82 +1899,18 @@ class LibreNMSAPI:
             response.raise_for_status()
 
             result = response.json()
-            if isinstance(result, dict) and result.get("status") == "ok":
-                # Select by key presence first, then validate the selected value. The old
-                # `result.get("sensors") or result.get("resources", [])` turned a missing list
-                # ({"status": "ok"}) or a falsy-but-present one ({"sensors": ""}) into [], so a
-                # malformed response was reported as a successful zero-sensor result.
-                if "sensors" in result:
-                    all_sensors = result["sensors"]
-                elif "resources" in result:
-                    all_sensors = result["resources"]
-                else:
-                    return False, result.get("message") or "Unexpected response format: missing sensor list"
-                if not isinstance(all_sensors, list):
-                    return False, result.get("message") or "Unexpected response format: missing sensor list"
-                # This is an external boundary: a list payload doesn't guarantee every item is a
-                # dict. Fail closed on a malformed item instead of filtering it out — silently
-                # dropping rows would make a broken response indistinguishable from "no serial
-                # sensors" and skip serial sync without surfacing the error. Mirrors the
-                # per-item validation in get_device_inventory().
-                if any(not isinstance(s, dict) for s in all_sensors):
-                    logger.warning("Unexpected sensors response for %s: non-dict sensor item", self.server_key)
-                    return False, result.get("message") or "Unexpected response format: invalid sensor item"
-                # Narrow to the serial subset BEFORE validating the rest of each row. This
-                # endpoint returns every sensor on the instance, so a temperature probe with an
-                # out-of-contract sensor_id would otherwise fail the whole serial refresh (and
-                # every row would be copied for normalization).
-                serial_sensors = []
-                unreadable_sensor_types = 0
-                for sensor in all_sensors:
-                    sensor_type = sensor.get("sensor_type")
-                    # A non-string sensor_type names no serial type and would raise TypeError on
-                    # the membership test; skip the row rather than fail every device's refresh.
-                    if not isinstance(sensor_type, str):
-                        unreadable_sensor_types += 1
-                        continue
-                    if sensor_type not in serial_types:
-                        continue
-                    if str(sensor.get("device_id")) != str(device_id):
-                        continue
-                    deleted = sensor.get("sensor_deleted", 0)
-                    valid_deleted = (
-                        isinstance(deleted, int) and not isinstance(deleted, bool) and deleted in (0, 1)
-                    ) or (isinstance(deleted, str) and deleted in ("0", "1"))
-                    if not valid_deleted:
-                        logger.warning(
-                            "Unexpected sensors response for %s: invalid sensor_deleted",
-                            self.server_key,
-                        )
-                        return False, result.get("message") or "Unexpected response format: invalid sensor_deleted"
-                    if str(deleted) == "1":
-                        continue
-                    sensor_id = self._normalize_librenms_id(sensor.get("sensor_id"))
-                    if sensor_id is None:
-                        logger.warning("Unexpected sensors response for %s: invalid sensor_id", self.server_key)
-                        return False, result.get("message") or "Unexpected response format: invalid sensor_id"
-                    serial_sensors.append({**sensor, "sensor_id": sensor_id})
-                if unreadable_sensor_types:
-                    logger.warning(
-                        "Skipped %s sensor(s) with a non-string sensor_type for %s",
-                        unreadable_sensor_types,
-                        self.server_key,
-                    )
-                return True, serial_sensors
-            if isinstance(result, dict):
+            if not isinstance(result, dict):
+                return False, "Unexpected response format"
+            if result.get("status") != "ok":
                 return False, result.get("message") or "Unexpected response format"
-            return False, "Unexpected response format"
+            all_sensors, list_error = self._extract_sensor_list(result)
+            if all_sensors is None:
+                return False, list_error
+            return self._select_device_serial_sensors(all_sensors, device_id, serial_types, result)
 
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                try:
-                    payload = e.response.json()
-                except (TypeError, ValueError):
-                    payload = None
-                message = payload.get("message") if isinstance(payload, dict) else None
-                if isinstance(message, str) and "sensors do not exist" in message.lower():
-                    return True, []
-                return False, "Sensors resource endpoint not found"
+            if e.response.status_code == HTTP_NOT_FOUND:
+                return self._classify_missing_sensors(e)
             return False, f"HTTP error: {str(e)}"
         except ValueError as e:
             # response.json() raises ValueError / requests JSONDecodeError on a non-JSON body.
@@ -1984,6 +1920,91 @@ class LibreNMSAPI:
             return False, f"Invalid JSON from LibreNMS: {str(e)}"
         except requests.exceptions.RequestException as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
+
+    @staticmethod
+    def _classify_missing_sensors(error) -> tuple[bool, list | str]:
+        """Tell "this instance holds no sensors" apart from "this endpoint is missing"."""
+        try:
+            payload = error.response.json()
+        except (TypeError, ValueError):
+            payload = None
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if isinstance(message, str) and "sensors do not exist" in message.lower():
+            return True, []
+        return False, "Sensors resource endpoint not found"
+
+    @staticmethod
+    def _extract_sensor_list(result: dict):
+        """Return the response's sensor list, or ``(None, message)`` when the payload is malformed."""
+        # Select by key presence first, then validate the selected value. The old
+        # `result.get("sensors") or result.get("resources", [])` turned a missing list
+        # ({"status": "ok"}) or a falsy-but-present one ({"sensors": ""}) into [], so a
+        # malformed response was reported as a successful zero-sensor result.
+        if "sensors" in result:
+            all_sensors = result["sensors"]
+        elif "resources" in result:
+            all_sensors = result["resources"]
+        else:
+            return None, result.get("message") or "Unexpected response format: missing sensor list"
+        if not isinstance(all_sensors, list):
+            return None, result.get("message") or "Unexpected response format: missing sensor list"
+        return all_sensors, None
+
+    @staticmethod
+    def _sensor_deleted_flag(sensor: dict) -> str | None:
+        """Return the row's deleted flag as "0"/"1", or None when it is out of contract."""
+        deleted = sensor.get("sensor_deleted", 0)
+        if isinstance(deleted, int) and not isinstance(deleted, bool) and deleted in (0, 1):
+            return str(deleted)
+        if isinstance(deleted, str) and deleted in ("0", "1"):
+            return deleted
+        return None
+
+    def _select_device_serial_sensors(
+        self, all_sensors: list, device_id: int, serial_types, result: dict
+    ) -> tuple[bool, list | str]:
+        """Narrow the instance-wide sensor table to one device's live serial rows."""
+        # This is an external boundary: a list payload doesn't guarantee every item is a dict.
+        # Fail closed on a malformed item instead of filtering it out — silently dropping rows
+        # would make a broken response indistinguishable from "no serial sensors" and skip
+        # serial sync without surfacing the error. Mirrors the per-item validation in
+        # get_device_inventory().
+        if any(not isinstance(s, dict) for s in all_sensors):
+            logger.warning("Unexpected sensors response for %s: non-dict sensor item", self.server_key)
+            return False, result.get("message") or "Unexpected response format: invalid sensor item"
+
+        serial_sensors = []
+        unreadable_sensor_types = 0
+        for sensor in all_sensors:
+            sensor_type = sensor.get("sensor_type")
+            # A non-string sensor_type names no serial type and would raise TypeError on the
+            # membership test; skip the row rather than fail every device's refresh.
+            if not isinstance(sensor_type, str):
+                unreadable_sensor_types += 1
+                continue
+            # Narrow to this device's serial subset BEFORE validating the rest of the row. This
+            # endpoint returns every sensor on the instance, so a temperature probe with an
+            # out-of-contract sensor_id would otherwise fail the whole serial refresh.
+            if sensor_type not in serial_types or str(sensor.get("device_id")) != str(device_id):
+                continue
+            deleted = self._sensor_deleted_flag(sensor)
+            if deleted is None:
+                logger.warning("Unexpected sensors response for %s: invalid sensor_deleted", self.server_key)
+                return False, result.get("message") or "Unexpected response format: invalid sensor_deleted"
+            if deleted == "1":
+                continue
+            sensor_id = self._normalize_librenms_id(sensor.get("sensor_id"))
+            if sensor_id is None:
+                logger.warning("Unexpected sensors response for %s: invalid sensor_id", self.server_key)
+                return False, result.get("message") or "Unexpected response format: invalid sensor_id"
+            serial_sensors.append({**sensor, "sensor_id": sensor_id})
+        if unreadable_sensor_types:
+            logger.warning(
+                "Skipped %s sensor(s) with a non-string sensor_type for %s",
+                unreadable_sensor_types,
+                self.server_key,
+            )
+        return True, serial_sensors
 
     def get_port_vlan_details(self, port_id: int) -> tuple[bool, dict | str]:
         """
