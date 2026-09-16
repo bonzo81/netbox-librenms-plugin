@@ -12,6 +12,11 @@ Every reader and writer of the format goes through here, so the two sides cannot
 STATUS_KEY = "__http_status__"
 BODY_KEY = "body"
 
+# The replayable HTTP status range. Capture refuses to record a response outside it (a transport
+# failure reports status 0) because the mock replay server would pass it to send_response().
+MIN_HTTP_STATUS = 100
+MAX_HTTP_STATUS = 599
+
 
 def _is_int(value):
     """Return whether *value* is a real integer. bool is an int subclass and is not one."""
@@ -24,9 +29,13 @@ def is_status_envelope(value):
 
     Both keys are required. A body would have to carry the reserved status key AND a "body" key
     to be mistaken for one, and an envelope written without its body is not silently read as an
-    empty error.
+    empty error. The status must also be replayable, so a fixture that capture would have refused
+    to write is rejected on the way back in.
     """
-    return isinstance(value, dict) and _is_int(value.get(STATUS_KEY)) and BODY_KEY in value
+    if not isinstance(value, dict) or BODY_KEY not in value:
+        return False
+    status = value.get(STATUS_KEY)
+    return _is_int(status) and MIN_HTTP_STATUS <= status <= MAX_HTTP_STATUS
 
 
 def is_malformed_status_envelope(value):

@@ -81,9 +81,9 @@ def test_recording_schema_errors_rejects_bool_int_fields():
     assert any("device_id must be an integer" in e for e in errors)
 
 
-@pytest.mark.parametrize("status", [True, False, "404", None, 404.0])
+@pytest.mark.parametrize("status", [True, False, "404", None, 404.0, 0, 99, 600, 999])
 def test_recording_schema_errors_rejects_malformed_status_envelopes(status):
-    """A present status marker must be a non-Boolean integer in a complete envelope."""
+    """A present status marker must be a non-Boolean integer inside the replayable HTTP range."""
     from netbox_librenms_plugin.data_shapes.envelope import BODY_KEY, STATUS_KEY, unwrap_response
     from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
 

@@ -8,7 +8,7 @@ assembles them into a recording dict that
 can replay. See ``data_shapes/recordings/`` and issue #95.
 """
 
-from netbox_librenms_plugin.data_shapes.envelope import wrap_response
+from netbox_librenms_plugin.data_shapes.envelope import MAX_HTTP_STATUS, MIN_HTTP_STATUS, wrap_response
 
 SCHEMA_VERSION = 1
 
@@ -120,7 +120,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         # [0, body] would bake an un-replayable route into the recording — the mock replay server
         # calls send_response(0), an out-of-range HTTP status — so skip any route that never produced
         # a real HTTP status. A genuine non-2xx (e.g. 404) IS a real status and is still recorded.
-        if not (100 <= status < 600):
+        if not (MIN_HTTP_STATUS <= status <= MAX_HTTP_STATUS):
             # A required structural route that never answered means the capture is incomplete:
             # persisting it would ship a partial fixture (missing device/ports/port_stack) as if
             # capture succeeded. Fail loudly instead. A caller can explicitly omit an optional
