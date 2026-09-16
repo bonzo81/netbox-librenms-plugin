@@ -1083,88 +1083,59 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             context["close_modal"] = True
         return view.render_sync_partial(request, obj, resolved_key, {"cable_sync": context})
 
-    def display_sync_results(self, request, results):  # noqa: C901
+    # (results key, messages level, template) in flash-message display order. The level is a
+    # NAME, resolved against the messages module at call time, so a test that patches that
+    # module still intercepts the call.
+    _RESULT_MESSAGES = (
+        ("missing_remote", "error", "Remote device or interface not found in NetBox for: {items}"),
+        ("invalid", "error", "No LibreNMS link data found for interfaces: {items}"),
+        ("failed", "error", "Failed to sync cables for interfaces: {items}"),
+        (
+            "rejected_selection",
+            "error",
+            "Selected device is not part of this cable-sync page for interfaces: {items}",
+        ),
+        (
+            "denied",
+            "error",
+            "You do not have permission to change the selected cable connection(s) for: {items}.",
+        ),
+        (
+            "stale",
+            "error",
+            "The cable state or target changed after confirmation. Refresh and review the current cable for: {items}",
+        ),
+        (
+            "unverified",
+            "error",
+            "These links come from a LibreNMS source the last refresh could not read, so they "
+            "may be out of date. Refresh Cables before syncing: {items}.",
+        ),
+        (
+            "unsupported",
+            "error",
+            "Multi-termination cables cannot be changed by cable sync. Update them in NetBox for: {items}.",
+        ),
+        ("duplicate", "warning", "Cable already exists for interfaces: {items}"),
+        (
+            "skipped",
+            "info",
+            "Skipped OOB-controller links (context only, not syncable to the host): {items}",
+        ),
+        ("patch_path", "info", "Skipped links already modeled through a patch path: {items}"),
+        ("tagged", "info", "Tagged existing cable(s) as LibreNMS-managed for: {items}"),
+        (
+            "conflict",
+            "warning",
+            "Overwrite protection: confirm the current cable(s) in the dialog for: {items}",
+        ),
+        ("overwritten", "success", "Overwrote existing cable for interfaces: {items}"),
+        ("valid", "success", "Successfully created cable for interfaces: {items}"),
+    )
+
+    def display_sync_results(self, request, results):
         """Display flash messages summarizing the cable sync results."""
-        if results["missing_remote"]:
-            messages.error(
-                request,
-                f"Remote device or interface not found in NetBox for: {', '.join(results['missing_remote'])}",
-            )
-        if results["invalid"]:
-            messages.error(
-                request,
-                f"No LibreNMS link data found for interfaces: {', '.join(results['invalid'])}",
-            )
-        if results.get("failed"):
-            messages.error(
-                request,
-                f"Failed to sync cables for interfaces: {', '.join(results['failed'])}",
-            )
-        if results.get("rejected_selection"):
-            messages.error(
-                request,
-                "Selected device is not part of this cable-sync page for interfaces: "
-                f"{', '.join(results['rejected_selection'])}",
-            )
-        if results.get("denied"):
-            messages.error(
-                request,
-                "You do not have permission to change the selected cable connection(s) for: "
-                f"{', '.join(results['denied'])}.",
-            )
-        if results.get("stale"):
-            messages.error(
-                request,
-                "The cable state or target changed after confirmation. Refresh and review the current cable for: "
-                f"{', '.join(results['stale'])}",
-            )
-        if results.get("unverified"):
-            messages.error(
-                request,
-                "These links come from a LibreNMS source the last refresh could not read, so they "
-                "may be out of date. Refresh Cables before syncing: "
-                f"{', '.join(results['unverified'])}.",
-            )
-        if results.get("unsupported"):
-            messages.error(
-                request,
-                "Multi-termination cables cannot be changed by cable sync. Update them in NetBox for: "
-                f"{', '.join(results['unsupported'])}.",
-            )
-        if results["duplicate"]:
-            messages.warning(
-                request,
-                f"Cable already exists for interfaces: {', '.join(results['duplicate'])}",
-            )
-        if results.get("skipped"):
-            messages.info(
-                request,
-                "Skipped OOB-controller links (context only, not syncable to the host): "
-                f"{', '.join(results['skipped'])}",
-            )
-        if results.get("patch_path"):
-            messages.info(
-                request,
-                f"Skipped links already modeled through a patch path: {', '.join(results['patch_path'])}",
-            )
-        if results.get("tagged"):
-            messages.info(
-                request,
-                f"Tagged existing cable(s) as LibreNMS-managed for: {', '.join(results['tagged'])}",
-            )
-        if results.get("conflict"):
-            messages.warning(
-                request,
-                "Overwrite protection: confirm the current cable(s) in the dialog for: "
-                f"{', '.join(results['conflict'])}",
-            )
-        if results.get("overwritten"):
-            messages.success(
-                request,
-                f"Overwrote existing cable for interfaces: {', '.join(results['overwritten'])}",
-            )
-        if results["valid"]:
-            messages.success(
-                request,
-                f"Successfully created cable for interfaces: {', '.join(results['valid'])}",
-            )
+        for key, level, template in self._RESULT_MESSAGES:
+            interfaces = results.get(key)
+            if interfaces:
+                getattr(messages, level)(request, template.format(items=", ".join(interfaces)))

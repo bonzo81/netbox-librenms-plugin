@@ -12,6 +12,10 @@ Covered so far:
 - ``_build_normal_link_context``: which link resolves to which device, owner and
   interface, what each lookup index holds, which pks land in the visibility sets,
   and when a trace is loaded.
+- ``enrich_serial_remote``: the guards, the manual pick, and the sibling-row claims.
+- ``_prepare_context``: the unresolved-identity, serial carry-forward and migrated
+  donor branches.
+- ``SyncCablesView.display_sync_results``: every result category's text and order.
 """
 
 import pytest
@@ -652,3 +656,119 @@ class TestPrepareContextReadOnlyDonor:
         assert rows, "the cached snapshot must render a row"
         assert all(row.get("can_create_cable") is False for row in rows)
         assert all("picker_url" not in row for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# SyncCablesView.display_sync_results
+#
+# Fifteen near-identical blocks, one per result category. The existing coverage
+# patches the messages module and passes four keys, so it pins neither the text
+# nor the order. This drives real message storage with every category populated.
+# ---------------------------------------------------------------------------
+
+# Every key display_sync_results reports, in the order the producer initialises them.
+SYNC_RESULT_KEYS = (
+    "valid",
+    "invalid",
+    "failed",
+    "duplicate",
+    "missing_remote",
+    "rejected_selection",
+    "skipped",
+    "overwritten",
+    "tagged",
+    "conflict",
+    "denied",
+    "stale",
+    "unverified",
+    "unsupported",
+    "patch_path",
+)
+
+
+@pytest.mark.django_db
+class TestDisplaySyncResults:
+    """Each populated category raises exactly one flash message, at its own level."""
+
+    def _run_with_every_category(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        request = make_request("post", user=make_superuser("cable-results-user"))
+        view = object.__new__(SyncCablesView)
+        # One distinct interface name per category, so a message cannot be attributed
+        # to the wrong key and still pass.
+        results = {key: [f"if-{key}"] for key in SYNC_RESULT_KEYS}
+
+        view.display_sync_results(request, results)
+
+        return {level: message_texts(request, level) for level in ("error", "warning", "info", "success")}
+
+    def test_every_category_reports_at_its_documented_level(self):
+        by_level = self._run_with_every_category()
+
+        assert [text.split(": ")[-1] for text in by_level["error"]] == [
+            "if-missing_remote",
+            "if-invalid",
+            "if-failed",
+            "if-rejected_selection",
+            "if-denied.",
+            "if-stale",
+            "if-unverified.",
+            "if-unsupported.",
+        ]
+        assert [text.split(": ")[-1] for text in by_level["warning"]] == ["if-duplicate", "if-conflict"]
+        assert [text.split(": ")[-1] for text in by_level["info"]] == ["if-skipped", "if-patch_path", "if-tagged"]
+        assert [text.split(": ")[-1] for text in by_level["success"]] == ["if-overwritten", "if-valid"]
+
+    def test_the_wording_of_each_category_is_unchanged(self):
+        by_level = self._run_with_every_category()
+        everything = [text for level in ("error", "warning", "info", "success") for text in by_level[level]]
+
+        assert "Remote device or interface not found in NetBox for: if-missing_remote" in everything
+        assert "No LibreNMS link data found for interfaces: if-invalid" in everything
+        assert "Failed to sync cables for interfaces: if-failed" in everything
+        assert "Selected device is not part of this cable-sync page for interfaces: if-rejected_selection" in everything
+        assert "You do not have permission to change the selected cable connection(s) for: if-denied." in everything
+        assert (
+            "The cable state or target changed after confirmation. Refresh and review the current cable for: if-stale"
+            in everything
+        )
+        assert (
+            "These links come from a LibreNMS source the last refresh could not read, so they may be out of "
+            "date. Refresh Cables before syncing: if-unverified." in everything
+        )
+        assert (
+            "Multi-termination cables cannot be changed by cable sync. Update them in NetBox for: if-unsupported."
+            in everything
+        )
+        assert "Cable already exists for interfaces: if-duplicate" in everything
+        assert "Skipped OOB-controller links (context only, not syncable to the host): if-skipped" in everything
+        assert "Skipped links already modeled through a patch path: if-patch_path" in everything
+        assert "Tagged existing cable(s) as LibreNMS-managed for: if-tagged" in everything
+        assert "Overwrite protection: confirm the current cable(s) in the dialog for: if-conflict" in everything
+        assert "Overwrote existing cable for interfaces: if-overwritten" in everything
+        assert "Successfully created cable for interfaces: if-valid" in everything
+
+    def test_an_empty_result_set_says_nothing(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        request = make_request("post", user=make_superuser("cable-results-empty-user"))
+        view = object.__new__(SyncCablesView)
+
+        view.display_sync_results(request, {key: [] for key in SYNC_RESULT_KEYS})
+
+        assert message_texts(request) == []
+
+    def test_a_partial_result_dict_still_reports_what_it_carries(self):
+        """Existing callers pass only the keys they populate, so absent keys must not raise."""
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        request = make_request("post", user=make_superuser("cable-results-partial-user"))
+        view = object.__new__(SyncCablesView)
+
+        view.display_sync_results(request, {"valid": [], "invalid": [], "duplicate": [], "missing_remote": ["if-only"]})
+
+        assert message_texts(request, "error") == ["Remote device or interface not found in NetBox for: if-only"]
