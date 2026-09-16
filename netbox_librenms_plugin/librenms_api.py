@@ -34,6 +34,12 @@ def _validate_api_url(url):
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("LibreNMS API URLs must use HTTP or HTTPS and include a host.")
+    try:
+        # urlsplit() parses the port only when it is read, so an unusable one would otherwise
+        # pass here, be offered in the server picker, and fail when a request is prepared.
+        _ = parsed.port
+    except ValueError:
+        raise ValueError("LibreNMS API URLs must use a valid port.") from None
     if "?" in url or "#" in url:
         raise ValueError("LibreNMS API URLs must not include a query or fragment.")
 

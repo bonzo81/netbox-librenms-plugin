@@ -148,6 +148,23 @@ class TestLibreNMSAPIInit:
         with pytest.raises(ValueError, match="must not include a query or fragment"):
             LibreNMSAPI(server_key="default")
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://librenms.example.test:bad",
+            "https://librenms.example.test:99999",
+        ],
+    )
+    def test_a_server_with_an_unusable_port_is_neither_offered_nor_built(self, mock_librenms_config, url):
+        """The picker must not offer a server the constructor then refuses to bind."""
+        mock_librenms_config["mock_config"].return_value = {"default": {"librenms_url": url, "api_token": "test-token"}}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        assert LibreNMSAPI.get_available_servers() == {}
+        with pytest.raises(ValueError, match="must use a valid port"):
+            LibreNMSAPI(server_key="default")
+
     def test_init_with_multi_server_config(self, mock_librenms_config):
         """Verify initialization with multi-server configuration."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
