@@ -1185,6 +1185,32 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert len(ips) == 0
 
+    def test_get_inventory_filtered_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
+        """LibreNMS 404s /inventory/{id} for a device with no inventory rows, which is not a stack."""
+        librenms_server.register("/api/v0/inventory/123", {"status": "error"}, status=404, method="GET")
+
+        success, inventory = local_librenms_api.get_inventory_filtered(
+            123, ent_physical_contained_in=0, missing_is_empty=True
+        )
+
+        # An empty inventory must read as a successful empty result. Reporting it as a failed read
+        # makes virtual chassis detection fail closed and blocks importing ordinary devices.
+        assert success is True
+        assert inventory == []
+
+        # Without the opt-in a 404 stays a failure, so a stale device id is not hidden from
+        # callers that have not established the device exists.
+        default_success, _detail = local_librenms_api.get_inventory_filtered(123, ent_physical_contained_in=0)
+        assert default_success is False
+
+    def test_get_inventory_filtered_non_404_http_error_still_fails(self, local_librenms_api, librenms_server):
+        """A real inventory fault stays a failure so virtual chassis detection can fail closed."""
+        librenms_server.register("/api/v0/inventory/123", {"status": "error"}, status=500, method="GET")
+
+        success, _payload = local_librenms_api.get_inventory_filtered(123, missing_is_empty=True)
+
+        assert success is False
+
     def test_get_device_ips_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
         """LibreNMS 404s /devices/{id}/ip for a device with no IPs — a successful empty result, not a fetch failure."""
         path = "/api/v0/devices/123/ip"

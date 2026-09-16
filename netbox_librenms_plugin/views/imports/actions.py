@@ -1508,16 +1508,16 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         "No background worker was available.",
                     )
 
-        # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
-        # preview is advisory only — a re-submitted stale confirm form or a scripted POST reaches
-        # this view directly — so block a colliding batch here too. This runs on the SYNCHRONOUS
+        # Re-run the object-collision and stack-ambiguity checks before any synchronous import.
+        # The confirm preview is advisory. A stale confirm form or scripted POST reaches this view
+        # directly, so the import path must enforce the same blockers. This runs on the SYNCHRONOUS
         # path only: it sits after the background-job dispatch above, so a batch that enqueued a job
         # doesn't pay this validation cost synchronously (ImportDevicesJob re-runs the same check).
         # A single selected device can never collide (collisions need two distinct LibreNMS ids on
         # one NetBox object), so skip the extra validation pass for the common single-row case.
         precheck_skip_msg = None
         if len(parsed_ids) >= 2:
-            collisions, unresolved = detect_collisions_for_device_ids(
+            collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
                 parsed_ids,
                 self.librenms_api,
                 libre_devices_cache=libre_devices_cache,
@@ -1528,16 +1528,26 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 vm_device_ids=vm_imports,
                 user=request.user,
             )
-            outcome = classify_bulk_precheck(collisions, unresolved, device_ids_to_import, vm_imports)
+            outcome = classify_bulk_precheck(
+                collisions,
+                unresolved,
+                stack_ambiguities,
+                device_ids_to_import,
+                vm_imports,
+            )
             if outcome.blocked:
-                # Genuine collision (two rows → one NetBox object): block the whole batch, exactly
-                # as the confirm modal does. Same shared wording ImportDevicesJob logs.
+                # Block the whole batch with the same message that ImportDevicesJob logs.
                 if is_htmx:
                     # 200, like the confirm step: HTMX skips the swap on non-2xx.
                     return render(
                         request,
                         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                        {"collisions": outcome.collisions, "oob": True},
+                        {
+                            "block_message": outcome.block_message,
+                            "collisions": outcome.collisions,
+                            "oob": True,
+                            "stack_ambiguities": outcome.stack_ambiguities,
+                        },
                     )
                 messages.error(request, outcome.block_message)
                 return redirect(active_import_url)

@@ -310,7 +310,7 @@ def test_collision_precheck_skips_import_prerequisite_queries():
     api = _LibreNMSBoundary(rows)
 
     with CaptureQueriesContext(connection) as captured:
-        collisions, unresolved = detect_collisions_for_device_ids(
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
             [96201, 96202, 96203],
             api,
             libre_devices_cache=rows,

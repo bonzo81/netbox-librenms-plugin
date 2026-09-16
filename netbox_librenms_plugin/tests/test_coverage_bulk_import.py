@@ -11,7 +11,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 
 
-class TestStackDedupKey:
+class TestStackIdentity:
     """One key per physical stack, and never one key shared by unrelated stacks."""
 
     def _members(self, **overrides):
@@ -20,30 +20,37 @@ class TestStackDedupKey:
         return [member]
 
     def test_member_serials_key_the_stack(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import stack_dedup_key
+        from netbox_librenms_plugin.import_utils.bulk_import import stack_identity
 
-        assert stack_dedup_key({"members": self._members()}, 7) == "librenms-stack-FOC1"
+        identity = stack_identity({"members": self._members()}, 7)
+
+        assert identity.key == "librenms-stack-FOC1"
+        assert identity.basis == "serials"
 
     def test_every_device_of_one_stack_shares_the_key(self):
         """Each stack member is its own LibreNMS device, so the key must not depend on which."""
-        from netbox_librenms_plugin.import_utils.bulk_import import stack_dedup_key
+        from netbox_librenms_plugin.import_utils.bulk_import import stack_identity
 
         vc_data = {"members": self._members(serial=None)}
+        first = stack_identity(vc_data, 7)
+        second = stack_identity(vc_data, 8)
 
-        assert stack_dedup_key(vc_data, 7) == stack_dedup_key(vc_data, 8)
+        assert first.key == second.key
+        assert first.basis == second.basis == "fingerprint"
 
     def test_stacks_without_member_identity_get_distinct_keys(self):
         """
         An empty member list fingerprints to a constant, so a shared key let the first such
         stack suppress virtual-chassis creation for every other one in the batch.
         """
-        from netbox_librenms_plugin.import_utils.bulk_import import stack_dedup_key
+        from netbox_librenms_plugin.import_utils.bulk_import import stack_identity
 
-        first = stack_dedup_key({"members": []}, 7)
-        second = stack_dedup_key({"members": []}, 8)
+        first = stack_identity({"members": []}, 7)
+        second = stack_identity({"members": []}, 8)
 
-        assert first != second
-        assert str(7) in first and str(8) in second
+        assert first.key != second.key
+        assert str(7) in first.key and str(8) in second.key
+        assert first.basis == second.basis == "device"
 
 
 pytestmark = pytest.mark.django_db
@@ -123,7 +130,7 @@ class TestBulkPrecheckDecision:
     def test_clean_batch_keeps_every_device_and_vm(self):
         from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
 
-        outcome = classify_bulk_precheck([], [], [1, 2], {3: {"cluster_id": 9}})
+        outcome = classify_bulk_precheck([], [], [], [1, 2], {3: {"cluster_id": 9}})
 
         assert outcome.blocked is False
         assert outcome.importable_device_ids == [1, 2]
@@ -134,7 +141,7 @@ class TestBulkPrecheckDecision:
     def test_unresolved_rows_are_skipped_without_blocking_the_rest(self):
         from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
 
-        outcome = classify_bulk_precheck([], [2, 4], [1, 2, 3], {4: {}, 5: {}})
+        outcome = classify_bulk_precheck([], [2, 4], [], [1, 2, 3], {4: {}, 5: {}})
 
         assert outcome.blocked is False
         assert outcome.skipped_ids == [2, 4]
@@ -153,7 +160,7 @@ class TestBulkPrecheckDecision:
             }
         ]
 
-        outcome = classify_bulk_precheck(collisions, [3], [1, 2, 3], {})
+        outcome = classify_bulk_precheck(collisions, [3], [], [1, 2, 3], {})
 
         assert outcome.blocked is True
         assert outcome.importable_device_ids == [1, 2]
@@ -165,6 +172,7 @@ class TestBulkPrecheckDecision:
 
         outcome = classify_bulk_precheck(
             [{"nb_device_pk": None, "target_visible": False, "librenms_devices": []}],
+            [],
             [],
             [1],
             {},
@@ -186,7 +194,7 @@ class TestCollisionDetection:
         _register_device(live_librenms, second)
         shared_cache = {}
 
-        collisions, unresolved = detect_collisions_for_device_ids(
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
             [41, 42],
             live_librenms.api,
             libre_devices_cache=shared_cache,
@@ -197,9 +205,13 @@ class TestCollisionDetection:
         assert collisions[0]["nb_device_pk"] == target.pk
         assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {41, 42}
         assert shared_cache == {41: first, 42: second}
+        # The inventory read per device is the stack-identity scan. It is what lets the precheck
+        # block two serial-less stacks that fingerprint alike, and the import reuses its cache.
         assert [request["path"] for request in live_librenms.server.requests] == [
             "/api/v0/devices/41",
+            "/api/v0/inventory/41",
             "/api/v0/devices/42",
+            "/api/v0/inventory/42",
         ]
 
     def test_distinct_real_targets_do_not_collide(self, live_librenms):
@@ -212,7 +224,7 @@ class TestCollisionDetection:
         _register_device(live_librenms, first)
         _register_device(live_librenms, second)
 
-        collisions, unresolved = detect_collisions_for_device_ids([51, 52], live_librenms.api)
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids([51, 52], live_librenms.api)
 
         assert collisions == []
         assert unresolved == []
@@ -220,7 +232,7 @@ class TestCollisionDetection:
     def test_missing_live_device_is_unresolved(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 
-        collisions, unresolved = detect_collisions_for_device_ids([404], live_librenms.api)
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids([404], live_librenms.api)
 
         assert collisions == []
         assert unresolved == [404]
@@ -228,7 +240,7 @@ class TestCollisionDetection:
     def test_mis_keyed_cached_row_fails_closed_without_http(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 
-        collisions, unresolved = detect_collisions_for_device_ids(
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
             [61],
             live_librenms.api,
             libre_devices_cache={61: _libre_device(62, "wrong-row")},
@@ -247,7 +259,7 @@ class TestCollisionDetection:
         )
         shared_cache = {}
 
-        collisions, unresolved = detect_collisions_for_device_ids(
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
             [71],
             live_librenms.api,
             libre_devices_cache=shared_cache,

@@ -81,6 +81,11 @@
     "GET /api/v0/devices/2000/transceivers": {
       "status": "ok",
       "transceivers": []
+    },
+    "GET /api/v0/inventory/2000/all": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
     }
   },
   "expected": {

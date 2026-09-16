@@ -208,7 +208,7 @@ class TestPrefetchVcData:
 
 @pytest.mark.django_db
 class TestDetectVirtualChassisFailures:
-    def test_a_failed_member_lookup_is_a_clean_negative(self, settings, librenms_server, caplog):
+    def test_a_failed_member_lookup_reports_detection_failure(self, settings, librenms_server, caplog):
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
 
         api = _api(settings, librenms_server, "vc_detect_children")
@@ -225,8 +225,9 @@ class TestDetectVirtualChassisFailures:
         with caplog.at_level(logging.ERROR, logger=vc_module.__name__):
             result = vc_module.detect_virtual_chassis_from_inventory(api, device_id)
 
-        assert result is None
-        # A refused member lookup must not be reported as a detection crash.
+        assert result["detection_failed"] is True
+        assert result["detection_error"] == "LibreNMS child chassis inventory request failed"
+        # A refused member lookup is a handled API failure, not a detection crash.
         assert "Error detecting virtual chassis" not in caplog.text
 
     def test_unparseable_member_positions_fall_back_to_the_inventory_order(self, settings, librenms_server):
@@ -266,7 +267,8 @@ class TestDetectVirtualChassisFailures:
         with caplog.at_level(logging.ERROR, logger=vc_module.__name__):
             result = vc_module.detect_virtual_chassis_from_inventory(api, device_id)
 
-        assert result is None
+        assert result["detection_failed"] is True
+        assert result["detection_error"] == "redis unreachable"
         assert "Error detecting virtual chassis" in caplog.text
 
 
