@@ -6151,6 +6151,51 @@ def test_rule_admission_does_not_change_the_cached_inventory_digest():
 
 
 @pytest.mark.django_db
+def test_a_rule_admitted_row_keeps_its_attributed_member_context():
+    """A presentation copy must not drop the member the item's parent attributed it to."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("admitted-context")
+    InventoryIgnoreRule.objects.create(
+        name="Admit sensors reported as other",
+        match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
+        pattern="other",
+        action=InventoryIgnoreRule.ACTION_INCLUDE,
+        require_serial_match_parent=False,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 140,
+            "entPhysicalClass": "stack",
+            "entPhysicalName": "Switch stack",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 141,
+            "entPhysicalClass": "chassis",
+            "entPhysicalName": "Chassis 2",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 140,
+        },
+        # No serial and no position of its own: only the parent chassis ties it to the member.
+        {
+            "entPhysicalIndex": 142,
+            "entPhysicalClass": "other",
+            "entPhysicalName": "Member sensor",
+            "entPhysicalModelName": "MEMBER-SENSOR",
+            "entPhysicalDescr": "Member sensor 0",
+            "entPhysicalContainedIn": 141,
+        },
+    ]
+
+    rows = _run_build_context_real(_make_view(), inventory, page)
+
+    admitted = next(row for row in rows if row["ent_physical_index"] == 142)
+    assert admitted["selected_device_id"] == member.pk
+    assert admitted["member_resolution_source"] == "parent-context"
+
+
+@pytest.mark.django_db
 def test_vc_descendants_use_their_own_member_context():
     """A descendant attributed by serial must use that member's rule and device context."""
     from netbox_librenms_plugin.models import InventoryIgnoreRule
@@ -6218,6 +6263,8 @@ def test_vc_descendant_local_position_does_not_override_parent_member():
             "entPhysicalContainedIn": 120,
         },
     ]
+    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+
     view = _make_view()
     index_map = {item["entPhysicalIndex"]: item for item in inventory}
 
@@ -6229,8 +6276,8 @@ def test_vc_descendant_local_position_does_not_override_parent_member():
         lambda _manufacturer: [],
     )
 
-    assert contexts[id(inventory[0])]["selected_device"].pk == page.pk
-    assert contexts[id(inventory[1])]["selected_device"].pk == page.pk
+    assert contexts[_inventory_item_key(inventory[0])]["selected_device"].pk == page.pk
+    assert contexts[_inventory_item_key(inventory[1])]["selected_device"].pk == page.pk
 
 
 @pytest.mark.django_db
@@ -6258,6 +6305,8 @@ def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
             "entPhysicalContainedIn": 131,
         },
     ]
+    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+
     view = _make_view()
     index_map = {item["entPhysicalIndex"]: item for item in inventory}
 
@@ -6269,6 +6318,6 @@ def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
         lambda _manufacturer: [],
     )
 
-    assert contexts[id(inventory[0])]["resolution_source"] == "default"
-    assert contexts[id(inventory[1])]["selected_device"].pk == member.pk
-    assert contexts[id(inventory[2])]["selected_device"].pk == member.pk
+    assert contexts[_inventory_item_key(inventory[0])]["resolution_source"] == "default"
+    assert contexts[_inventory_item_key(inventory[1])]["selected_device"].pk == member.pk
+    assert contexts[_inventory_item_key(inventory[2])]["selected_device"].pk == member.pk

@@ -107,6 +107,17 @@ def _inventory_item_offsettable(item: dict) -> bool:
     return idx_ok and parent_ok
 
 
+def _inventory_item_key(item: dict):
+    """
+    Return the key an item's attributed ignore context is stored under.
+
+    The LibreNMS index is the item's identity everywhere else in this view, and it survives the
+    presentation copies _collect_top_items() makes, which object identity does not.
+    """
+    index = item.get("entPhysicalIndex")
+    return ("index", index) if index is not None else ("object", id(item))
+
+
 def _class_is_included(item: dict, rules: list) -> bool:
     """
     Return True when an include rule admits this item's entPhysicalClass.
@@ -754,7 +765,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             idx = item.get("entPhysicalIndex")
             if idx is None:
                 continue
-            item_context = item_ignore_contexts[id(item)]
+            item_context = item_ignore_contexts[_inventory_item_key(item)]
             ignore_cache[idx] = _check_ignore_rules(
                 item,
                 index_map.get(item.get("entPhysicalContainedIn")),
@@ -871,7 +882,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         def context_for(item, resolving=None):
             """Resolve one item after its parent so weak child hints cannot replace ownership."""
-            item_key = id(item)
+            item_key = _inventory_item_key(item)
             if item_key in item_contexts:
                 return item_contexts[item_key]
             if item.get("_source") == OOB_INVENTORY_SOURCE:
@@ -885,7 +896,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             resolving = set() if resolving is None else resolving
             inherited_member = None
             parent = index_map.get(item.get("entPhysicalContainedIn"))
-            if parent is not None and id(parent) not in resolving:
+            if parent is not None and _inventory_item_key(parent) not in resolving:
                 parent_context = context_for(parent, resolving | {item_key})
                 # A generic stack/container root can only fall back to the page device. It has not
                 # established ownership, so let a chassis child use its own position or name hint.
@@ -914,7 +925,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _ignore_policy_for_item(item, ignore_contexts, default_rules, default_device_serial):
         """Return one item's attributed policy, or the caller's default policy."""
-        context = ignore_contexts.get(id(item)) if ignore_contexts is not None else None
+        context = ignore_contexts.get(_inventory_item_key(item)) if ignore_contexts is not None else None
         if context is None:
             return default_rules, default_device_serial
         return context["ignore_rules"], context["device_serial"]
@@ -1122,7 +1133,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         table_data = []
 
         for item in top_items:
-            ignore_context = ignore_contexts.get(id(item))
+            ignore_context = ignore_contexts.get(_inventory_item_key(item))
             if ignore_context is None:
                 target_device, resolution_source = self._infer_vc_member_for_item(obj, item, index_map, vc_members)
                 target_ignore_rules = ignore_rules
@@ -1451,7 +1462,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         )
         target_context_by_depth = {0: target_context}
         for depth, sub_item in sub_items:
-            sub_policy = ignore_contexts.get(id(sub_item))
+            sub_policy = ignore_contexts.get(_inventory_item_key(sub_item))
             if sub_policy is None:
                 sub_selected_device = selected_device
                 sub_resolution_source = resolution_source
