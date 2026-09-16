@@ -486,3 +486,169 @@ class TestEnrichSerialRemoteClaims:
         _serial_view().enrich_serial_remote(link, claimed_cp_ids=claimed)
 
         assert claimed == {only.pk}
+
+
+# ---------------------------------------------------------------------------
+# _prepare_context
+#
+# The cached and plain-refresh paths are well covered in test_coverage_base_views.py.
+# These pin three branches that carried NO test at all, which are exactly the ones a
+# split of this method could drop silently: the unresolved-id short circuit, the
+# carry-forward of serial rows when the serial source is skipped, and the read-only
+# donor pass that strips every sync affordance.
+# ---------------------------------------------------------------------------
+
+
+def _api_view(user, server_key=SERVER_KEY):
+    """The device Cables tab bound to a REAL LibreNMS client, so a refresh performs real HTTP."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+    view = make_view(
+        DeviceCableTableView,
+        make_request("get", user=user),
+        librenms_api=LibreNMSAPI(server_key=server_key),
+    )
+    view._active_server_key = server_key
+    return view
+
+
+def _point_at(settings, url, server_key=SERVER_KEY):
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+    configure_librenms_servers(
+        settings, {server_key: {"librenms_url": url, "api_token": "test-token", "verify_ssl": False}}
+    )
+    return server_key
+
+
+@pytest.mark.django_db
+class TestPrepareContextIncompleteRefresh:
+    """A refresh that cannot establish the device's identity must not render a table."""
+
+    def test_an_ambiguous_librenms_id_returns_the_refresh_incomplete_context(self, librenms_server, settings):
+        """Two owners of one id is a conflict, so the tab reports it instead of rendering rows.
+
+        The short circuit sits after the fetch-failure guard, so it is only reached when
+        get_links_data still returns a list. A device whose console ports the viewer cannot
+        read does exactly that, so the row carries both conditions.
+        """
+        from dcim.models import Device
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        server_key = _point_at(settings, librenms_server.url)
+        make_device("ctx-ambiguous-owner-a", librenms_cf={server_key: 8801})
+        make_device("ctx-ambiguous-owner-b", librenms_cf={server_key: 8801})
+        target, _csps, _ = make_serial_device("ctx-ambiguous-target", csp_names=["ttyS0"])
+        target.custom_field_data["librenms_id"] = {server_key: None}
+        target.save()
+        librenms_server.register(
+            f"/api/v0/devices/{target.name}",
+            {"status": "ok", "devices": [{"device_id": 8801}]},
+            method="GET",
+        )
+        user = make_user_with_perms("ctx-ambiguous-user", [])
+        user = grant(user, "view", Device)
+        view = _api_view(user, server_key)
+        cache_key = view.get_cache_key(target, "links", server_key)
+        cache.set(cache_key, {"links": [], "snapshot_token": "stale"}, timeout=300)
+
+        context = view._prepare_context(view.request, target, fetch_fresh=True, server_key=server_key)
+
+        # Precondition: the conflict really fired, rather than the fetch failing for another reason.
+        assert view._librenms_id_unresolved is True
+        assert context == {
+            "table": None,
+            "object": target,
+            "cache_expiry": None,
+            "server_key": server_key,
+            "refresh_incomplete": True,
+        }
+        assert cache.get(cache_key) is None, "the stale snapshot must not survive an unresolved refresh"
+
+    def test_a_skipped_serial_source_carries_the_previous_serial_rows_forward(self, librenms_server, settings):
+        """The user cannot read the console ports, so the refresh must not silently drop those rows."""
+        from dcim.models import Device
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        server_key = _point_at(settings, librenms_server.url)
+        device, (csp,), _ = make_serial_device("ctx-serialskip-device", csp_names=["ttyS0"])
+        device.custom_field_data["librenms_id"] = {server_key: 8802}
+        device.save()
+        librenms_server.register("/api/v0/devices/8802/links", {"status": "ok", "links": []})
+        # Device is viewable; its ConsoleServerPorts are NOT, which is what skips the serial source.
+        user = make_user_with_perms("ctx-serialskip-user", [])
+        user = grant(user, "view", Device)
+        view = _api_view(user, server_key)
+        cache_key = view.get_cache_key(device, "links", server_key)
+        prior_serial_row = {
+            "_source": "serial",
+            "device_id": device.pk,
+            "local_port": csp.name,
+            "local_port_id": f"serial:{csp.pk}",
+            "sensor_id": csp.pk,
+            "sensor_index_int": 1,
+            "is_configured": True,
+            "remote_device": "some-router",
+        }
+        cache.set(cache_key, {"links": [prior_serial_row], "snapshot_token": "prior"}, timeout=300)
+
+        context = view._prepare_context(view.request, device, fetch_fresh=True, server_key=server_key)
+
+        # Precondition: the skip really fired, so the assertions below describe that state.
+        assert view._serial_source_skipped is True
+        assert "serial" in context["incomplete_sources"]
+        cached_after = cache.get(cache_key)
+        assert [row["_source"] for row in cached_after["links"]] == ["serial"], (
+            "the previous serial row must survive a refresh that could not read the serial source"
+        )
+
+
+@pytest.mark.django_db
+class TestPrepareContextReadOnlyDonor:
+    """A device merged into another must offer no cable actions on its own tab."""
+
+    def test_a_migrated_donor_strips_every_row_affordance(self, settings):
+        from django.core.cache import cache
+
+        server_key = _point_at(settings, "https://librenms.example.invalid")
+        donor = make_device("ctx-donor-device")
+        donor.custom_field_data["librenms_id"] = {
+            server_key: {"_migrated_to": {"device_id": 4242, "server_key": server_key, "at": "2026-09-16T00:00:00Z"}}
+        }
+        donor.save()
+        peer = make_device("ctx-donor-peer")
+        make_interface(peer, "Gi1/1")
+        make_interface(donor, "Gi0/1")
+        view = _api_view(make_superuser("ctx-donor-user"), server_key)
+        cache_key = view.get_cache_key(donor, "links", server_key)
+        cache.set(
+            cache_key,
+            {
+                "links": [
+                    {
+                        "_source": "lldp",
+                        "device_id": donor.pk,
+                        "local_port": "Gi0/1",
+                        "remote_device": peer.name,
+                        "remote_port": "Gi1/1",
+                    }
+                ],
+                "snapshot_token": "donor",
+            },
+            timeout=300,
+        )
+
+        context = view._prepare_context(view.request, donor, fetch_fresh=False, server_key=server_key)
+
+        rows = [row.record for row in context["table"].rows]
+        # Precondition: the row really rendered, so "no affordance" is not an empty-table artefact.
+        assert rows, "the cached snapshot must render a row"
+        assert all(row.get("can_create_cable") is False for row in rows)
+        assert all("picker_url" not in row for row in rows)

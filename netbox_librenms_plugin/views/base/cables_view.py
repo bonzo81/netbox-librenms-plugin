@@ -2169,10 +2169,8 @@ class BaseCableTableView(
         """Return the cable table for *data*; concrete subclasses choose the table class."""
         raise NotImplementedError
 
-    def _prepare_context(self, request, obj, fetch_fresh=False, server_key=None):  # noqa: C901
+    def _prepare_context(self, request, obj, fetch_fresh=False, server_key=None):
         """Prepare the context data for cable sync views."""
-        table = None
-        cache_expiry = None
         # Scoped to the POST-resolved server when provided; else the degrading resolver.
         server_key = server_key or self._render_server_key()
         # For VC devices, cache under the sync device's key so SingleCableVerifyView reads the same entry.
@@ -2180,81 +2178,32 @@ class BaseCableTableView(
         if cache_device is None:
             return None
         cache_key = self.get_cache_key(cache_device, "links", server_key)
-        incomplete_sources = []
-        cached_before_refresh = cache.get(cache_key) if fetch_fresh else None
 
         if fetch_fresh:
-            # Always fetch new data when requested
-            links_data = self.get_links_data(obj, server_key=server_key, sync_device=cache_device)
-            # Only a true fetch failure returns None. An empty list ([]) is a valid result
-            # (device has no host links) and must flow through: get_links_data() may have
-            # collected zero host links yet still set _oob_links_fetch_failed, and post()
-            # surfaces that OOB warning only on the success path — `if not links_data`
-            # would discard it and mislabel it "No links found".
-            if links_data is None:
-                cache.delete(cache_key)
-                return None
-            if getattr(self, "_librenms_id_unresolved", False):
-                cache.delete(cache_key)
-                return {
-                    "table": None,
-                    "object": obj,
-                    "cache_expiry": None,
-                    "server_key": server_key,
-                    "refresh_incomplete": True,
-                }
-            snapshot_token = uuid4().hex
-            if getattr(self, "_links_fetch_error", None) and getattr(self, "librenms_id", None) is not None:
-                incomplete_sources.append("host")
-            if getattr(self, "_oob_links_fetch_failed", False):
-                incomplete_sources.append("OOB")
-            if getattr(self, "_serial_links_fetch_failed", False):
-                incomplete_sources.append("serial")
-            if getattr(self, "_serial_source_skipped", False):
-                prior_links = _extract_cached_links(cached_before_refresh) if cached_before_refresh else None
-                links_data.extend(link for link in prior_links or [] if link.get("_source") == "serial")
-                incomplete_sources.append("serial")
+            snapshot = self._refresh_cable_snapshot(obj, cache_device, cache_key, server_key)
         else:
-            # Try to use cached data
-            cached_links_data = cache.get(cache_key)
-            if cached_links_data:
-                # Fail closed on a malformed/corrupt cache entry (non-dict, non-list "links", or a
-                # non-dict link row) instead of crashing the cached render below on .items().
-                links_data = _extract_cached_links(cached_links_data, cache_key)
-                if links_data is None:
-                    return None
-                snapshot_token = cable_snapshot_token(cached_links_data)
-                cached_incomplete = cached_links_data.get("incomplete_sources", [])
-                if isinstance(cached_incomplete, list):
-                    incomplete_sources = [source for source in cached_incomplete if isinstance(source, str)]
-            else:
-                return None
-
-        # The shared snapshot stores only permission-independent LibreNMS source fields. NetBox
-        # IDs, URLs, cable state, and user picks are derived below for this request only.
-        raw_links = assign_cable_row_ids(
-            [{k: v for k, v in link.items() if k in _RAW_LINK_KEYS} for link in links_data]
-        )
-        if raw_links is None:
-            cache.delete(cache_key)
+            snapshot = self._read_cached_cable_snapshot(cache_key)
+        if snapshot is None:
             return None
-        if fetch_fresh:
-            cache.set(
-                cache_key,
-                {
-                    "links": raw_links,
-                    "snapshot_token": snapshot_token,
-                    "incomplete_sources": incomplete_sources,
-                },
-                timeout=self.librenms_api.cache_timeout,
-            )
+        if snapshot.get("refresh_incomplete"):
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": server_key,
+                "refresh_incomplete": True,
+            }
+
+        raw_links = self._store_raw_cable_links(snapshot, cache_key, fetch_fresh)
+        if raw_links is None:
+            return None
 
         user_id = getattr(getattr(request, "user", None), "pk", None)
         if user_id is not None:
             raw_links, _has_manual_picks = apply_cable_manual_picks(
                 cache,
                 cache_key,
-                {"links": raw_links, "snapshot_token": snapshot_token},
+                {"links": raw_links, "snapshot_token": snapshot["snapshot_token"]},
                 user_id,
                 raw_links,
             )
@@ -2267,36 +2216,137 @@ class BaseCableTableView(
             sync_device=cache_device,
         )
         if isinstance(obj, Device):
-            local_owner_ids = {
-                owner_id
-                for link in links_data
-                if (owner_id := coerce_librenms_id(link.get("netbox_local_device_id"))) is not None
-            }
-            owner_devices = {device.pk: device for device in (obj, cache_device)}
-            owner_devices.update(
-                {
-                    device.pk: device
-                    for device in self._viewable_queryset(Device).filter(pk__in=local_owner_ids - owner_devices.keys())
-                }
-            )
-            read_only_owner_ids = {
-                device_id for device_id, device in owner_devices.items() if get_migrated_to_marker(device, server_key)
-            }
-            page_is_read_only = obj.pk in read_only_owner_ids or cache_device.pk in read_only_owner_ids
-            for link in links_data:
-                if (
-                    not page_is_read_only
-                    and coerce_librenms_id(link.get("netbox_local_device_id")) not in read_only_owner_ids
-                ):
-                    continue
-                link["can_create_cable"] = False
-                link.pop("picker_url", None)
+            self._disable_actions_for_migrated_owners(links_data, obj, cache_device, server_key)
 
-        # Calculate cache expiry
+        cache_expiry = self._cable_cache_expiry(cache_key)
+        return {
+            "table": self._build_cable_table(request, links_data, obj, server_key),
+            "object": obj,
+            "cache_expiry": cache_expiry,
+            "server_key": server_key,
+            "incomplete_sources": snapshot["incomplete_sources"],
+        }
+
+    def _refresh_cable_snapshot(self, obj, cache_device, cache_key, server_key):
+        """
+        Fetch a live snapshot of the device's cable rows.
+
+        Returns None when the fetch truly failed, ``{"refresh_incomplete": True}`` when the
+        device's LibreNMS identity could not be resolved, else the snapshot with the list of
+        sources that came back incomplete.
+        """
+        cached_before_refresh = cache.get(cache_key)
+        links_data = self.get_links_data(obj, server_key=server_key, sync_device=cache_device)
+        # Only a true fetch failure returns None. An empty list ([]) is a valid result
+        # (device has no host links) and must flow through: get_links_data() may have
+        # collected zero host links yet still set _oob_links_fetch_failed, and post()
+        # surfaces that OOB warning only on the success path — `if not links_data`
+        # would discard it and mislabel it "No links found".
+        if links_data is None:
+            cache.delete(cache_key)
+            return None
+        if getattr(self, "_librenms_id_unresolved", False):
+            cache.delete(cache_key)
+            return {"refresh_incomplete": True}
+
+        incomplete_sources = []
+        if getattr(self, "_links_fetch_error", None) and getattr(self, "librenms_id", None) is not None:
+            incomplete_sources.append("host")
+        if getattr(self, "_oob_links_fetch_failed", False):
+            incomplete_sources.append("OOB")
+        if getattr(self, "_serial_links_fetch_failed", False):
+            incomplete_sources.append("serial")
+        if getattr(self, "_serial_source_skipped", False):
+            prior_links = _extract_cached_links(cached_before_refresh) if cached_before_refresh else None
+            links_data.extend(link for link in prior_links or [] if link.get("_source") == "serial")
+            incomplete_sources.append("serial")
+        return {
+            "links": links_data,
+            "snapshot_token": uuid4().hex,
+            "incomplete_sources": incomplete_sources,
+        }
+
+    @staticmethod
+    def _read_cached_cable_snapshot(cache_key):
+        """Return the cached snapshot, or None when it is absent or unusable."""
+        cached_links_data = cache.get(cache_key)
+        if not cached_links_data:
+            return None
+        # Fail closed on a malformed/corrupt cache entry (non-dict, non-list "links", or a
+        # non-dict link row) instead of crashing the cached render on .items().
+        links_data = _extract_cached_links(cached_links_data, cache_key)
+        if links_data is None:
+            return None
+        cached_incomplete = cached_links_data.get("incomplete_sources", [])
+        return {
+            "links": links_data,
+            "snapshot_token": cable_snapshot_token(cached_links_data),
+            "incomplete_sources": (
+                [source for source in cached_incomplete if isinstance(source, str)]
+                if isinstance(cached_incomplete, list)
+                else []
+            ),
+        }
+
+    def _store_raw_cable_links(self, snapshot, cache_key, fetch_fresh):
+        """Strip the snapshot to shared source fields, and write it back on a refresh."""
+        # The shared snapshot stores only permission-independent LibreNMS source fields. NetBox
+        # IDs, URLs, cable state, and user picks are derived per request by the caller.
+        raw_links = assign_cable_row_ids(
+            [{k: v for k, v in link.items() if k in _RAW_LINK_KEYS} for link in snapshot["links"]]
+        )
+        if raw_links is None:
+            cache.delete(cache_key)
+            return None
+        if fetch_fresh:
+            cache.set(
+                cache_key,
+                {
+                    "links": raw_links,
+                    "snapshot_token": snapshot["snapshot_token"],
+                    "incomplete_sources": snapshot["incomplete_sources"],
+                },
+                timeout=self.librenms_api.cache_timeout,
+            )
+        return raw_links
+
+    def _disable_actions_for_migrated_owners(self, links_data, obj, cache_device, server_key):
+        """Strip every sync affordance from rows owned by a device already merged into another."""
+        local_owner_ids = {
+            owner_id
+            for link in links_data
+            if (owner_id := coerce_librenms_id(link.get("netbox_local_device_id"))) is not None
+        }
+        owner_devices = {device.pk: device for device in (obj, cache_device)}
+        owner_devices.update(
+            {
+                device.pk: device
+                for device in self._viewable_queryset(Device).filter(pk__in=local_owner_ids - owner_devices.keys())
+            }
+        )
+        read_only_owner_ids = {
+            device_id for device_id, device in owner_devices.items() if get_migrated_to_marker(device, server_key)
+        }
+        page_is_read_only = obj.pk in read_only_owner_ids or cache_device.pk in read_only_owner_ids
+        for link in links_data:
+            if (
+                not page_is_read_only
+                and coerce_librenms_id(link.get("netbox_local_device_id")) not in read_only_owner_ids
+            ):
+                continue
+            link["can_create_cable"] = False
+            link.pop("picker_url", None)
+
+    @staticmethod
+    def _cable_cache_expiry(cache_key):
+        """Return when the cached snapshot expires, or None when it carries no TTL."""
         cache_ttl = cache_remaining_ttl(cache, cache_key)
-        if cache_ttl is not None and cache_ttl > 0:
-            cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
-        # Generate the table
+        if cache_ttl is None or cache_ttl <= 0:
+            return None
+        return timezone.now() + timezone.timedelta(seconds=cache_ttl)
+
+    def _build_cable_table(self, request, links_data, obj, server_key):
+        """Build the row table, scoping its pagination/sort URL to the RESOLVED server."""
         table = self.get_table(links_data, obj)
         # Build the follow-up HTMX URL (pagination/sorting) on the RESOLVED server scope —
         # not the lazy session client, which can point at a different server after a failed
@@ -2305,17 +2355,8 @@ class BaseCableTableView(
         # calling super, so a base-class override never ran for the device tab (htmx_url
         # stayed None). quote_plus mirrors ip_addresses_view (a key isn't a guaranteed slug).
         table.htmx_url = f"{request.path}?tab=cables" + (f"&server_key={quote_plus(server_key)}" if server_key else "")
-
         table.configure(request)
-
-        # Prepare and return the context
-        return {
-            "table": table,
-            "object": obj,
-            "cache_expiry": cache_expiry,
-            "server_key": server_key,
-            "incomplete_sources": incomplete_sources,
-        }
+        return table
 
     def get_context_data(self, request, obj):
         """Get the context data for the cable sync view."""
