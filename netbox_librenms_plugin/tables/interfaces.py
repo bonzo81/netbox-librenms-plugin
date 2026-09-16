@@ -1,6 +1,7 @@
 import copy
 import json as json_module
 from functools import cached_property
+from typing import NamedTuple
 
 import django_tables2 as tables
 from django.urls import reverse
@@ -39,8 +40,23 @@ _RELATIONSHIP_STATUS_MAP = {
 }
 
 
+class _VlanRowContext(NamedTuple):
+    """One row's VLAN evidence plus the NetBox assignment it is compared against."""
+
+    group_map: dict
+    missing: list
+    exists_in_netbox: bool
+    netbox_untagged_vid: int | None
+    netbox_untagged_group_id: int | None
+    netbox_tagged_vids: set
+    netbox_tagged_group_ids: dict
+
+
 class LibreNMSInterfaceTable(tables.Table):
     """Table for displaying LibreNMS interface data."""
+
+    # Show at most this many VLANs inline; the rest are summarised as "+N more".
+    _MAX_INLINE_VLANS = 3
 
     # NetBox object class these rows sync against. Driven by the table subclass rather than
     # a runtime ``self.device.cluster`` probe — a cluster-less VM has a falsy ``cluster`` and
@@ -165,7 +181,7 @@ class LibreNMSInterfaceTable(tables.Table):
         attrs={"td": {"data-col": "vlans"}},
     )
 
-    def render_vlans(self, value, record):  # noqa: C901
+    def render_vlans(self, value, record):
         """
         Render VLANs column showing untagged and tagged VLANs.
 
@@ -189,162 +205,178 @@ class LibreNMSInterfaceTable(tables.Table):
             SafeString: The rendered VLAN summary and controls.
 
         """
-        untagged = record.get("untagged_vlan")
-        tagged = record.get("tagged_vlans", [])
-        missing_vlans = record.get("missing_vlans", [])
-
-        # Get NetBox interface for comparison
-        exists_in_netbox = record.get("exists_in_netbox", False)
-        netbox_interface = record.get("netbox_interface")
-
-        # Get NetBox VLAN assignments (VID + group for group-aware comparison)
-        netbox_untagged_vid = None
-        netbox_untagged_group_id = None
-        netbox_tagged_vids = set()
-        netbox_tagged_group_ids = {}
-        if netbox_interface:
-            if netbox_interface.untagged_vlan:
-                netbox_untagged_vid = netbox_interface.untagged_vlan.vid
-                netbox_untagged_group_id = netbox_interface.untagged_vlan.group_id
-            for v in netbox_interface.tagged_vlans.all():
-                netbox_tagged_vids.add(v.vid)
-                netbox_tagged_group_ids[v.vid] = v.group_id
-
-        all_vlans = []
-        if untagged:
-            all_vlans.append(("U", untagged))
-        for vid in sorted(tagged):
-            all_vlans.append(("T", vid))
-
+        all_vlans = self._collect_row_vlans(record)
         if not all_vlans:
             return mark_safe("—")
 
-        interface_name = record.get(self.interface_name_field, "")
-        # _sync_interface_vlans() reads vlan_group_<canonical port id>_<vid>, so a raw value such
-        # as "010" would render a key the view never looks up and the override would be dropped.
-        canonical_port_id = normalize_librenms_port_id(record.get("port_id"))
-        row_key = str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id") or "")
-
-        # Build compact colored summary (show up to 3 VLANs, summarize rest)
-        vlan_group_map = record.get("vlan_group_map", {})
-        MAX_INLINE = 3
-        inline_parts = []
-        for vlan_type, vid in all_vlans[:MAX_INLINE]:
-            selected_gid = self._parse_group_id(vlan_group_map.get(vid, {}).get("group_id", ""))
-            group_matches = check_vlan_group_matches(
-                vlan_type,
-                vid,
-                selected_gid,
-                netbox_untagged_group_id,
-                netbox_tagged_group_ids,
-                netbox_untagged_vid,
-                netbox_tagged_vids,
-            )
-            if vlan_type == "U":
-                css = get_untagged_vlan_css_class(
-                    vid, netbox_untagged_vid, exists_in_netbox, missing_vlans, group_matches
-                )
-            else:
-                css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches)
-            warning = get_missing_vlan_warning(vid, missing_vlans)
-            # Escape the LibreNMS-sourced vid/vlan_type (XSS, issue #105 class). css is an
-            # internal class name; warning is the static icon HTML from get_missing_vlan_warning,
-            # so it is marked safe rather than escaped.
-            inline_parts.append(
-                format_html('<span class="{}">{}({}){}</span>', css, vid, vlan_type, mark_safe(warning))
-            )
-
-        # inline_parts are already escaped SafeStrings; join them and keep the result safe.
-        summary = mark_safe(", ".join(str(part) for part in inline_parts))
-        if len(all_vlans) > MAX_INLINE:
-            extra = len(all_vlans) - MAX_INLINE
-            summary = format_html('{} <span class="text-muted">+{} more</span>', summary, extra)
+        context = self._vlan_row_context(record)
+        summary = self._render_vlan_summary(all_vlans, context)
 
         # Keep the LibreNMS VLAN summary visible, but do not expose or submit NetBox scope
         # details for a row whose owner is outside the user's Device view scope.
         if not record.get("sync_target_resolvable", True):
             return summary
 
-        # Build tooltip showing auto-selected VLAN group per VLAN. Escape the LibreNMS-sourced
-        # vid/vlan_type and group_name; the "&#10;" separator is a literal newline entity for the
-        # title attribute, so join the escaped lines and mark the whole tooltip safe.
+        interface_name = record.get(self.interface_name_field, "")
+        row_key = self._vlan_row_key(record)
+        return format_html(
+            '<span title="{}">{}</span>{}{}',
+            self._render_vlan_tooltip(all_vlans, context),
+            summary,
+            self._render_vlan_edit_button(record, all_vlans, context, interface_name, row_key),
+            self._render_vlan_hidden_inputs(all_vlans, context, interface_name, row_key),
+        )
+
+    @staticmethod
+    def _collect_row_vlans(record):
+        """Return the row's VLANs as ``(type, vid)`` pairs: untagged first, then tagged by vid."""
+        all_vlans = []
+        untagged = record.get("untagged_vlan")
+        if untagged:
+            all_vlans.append(("U", untagged))
+        all_vlans.extend(("T", vid) for vid in sorted(record.get("tagged_vlans", [])))
+        return all_vlans
+
+    @staticmethod
+    def _vlan_row_key(record):
+        """Return the port id the sync view reads back out of the rendered form field names."""
+        # _sync_interface_vlans() reads vlan_group_<canonical port id>_<vid>, so a raw value such
+        # as "010" would render a key the view never looks up and the override would be dropped.
+        canonical_port_id = normalize_librenms_port_id(record.get("port_id"))
+        return str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id") or "")
+
+    @staticmethod
+    def _vlan_row_context(record):
+        """Bundle the row's VLAN evidence with the NetBox assignments it is compared against."""
+        netbox_untagged_vid = None
+        netbox_untagged_group_id = None
+        netbox_tagged_vids = set()
+        netbox_tagged_group_ids = {}
+        netbox_interface = record.get("netbox_interface")
+        if netbox_interface:
+            if netbox_interface.untagged_vlan:
+                netbox_untagged_vid = netbox_interface.untagged_vlan.vid
+                netbox_untagged_group_id = netbox_interface.untagged_vlan.group_id
+            for vlan in netbox_interface.tagged_vlans.all():
+                netbox_tagged_vids.add(vlan.vid)
+                netbox_tagged_group_ids[vlan.vid] = vlan.group_id
+        return _VlanRowContext(
+            group_map=record.get("vlan_group_map", {}),
+            missing=record.get("missing_vlans", []),
+            exists_in_netbox=record.get("exists_in_netbox", False),
+            netbox_untagged_vid=netbox_untagged_vid,
+            netbox_untagged_group_id=netbox_untagged_group_id,
+            netbox_tagged_vids=netbox_tagged_vids,
+            netbox_tagged_group_ids=netbox_tagged_group_ids,
+        )
+
+    def _vlan_css_class(self, context, vlan_type, vid):
+        """Return one VLAN's colour class. The inline summary and the modal must agree on it."""
+        selected_gid = self._parse_group_id(context.group_map.get(vid, {}).get("group_id", ""))
+        group_matches = check_vlan_group_matches(
+            vlan_type,
+            vid,
+            selected_gid,
+            context.netbox_untagged_group_id,
+            context.netbox_tagged_group_ids,
+            context.netbox_untagged_vid,
+            context.netbox_tagged_vids,
+        )
+        if vlan_type == "U":
+            return get_untagged_vlan_css_class(
+                vid, context.netbox_untagged_vid, context.exists_in_netbox, context.missing, group_matches
+            )
+        return get_tagged_vlan_css_class(
+            vid, context.netbox_tagged_vids, context.exists_in_netbox, context.missing, group_matches
+        )
+
+    def _render_vlan_summary(self, all_vlans, context):
+        """Render up to three coloured VLANs inline, then count the rest."""
+        inline_parts = []
+        for vlan_type, vid in all_vlans[: self._MAX_INLINE_VLANS]:
+            # Escape the LibreNMS-sourced vid/vlan_type (XSS, issue #105 class). css is an
+            # internal class name; warning is the static icon HTML from get_missing_vlan_warning,
+            # so it is marked safe rather than escaped.
+            inline_parts.append(
+                format_html(
+                    '<span class="{}">{}({}){}</span>',
+                    self._vlan_css_class(context, vlan_type, vid),
+                    vid,
+                    vlan_type,
+                    mark_safe(get_missing_vlan_warning(vid, context.missing)),
+                )
+            )
+        # inline_parts are already escaped SafeStrings; join them and keep the result safe.
+        summary = mark_safe(", ".join(str(part) for part in inline_parts))
+        if len(all_vlans) > self._MAX_INLINE_VLANS:
+            summary = format_html(
+                '{} <span class="text-muted">+{} more</span>', summary, len(all_vlans) - self._MAX_INLINE_VLANS
+            )
+        return summary
+
+    @staticmethod
+    def _render_vlan_tooltip(all_vlans, context):
+        """Render the title attribute naming the group each VLAN resolved to."""
+        # Escape the LibreNMS-sourced vid/vlan_type and group_name; the "&#10;" separator is a
+        # literal newline entity for the title attribute, so join the escaped lines and mark the
+        # whole tooltip safe.
         tooltip_lines = []
         for vlan_type, vid in all_vlans:
-            if vid in missing_vlans:
+            if vid in context.missing:
                 tooltip_lines.append(format_html("VLAN {}({}) → ⚠ Not in NetBox", vid, vlan_type))
             else:
-                group_info = vlan_group_map.get(vid, {})
-                group_name = group_info.get("group_name", "Global")
+                group_name = context.group_map.get(vid, {}).get("group_name", "Global")
                 tooltip_lines.append(format_html("VLAN {}({}) → {}", vid, vlan_type, group_name))
-        tooltip_text = mark_safe("&#10;".join(str(line) for line in tooltip_lines))
+        return mark_safe("&#10;".join(str(line) for line in tooltip_lines))
 
-        # Build hidden inputs for per-VLAN group selections (submitted with form)
-        hidden_inputs = []
-        for vlan_type, vid in all_vlans:
-            group_info = vlan_group_map.get(vid, {})
-            group_id = group_info.get("group_id", "")
-            hidden_inputs.append(
-                format_html(
-                    '<input type="hidden" name="vlan_group_{}_{}" '
-                    'value="{}" class="vlan-group-hidden" '
-                    'data-interface="{}" data-vid="{}">',
-                    row_key,
-                    vid,
-                    group_id,
-                    interface_name,
-                    vid,
-                )
+    @staticmethod
+    def _render_vlan_hidden_inputs(all_vlans, context, interface_name, row_key):
+        """Render the per-VLAN group inputs the sync view reads on submit."""
+        hidden_inputs = [
+            format_html(
+                '<input type="hidden" name="vlan_group_{}_{}" '
+                'value="{}" class="vlan-group-hidden" '
+                'data-interface="{}" data-vid="{}">',
+                row_key,
+                vid,
+                context.group_map.get(vid, {}).get("group_id", ""),
+                interface_name,
+                vid,
             )
+            for _vlan_type, vid in all_vlans
+        ]
+        return mark_safe("".join(str(field) for field in hidden_inputs))
 
-        # Build JSON data for modal (use proper json serialization for safety)
+    def _vlan_modal_json(self, all_vlans, context):
+        """Serialize the per-VLAN state the edit modal renders."""
         vlan_json_items = []
         for vlan_type, vid in all_vlans:
-            group_info = vlan_group_map.get(vid, {})
-            is_missing = vid in missing_vlans
-            selected_gid = self._parse_group_id(group_info.get("group_id", ""))
-            group_matches = check_vlan_group_matches(
-                vlan_type,
-                vid,
-                selected_gid,
-                netbox_untagged_group_id,
-                netbox_tagged_group_ids,
-                netbox_untagged_vid,
-                netbox_tagged_vids,
-            )
-            if vlan_type == "U":
-                css = get_untagged_vlan_css_class(
-                    vid, netbox_untagged_vid, exists_in_netbox, missing_vlans, group_matches
-                )
-            else:
-                css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches)
-            display_group_name = "Not in NetBox" if is_missing else group_info.get("group_name", "Global")
+            group_info = context.group_map.get(vid, {})
+            is_missing = vid in context.missing
             vlan_json_items.append(
                 {
                     "vid": vid,
                     "type": vlan_type,
                     "group_id": group_info.get("group_id", ""),
-                    "group_name": display_group_name,
-                    "css": css,
+                    "group_name": "Not in NetBox" if is_missing else group_info.get("group_name", "Global"),
+                    "css": self._vlan_css_class(context, vlan_type, vid),
                     "missing": is_missing,
                 }
             )
-        vlan_json = json_module.dumps(vlan_json_items)
+        return json_module.dumps(vlan_json_items)
 
-        device_id = record.get("selected_object_id") or (self.device.pk if self.device else "")
-
-        # Build vlan_groups JSON for modal dropdowns
+    def _vlan_group_options_json(self, record):
+        """Serialize the group dropdown options, global first."""
         group_options = [{"id": "", "name": "-- No Group (Global) --", "scope": ""}]
         for group in record.get("vlan_groups", self.vlan_groups):
             scope_info = str(group.scope) if hasattr(group, "scope") and group.scope else ""
             group_options.append({"id": str(group.pk), "name": group.name, "scope": scope_info})
+        return json_module.dumps(group_options)
 
-        groups_json = json_module.dumps(group_options)
-
-        # Escape JSON for safe embedding in HTML attributes
-        escaped_vlan_json = escape(vlan_json)
-        escaped_groups_json = escape(groups_json)
-
-        edit_btn = format_html(
+    def _render_vlan_edit_button(self, record, all_vlans, context, interface_name, row_key):
+        """Render the button that opens the VLAN group modal for this row."""
+        device_id = record.get("selected_object_id") or (self.device.pk if self.device else "")
+        return format_html(
             '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" '
             'data-interface="{}" '
             'data-row-key="{}" '
@@ -356,18 +388,9 @@ class LibreNMSInterfaceTable(tables.Table):
             interface_name,
             row_key,
             device_id,
-            escaped_vlan_json,
-            escaped_groups_json,
-        )
-
-        hidden_inputs_html = mark_safe("".join(str(h) for h in hidden_inputs))
-
-        return format_html(
-            '<span title="{}">{}</span>{}{}',
-            tooltip_text,
-            summary,
-            edit_btn,
-            hidden_inputs_html,
+            # Escape the JSON for safe embedding in the HTML attributes.
+            escape(self._vlan_modal_json(all_vlans, context)),
+            escape(self._vlan_group_options_json(record)),
         )
 
     @staticmethod
