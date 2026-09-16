@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import expect
 
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
@@ -224,7 +225,10 @@ class TestRequirementCascade:
                 }"""
             )
 
-        relationship_data = page.locator("tr[data-port-id='10']").evaluate(
+        row = page.locator("tr[data-port-id='10']")
+        # The response event occurs before response.json() updates the row.
+        expect(row).to_have_attribute("data-bridge-name", "new-bridge")
+        relationship_data = row.evaluate(
             """row => ({
                 parentPortId: row.dataset.parentPortId,
                 parentName: row.dataset.parentName,
