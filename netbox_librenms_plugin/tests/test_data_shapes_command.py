@@ -198,3 +198,33 @@ def test_rebuild_manifest_refuses_to_wipe_when_no_recordings(tmp_path, monkeypat
 
     # The shipped manifest is left intact, not wiped to [].
     assert json.loads(manifest_path.read_text()) == original
+
+
+def test_validate_rejects_a_recording_whose_signature_is_invalid(tmp_path):
+    """The recording schema does not cover meta, so --validate must check what it generated."""
+    rec = anonymize_recording(load_recording("cisco-stackwise-3member"))
+    rec["meta"] = {**rec.get("meta", {}), "os": 123}  # passes recording_schema_errors, signs as a non-string os
+    path = tmp_path / "bad-signature.json"
+    path.write_text(json.dumps(rec))
+
+    with pytest.raises(CommandError, match="invalid novelty signature"):
+        _run(validate=str(path))
+
+
+def test_rebuild_manifest_refuses_to_write_a_manifest_it_could_not_load(tmp_path, monkeypatch):
+    """A generated manifest load_manifest() would reject must not replace the shipped one."""
+    rec_dir = tmp_path / "recordings"
+    rec_dir.mkdir()
+    rec = load_recording("cisco-stackwise-3member")
+    rec["meta"] = {**rec.get("meta", {}), "os": 123}
+    (rec_dir / "cisco-stackwise-3member.json").write_text(json.dumps(rec))
+    manifest_path = rec_dir / "manifest.json"
+    original = [{"name": "cisco-stackwise-3member", "signature": {"os": "os-abc123"}}]
+    manifest_path.write_text(json.dumps(original))
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", manifest_path)
+
+    with pytest.raises(CommandError, match="Generated manifest is invalid"):
+        _run(**{"rebuild_manifest": True})
+
+    assert json.loads(manifest_path.read_text()) == original

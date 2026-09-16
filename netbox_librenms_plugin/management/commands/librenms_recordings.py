@@ -19,7 +19,12 @@ from django.core.management.base import BaseCommand, CommandError
 
 from netbox_librenms_plugin.data_shapes import recordings_store
 from netbox_librenms_plugin.data_shapes.anonymize import find_pii
-from netbox_librenms_plugin.data_shapes.signature import build_manifest, classify_novelty, compute_shape_signature
+from netbox_librenms_plugin.data_shapes.signature import (
+    build_manifest,
+    classify_novelty,
+    compute_shape_signature,
+    signature_schema_errors,
+)
 
 
 class Command(BaseCommand):
@@ -72,6 +77,10 @@ class Command(BaseCommand):
             raise CommandError(f"Recording still contains PII (anonymize before submitting):\n  - {lines}")
 
         signature = compute_shape_signature(recording)
+        # The recording schema does not cover meta, so a non-string meta.os passes it and still
+        # produces a signature the manifest rejects. Report that here instead of reporting success.
+        if errors := signature_schema_errors(signature):
+            raise CommandError("Recording produces an invalid novelty signature:\n  - " + "\n  - ".join(errors))
         # Use the shipped manifest.json (recordings_store.load_manifest), not a manifest rebuilt from
         # load_bundled_recordings(): the recordings are dev/test fixtures NOT packaged in the wheel,
         # so in a wheel install build_manifest(load_bundled_recordings()) would be empty and classify
@@ -98,6 +107,8 @@ class Command(BaseCommand):
                 f"from a source checkout (the recordings are not packaged in the wheel)."
             )
         manifest = build_manifest(recordings)
+        if errors := recordings_store.manifest_schema_errors(manifest):
+            raise CommandError("Generated manifest is invalid:\n  - " + "\n  - ".join(errors))
         # Write atomically (tmp + replace): a direct write_text truncates the shipped manifest
         # first, so a crash mid-write would make novelty classification unavailable until a rebuild.
         tmp_path = recordings_store.MANIFEST_PATH.with_name(f".{recordings_store.MANIFEST_PATH.name}.{uuid4().hex}.tmp")

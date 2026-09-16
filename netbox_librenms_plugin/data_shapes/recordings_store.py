@@ -77,18 +77,32 @@ def load_manifest():
         raise RuntimeError(f"Could not read data-shape manifest {MANIFEST_PATH.name!r}.") from exc
     except ValueError as exc:
         raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} is not valid JSON.") from exc
-    if not isinstance(manifest, list):
-        raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} must contain a JSON list.")
+    if errors := manifest_schema_errors(manifest):
+        raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} {errors[0]}.")
+    return manifest
+
+
+def manifest_schema_errors(manifest):
+    """
+    Return a list of schema problems with a novelty manifest (empty when valid).
+
+    The rebuild command checks what it generated against this, so a manifest that load_manifest()
+    would reject can never replace the shipped one and leave novelty classification unavailable.
+    """
     from netbox_librenms_plugin.data_shapes.signature import signature_schema_errors
 
+    if not isinstance(manifest, list):
+        return ["must contain a JSON list"]
+    errors = []
     for index, entry in enumerate(manifest):
         if not isinstance(entry, dict):
-            raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} entry {index} must be an object.")
+            errors.append(f"entry {index} must be an object")
+            continue
         if not isinstance(entry.get("name"), str) or not entry["name"]:
-            raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} entry {index} must have a non-empty name.")
-        if errors := signature_schema_errors(entry.get("signature")):
-            raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} entry {index} is invalid: {errors[0]}.")
-    return manifest
+            errors.append(f"entry {index} must have a non-empty name")
+        if entry_errors := signature_schema_errors(entry.get("signature")):
+            errors.append(f"entry {index} is invalid: {entry_errors[0]}")
+    return errors
 
 
 def recording_schema_errors(recording):
