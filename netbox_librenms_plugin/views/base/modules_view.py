@@ -1001,7 +1001,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         transparent_indices,
         ignore_cache,
         ignore_contexts=None,
-    ):  # noqa: C901
+    ):
         """
         Collect top-level inventory items for the sync table.
 

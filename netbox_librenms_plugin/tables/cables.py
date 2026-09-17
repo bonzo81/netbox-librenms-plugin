@@ -124,7 +124,8 @@ class LibreNMSCableTable(tables.Table):
         """Render local port name as a link if URL is available."""
         # Leading space: the badge follows the port name.
         oob_badge = oob_badge_html(record, leading_space=True)
-        serial_badge = mark_safe(SERIAL_BADGE_HTML) if record.get("_source") == SERIAL_INVENTORY_SOURCE else ""  # noqa: S308
+        # Both badges are static trusted markup with no interpolation.
+        serial_badge = mark_safe(SERIAL_BADGE_HTML) if record.get("_source") == SERIAL_INVENTORY_SOURCE else ""
         # Normalize None to "" in both branches; otherwise the linked branch
         # renders the literal "None" as the link text when value is missing.
         display_value = value or ""
@@ -134,10 +135,9 @@ class LibreNMSCableTable(tables.Table):
 
     def render_remote_port(self, value, record):
         """Render remote port name as a link if URL is available; flag a manually picked remote."""
+        # Static trusted markup, mirrors the Serial badge idiom.
         manual_badge = (
-            mark_safe(  # noqa: S308  (static trusted markup, mirrors the Serial badge idiom)
-                ' <i class="mdi mdi-gesture-tap-button text-muted" title="Remote end picked manually"></i>'
-            )
+            mark_safe(' <i class="mdi mdi-gesture-tap-button text-muted" title="Remote end picked manually"></i>')
             if record.get("manual_remote")
             else ""
         )

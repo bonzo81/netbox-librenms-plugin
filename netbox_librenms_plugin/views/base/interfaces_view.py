@@ -936,7 +936,7 @@ class BaseInterfaceTableView(
         return any(
             port.get("ifType", "") == "ieee8023adLag"
             or any((match := sub_iface_re.match(name)) and match.group(1) in port_names for name in names)
-            for port, names in zip(ports, names_per_port)
+            for port, names in zip(ports, names_per_port, strict=True)
         )
 
     def _has_relationship_name_signals(

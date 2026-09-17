@@ -146,22 +146,22 @@ class LibreNMSSettings(models.Model):
         help_text="Cable description; the acting server key is appended, e.g. 'Synced from LibreNMS (production)'",
     )
 
-    def save(self, *args, **kwargs):
-        self.pk = 1
-        super().save(*args, **kwargs)
-
     class Meta:
         """Meta options for LibreNMSSettings."""
 
         verbose_name = "LibreNMS Settings"
         verbose_name_plural = "LibreNMS Settings"
 
+    def __str__(self):
+        return f"LibreNMS Settings - Server: {self.selected_server}"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
     def get_absolute_url(self):
         """Return the URL for the settings page."""
         return reverse("plugins:netbox_librenms_plugin:settings")
-
-    def __str__(self):
-        return f"LibreNMS Settings - Server: {self.selected_server}"
 
 
 class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
@@ -435,7 +435,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
             try:
                 _validate_replacement_template(pattern, self.netbox_bay_name)
             except (re.error, IndexError) as e:
-                raise ValidationError({"netbox_bay_name": f"Invalid replacement: {e}"})
+                raise ValidationError({"netbox_bay_name": f"Invalid replacement: {e}"}) from e
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
@@ -559,7 +559,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         try:
             _validate_replacement_template(compiled, self.replacement)
         except (re.error, IndexError) as e:
-            raise ValidationError({"replacement": f"Invalid replacement template: {e}"})
+            raise ValidationError({"replacement": f"Invalid replacement template: {e}"}) from e
 
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""

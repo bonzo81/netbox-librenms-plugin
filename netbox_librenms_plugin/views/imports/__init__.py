@@ -1,6 +1,6 @@
 """LibreNMS import workflow views."""
 
-from .actions import (  # noqa: F401
+from .actions import (
     BulkImportConfirmView,
     BulkImportDevicesView,
     CreatePlatformFromImportView,
@@ -13,7 +13,7 @@ from .actions import (  # noqa: F401
     DeviceVCDetailsView,
     SaveUserPrefView,
 )
-from .list import LibreNMSImportView  # noqa: F401
+from .list import LibreNMSImportView
 
 __all__ = [
     "BulkImportConfirmView",

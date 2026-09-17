@@ -85,7 +85,7 @@ def _post(device, module, inventory_item):
     )
     request.user = get_user_model().objects.create_superuser(username=f"mib-{device.pk}", email="", password="x")
     request.session = {}
-    setattr(request, "_messages", FallbackStorage(request))
+    request._messages = FallbackStorage(request)
     return request
 
 

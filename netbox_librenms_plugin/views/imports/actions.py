@@ -1331,7 +1331,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return False
         return request.POST.get("use_background_job") == "on"
 
-    def post(self, request):  # noqa: C901, PLR0912
+    def post(self, request):  # noqa: C901
         """Import selected devices from LibreNMS into NetBox."""
         # Check write permission before any import operation
         if error := self.require_write_permission():

@@ -190,7 +190,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         return validated_devices
 
-    def get(self, request, *args, **kwargs):  # noqa: C901, D401
+    def get(self, request, *args, **kwargs):  # noqa: C901
         """Render the import table backed by LibreNMS data."""
         libre_filter_fields = (
             "librenms_location",
@@ -452,7 +452,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         }
         return render(request, self.template_name, context)
 
-    def get_queryset(self, request):  # noqa: D401 - inherited doc
+    def get_queryset(self, request):
         """Load import data into _import_data and return an empty Device queryset."""
         import_data = self._get_import_queryset()
         self._import_data = import_data

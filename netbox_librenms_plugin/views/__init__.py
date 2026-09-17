@@ -2,17 +2,17 @@
 Module for initializing views for the NetBox LibreNMS plugin.
 
 All imports below are intentional re-exports consumed by urls.py and
-other modules.  The F401 suppressions prevent linters from flagging
-them as unused within this file.
+other modules.  The package-level F401 per-file-ignore keeps them from
+reading as unused here.
 """
 
-from .base.cables_view import BaseCableTableView, CableRemotePickerView, SingleCableVerifyView  # noqa: F401
-from .base.interfaces_view import BaseInterfaceTableView  # noqa: F401
-from .data_shapes import CaptureDataShapeView  # noqa: F401
-from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView  # noqa: F401
-from .base.librenms_sync_view import BaseLibreNMSSyncView  # noqa: F401
-from .base.vlan_table_view import BaseVLANTableView  # noqa: F401
-from .imports import (  # noqa: F401
+from .base.cables_view import BaseCableTableView, CableRemotePickerView, SingleCableVerifyView
+from .base.interfaces_view import BaseInterfaceTableView
+from .data_shapes import CaptureDataShapeView
+from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView
+from .base.librenms_sync_view import BaseLibreNMSSyncView
+from .base.vlan_table_view import BaseVLANTableView
+from .imports import (
     BulkImportConfirmView,
     BulkImportDevicesView,
     CreatePlatformFromImportView,
@@ -26,14 +26,14 @@ from .imports import (  # noqa: F401
     LibreNMSImportView,
     SaveUserPrefView,
 )
-from .imports.actions import (  # noqa: F401
+from .imports.actions import (
     AddAsOOBView,
     AddDeviceTypeMappingView,
     AddPlatformMappingView,
     MergeNetBoxDevicesView,
     PromoteToHostView,
 )
-from .mapping_views import (  # noqa: F401
+from .mapping_views import (
     CarrierAutoInstallRuleBulkDeleteView,
     CarrierAutoInstallRuleBulkExportYAMLView,
     CarrierAutoInstallRuleBulkImportView,
@@ -134,7 +134,7 @@ from .mapping_views import (  # noqa: F401
     SerialSensorTypePatternListView,
     SerialSensorTypePatternView,
 )
-from .object_sync import (  # noqa: F401
+from .object_sync import (
     DeviceCableTableView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
@@ -152,10 +152,10 @@ from .object_sync import (  # noqa: F401
     VMIPAddressTableView,
     VMLibreNMSSyncView,
 )
-from .settings_views import LibreNMSSettingsView, TestLibreNMSConnectionView  # noqa: F401
-from .status_check import DeviceStatusListView, VMStatusListView  # noqa: F401
-from .sync.cables import SyncCablesView  # noqa: F401
-from .sync.device_fields import (  # noqa: F401
+from .settings_views import LibreNMSSettingsView, TestLibreNMSConnectionView
+from .status_check import DeviceStatusListView, VMStatusListView
+from .sync.cables import SyncCablesView
+from .sync.device_fields import (
     AssignVCSerialView,
     ConvertLegacyLibreNMSIdView,
     CreateAndAssignPlatformView,
@@ -166,22 +166,22 @@ from .sync.device_fields import (  # noqa: F401
     UpdateDeviceSerialView,
     UpdateDeviceTypeView,
 )
-from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView  # noqa: F401
-from .sync.interfaces import (  # noqa: F401
+from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView
+from .sync.interfaces import (
     DeleteNetBoxInterfacesView,
     SyncInterfaceBridgeView,
     SyncInterfaceLagView,
     SyncInterfaceParentView,
     SyncInterfacesView,
 )
-from .sync.ip_addresses import SyncIPAddressesView  # noqa: F401
-from .sync.locations import SyncSiteLocationView  # noqa: F401
-from .sync.migrate import (  # noqa: F401
+from .sync.ip_addresses import SyncIPAddressesView
+from .sync.locations import SyncSiteLocationView
+from .sync.migrate import (
     MoveInterfaceToWinnerView,
     MoveIPAddressToWinnerView,
     TransferDeviceIPView,
 )
-from .sync.modules import (  # noqa: F401
+from .sync.modules import (
     AddBayTemplateView,
     InstallBranchView,
     InstallModuleView,
@@ -193,4 +193,4 @@ from .sync.modules import (  # noqa: F401
     UpdateModuleSerialView,
     VCNormalizationReportView,
 )
-from .sync.vlans import SyncVLANsView  # noqa: F401
+from .sync.vlans import SyncVLANsView

@@ -297,9 +297,9 @@ class ImportSettingsForm(NetBoxModelForm):
             # This should be caught by check above, but just in case
             raise forms.ValidationError(
                 f"Invalid placeholder in pattern: {e}. Valid options are: {{position}}, {{serial}}"
-            )
+            ) from e
         except (ValueError, IndexError) as e:
-            raise forms.ValidationError(f"Invalid pattern syntax: {str(e)}")
+            raise forms.ValidationError(f"Invalid pattern syntax: {str(e)}") from e
 
         return pattern
 
@@ -1095,15 +1095,16 @@ class CaseInsensitiveCSVModelChoiceField(CSVModelChoiceField):
         try:
             return self.queryset.get(**{f"{self.to_field_name}__iexact": value})
         except self.queryset.model.DoesNotExist:
+            # A missing row is the expected outcome of this lookup, not an error worth chaining.
             raise forms.ValidationError(
                 self.error_messages["invalid_choice"],
                 code="invalid_choice",
                 params={"value": value},
-            )
+            ) from None
         except MultipleObjectsReturned:
             raise forms.ValidationError(
                 f'"{value}" is not a unique value for this field; specify parent_site to disambiguate.'
-            )
+            ) from None
 
 
 class LocationMappingImportForm(NetBoxModelImportForm):

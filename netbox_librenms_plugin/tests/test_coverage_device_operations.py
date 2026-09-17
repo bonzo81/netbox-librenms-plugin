@@ -1803,4 +1803,4 @@ def test_lazy_bulk_import_export_and_unknown_attributes():
 
     assert callable(operations.bulk_import_devices_shared)
     with pytest.raises(AttributeError):
-        getattr(operations, "unknown_device_operation")
+        _ = operations.unknown_device_operation

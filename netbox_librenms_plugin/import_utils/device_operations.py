@@ -9,7 +9,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from tenancy.models import Tenant
-from virtualization.models import Cluster  # noqa: F401 — used by test mock.patch targets
+from virtualization.models import Cluster
 
 from ..constants import normalize_oob_type
 from ..import_validation_helpers import (
