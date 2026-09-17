@@ -15,8 +15,6 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.constants import is_supported_interface_name_field
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
-from netbox_librenms_plugin.utils import identify_ip_sync_rows, index_ip_sync_rows, normalize_ip_sync_row_id
-
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
@@ -24,7 +22,10 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_interface_name_field,
     get_virtual_chassis_members,
+    identify_ip_sync_rows,
     index_ip_source_interfaces,
+    index_ip_sync_rows,
+    normalize_ip_sync_row_id,
     resolve_create_missing_interfaces,
     resolve_ip_source_interface,
     resolve_set_primary_ip,

@@ -3,7 +3,6 @@ import importlib
 import django.db.models.deletion
 from django.db import migrations, models
 
-
 # The rule that admits entPhysicalClass "other" exists for Juniper Routing Engines. Left global it
 # changes what every other vendor's sync admits, so scope it to Juniper where that manufacturer is
 # known. Read the name from the migration that seeds it so the two cannot drift.

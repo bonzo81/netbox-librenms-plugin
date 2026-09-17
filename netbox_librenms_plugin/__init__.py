@@ -118,7 +118,6 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
 
     try:
         from django.contrib.contenttypes.models import ContentType
-
         from extras.models import CustomField
 
         cf, created = CustomField.objects.using(db_alias).get_or_create(

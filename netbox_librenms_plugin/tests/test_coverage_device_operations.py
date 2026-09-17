@@ -16,7 +16,6 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
-
 SERVER_KEY = "test-server"
 
 
@@ -1316,6 +1315,7 @@ class TestValidationWithRealLibreNMS:
 
     def test_chassis_inventory_recovers_an_unmatched_hardware_string(self, librenms_api):
         from dcim.models import DeviceType, Manufacturer
+
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
         api, server = librenms_api
@@ -1383,6 +1383,7 @@ class TestImportSingleDevice:
 
     def test_real_import_persists_normalized_identity_and_location(self, librenms_api):
         from dcim.models import Location
+
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
@@ -1427,6 +1428,7 @@ class TestImportSingleDevice:
 
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack
+
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
@@ -1711,6 +1713,7 @@ class TestImportSingleDevice:
     def test_rack_resolved_from_parsed_token_via_mapping(self, librenms_api):
         """Persist the mapped rack when the parsed token has no exact match."""
         from dcim.models import Rack
+
         from netbox_librenms_plugin.models import LocationMapping
 
         site, device_type, role = self._infrastructure("mapped-rack")
@@ -1728,6 +1731,7 @@ class TestImportSingleDevice:
     def test_ambiguous_rack_name_skips_automatic_assignment(self, librenms_api, caplog):
         """Leave the rack unset when duplicate names exist, even if an alias matches."""
         from dcim.models import Location, Rack
+
         from netbox_librenms_plugin.models import LocationMapping
 
         site, device_type, role = self._infrastructure("ambiguous-rack")
@@ -1783,6 +1787,7 @@ class TestImportSingleDevice:
     def test_tenant_resolved_from_parsed_token_via_mapping(self, librenms_api):
         """Persist the mapped tenant when the parsed token has no exact match."""
         from tenancy.models import Tenant
+
         from netbox_librenms_plugin.models import LocationMapping
 
         site, device_type, role = self._infrastructure("mapped-tenant")

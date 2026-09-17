@@ -9,7 +9,6 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.db import DatabaseError, DataError, IntegrityError, transaction
-
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
@@ -27,6 +26,20 @@ from netbox_librenms_plugin.identity_replacement import (
     load_identity_replacement_intent,
     sign_identity_replacement_intent,
 )
+from netbox_librenms_plugin.import_plan import (
+    ClusterPlacement,
+    DeviceTarget,
+    HostPlacement,
+    ImportRowIntent,
+    InvalidImportIntent,
+    MatchedSitePlacement,
+    VMPlacementMethod,
+    import_row_hx_include,
+    parse_import_row_intent,
+    parse_import_row_plan,
+    partition_import_plans,
+    serialize_import_plans,
+)
 from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
@@ -42,23 +55,9 @@ from netbox_librenms_plugin.import_utils import (
     scope_bulk_collisions,
     scope_validation_disclosure,
     scope_validation_disclosures,
-    visible_object_label,
     update_vc_member_suggested_names,
     validate_device_for_import,
-)
-from netbox_librenms_plugin.import_plan import (
-    ClusterPlacement,
-    DeviceTarget,
-    HostPlacement,
-    ImportRowIntent,
-    InvalidImportIntent,
-    MatchedSitePlacement,
-    VMPlacementMethod,
-    import_row_hx_include,
-    partition_import_plans,
-    parse_import_row_intent,
-    parse_import_row_plan,
-    serialize_import_plans,
+    visible_object_label,
 )
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
@@ -3427,8 +3426,8 @@ class AddAsOOBView(
                 requested interface is outside the caller's view scope.
 
         """
-        from django.core.exceptions import ValidationError
         from dcim.models import Interface
+        from django.core.exceptions import ValidationError
         from utilities.permissions import get_permission_for_model
 
         iface_id = (request.POST.get("oob_interface_id") or "").strip()
@@ -3835,6 +3834,7 @@ class MergeNetBoxDevicesView(
             return error
 
         from dcim.models import Device
+
         from netbox_librenms_plugin.utils import (
             mark_librenms_migrated,
             merge_librenms_links,
@@ -4160,6 +4160,7 @@ class AddPlatformMappingView(
             return error
 
         from dcim.models import Platform
+
         from netbox_librenms_plugin.models import PlatformMapping
 
         # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing

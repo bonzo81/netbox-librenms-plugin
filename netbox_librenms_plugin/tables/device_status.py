@@ -11,9 +11,9 @@ from django_tables2 import Column
 from netbox.tables.columns import ToggleColumn
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod, import_row_hx_include
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
-from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod, import_row_hx_include
 from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_librenms_sync_device,

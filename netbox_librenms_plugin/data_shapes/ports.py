@@ -12,7 +12,6 @@ from itertools import islice
 
 import re2
 
-
 ANON_INTERFACE_NAME_PREFIX = "iface-"
 ANON_INTERFACE_NAME_RE = re.compile(rf"^{re.escape(ANON_INTERFACE_NAME_PREFIX)}[0-9a-f]{{6}}(?:\.\d+)*$")
 

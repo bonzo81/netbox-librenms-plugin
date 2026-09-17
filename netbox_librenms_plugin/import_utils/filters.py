@@ -5,9 +5,8 @@ from typing import List
 
 from django.core.cache import cache
 
-from .cache import get_import_search_cache_key
-
 from ..librenms_api import LibreNMSAPI, LibreNMSUnreachable
+from .cache import get_import_search_cache_key
 
 logger = logging.getLogger(__name__)
 

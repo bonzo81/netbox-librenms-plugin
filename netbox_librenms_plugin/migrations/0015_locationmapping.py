@@ -3,10 +3,11 @@
 import django.db.models.deletion
 import django.db.models.functions.text
 import netbox.models.deletion
-import netbox_librenms_plugin.models
 import taggit.managers
 import utilities.json
 from django.db import migrations, models
+
+import netbox_librenms_plugin.models
 
 
 class Migration(migrations.Migration):

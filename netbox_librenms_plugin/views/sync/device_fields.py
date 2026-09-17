@@ -5,12 +5,11 @@ from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 from django.db import IntegrityError, transaction
-from django.utils.text import slugify
-
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.html import escape
+from django.utils.text import slugify
 from django.views import View
 from virtualization.models import VirtualMachine
 

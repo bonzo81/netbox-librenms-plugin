@@ -10,8 +10,8 @@ match and a reason, never an authoritative decision.
 
 import re
 
-from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
+from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_RE,
     compile_lag_patterns,

@@ -31,6 +31,7 @@ from .cache import (
     get_import_search_cache_key,
     get_validated_device_cache_key,
 )
+from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
     _determine_device_name,
     fetch_device_with_cache,
@@ -38,7 +39,6 @@ from .device_operations import (
     import_single_device,
     validate_device_for_import,
 )
-from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .disclosure import (
     scope_validation_disclosure,
     scope_validation_disclosures,

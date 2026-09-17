@@ -11,7 +11,6 @@ from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_serv
 from netbox_librenms_plugin.tests.view_test_helpers import grant as grant_view_permission
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-
 SERVER_KEY = "default"
 
 
@@ -124,6 +123,7 @@ class TestShouldUseBackgroundJob:
     @staticmethod
     def _view(user, data=None, *, cleaned_data=None):
         from django.test import RequestFactory
+
         from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -281,6 +281,7 @@ class TestImportDevicesJob:
         from core.choices import JobStatusChoices
         from dcim.models import Device, DeviceRole
         from virtualization.models import VirtualMachine
+
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-legacy-import-infrastructure")
@@ -328,6 +329,7 @@ class TestImportDevicesJob:
     def test_mixed_device_and_vm_batch_imports_real_objects_and_persists_ids(self, librenms_server):
         from dcim.models import Device, DeviceRole
         from virtualization.models import VirtualMachine
+
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-import-infrastructure")
@@ -382,6 +384,7 @@ class TestImportDevicesJob:
 
     def test_unresolved_row_is_skipped_while_a_checked_row_imports(self, librenms_server):
         from dcim.models import Device, DeviceRole
+
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-unresolved-infrastructure")
@@ -421,6 +424,7 @@ class TestImportDevicesJob:
     def test_a_lone_row_whose_stack_read_failed_is_skipped_not_imported(self, librenms_server):
         """One row runs the same pre-check as many: an unreadable stack must not import VC-less."""
         from dcim.models import Device, DeviceRole
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
         from netbox_librenms_plugin.jobs import ImportDevicesJob
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -469,6 +473,7 @@ class TestImportDevicesJob:
     def test_cross_mode_collision_blocks_the_whole_batch(self, librenms_server):
         from dcim.models import Device
         from virtualization.models import VirtualMachine
+
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         target = make_device("background-collision-target")
@@ -514,6 +519,7 @@ class TestImportDevicesJob:
         django_user_model,
     ):
         from django.core.exceptions import PermissionDenied
+
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         user = django_user_model.objects.create_user(username="background-revoked-user")
@@ -538,6 +544,7 @@ class TestImportDevicesJob:
 
     def test_vm_only_permission_is_sufficient_for_a_vm_only_batch(self, librenms_server):
         from virtualization.models import VirtualMachine
+
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         cluster = make_cluster("background-vm-only-cluster")

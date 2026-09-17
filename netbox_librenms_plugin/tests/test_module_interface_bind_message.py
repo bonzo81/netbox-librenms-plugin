@@ -95,6 +95,8 @@ def _drive(device, module, *, port_id, ifname):
 
     from netbox_librenms_plugin.tests.view_test_helpers import (
         post as post_view,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import (
         trusted_module_inventory_payload,
     )
     from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView

@@ -8,7 +8,7 @@ from django_rq import get_queue
 from drf_spectacular.utils import extend_schema
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import BasePermission, SAFE_METHODS
+from rest_framework.permissions import SAFE_METHODS, BasePermission
 from rq.exceptions import NoSuchJobError
 from rq.job import Job as RQJob
 
@@ -46,8 +46,8 @@ from .serializers import (
     DeviceTypeMappingSerializer,
     InterfaceTypeMappingSerializer,
     InventoryIgnoreRuleSerializer,
-    LocationMappingSerializer,
     JobErrorSerializer,
+    LocationMappingSerializer,
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
     NormalizationRuleSerializer,
