@@ -5,7 +5,7 @@ Targets:
 - cables.py lines 147-149 (exception path in process_interface_sync)
 - devices.py lines 77, 81-82 (port_association_mode, invalid poller_group)
 - locations.py lines 26-28, 32-35, 44-49 (get_table, get_context_data, get_queryset)
-- vlans.py lines 134-139 (grouped VLAN update/skip paths)
+- vlans.py lines 134-139 (grouped VLAN update/skip paths).
 """
 
 from contextlib import contextmanager
@@ -156,7 +156,8 @@ class TestGetCachedPortsData:
 
 
 class TestSyncInterface:
-    """Which device the LibreNMS row is written to, resolved against real rows.
+    """
+    Which device the LibreNMS row is written to, resolved against real rows.
 
     ``update_interface_attributes`` and ``_sync_interface_vlans`` stay stubbed: they are the
     view's own next steps, and these tests are about target selection, not field copying.
@@ -733,18 +734,19 @@ class TestVlansGroupedUpdateAndSkip:
         )
         return view, req, dev, vlan, cache_key
 
-    def test_grouped_vlan_with_different_name_is_renamed(self):
-        """A grouped VLAN whose LibreNMS name differs is renamed and persisted."""
+    def test_grouped_vlan_with_different_name_requires_confirmation(self):
+        """A grouped VLAN whose LibreNMS name differs is disclosed without a write."""
         from django.core.cache import cache
         from ipam.models import VLAN
 
         view, req, dev, vlan, cache_key = self._setup("update", cached_name="NewName", existing_name="OldName")
 
         try:
-            view._handle_create_vlans(req, dev, "device", dev.pk)
+            response = view._handle_create_vlans(req, dev, "device", dev.pk)
 
-            assert VLAN.objects.get(pk=vlan.pk).name == "NewName"
-            assert any("updated" in t for t in message_texts(req, "success"))
+            assert response.status_code == 200
+            assert b"Confirm VLAN changes" in response.content
+            assert VLAN.objects.get(pk=vlan.pk).name == "OldName"
         finally:
             cache.delete(cache_key)
 

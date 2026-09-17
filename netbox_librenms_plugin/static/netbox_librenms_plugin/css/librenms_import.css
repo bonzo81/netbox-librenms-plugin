@@ -1,0 +1,107 @@
+#device-import-table {
+    width: 100%;
+    table-layout: fixed;
+}
+
+#device-import-table th,
+#device-import-table td {
+    vertical-align: middle;
+}
+
+#device-import-table .import-select-column {
+    width: 2.75rem;
+}
+
+#device-import-table .import-name-column {
+    width: 22%;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+#device-import-table .import-setup-column {
+    width: 18%;
+}
+
+#device-import-table .import-actions-column {
+    width: 10rem;
+}
+
+#device-import-results [data-import-column] {
+    display: none;
+}
+
+#device-import-results[data-visible-columns~="location"] [data-import-column="location"],
+#device-import-results[data-visible-columns~="hardware"] [data-import-column="hardware"],
+#device-import-results[data-visible-columns~="hostname"] [data-import-column="hostname"],
+#device-import-results[data-visible-columns~="sysname"] [data-import-column="sysname"] {
+    display: table-cell;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+.import-options-menu,
+.import-columns-menu {
+    min-width: 20rem;
+}
+
+.import-row-options-menu {
+    min-width: 21rem;
+}
+
+.import-setup-select,
+.import-option-select {
+    min-width: 0;
+    width: 100%;
+}
+
+.import-source-label {
+    display: block;
+    margin-bottom: 0.125rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
+}
+
+.device-import-table-wrapper {
+    overflow-x: auto;
+    overflow-y: visible;
+    padding-bottom: 12rem;
+    margin-bottom: -12rem;
+}
+
+.device-import-table-wrapper + .pagination {
+    position: relative;
+    z-index: 1;
+}
+
+@media (max-width: 991.98px) {
+    #device-import-results[data-visible-columns~="location"] [data-import-column="location"],
+    #device-import-results[data-visible-columns~="hardware"] [data-import-column="hardware"] {
+        display: none;
+    }
+
+    #device-import-table .import-name-column {
+        width: 28%;
+    }
+
+    #device-import-table .import-setup-column {
+        width: 22%;
+    }
+}
+
+@media (max-width: 767.98px) {
+    #device-import-table .import-actions-column {
+        width: 7rem;
+    }
+
+    #device-import-table .device-import-action-label {
+        display: none;
+    }
+
+    .import-options-menu,
+    .import-columns-menu,
+    .import-row-options-menu {
+        min-width: min(20rem, calc(100vw - 2rem));
+    }
+}

@@ -9,6 +9,7 @@ from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.utils import (
     get_table_paginate_count,
+    module_inventory_binding_token,
     netbox_relocates_module_subtree,
     oob_badge_html,
     render_vc_member_options,
@@ -75,6 +76,7 @@ class LibreNMSModuleTable(tables.Table):
         self.device = device
         self.csrf_token = ""
         self.server_key = server_key
+        self.inventory_snapshot_digest = ""
         self.has_write_permission = has_write_permission
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
@@ -318,6 +320,7 @@ class LibreNMSModuleTable(tables.Table):
 
         Returns:
             SafeString: The live status badge and hidden in-flight spinner badge.
+
         """
         # An update action (Update Serial / Update Interface) acts on an already-installed module
         # and a row never offers it alongside an install-flavoured action, so a row with an update
@@ -487,6 +490,7 @@ class LibreNMSModuleTable(tables.Table):
 
         Returns:
             SafeString: The HTMX button, empty safe string, linked fallback, or non-interactive fallback markup.
+
         """
         device = getattr(self, "device", None)
         can_add_template = getattr(self, "can_add_module_bay_template", False)
@@ -554,9 +558,22 @@ class LibreNMSModuleTable(tables.Table):
 
         buttons = []
 
-        # Single install button (requires add permission)
-        if self.can_add_module and record.get("can_install"):
+        # Single install button (requires add permission). The view resolves the row by index, so a
+        # row without one can only submit a form the view refuses; the carrier action below has no
+        # inventory row of its own and stays indexless.
+        if self.can_add_module and record.get("can_install") and record.get("ent_physical_index"):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "install_module",
+                {
+                    "module_bay_id": record.get("module_bay_id"),
+                    "module_type_id": record.get("module_type_id"),
+                },
+                record.get("ent_physical_index"),
+                record["inventory_digest"],
+            )
             buttons.append(
                 format_html(
                     # hx-post: the view answers with the module tab fragment, swapped into
@@ -569,14 +586,9 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
-                    '<input type="hidden" name="librenms_port_id" value="{}">'
-                    '<input type="hidden" name="librenms_ifname" value="{}">'
-                    '<input type="hidden" name="librenms_ifdescr" value="{}">'
-                    '<input type="hidden" name="inventory_name" value="{}">'
-                    '<input type="hidden" name="inventory_descr" value="{}">'
                     '<input type="hidden" name="module_bay_id" value="{}">'
                     '<input type="hidden" name="module_type_id" value="{}">'
-                    '<input type="hidden" name="serial" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-success" title="Install module in bay">'
                     '<i class="mdi mdi-download"></i> Install'
                     "</button></form>",
@@ -586,20 +598,28 @@ class LibreNMSModuleTable(tables.Table):
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record.get("ent_physical_index", ""),
-                    record.get("librenms_port_id", ""),
-                    record.get("librenms_ifname") or "",
-                    record.get("librenms_ifdescr") or "",
-                    record.get("name") or "",
-                    record.get("description") or "",
                     record.get("module_bay_id", ""),
                     record.get("module_type_id", ""),
-                    record.get("serial") or "",
+                    inventory_binding,
                 )
             )
 
         # Install branch button for parents with installable children (requires add)
-        if self.can_add_module and record.get("has_installable_children") and record.get("ent_physical_index"):
+        if (
+            self.can_add_module
+            and record.get("has_installable_children")
+            and record.get("ent_physical_index")
+            and self.inventory_snapshot_digest
+        ):
             url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "install_branch",
+                {"parent_index": record.get("ent_physical_index")},
+                record.get("ent_physical_index"),
+                self.inventory_snapshot_digest,
+            )
             buttons.append(
                 format_html(
                     # hx-post: the view answers with the module tab fragment, swapped into
@@ -612,6 +632,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="parent_index" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-primary ms-1"'
                     ' title="Install this module and all installable children">'
                     '<i class="mdi mdi-file-tree"></i> Install Branch'
@@ -622,45 +643,27 @@ class LibreNMSModuleTable(tables.Table):
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record.get("ent_physical_index", ""),
+                    inventory_binding,
                 )
             )
 
-        # Update serial button for serial mismatch rows (requires change)
-        if self.can_change_module and record.get("can_update_serial") and record.get("installed_module_id"):
-            url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
-            buttons.append(
-                format_html(
-                    # hx-post: the view answers with the module tab fragment, swapped into
-                    # #module-sync-content; method/action keep it working without JS.
-                    '<form method="post" action="{}" hx-post="{}"'
-                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
-                    ' hx-sync="#module-sync-content:drop"'
-                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
-                    '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
-                    '<input type="hidden" name="server_key" value="{}">'
-                    '<input type="hidden" name="selected_device_id" value="{}">'
-                    '<input type="hidden" name="module_id" value="{}">'
-                    '<input type="hidden" name="serial" value="{}">'
-                    '<button type="submit" class="btn btn-sm btn-warning ms-1"'
-                    ' title="Update serial in NetBox to match LibreNMS">'
-                    '<i class="mdi mdi-sync"></i> Update Serial'
-                    "</button></form>",
-                    url,
-                    url,
-                    self.csrf_token,
-                    self.server_key,
-                    record.get("selected_device_id") or self.device.pk,
-                    record["installed_module_id"],
-                    record.get("serial") or "",
-                )
-            )
-
+        # Update serial button for serial mismatch rows (requires change). The view resolves the
+        # serial through the cached row, so a row without an index has no usable action.
         if (
-            getattr(self, "can_change_interface", False)
-            and record.get("can_update_interface_binding")
+            self.can_change_module
+            and record.get("can_update_serial")
             and record.get("installed_module_id")
+            and record.get("ent_physical_index")
         ):
-            url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
+            url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "update_module_serial",
+                {"module_id": record["installed_module_id"]},
+                record.get("ent_physical_index"),
+                record["inventory_digest"],
+            )
             buttons.append(
                 format_html(
                     # hx-post: the view answers with the module tab fragment, swapped into
@@ -674,11 +677,51 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
-                    '<input type="hidden" name="librenms_port_id" value="{}">'
-                    '<input type="hidden" name="librenms_ifname" value="{}">'
-                    '<input type="hidden" name="librenms_ifdescr" value="{}">'
-                    '<input type="hidden" name="inventory_name" value="{}">'
-                    '<input type="hidden" name="inventory_descr" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
+                    '<button type="submit" class="btn btn-sm btn-warning ms-1"'
+                    ' title="Update serial in NetBox to match LibreNMS">'
+                    '<i class="mdi mdi-sync"></i> Update Serial'
+                    "</button></form>",
+                    url,
+                    url,
+                    self.csrf_token,
+                    self.server_key,
+                    record.get("selected_device_id") or self.device.pk,
+                    record["installed_module_id"],
+                    record.get("ent_physical_index") or "",
+                    inventory_binding,
+                )
+            )
+
+        if (
+            getattr(self, "can_change_interface", False)
+            and record.get("can_update_interface_binding")
+            and record.get("installed_module_id")
+            and record.get("ent_physical_index")
+        ):
+            url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "update_module_interface",
+                {"module_id": record["installed_module_id"]},
+                record.get("ent_physical_index"),
+                record["inventory_digest"],
+            )
+            buttons.append(
+                format_html(
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="server_key" value="{}">'
+                    '<input type="hidden" name="selected_device_id" value="{}">'
+                    '<input type="hidden" name="module_id" value="{}">'
+                    '<input type="hidden" name="ent_index" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-outline-warning ms-1"'
                     ' title="Associate matching NetBox interface with installed module">'
                     '<i class="mdi mdi-link-variant"></i> Update Interface'
@@ -690,11 +733,7 @@ class LibreNMSModuleTable(tables.Table):
                     record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
                     record.get("ent_physical_index", ""),
-                    record.get("librenms_port_id", ""),
-                    record.get("librenms_ifname") or "",
-                    record.get("librenms_ifdescr") or "",
-                    record.get("name") or "",
-                    record.get("description") or "",
+                    inventory_binding,
                 )
             )
 

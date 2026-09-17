@@ -1,5 +1,8 @@
 {% load helpers %}
 {% include 'inc/messages.html' %}
+{% if request.htmx %}
+{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=cable_sync.cache_expiry cache_container_id="cable-cache-countdown" cache_countdown_id="cable-countdown-timer" cache_oob=True %}
+{% endif %}
 
 <!-- Cable Sync Table -->
 {% if cable_sync.table %}
@@ -23,7 +26,7 @@
     {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
     <input type="hidden" id="selected_port" name="select" value="">
 {% endif %}
-    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+    <div class="noprint d-flex justify-content-between align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
         <div>
             {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
@@ -35,18 +38,13 @@
                 <i class="mdi mdi-help-circle"></i> info
             </a>
         </div>
-        {% if cable_sync.cache_expiry %}
-            <div id="cable-cache-countdown" class="me-3">
-                Cache expires in: <span id="cable-countdown-timer" data-expiry="{{ cable_sync.cache_expiry|date:'c' }}"></span>
-            </div>
-        {% endif %}
     </div>
 
     <div class="row mb-3">
         <div class="col col-md-12">
             <div class="d-flex justify-content-end align-items-center mb-3">
-                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#cableFilterSection" aria-expanded="false" aria-controls="cableFilterSection">
-                    <i class="mdi mdi-filter"></i> Toggle Filters
+                <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse" data-bs-target="#cableFilterSection" aria-expanded="false" aria-controls="cableFilterSection">
+                    <i class="mdi mdi-filter-outline"></i> Filters
                 </button>
             </div>
             <div class="collapse mb-3" id="cableFilterSection">

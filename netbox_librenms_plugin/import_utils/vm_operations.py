@@ -2,18 +2,66 @@
 
 import logging
 
-from dcim.models import DeviceRole
+from dcim.models import Device, DeviceRole, Site
 from django.db import transaction
 from django.utils import timezone
 from virtualization.models import Cluster
 
 from ..librenms_api import LibreNMSAPI
+from ..import_plan import VMPlacementMethod
+from ..import_validation_helpers import (
+    apply_cluster_to_validation,
+    apply_host_to_validation,
+    apply_role_to_validation,
+    vm_host_placement_issue,
+)
 from ..utils import lock_librenms_id_assignment
 from .bulk_import import _is_job_cancelled
 from .device_operations import _determine_device_name, fetch_device_with_cache, validate_device_for_import
 from .permissions import require_permissions
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_vm_placement(validation: dict, mappings: dict, user) -> str | None:
+    """Resolve one explicit placement into validation, or return its failure message."""
+    placement_method = mappings.get("placement")
+    cluster_id = mappings.get("cluster_id")
+    host_device_id = mappings.get("host_device_id")
+
+    if placement_method == VMPlacementMethod.SITE:
+        if cluster_id or host_device_id:
+            return "Matched-site placement cannot include a cluster or host"
+        site_match = validation.get("site", {})
+        matched_site = site_match.get("site")
+        if not site_match.get("found") or matched_site is None:
+            return "Matched site is unavailable"
+        site = Site.objects.restrict(user, "view").filter(pk=matched_site.pk).first()
+        if site is None:
+            return "Matched site is unavailable"
+        site_match["site"] = site
+        return None
+
+    if placement_method == VMPlacementMethod.CLUSTER:
+        if not cluster_id or host_device_id:
+            return "Cluster placement requires one cluster and no host"
+        cluster = Cluster.objects.restrict(user, "view").filter(id=cluster_id).first()
+        if cluster is None:
+            return "Selected cluster is unavailable"
+        apply_cluster_to_validation(validation, cluster)
+        return None
+
+    if placement_method == VMPlacementMethod.HOST:
+        if not host_device_id or cluster_id:
+            return "Host placement requires one host and no cluster selection"
+        host_device = (
+            Device.objects.restrict(user, "view").select_related("cluster", "site").filter(id=host_device_id).first()
+        )
+        if host_device is None:
+            return "Selected host device is unavailable"
+        return apply_host_to_validation(validation, host_device)
+
+    return "Select a valid virtual-machine placement method"
 
 
 def create_vm_from_librenms(
@@ -28,26 +76,39 @@ def create_vm_from_librenms(
     Create a NetBox VirtualMachine from LibreNMS device data.
 
     Args:
-        libre_device: Device data from LibreNMS
-        validation: Validation result from validate_device_for_import with import_as_vm=True
-        use_sysname: If True, prefer sysName; if False, use hostname
-        server_key: LibreNMS server key used to store the librenms_id custom field
+        libre_device: Device data from LibreNMS.
+        validation: Validation result from ``validate_device_for_import()`` with
+            ``import_as_vm=True``.
+        use_sysname: If True, prefer sysName. If False, use hostname.
+        server_key: LibreNMS server key used to store the ``librenms_id`` custom field.
         strip_domain: If True, remove the domain suffix from the VM name.
         role: Optional NetBox device role. The validated role is used when this is None.
 
     Returns:
-        Created VirtualMachine instance
+        The created VirtualMachine instance.
 
     Raises:
-        Exception if VM cannot be created
+        ValueError: If the VM cannot be created from the validated data.
+
     """
     from virtualization.models import VirtualMachine
 
     if not validation["can_import"]:
         raise ValueError(f"VM cannot be imported: {', '.join(validation['issues'])}")
 
-    # Extract matched objects from validation
-    cluster = validation["cluster"]["cluster"]
+    # Extract matched objects from validation.
+    placement = validation.get("vm_placement") or {}
+    placement_method = placement.get("method")
+    host_device = placement.get("host_device") if placement_method == VMPlacementMethod.HOST else None
+    if host_device is not None and (issue := vm_host_placement_issue(host_device)) is not None:
+        raise ValueError(f"VM cannot be imported: {issue}")
+    if placement_method == VMPlacementMethod.SITE:
+        site = validation.get("site", {}).get("site")
+    elif host_device is not None:
+        site = host_device.site
+    else:
+        site = None
+    cluster = validation.get("cluster", {}).get("cluster") if placement_method != VMPlacementMethod.SITE else None
     platform = validation["platform"].get("platform")
     role = role if role is not None else validation.get("device_role", {}).get("role")
 
@@ -93,13 +154,17 @@ def create_vm_from_librenms(
             raise ValueError(
                 f"VM cannot be imported: LibreNMS ID {librenms_device_id} is already assigned to another {object_label}"
             )
-        vm = VirtualMachine.objects.create(
+        vm = VirtualMachine(
             name=vm_name,
+            site=site,
             cluster=cluster,
+            device=host_device,
             role=role,
             platform=platform,
             comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
         )
+        vm.full_clean()
+        vm.save()
         set_librenms_device_id(vm, librenms_device_id, server_key)
         vm.save()
 
@@ -108,7 +173,7 @@ def create_vm_from_librenms(
 
 
 def bulk_import_vms(
-    vm_imports: dict[int, dict[str, int]],
+    vm_imports: dict[int, dict[str, int | str]],
     api: LibreNMSAPI,
     sync_options: dict = None,
     libre_devices_cache: dict = None,
@@ -118,7 +183,7 @@ def bulk_import_vms(
     """
     Import multiple LibreNMS devices as VMs in NetBox.
 
-    Handles validation, cluster/role assignment, name determination,
+    Handles validation, placement and role assignment, name determination,
     and VM creation. Supports both synchronous and background job execution.
 
     This function consolidates VM import logic that was previously duplicated
@@ -126,11 +191,12 @@ def bulk_import_vms(
     across synchronous and background import paths.
 
     Args:
-        vm_imports: Dict mapping device_id to {"cluster_id": int, "device_role_id": int}
-        api: LibreNMSAPI instance for device fetching
-        sync_options: Optional dict with use_sysname, strip_domain settings
-        libre_devices_cache: Optional pre-fetched device data cache
-        job: Optional JobRunner instance for background job logging/cancellation
+        vm_imports: Dict that maps each LibreNMS device ID to its explicit placement
+            and optional Device Role.
+        api: LibreNMSAPI instance for device fetching.
+        sync_options: Optional dict with use_sysname and strip_domain settings.
+        libre_devices_cache: Optional pre-fetched device data cache.
+        job: Optional JobRunner instance for background job logging and cancellation.
         user: User performing the import (for permission checks). If job is provided,
             user is extracted from job.job.user if not explicitly passed.
 
@@ -141,22 +207,20 @@ def bulk_import_vms(
             - skipped: List of {"device_id": int, "reason": str}
 
     Raises:
-        PermissionDenied: If user lacks required permissions
+        PermissionDenied: If the user lacks required permissions.
 
     Example:
         >>> # Synchronous import from view
-        >>> vm_imports = {123: {"cluster_id": 5, "device_role_id": 2}}
+        >>> vm_imports = {
+        ...     123: {"placement": "cluster", "cluster_id": 5, "device_role_id": 2}
+        ... }
         >>> result = bulk_import_vms(vm_imports, api, sync_options, user=request.user)
         >>> print(f"Created {len(result['success'])} VMs")
         >>>
         >>> # Background job import
         >>> result = bulk_import_vms(vm_imports, api, sync_options, cache, job=self)
-    """
-    from netbox_librenms_plugin.import_validation_helpers import (
-        apply_cluster_to_validation,
-        apply_role_to_validation,
-    )
 
+    """
     # Extract user from job if not explicitly provided
     if user is None and job is not None:
         user = getattr(job.job, "user", None)
@@ -218,30 +282,22 @@ def bulk_import_vms(
                 log.info(f"VM {vm_id} already exists in NetBox")
                 continue
 
-            # Apply manual cluster and role selections
+            # Apply explicit placement and the optional role.
             vm_mappings = vm_imports[vm_id]
-            cluster_id = vm_mappings.get("cluster_id")
             role_id = vm_mappings.get("device_role_id")
 
-            if cluster_id:
-                cluster = Cluster.objects.filter(id=cluster_id).first()
-                if cluster:
-                    apply_cluster_to_validation(validation, cluster)
-                else:
-                    result["failed"].append(
-                        {"device_id": vm_id, "error": f"Selected cluster (id={cluster_id}) no longer exists"}
-                    )
-                    continue
+            placement_error = _apply_vm_placement(validation, vm_mappings, user)
+            if placement_error:
+                result["failed"].append({"device_id": vm_id, "error": placement_error})
+                continue
 
             role = None
             if role_id:
-                role = DeviceRole.objects.filter(id=role_id).first()
+                role = DeviceRole.objects.restrict(user, "view").filter(id=role_id).first()
                 if role:
                     apply_role_to_validation(validation, role, is_vm=True)
                 else:
-                    result["failed"].append(
-                        {"device_id": vm_id, "error": f"Selected role (id={role_id}) no longer exists"}
-                    )
+                    result["failed"].append({"device_id": vm_id, "error": "Selected role is unavailable"})
                     continue
 
             # Determine VM name

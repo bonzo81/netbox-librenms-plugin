@@ -11,7 +11,7 @@ from netbox_librenms_plugin.tests.cache_test_helpers import (
     seed_inventory,
     snapshot_state,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, module_row_binding
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
@@ -51,12 +51,6 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 ("delete", Interface),
             ],
         )
-        request = make_request(
-            "post",
-            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
-            user=user,
-        )
-        view = make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
         inventory = [
             {
                 "entPhysicalIndex": 100,
@@ -66,6 +60,22 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 "entPhysicalContainedIn": 0,
             }
         ]
+        request = make_request(
+            "post",
+            {
+                "module_id": str(installed.pk),
+                "ent_index": "100",
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    page_device,
+                    "replace_module",
+                    inventory[0],
+                    action_target={"module_id": installed.pk},
+                ),
+            },
+            user=user,
+        )
+        view = make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
         key = seed_inventory(view, page_device, inventory, librenms_id=7)
         seeded = seed_every_tab(other_device)
 
@@ -169,12 +179,6 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 ("delete", Interface),
             ],
         )
-        request = make_request(
-            "post",
-            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
-            user=user,
-        )
-        view = make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
         inventory = [
             {
                 "entPhysicalIndex": 100,
@@ -184,6 +188,22 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 "entPhysicalContainedIn": 0,
             }
         ]
+        request = make_request(
+            "post",
+            {
+                "module_id": str(installed.pk),
+                "ent_index": "100",
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    page_device,
+                    "replace_module",
+                    inventory[0],
+                    action_target={"module_id": installed.pk},
+                ),
+            },
+            user=user,
+        )
+        view = make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
         key = seed_inventory(view, page_device, inventory, librenms_id=7)
         seeded = seed_every_tab(bystander)
 

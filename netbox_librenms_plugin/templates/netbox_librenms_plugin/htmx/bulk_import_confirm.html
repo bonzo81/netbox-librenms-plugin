@@ -60,7 +60,9 @@
         {% endif %}
 
         <div class="text-muted small mt-1 d-flex flex-wrap gap-3">
+          {% if entry.site %}<span><strong>Site:</strong> {{ entry.site.name }}</span>{% endif %}
           {% if entry.cluster %}<span><strong>Cluster:</strong> {{ entry.cluster.name }}</span>{% endif %}
+          {% if entry.host_device %}<span><strong>Host:</strong> {{ entry.host_device.name }}</span>{% endif %}
           {% if entry.rack %}
             <span>
               <strong>Rack:</strong>
@@ -144,8 +146,11 @@
     <input type="hidden" name="vc_detection_enabled" value="{{ vc_detection_enabled|yesno:'on,off' }}">
     {% for entry in devices %}
       <input type="hidden" name="select" value="{{ entry.device_id }}">
+      <input type="hidden" name="object_type_{{ entry.device_id }}" value="{{ entry.object_type }}">
+      {% if entry.placement_method %}<input type="hidden" name="vm_placement_{{ entry.device_id }}" value="{{ entry.placement_method }}">{% endif %}
       {% if entry.role %}<input type="hidden" name="role_{{ entry.device_id }}" value="{{ entry.role.pk }}">{% endif %}
       {% if entry.cluster %}<input type="hidden" name="cluster_{{ entry.device_id }}" value="{{ entry.cluster.pk }}">{% endif %}
+      {% if entry.host_device %}<input type="hidden" name="host_device_{{ entry.device_id }}" value="{{ entry.host_device.pk }}">{% endif %}
       {% if entry.rack %}<input type="hidden" name="rack_{{ entry.device_id }}" value="{{ entry.rack.pk }}">{% endif %}
     {% endfor %}
     <input type="hidden" name="use_sysname" value="{{ use_sysname|yesno:'true,false' }}">

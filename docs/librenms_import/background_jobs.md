@@ -40,10 +40,10 @@ The cache includes both LibreNMS device data AND NetBox reference data used in t
 
 **From NetBox:**
 - Available device roles (for the role dropdown in each row)
-- Available VM clusters (for VM imports)
+- Available VM clusters (for cluster placement)
 - Available racks for each site (filtered by the device's matched site)
 
-This means if you add a new role, create a new rack, or add a new cluster in NetBox, those changes won't appear in the import table dropdowns until you clear the cache or wait for it to expire (the configured cache timeout).
+This means if you add a new role, create a new rack, or add a new cluster in NetBox, those changes won't appear in the import table dropdowns until you clear the cache or wait for it to expire (the configured cache timeout). Host Device choices use NetBox's live selector instead of this cached reference data.
 
 ### Controlling Cache
 

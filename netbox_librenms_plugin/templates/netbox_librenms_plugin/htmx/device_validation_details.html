@@ -435,15 +435,35 @@
               </tr>
 
               {% if validation.import_as_vm and not validation.existing_device or validation.existing_device and existing_device_model_name == "virtualmachine" %}
-              {# Cluster row (VMs only) #}
+              {# Placement row (VMs only) #}
               <tr>
-                <td style="padding-left: 0.75rem;">Cluster</td>
+                <td style="padding-left: 0.75rem;">Placement</td>
                 <td>
-                  {% if validation.cluster.cluster %}
+                  {% if validation.existing_device and validation.existing_device.device %}
+                    Host: {{ validation.existing_device.device.name }}
+                    {% if validation.existing_device.cluster %} ({{ validation.existing_device.cluster.name }}){% endif %}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% elif validation.existing_device and validation.existing_device.cluster %}
+                    Cluster: {{ validation.existing_device.cluster.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% elif validation.existing_device and validation.existing_device.site %}
+                    Site: {{ validation.existing_device.site.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% elif validation.vm_placement.method == "host" and validation.vm_placement.found and validation.vm_placement.host_device %}
+                    Host: {{ validation.vm_placement.host_device.name }}
+                    {% if validation.cluster.cluster %} ({{ validation.cluster.cluster.name }}){% endif %}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% elif validation.vm_placement.method == "cluster" and validation.cluster.cluster %}
+                    Cluster: {{ validation.cluster.cluster.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% elif validation.vm_placement.method == "site" and validation.site.site %}
+                    Site: {{ validation.site.site.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% elif validation.cluster.cluster %}
                     {{ validation.cluster.cluster.name }}
                     <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
-                    <span class="text-danger"><i class="mdi mdi-close-circle"></i> No cluster assigned</span>
+                    <span class="text-danger"><i class="mdi mdi-close-circle"></i> No valid placement</span>
                   {% endif %}
                 </td>
                 <td><span class="text-muted">—</span></td>

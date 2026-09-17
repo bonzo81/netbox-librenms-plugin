@@ -39,6 +39,7 @@ from ..utils import (
     set_librenms_device_id,
 )
 from .cache import get_import_device_cache_key
+from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
     _generate_vc_member_name,
     empty_virtual_chassis_data,
@@ -103,6 +104,7 @@ def _detect_oob_type_from_name(name):
     Returns:
         str | None: The canonical OOB type token (idrac/ilo/ipmi/bmc/drac), or None
             if no token matches.
+
     """
     if not name:
         return None
@@ -124,6 +126,7 @@ def _describe_existing_librenms_link(obj, server_key):
     Returns:
         dict: ``{"host_id": int|None, "oob_id": int|None, "oob_type": str|None}``
             summarising the ``librenms_id`` custom field for *server_key*.
+
     """
     info = {"host_id": None, "oob_id": None, "oob_type": None}
     # Host ID via the single canonical accessor (per coding guidelines) rather than touching the
@@ -164,6 +167,7 @@ def _describe_link_note(existing_link):
     Returns:
         str: One of "currently linked to LibreNMS device #N", "currently linked to LibreNMS
             as an OOB controller", or "not linked to LibreNMS".
+
     """
     link = existing_link or {}
     if link.get("host_id"):
@@ -199,6 +203,7 @@ def resolve_device_by_host_ip(primary_ip):
     Raises:
         ValueError: When *primary_ip* is not a parseable host address. Callers catch it and
             fail closed for that device.
+
     """
     from dcim.models import Device
     from ipam.models import IPAddress
@@ -249,6 +254,7 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
 
     Returns:
         dict | None: Dict with matched/device_type/match_type keys, or None on failure.
+
     """
     skip_values = {"", "-", "Unspecified", "BUILTIN", "None"}
 
@@ -277,65 +283,6 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
     return None
 
 
-def _name_candidates(libre_device: dict) -> tuple[str | None, str | None]:
-    """Return the sysName and hostname values that can name a device: strings only."""
-    sysname = libre_device.get("sysName")
-    hostname = libre_device.get("hostname")
-    return (sysname if isinstance(sysname, str) else None, hostname if isinstance(hostname, str) else None)
-
-
-def _resolve_device_name(
-    libre_device: dict,
-    use_sysname: bool = True,
-    strip_domain: bool = False,
-    device_id: int | str = None,
-) -> tuple[str, str]:
-    """
-    Resolve the device/VM name from LibreNMS data and report which value it came from.
-
-    Centralized logic for building device names with consistent handling of:
-    - sysName vs hostname preference
-    - Domain stripping (avoiding IP addresses)
-    - Fallback to device_id when no name remains, including after stripping
-
-    Args:
-        libre_device: Device data from LibreNMS
-        use_sysname: If True, prefer sysName; if False, use hostname
-        strip_domain: If True, strip domain suffix (e.g., '.example.com')
-        device_id: LibreNMS device ID for fallback name generation
-
-    Returns:
-        tuple[str, str]: The determined name and its source: ``"sysname"``, ``"hostname"``, or
-            the ``device-<id>`` fallback itself when no usable name remains after stripping.
-    """
-    # LibreNMS sends JSON, so a name field can arrive as any type; only a str can name a device.
-    sysname, hostname = _name_candidates(libre_device)
-
-    # Determine base name based on use_sysname preference
-    if use_sysname:
-        name, source = (sysname, "sysname") if sysname else (hostname, "hostname")
-    else:
-        name, source = (hostname, "hostname") if hostname else (sysname, "sysname")
-
-    # Strip domain if requested (but not for IP addresses)
-    if strip_domain and name and "." in name:
-        try:
-            parse_host_address(name)
-            # It's a valid IP address, don't strip
-        except ValueError:
-            # Not an IP, safe to strip domain
-            name = name.split(".")[0]
-
-    # Fallback to device_id if no name found. This runs AFTER stripping because a sysName whose
-    # first label is empty (".example.com") strips to "", which would otherwise reach NetBox as a
-    # blank device name.
-    if not name:
-        fallback_id = device_id if device_id is not None else libre_device.get("device_id", "unknown")
-        name = source = f"device-{fallback_id}"
-
-    return name, source
-
-
 def _determine_device_name(
     libre_device: dict,
     use_sysname: bool = True,
@@ -360,6 +307,7 @@ def _determine_device_name(
         >>> _determine_device_name({'sysName': 'router.example.com', 'hostname': 'router'},
         ...                        use_sysname=True, strip_domain=True)
         'router'
+
     """
     return _resolve_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain, device_id=device_id)[
         0
@@ -385,6 +333,7 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
 
     Returns:
         None
+
     """
     logger.warning("Import validation blocked — ambiguous librenms_id %r: %s", librenms_id, exc)
     result["ambiguous_librenms_id"] = True
@@ -424,6 +373,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
 
     Returns:
         dict: The keyword arguments for :func:`apply_oob_detection_result`.
+
     """
     # Compute both possible roles for the incoming LibreNMS device against
     # the existing NetBox device, then pick a heuristic default. The UI
@@ -583,22 +533,22 @@ def validate_device_for_import(  # noqa: C901
     Performs comprehensive validation:
     - Checks if device already exists in NetBox
     - Validates required prerequisites (Site, DeviceType, DeviceRole for devices)
-      OR (Cluster for VMs)
+      or placement (matched Site, selected Cluster, or selected host Device) for VMs
     - Provides smart matching for missing objects
     - Detects virtual chassis/stack configuration (if API provided)
     - Returns detailed validation status
 
     Args:
-        libre_device: Device data from LibreNMS
-        import_as_vm: If True, validate for VM import instead of device import
-        api: Optional LibreNMSAPI instance for virtual chassis detection
+        libre_device: Device data from LibreNMS.
+        import_as_vm: If True, validate for VM import instead of Device import.
+        api: Optional LibreNMSAPI instance for virtual chassis detection.
         server_key: LibreNMS server key for stored identifiers and API data.
-        include_vc_detection: Skip VC detection when False to speed up bulk operations
+        include_vc_detection: Skip VC detection when False to speed up bulk operations.
         collision_only: Return after existing-object and collision-candidate matching. This skips
             site, device type, role, platform, rack, and virtual-chassis import prerequisites.
-        force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS
-        use_sysname: If True, prefer sysName over hostname (matches import behaviour)
-        strip_domain: If True, strip domain suffix from device name
+        force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS.
+        use_sysname: If True, prefer sysName over hostname (matches import behavior).
+        strip_domain: If True, strip domain suffix from device name.
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
 
     Returns:
@@ -634,7 +584,7 @@ def validate_device_for_import(  # noqa: C901
                 'virtual_chassis': dict,  # VC detection state, empty_virtual_chassis_data() shape
                 'issues': List[str],  # Blocking issues
                 'warnings': List[str],  # Non-blocking warnings
-                'site': {  # Only for devices
+                'site': {  # Device site or VM matched-site placement
                     'found': bool,
                     'site': Site or None,
                     'match_type': str,  # 'exact' or None
@@ -650,15 +600,20 @@ def validate_device_for_import(  # noqa: C901
                     'match_type': str,  # 'exact' or None
                     'suggestions': List[dict]  # Device types for user selection
                 },
-                'device_role': {  # Only for devices
-                    'found': bool,  # Always False - requires manual selection
+                'device_role': {
+                    'found': bool,  # False until manually selected for a new Device
                     'role': DeviceRole or None,
                     'available_roles': List[DeviceRole]  # All roles for user selection
                 },
-                'cluster': {  # Only for VMs
-                    'found': bool,  # Always False - requires manual selection
+                'cluster': {  # Selected or host-derived VM cluster
+                    'found': bool,
                     'cluster': Cluster or None,
                     'available_clusters': List[Cluster]  # All clusters for user selection
+                },
+                'vm_placement': {
+                    'method': str,  # 'site', 'cluster', or 'host'
+                    'found': bool,
+                    'host_device': Device or None
                 },
                 'platform': {
                     'found': bool,
@@ -689,6 +644,7 @@ def validate_device_for_import(  # noqa: C901
         >>> validation = validate_device_for_import(libre_device)
         >>> if validation['is_ready']:
         ...     import_single_device(libre_device['device_id'])
+
     """
     result = {
         "is_ready": False,
@@ -742,6 +698,11 @@ def validate_device_for_import(  # noqa: C901
             "found": False,
             "cluster": None,
             "available_clusters": [],
+        },
+        "vm_placement": {
+            "method": "site",
+            "found": False,
+            "host_device": None,
         },
         "platform": {"found": False, "platform": None, "match_type": None},
         "rack": {
@@ -1377,7 +1338,7 @@ def validate_device_for_import(  # noqa: C901
 
         # An ambiguous librenms_id (matches >1 NetBox record) is the terminal blocker for this
         # row — the user must resolve the duplicate id. Don't run the new-import site/device_type/
-        # role/cluster validation below: with existing_device fail-closed to None, it would pile
+        # role/placement validation below: with existing_device fail-closed to None, it would pile
         # unrelated "must select ..." blockers onto a row whose real problem is the ambiguous id
         # (mirrors bulk_import.py treating ambiguity as the terminal state). existing_match_type
         # is already "ambiguous_librenms_id" (set by _flag_ambiguous_librenms_id).
@@ -1388,6 +1349,14 @@ def validate_device_for_import(  # noqa: C901
 
         if collision_only:
             return result
+
+        # Site placement is valid for both Devices and virtual machines. Resolve it before the
+        # type-specific branches so a VM can use its LibreNMS location without a cluster.
+        location = libre_device.get("location", "")
+        parsed_location = parse_location_for_import(location)
+        site_token = parsed_location.get("site") or ""
+        site_match = find_matching_site(site_token)
+        result["site"] = site_match
 
         # Validate based on import type (Device or VM)
         if import_as_vm:
@@ -1404,23 +1373,18 @@ def validate_device_for_import(  # noqa: C901
 
         if import_as_vm:
             if not result.get("existing_device"):
-                # 2. For NEW VMs: Validate Cluster (required) - Must be manually selected
-                result["cluster"]["found"] = False
-                result["issues"].append("Cluster must be manually selected before importing as VM")
+                result["vm_placement"].update(method="site", found=site_match["found"])
+                if not site_match["found"]:
+                    result["issues"].append(
+                        "VM placement requires a matching site, selected cluster, or selected host device"
+                    )
 
             # Skip device-specific validations for all VMs (new and existing)
-            result["site"]["found"] = True  # Not required for VMs
             result["device_type"]["found"] = True  # Not required for VMs
             result["device_role"]["found"] = True  # Not required for VMs
 
         else:
             # 2. For Devices: Validate Site (required)
-            location = libre_device.get("location", "")
-            parsed_location = parse_location_for_import(location)
-            site_token = parsed_location.get("site") or ""
-            site_match = find_matching_site(site_token)
-            result["site"] = site_match
-
             if not site_match["found"]:
                 if not result.get("existing_device"):
                     result["issues"].append(f"No matching site found for location: '{location}'")
@@ -1638,8 +1602,7 @@ def validate_device_for_import(  # noqa: C901
             result["can_import"] = len(result["issues"]) == 0
 
             if import_as_vm:
-                # For VMs: only cluster is required
-                result["is_ready"] = result["can_import"] and result["cluster"]["found"]
+                result["is_ready"] = result["can_import"] and result["vm_placement"]["found"]
             else:
                 # For Devices: site, device_type, and device_role are required
                 result["is_ready"] = (
@@ -1670,6 +1633,7 @@ def import_single_device(  # noqa: C901
     manual_mappings: dict = None,
     sync_options: dict = None,
     libre_device: dict = None,
+    user=None,
 ) -> dict:
     """
     Import a single LibreNMS device to NetBox.
@@ -1690,6 +1654,7 @@ def import_single_device(  # noqa: C901
             - sync_fields: bool (default True)
         libre_device: Pre-fetched LibreNMS device data (optional).
             If provided, skips API call to fetch device info.
+        user: User whose view scope authorizes explicit object selections.
 
     Returns:
         dict: Import result with structure:
@@ -1704,6 +1669,7 @@ def import_single_device(  # noqa: C901
                     'ip_addresses': int
                 },
             }
+
     """
     try:
         api = LibreNMSAPI(server_key=server_key)
@@ -1797,8 +1763,20 @@ def import_single_device(  # noqa: C901
 
             rack_id = manual_mappings.get("rack_id")
             if rack_id:
-                rack = Rack.objects.select_related("location", "site").filter(id=rack_id).first()
-                rack_explicitly_selected = rack is not None
+                rack = (
+                    Rack.objects.restrict(user, "view").select_related("location", "site").filter(id=rack_id).first()
+                    if user is not None
+                    else None
+                )
+                if rack is None:
+                    return {
+                        "success": False,
+                        "device": None,
+                        "message": "",
+                        "error": "Selected rack is unavailable",
+                        "synced": {},
+                    }
+                rack_explicitly_selected = True
 
         # Validate required fields
         if not site:
@@ -1969,6 +1947,7 @@ def get_librenms_device_by_id(api: LibreNMSAPI, device_id: int, use_cache: bool 
 
     Returns:
         Device dictionary or None if not found
+
     """
     try:
         # Use the dedicated API endpoint to get device by ID
@@ -2018,6 +1997,7 @@ def fetch_device_with_cache(
         >>> # With pre-fetched cache dict
         >>> cache_dict = {123: {...}, 456: {...}}
         >>> libre_device = fetch_device_with_cache(123, api, libre_devices_cache=cache_dict)
+
     """
     # Check pre-fetched cache dict first (fastest) — but only when the cached row's OWN device_id
     # doesn't contradict the requested id (cached_row_matches), so a mis-keyed/stale entry isn't
@@ -2060,6 +2040,7 @@ def __getattr__(name):
 
     Raises:
         AttributeError: If *name* is any other attribute.
+
     """
     if name == "bulk_import_devices_shared":
         from .bulk_import import bulk_import_devices_shared

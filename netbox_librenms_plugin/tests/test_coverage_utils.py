@@ -7,7 +7,8 @@ import pytest
 
 @pytest.mark.django_db
 class TestSerialScopeNormalization:
-    """Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
+    """
+    Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
 
     The rewrite is a NormalizationRule rather than compiled-in, so an operator can see why a
     stored serial differs from the raw inventory and add the next vendor without a release.
@@ -938,11 +939,32 @@ class TestNetboxCleanReadsParentVirtualChassis:
             assert utils.netbox_clean_reads_parent_virtual_chassis() is True
 
 
+class TestNetboxAllowsStandaloneVmHost:
+    """Version gate for direct VM assignment to a standalone host device."""
+
+    @pytest.mark.parametrize(
+        ("version", "expected"),
+        [
+            ((4, 4, 0), False),
+            ((4, 5, 5), False),
+            ((4, 6, 0), True),
+            ((4, 6, 5), True),
+            (None, False),
+        ],
+    )
+    def test_matches_netbox_host_placement_capability(self, version, expected):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=version):
+            assert utils.netbox_allows_standalone_vm_host() is expected
+
+
 class TestHasNestedNameConflictVersionGating:
     """has_nested_name_conflict() must short-circuit on NetBox >= 4.5.6 (issue #20467)."""
 
     def _build_args(self, with_module_token=True):
-        """Build (module_type, module_bay, sibling_counts) that would trigger
+        """
+        Build (module_type, module_bay, sibling_counts) that would trigger
         the legacy conflict (nested bay, sibling exists, {module} in template)."""
         template = MagicMock()
         template.name = "{module}" if with_module_token else "Gi0/1"
@@ -1107,7 +1129,8 @@ class TestValidateRegexField:
 
 @pytest.mark.django_db
 class TestInterfaceNameFallbackMatchesPort:
-    """The fallback reader must agree with get_librenms_device_id on every stored shape.
+    """
+    The fallback reader must agree with get_librenms_device_id on every stored shape.
 
     The two used to walk custom_field_data separately, so they could drift on which shapes
     resolve. Only the "no binding recorded" rules stay local to the fallback.

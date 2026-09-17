@@ -8,6 +8,7 @@ import pytest
 
 from netbox_librenms_plugin.tests.view_test_helpers import (
     get as _get,
+    module_row_binding,
     post as _post,
     trusted_module_inventory_payload,
 )
@@ -144,7 +145,8 @@ class TestModuleMismatchPreviewView:
 
     @pytest.mark.django_db
     def test_the_preview_refuses_an_oob_sourced_row(self):
-        """The preview is the entry point to Replace, so it must refuse an OOB row too.
+        """
+        The preview is the entry point to Replace, so it must refuse an OOB row too.
 
         Offering the dialog for inventory the install path will not act on invites the user into
         a flow that cannot succeed.
@@ -202,7 +204,8 @@ class TestModuleMismatchPreviewView:
 
     @pytest.mark.django_db
     def test_the_preview_shows_the_serial_without_the_vendor_marker(self):
-        """The preview sits next to the stored module serial, which carries no "S/N ".
+        """
+        The preview sits next to the stored module serial, which carries no "S/N ".
 
         Showing the raw inventory value here reads as a mismatch against a module whose
         serial was written through the same normalization.
@@ -521,7 +524,8 @@ class TestReplaceModuleView:
 
     @pytest.mark.django_db
     def test_an_oob_sourced_row_cannot_replace_a_host_module(self):
-        """OOB-controller inventory is merged for display only and is read-only.
+        """
+        OOB-controller inventory is merged for display only and is read-only.
 
         The shared install helper rejects it, but this view builds its own Module, so a crafted
         POST naming an OOB row's entPhysicalIndex would otherwise install it onto the host.
@@ -583,7 +587,8 @@ class TestReplaceModuleView:
 
     @pytest.mark.django_db
     def test_the_replacement_stores_the_serial_without_the_vendor_marker(self):
-        """The stored serial must match what the install path writes for the same inventory row.
+        """
+        The stored serial must match what the install path writes for the same inventory row.
 
         Juniper reports "S/N BCFB9793"; storing that verbatim leaves the module reading
         Serial Mismatch against its own inventory row forever.
@@ -607,9 +612,24 @@ class TestReplaceModuleView:
             module_type=old_type,
             serial="REPLACE-MARKER-OLD-SERIAL",
         )
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": new_type.model,
+            "entPhysicalSerialNum": "S/N NS123",
+        }
         request = make_request(
             "post",
-            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+            {
+                "module_id": str(installed.pk),
+                "ent_index": "100",
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    device,
+                    "replace_module",
+                    inventory_item,
+                    action_target={"module_id": installed.pk},
+                ),
+            },
         )
         view = make_view(
             ReplaceModuleView,
@@ -619,16 +639,7 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": new_type.model,
-                        "entPhysicalSerialNum": "S/N NS123",
-                    }
-                ],
-            ),
+            trusted_module_inventory_payload(device, [inventory_item]),
             timeout=300,
         )
         try:
@@ -641,7 +652,8 @@ class TestReplaceModuleView:
 
     @pytest.mark.django_db
     def test_a_rule_that_leaves_padding_still_stores_a_clean_serial(self):
-        """A serial rule is operator-written, so it can drop a prefix and leave the space behind.
+        """
+        A serial rule is operator-written, so it can drop a prefix and leave the space behind.
 
         The padded serial would then never match the same serial normalized anywhere else.
         """
@@ -674,9 +686,24 @@ class TestReplaceModuleView:
             module_type=old_type,
             serial="REPLACE-PADDED-OLD-SERIAL",
         )
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": new_type.model,
+            "entPhysicalSerialNum": "S/N NS123",
+        }
         request = make_request(
             "post",
-            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+            {
+                "module_id": str(installed.pk),
+                "ent_index": "100",
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    device,
+                    "replace_module",
+                    inventory_item,
+                    action_target={"module_id": installed.pk},
+                ),
+            },
         )
         view = make_view(
             ReplaceModuleView,
@@ -686,16 +713,7 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": new_type.model,
-                        "entPhysicalSerialNum": "S/N NS123",
-                    }
-                ],
-            ),
+            trusted_module_inventory_payload(device, [inventory_item]),
             timeout=300,
         )
         try:
@@ -727,9 +745,24 @@ class TestReplaceModuleView:
             module_type=old_type,
             serial="REPLACE-REAL-OLD-SERIAL",
         )
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": new_type.model,
+            "entPhysicalSerialNum": "REPLACE-REAL-NEW-SERIAL",
+        }
         request = make_request(
             "post",
-            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+            {
+                "module_id": str(installed.pk),
+                "ent_index": "100",
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    device,
+                    "replace_module",
+                    inventory_item,
+                    action_target={"module_id": installed.pk},
+                ),
+            },
         )
         view = make_view(
             ReplaceModuleView,
@@ -739,16 +772,7 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": new_type.model,
-                        "entPhysicalSerialNum": "REPLACE-REAL-NEW-SERIAL",
-                    }
-                ],
-            ),
+            trusted_module_inventory_payload(device, [inventory_item]),
             timeout=300,
         )
         try:
@@ -794,9 +818,24 @@ class TestReplaceModuleView:
             module_type=conflict_type,
             serial="REPLACE-CONFLICT-NEW-SERIAL",
         )
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": new_type.model,
+            "entPhysicalSerialNum": conflict.serial,
+        }
         request = make_request(
             "post",
-            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+            {
+                "module_id": str(installed.pk),
+                "ent_index": "100",
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    device,
+                    "replace_module",
+                    inventory_item,
+                    action_target={"module_id": installed.pk},
+                ),
+            },
         )
         view = make_view(
             ReplaceModuleView,
@@ -806,16 +845,7 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": new_type.model,
-                        "entPhysicalSerialNum": conflict.serial,
-                    }
-                ],
-            ),
+            trusted_module_inventory_payload(device, [inventory_item]),
             timeout=300,
         )
         try:
@@ -881,9 +911,24 @@ class TestReplaceModuleView:
             ],
         )
         user = grant(user, "change", Interface, constraints={"device__modules__isnull": True})
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalModelName": new_type.model,
+            "entPhysicalSerialNum": "REPLACE-ADOPTION-NEW-SERIAL",
+        }
         request = make_request(
             "post",
-            {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
+            {
+                "module_id": str(installed.pk),
+                "ent_index": "100",
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    device,
+                    "replace_module",
+                    inventory_item,
+                    action_target={"module_id": installed.pk},
+                ),
+            },
             user=user,
         )
         view = make_view(
@@ -894,16 +939,7 @@ class TestReplaceModuleView:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": new_type.model,
-                        "entPhysicalSerialNum": "REPLACE-ADOPTION-NEW-SERIAL",
-                    }
-                ],
-            ),
+            trusted_module_inventory_payload(device, [inventory_item]),
             timeout=300,
         )
         try:

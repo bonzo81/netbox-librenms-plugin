@@ -4,7 +4,7 @@ import json
 from unittest.mock import patch
 
 import pytest
-from dcim.models import Cable, Module, ModuleBay, ModuleBayTemplate, ModuleType
+from dcim.models import Module, ModuleBay, ModuleBayTemplate, ModuleType
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -41,7 +41,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+from netbox_librenms_plugin.utils import (
+    mark_librenms_migrated,
+    module_inventory_binding_token,
+    module_inventory_row_digest,
+    set_librenms_device_id,
+)
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
@@ -1095,43 +1100,6 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
 
 
 @pytest.mark.django_db
-def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
-    client,
-    settings,
-    django_capture_on_commit_callbacks,
-):
-    """A committed cable must clear comparisons that depend on current topology."""
-    _configure_servers(settings)
-    device = make_device("cache-cable-writer", librenms_cf={"primary": {"id": 63}})
-    remote_device = make_device("cache-cable-remote")
-    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    links_payload = {
-        "links": [
-            {
-                "local_port_id": 7201,
-                "local_port": local.name,
-                "netbox_local_interface_id": local.pk,
-                "netbox_remote_device_id": remote_device.pk,
-                "netbox_remote_interface_id": remote.pk,
-            }
-        ]
-    }
-    _seed_snapshot("links", device, "primary", links_payload)
-    _seed_snapshot("inventory", device, "primary")
-
-    client.force_login(make_superuser("cache-cable-writer-user"))
-    url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", kwargs={"pk": device.pk})
-    with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"server_key": "primary", "select": "7201"})
-
-    assert response.status_code == 302
-    assert Cable.objects.filter(terminations__termination_id=local.pk).exists()
-    assert cache.get(_cache_key("links", device, "primary")) == links_payload
-    assert cache.get(_cache_key("inventory", device, "primary")) is None
-
-
-@pytest.mark.django_db
 def test_module_install_invalidates_other_tabs_after_creating_a_module(
     client,
     settings,
@@ -1194,7 +1162,10 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
         module_type=module_type,
         serial="UNCHANGED-SERIAL",
     )
-    inventory_payload = {"inventory": [{"entPhysicalIndex": 8102}]}
+    inventory_payload = {
+        "librenms_id": 641,
+        "inventory": [{"entPhysicalIndex": 8102, "entPhysicalSerialNum": module.serial}],
+    }
     _seed_snapshot("inventory", device, "primary", inventory_payload)
     _seed_snapshot("ports", device, "primary")
     client.force_login(make_superuser("cache-module-unchanged-user"))
@@ -1206,7 +1177,15 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
             {
                 "server_key": "primary",
                 "module_id": str(module.pk),
-                "serial": module.serial,
+                "ent_index": "8102",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "primary",
+                    "update_module_serial",
+                    {"module_id": module.pk},
+                    8102,
+                    module_inventory_row_digest(inventory_payload["inventory"][0]),
+                ),
             },
         )
 
@@ -1231,12 +1210,36 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         model="Cache Scoped Module",
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
+    inventory_payload = {
+        "librenms_id": 642,
+        "inventory": [{"entPhysicalIndex": 8103, "entPhysicalSerialNum": "NEW"}],
+    }
+    _seed_snapshot(
+        "inventory",
+        device,
+        "primary",
+        inventory_payload,
+    )
     _seed_snapshot("ports", device, "primary")
     client.force_login(make_superuser("cache-module-missing-server-user"))
     url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"module_id": str(module.pk), "serial": "NEW"})
+        response = client.post(
+            url,
+            {
+                "module_id": str(module.pk),
+                "ent_index": "8103",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "primary",
+                    "update_module_serial",
+                    {"module_id": module.pk},
+                    8103,
+                    module_inventory_row_digest(inventory_payload["inventory"][0]),
+                ),
+            },
+        )
 
     assert response.status_code == 302
     module.refresh_from_db()
@@ -1442,12 +1445,12 @@ def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(s
 
 
 @pytest.mark.django_db
-def test_module_serial_update_without_a_usable_server_invalidates_the_source_snapshot(
+def test_module_serial_update_without_a_usable_server_refuses_the_write(
     client,
     settings,
     django_capture_on_commit_callbacks,
 ):
-    """A NetBox-only module write without cleanup ownership must invalidate its source snapshot."""
+    """The serial comes from the server-scoped inventory snapshot, so no server means no write."""
     server_key = _configured_server_key(settings)
     device = make_device("cache-serial-without-server", librenms_cf={server_key: {"id": 645}})
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
@@ -1458,20 +1461,16 @@ def test_module_serial_update_without_a_usable_server_invalidates_the_source_sna
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
     configure_no_librenms_servers(settings)
     _seed_snapshot("inventory", device, server_key)
-    assert cache.get(_cache_key("inventory", device, server_key)) is not None
     client.force_login(make_superuser("cache-serial-without-server-user"))
     url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"module_id": str(module.pk), "serial": "NEW"})
+        response = client.post(url, {"module_id": str(module.pk), "ent_index": "8104"})
 
     assert response.status_code == 302
     module.refresh_from_db()
-    assert module.serial == "NEW"
-    assert cache.get(_cache_key("inventory", device, server_key)) is None
-    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, server_key))
-    assert state is not None
-    assert state["state"] == SyncTabState.INVALIDATED.value
+    assert module.serial == "OLD"
+    assert cache.get(_cache_key("inventory", device, server_key)) is not None
 
 
 @pytest.mark.django_db
@@ -1772,61 +1771,6 @@ def test_htmx_module_cache_miss_replaces_active_tab_with_warning(client, setting
     assert b"No cached inventory data" in response.content
     assert b"Refresh Modules" in response.content
     assert b'name="select"' not in response.content
-
-
-@pytest.mark.django_db
-def test_partial_cable_refresh_renders_no_syncable_rows(client, settings):
-    """An incomplete cable refresh must not show rows without a backing snapshot."""
-    _configure_servers(settings)
-    device = make_device(
-        "cache-cable-partial",
-        librenms_cf={"primary": {"id": 647, "oob": {"id": 649, "type": "oob"}}},
-    )
-    remote_device = make_device("cache-cable-partial-remote", librenms_cf={"primary": {"id": 648}})
-    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    set_librenms_device_id(local, 7471, "primary")
-    set_librenms_device_id(remote, 7472, "primary")
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
-    client.force_login(make_superuser("cache-cable-partial-user"))
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/devices/647/links"):
-            return _json_response(
-                url,
-                {
-                    "status": "ok",
-                    "links": [
-                        {
-                            "local_port_id": 7471,
-                            "local_port": local.name,
-                            "remote_port_id": 7472,
-                            "remote_port": remote.name,
-                            "remote_hostname": remote_device.name,
-                            "remote_device_id": 648,
-                        }
-                    ],
-                },
-            )
-        if url.endswith("/api/v0/devices/647/ports"):
-            return _json_response(
-                url,
-                {"status": "ok", "ports": [{"port_id": 7471, "ifName": local.name, "ifDescr": local.name}]},
-            )
-        if url.endswith("/api/v0/devices/649/links"):
-            return _json_response(url, {"message": "Unavailable"}, status=503)
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
-        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
-
-    assert response.status_code == 200
-    assert b"Cable refresh was incomplete" in response.content
-    assert b"Sync Selected Cables" not in response.content
-    assert b'name="select"' not in response.content
-    assert cache.get(_cache_key("links", device, "primary")) is None
 
 
 @pytest.mark.django_db

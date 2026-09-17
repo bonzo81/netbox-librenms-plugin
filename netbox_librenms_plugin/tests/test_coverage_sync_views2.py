@@ -891,7 +891,8 @@ class TestAddDeviceToLibreNMSViewV3:
 
 class TestAddDeviceToLibreNMSViewUnknownVersion:
     def test_unknown_snmp_version_shows_error(self):
-        """A version string that is neither v1/v2c nor v3 is refused before reaching LibreNMS.
+        """
+        A version string that is neither v1/v2c nor v3 is refused before reaching LibreNMS.
 
         ``snmp_version`` on the v3 form is a plain CharField whose ``initial`` does not constrain a
         BOUND form, so a posted "v99" survives validation, reaches form_valid as the version, and
@@ -2213,7 +2214,7 @@ class TestSyncVLANsViewCreateVLAN:
 
 
 class TestSyncVLANsViewUpdateVLAN:
-    def test_existing_vlan_name_updated(self):
+    def test_existing_vlan_name_requires_confirmation(self):
         from ipam.models import VLAN
 
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
@@ -2235,9 +2236,11 @@ class TestSyncVLANsViewUpdateVLAN:
         ):
             mock_cache.get.return_value = [{"vlan_vlan": 100, "vlan_name": "Management"}]
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["100"]})
-            view.post(view.request, object_type="device", object_id=dev.pk)
+            response = view.post(view.request, object_type="device", object_id=dev.pk)
 
-        assert VLAN.objects.get(vid=100, group=None).name == "Management"  # renamed in place
+        assert response.status_code == 200
+        assert b"Confirm VLAN changes" in response.content
+        assert VLAN.objects.get(vid=100, group=None).name == "OldName"
 
 
 class TestSyncVLANsViewUnchangedVLAN:
@@ -2455,7 +2458,8 @@ class TestSyncVLANsViewWithGroup:
         assert any("several VLANs" in text for text in message_texts(req, "error"))
 
     def test_invalid_vid_string_skipped(self):
-        """A non-numeric selection is skipped, and the rest of the batch still syncs.
+        """
+        A non-numeric selection is skipped, and the rest of the batch still syncs.
 
         The batch carries a valid VID after the bad one so a `break` in place of the
         `continue` would be caught — a single-item batch cannot tell them apart.
@@ -2534,7 +2538,7 @@ class TestSyncVLANsViewWithGroup:
 class TestSyncVLANsViewGroupedUpdateSkip:
     """Lines 134-139: grouped VLAN update (elif) and unchanged (else) paths."""
 
-    def test_grouped_vlan_name_updated(self):
+    def test_grouped_vlan_name_requires_confirmation(self):
         from ipam.models import VLAN
 
         dev = make_device("vlan-grp-update")
@@ -2543,9 +2547,11 @@ class TestSyncVLANsViewGroupedUpdateSkip:
         req = _make_request(post_data={"action": "create_vlans", "select": ["300"], "vlan_group_300": str(group.pk)})
         view = _vlan_view(req, dev, [{"vlan_vlan": 300, "vlan_name": "NewGroupedName"}])
 
-        _post(view, req, object_type="device", object_id=dev.pk)
+        response = _post(view, req, object_type="device", object_id=dev.pk)
 
-        assert VLAN.objects.get(pk=vlan.pk).name == "NewGroupedName"
+        assert response.status_code == 200
+        assert b"Confirm VLAN changes" in response.content
+        assert VLAN.objects.get(pk=vlan.pk).name == "OldGroupedName"
 
     def test_grouped_vlan_unchanged_skipped(self):
         from ipam.models import VLAN
@@ -2609,7 +2615,8 @@ class TestSyncVLANsViewGroupedUpdateSkip:
 
 
 def _make_site(name, *, latitude=None, longitude=None):
-    """A real Site, optionally with coordinates.
+    """
+    A real Site, optionally with coordinates.
 
     Re-read from the DB so the coordinate fields come back as the Decimals the view actually
     formats in production, not the Python floats that were passed in.
