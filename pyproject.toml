@@ -30,6 +30,15 @@ requires-python = ">=3.12.0"
 "Homepage" = "https://github.com/bonzo81/netbox-librenms-plugin/"
 "Bug Tracker" = "https://github.com/bonzo81/netbox-librenms-plugin/issues/"
 
+[project.optional-dependencies]
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocs-include-markdown-plugin",
+    "mkdocstrings[python]",
+    "pymdown-extensions",
+]
+
 # New: Restrict package discovery to our plugin only
 [tool.setuptools]
 include-package-data = true

@@ -65,9 +65,10 @@ PLUGINS_CONFIG = {
 
 ## Usage
 
-1. Navigate to **LibreNMS Plugin** > **Settings** > **Server Settings**
-2. Select your desired LibreNMS server from the dropdown
-3. Click **Save Settings**
+1. Navigate to **LibreNMS → Settings → Plugin Settings**
+2. Find the **LibreNMS Server Settings** section
+3. Select your desired LibreNMS server from the dropdown
+4. Click **Save Settings**
 
 This server is the installation default. Import uses its own transient server selection. An object sync page uses only servers that have a mapping in the object's `librenms_id` field.
 
@@ -79,7 +80,7 @@ Changing the import server clears the current filters and results. The **Clear**
 
 ### Replacing an identity on the active server
 
-An import link or update action never replaces a different host ID that the object already stores for the active server. It is blocked, and a separate confirmation offers the replacement. Confirming changes only that server's host ID and keeps its out-of-band link, every other server mapping, and the preferred server. See [Validation](../librenms_import/validation.md#replacing-a-librenms-identity).
+An import link or update action never replaces a different host ID that the object already stores for the active server. It is blocked, and a separate confirmation offers the replacement. Confirming changes only that server's host ID and keeps its out-of-band link, every other server mapping, and the preferred server. See [Validation](../device_import/validation_and_configuration.md#replacing-a-librenms-identity).
 
 ### Object sync server selection
 
