@@ -235,7 +235,7 @@ class TestSourceMarkerConvention:
                 # Either operand may hold the access: `row["_source"] == "serial"` and
                 # `"serial" == row["_source"]` spell the marker inline just the same.
                 operands = [node.left, *node.comparators]
-                for first, second in zip(operands, operands[1:]):
+                for first, second in zip(operands, operands[1:], strict=False):
                     if any(
                         self._is_source_access(access)
                         and isinstance(literal, ast.Constant)
@@ -247,7 +247,7 @@ class TestSourceMarkerConvention:
                 if isinstance(node.value.value, str) and any(self._is_source_access(t) for t in node.targets):
                     hits.append(node.lineno)
             elif isinstance(node, ast.Dict):
-                for key, value in zip(node.keys, node.values):
+                for key, value in zip(node.keys, node.values, strict=True):
                     if (
                         isinstance(key, ast.Constant)
                         and key.value == "_source"

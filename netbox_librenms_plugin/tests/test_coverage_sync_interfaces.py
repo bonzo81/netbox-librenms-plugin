@@ -2065,7 +2065,7 @@ class TestSyncInterfacesViewPost:
         cache_key = view.get_cache_key(device, "ports", "default")
         cache.set(cache_key, {"ports": [port], "port_stack_relationships": {}})
 
-        def raise_integrity_error(*args, **kwargs):  # noqa: ARG001
+        def raise_integrity_error(*args, **kwargs):
             raise IntegrityError("deferred FK violated at COMMIT")
 
         monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", raise_integrity_error)
@@ -4611,7 +4611,7 @@ class TestSyncLagAndParentRelationships:
         child = make_interface(member2, "Ethernet7.100", iface_type="virtual")
         parent = make_interface(member1, "Ethernet7")
 
-        def raise_core_bug(instance):  # noqa: ARG001
+        def raise_core_bug(instance):
             raise self._CORE_VC_BUG
 
         monkeypatch.setattr(utils, "_get_netbox_version_tuple", lambda: (4, 4, 1))
@@ -4632,7 +4632,7 @@ class TestSyncLagAndParentRelationships:
         child = make_interface(device, "Ethernet5.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet5")
 
-        def raise_core_bug(instance):  # noqa: ARG001
+        def raise_core_bug(instance):
             raise self._CORE_VC_BUG
 
         monkeypatch.setattr(Interface, "clean", raise_core_bug)
@@ -4652,7 +4652,7 @@ class TestSyncLagAndParentRelationships:
         child = make_interface(member2, "Ethernet6.100", iface_type="virtual")
         parent = make_interface(member1, "Ethernet6")
 
-        def raise_unrelated_error(instance):  # noqa: ARG001
+        def raise_unrelated_error(instance):
             raise AttributeError("'Interface' object has no attribute 'nope'", name="nope")
 
         monkeypatch.setattr(Interface, "clean", raise_unrelated_error)
@@ -4673,7 +4673,7 @@ class TestSyncLagAndParentRelationships:
         parent = VMInterface.objects.create(virtual_machine=vm, name="Ethernet1")
         original = AttributeError("validation failed", name="unexpected")
 
-        def raise_original(instance):  # noqa: ARG001
+        def raise_original(instance):
             raise original
 
         monkeypatch.setattr(VMInterface, "clean", raise_original)

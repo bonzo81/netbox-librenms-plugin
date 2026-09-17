@@ -1665,7 +1665,7 @@ class TestPredictModuleInterfaceRenameSignalGuard:
             pass
 
         @receiver(predict_module_interface_names)
-        def _bad(sender, device, module, names, **kwargs):  # noqa: ARG001
+        def _bad(sender, device, module, names, **kwargs):
             return return_value
 
         try:
