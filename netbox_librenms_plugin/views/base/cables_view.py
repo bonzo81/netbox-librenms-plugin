@@ -843,12 +843,18 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
     def post(self, request, pk):
         """Handle POST request for cable sync view."""
         obj = self.get_object(pk)
-        posted_server_key = request.POST.get("server_key")
         # Rebind the API to the POSTed server so live link/port fetches hit the same
-        # Active server whose source snapshot supplies this multi-server tab.
-        server_key = self.rebind_api_for_server(posted_server_key)
+        # Active server whose source snapshot supplies this multi-server tab. The strict helper,
+        # not request.POST.get(): QueryDict.get() keeps the LAST of repeated values, so an
+        # ambiguous payload would silently refresh one server's cache namespace from another's.
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
-            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            getlist = getattr(request.POST, "getlist", None)
+            posted_values = getlist("server_key") if callable(getlist) else request.POST.get("server_key")
+            if isinstance(posted_values, (list, tuple)) and len(posted_values) > 1:
+                messages.error(request, "Select exactly one configured LibreNMS server.")
+            else:
+                messages.error(request, "Selected LibreNMS server is no longer configured.")
             # rebind_api_for_server() returned None to avoid building a missing/misconfigured
             # default client; reading the lazy `librenms_api` property here would reconstruct it
             # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.

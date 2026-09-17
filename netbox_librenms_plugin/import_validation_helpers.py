@@ -180,7 +180,8 @@ def apply_oob_detection_result(
     serial_role_choice_available: bool,
     warnings: "list | None" = None,
 ) -> None:
-    """Apply OOB/promote-to-host serial detection results to the validation dict.
+    """
+    Apply OOB/promote-to-host serial detection results to the validation dict.
 
     Call this after computing all OOB/promote-to-host flags from the LibreNMS
     and NetBox data.  All mutations to ``result["oob_candidate"]``,
@@ -224,7 +225,8 @@ def apply_merge_candidates(
     oob_named: dict,
     warning: str,
 ) -> None:
-    """Apply merge-candidates detection results to the validation dict.
+    """
+    Apply merge-candidates detection results to the validation dict.
 
     Called when the hostname-matched and serial-matched NetBox devices are
     different objects and at least one already has a LibreNMS linkage,
@@ -251,11 +253,13 @@ def apply_merge_candidates(
     # (is_ready=True while merge mode blocks import).
     result["is_ready"] = False
     result["oob_candidate"] = None
-    # Clear earlier serial-conflict state so the merge path is the single source of truth:
-    # a hostname-first row may have already set serial_duplicate / serial_confirmed, which
-    # would otherwise leave a stale "serial conflict" signal alongside "merge these devices".
+    # Clear earlier serial-conflict state so the merge path is the single source of truth: a
+    # hostname-first row may have already set serial_duplicate / serial_confirmed / serial_conflict,
+    # which would otherwise leave a stale "serial conflict" signal alongside "merge these devices"
+    # (serial_conflict would also make the display gate render its warning back into the reset list).
     result["serial_duplicate"] = False
     result["serial_confirmed"] = False
+    result["serial_conflict"] = None
     # "absent otherwise" contract — the merge path has no promotion target.
     result.pop("promote_to_host", None)
     result["serial_role_choice_available"] = False
@@ -279,18 +283,59 @@ def clear_match_derived_action_fields(validation: dict) -> None:
 
     ``promote_to_host`` follows the "absent otherwise" contract (see
     :func:`apply_oob_detection_result`) and is popped; ``merge_candidates``
-    is always present, defaulting to ``None``, and is reset in place.
+    and ``serial_conflict`` are always present, defaulting to ``None``, and
+    are reset in place.
     """
     validation["serial_action"] = None
     validation["oob_candidate"] = None
     validation["serial_confirmed"] = False
     validation["serial_duplicate"] = False
+    validation["serial_conflict"] = None
     validation["serial_role_choice_available"] = False
     validation["name_matches"] = False
     validation["name_sync_available"] = False
     validation["suggested_name"] = None
     validation.pop("promote_to_host", None)
     validation["merge_candidates"] = None
+
+
+def reset_device_role(validation: dict) -> None:
+    """
+    Reset the row's role selection to "not found", preserving available_roles.
+
+    One shape shared by every branch that drops a device match (deleted device, vanished link,
+    late cross-model rebind, a match withheld from this viewer), so the copies can't drift.
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+
+    Returns:
+        None
+    """
+    validation["device_role"] = {
+        "found": False,
+        "role": None,
+        "available_roles": validation.get("device_role", {}).get("available_roles", []),
+    }
+
+
+def reset_cluster(validation: dict) -> None:
+    """
+    Reset the row's cluster selection to "not found", preserving available_clusters.
+
+    The VM twin of :func:`reset_device_role`: VM rows are gated on cluster, not role.
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+
+    Returns:
+        None
+    """
+    validation["cluster"] = {
+        "found": False,
+        "cluster": None,
+        "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
+    }
 
 
 def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None:

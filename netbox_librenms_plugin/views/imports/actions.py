@@ -40,6 +40,9 @@ from netbox_librenms_plugin.import_utils import (
     get_virtual_chassis_data,
     required_import_permissions,
     scope_bulk_collisions,
+    scope_validation_disclosure,
+    scope_validation_disclosures,
+    visible_object_label,
     update_vc_member_suggested_names,
     validate_device_for_import,
 )
@@ -388,18 +391,6 @@ def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
     return locked, None
 
 
-def _visible_conflict_label(view, id_conflict):
-    """
-    Return ``(object_label, name)`` when the viewer may see *id_conflict*, else ``None``.
-
-    The scope check is a disclosure control, so it lives in one place: a second copy could drift
-    and let a caller name an object outside the viewer's scope.
-    """
-    if not view.restricted_queryset(type(id_conflict), "view").filter(pk=id_conflict.pk).exists():
-        return None
-    return ("VM" if id_conflict._meta.model_name == "virtualmachine" else "device", id_conflict.name)
-
-
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
     """Lock one server/ID claim and its target, then reject ownership across Devices and VMs."""
     from virtualization.models import VirtualMachine as NetBoxVM
@@ -421,7 +412,7 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
             f"LibreNMS ID {librenms_id} is ambiguous. Resolve the duplicate assignment before changing the mapping."
         )
     if id_conflict is not None:
-        visible = _visible_conflict_label(view, id_conflict)
+        visible = visible_object_label(id_conflict, view.request.user)
         if visible is None:
             return None, _htmx_error_response(
                 "LibreNMS ID is already assigned to another object outside your view scope."
@@ -485,7 +476,7 @@ def _acquire_serial_assignment_lock(serial: str) -> None:
     acquire_advisory_transaction_lock(f"netbox-librenms-plugin:device-serial:{serial}")
 
 
-def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse | None:
+def _apply_conflict_checked_serial(device, incoming_serial: str, user) -> HttpResponse | None:
     """
     Assign *incoming_serial* to *device* under the serial advisory lock, or report the conflict.
 
@@ -501,6 +492,8 @@ def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse
     Args:
         device: The Device to mutate. ``serial`` is set in memory only; the caller persists it.
         incoming_serial: The already-trimmed serial from LibreNMS.
+        user: The requesting user. The conflict lookup is unrestricted (a duplicate the user cannot
+            see still blocks the write), so only their view scope decides whether it is named.
 
     Returns:
         HttpResponse | None: An HTMX error toast when another device owns the serial, else None.
@@ -510,10 +503,14 @@ def _apply_conflict_checked_serial(device, incoming_serial: str) -> HttpResponse
     _acquire_serial_assignment_lock(incoming_serial)
     conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=device.pk).first()
     if conflict_device:
-        logger.warning(
-            f"Serial assignment blocked: '{incoming_serial}' already assigned to "
-            f"'{conflict_device.name}' (pk={conflict_device.pk})"
-        )
+        # No identity in the log either: the lookup is unrestricted, and the serial alone lets an
+        # operator find the owner without writing an unviewable object's name to a log file.
+        logger.warning(f"Serial assignment blocked: '{incoming_serial}' is already assigned to another device")
+        visible = visible_object_label(conflict_device, user)
+        if visible is None:
+            return _htmx_error_response(
+                f"Serial conflict: '{incoming_serial}' is already assigned to a device outside your view scope."
+            )
         return _htmx_error_response(
             f"Serial conflict: '{incoming_serial}' is already assigned to device "
             f"'{conflict_device.name}' (ID: {conflict_device.pk})"
@@ -828,6 +825,9 @@ class DeviceImportHelperMixin:
         # Apply user selections (cluster, role, rack) to validation
         _apply_user_selections_to_validation(validation, selections, is_vm)
 
+        # Last, so nothing downstream re-adds identity or re-enables a row this viewer may not see.
+        scope_validation_disclosure(validation, request.user)
+
         return validation, selections
 
     def render_device_row(self, request, libre_device: dict, validation: dict, selections: dict):
@@ -844,7 +844,7 @@ class DeviceImportHelperMixin:
             HttpResponse with rendered device row
         """
         libre_device["_validation"] = validation
-        table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key)
+        table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key, user=request.user)
 
         context = {
             "record": libre_device,
@@ -1121,6 +1121,9 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         }
 
         collisions = scope_bulk_collisions(detect_bulk_collisions(devices), request.user)
+        # After collision detection, which must key on the unrestricted matches to stop two rows
+        # writing the same NetBox device.
+        scope_validation_disclosures([entry.get("validation") for entry in devices], request.user)
         if collisions:
             # Render at 200 (not 4xx): this is an interstitial modal swapped
             # into #htmx-modal-content, exactly like the confirm step. A non-2xx
@@ -1553,7 +1556,9 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             # inside the loop made re-render O(n*m) for an import of n devices and m VM successes.
             imported_vm_ids = {item["device_id"] for item in vm_result.get("success", [])}
 
-            # Re-validate and render each imported device with fresh status
+            refreshed_devices = []
+
+            # Re-validate each imported device with fresh status.
             for device_id in imported_device_ids:
                 # Fetch device from cache or API
                 libre_device = fetch_device_with_cache(
@@ -1580,27 +1585,39 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     )
                     validation["import_as_vm"] = is_vm
 
-                    # Update cache with fresh validation
                     libre_device["_validation"] = validation
+                    # Cache the raw LibreNMS payload only. This key is shared by every user, and
+                    # the validation it would otherwise carry holds matches from unrestricted
+                    # searches; the row table and the modal scope or recompute it per request.
                     cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-                    cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
+                    cache.set(
+                        cache_key,
+                        {key: value for key, value in libre_device.items() if key != "_validation"},
+                        self.librenms_api.cache_timeout,
+                    )
 
-                    # Render updated row
-                    table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key)
-                    context = {
-                        "record": libre_device,
-                        "table": table,
-                        "cluster_id": None,
-                        "role_id": None,
-                        "rack_id": None,
-                    }
+                    refreshed_devices.append(libre_device)
 
-                    row_html = render(
-                        request,
-                        "netbox_librenms_plugin/htmx/device_import_row.html",
-                        context,
-                    ).content.decode("utf-8")
-                    updated_rows_html.append(row_html)
+            if refreshed_devices:
+                table = DeviceImportTable(
+                    refreshed_devices,
+                    server_key=self.librenms_api.server_key,
+                    user=request.user,
+                )
+                context = {
+                    "record": refreshed_devices[0],
+                    "table": table,
+                    "cluster_id": None,
+                    "role_id": None,
+                    "rack_id": None,
+                }
+
+                row_html = render(
+                    request,
+                    "netbox_librenms_plugin/htmx/device_import_row.html",
+                    context,
+                ).content.decode("utf-8")
+                updated_rows_html.append(row_html)
 
             # Append all summary toasts as a single OOB swap. In the HTMX path no
             # Django messages were queued (see above), so this OOB fragment is the
@@ -2113,7 +2130,7 @@ class DeviceConflictActionView(
                     incoming_serial = normalize_serial(libre_device.get("serial")) if existing_model is Device else None
                     fields = ["custom_field_data", "name"]
                     if incoming_serial and incoming_serial != "-":
-                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
+                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
                             return err
                         fields.append("serial")
                     existing_device.name = hostname
@@ -2133,7 +2150,7 @@ class DeviceConflictActionView(
                     incoming_serial = normalize_serial(libre_device.get("serial"))
                     fields = ["custom_field_data"]
                     if incoming_serial and incoming_serial != "-":
-                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial):
+                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
                             return err
                         fields.append("serial")
                     if librenms_device_type:
@@ -2181,7 +2198,7 @@ class DeviceConflictActionView(
                     except Device.DoesNotExist:
                         return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
                     # Re-check for serial ownership conflict under the locks, on the LOCKED row.
-                    if err := _apply_conflict_checked_serial(locked_device, incoming_serial):
+                    if err := _apply_conflict_checked_serial(locked_device, incoming_serial, request.user):
                         return err
                     if err := _save_device(locked_device, update_fields=["serial"], request=request):
                         return err
@@ -2966,7 +2983,7 @@ class AddAsOOBView(
                     "attaching as OOB."
                 )
             if id_conflict is not None:
-                visible = _visible_conflict_label(self, id_conflict)
+                visible = visible_object_label(id_conflict, request.user)
                 if visible is None:
                     return _htmx_error_response(
                         f"LibreNMS device #{librenms_id} is already assigned to another object outside your view scope."
@@ -3483,8 +3500,8 @@ class PromoteToHostView(
     Promote a LibreNMS host to the primary link of an existing NetBox device.
 
     The existing NetBox device's current ``librenms_id.{server_key}.id`` is moved into
-    the ``oob`` slot (preserving its bare-int → dict-form transition), and the incoming
-    LibreNMS device id becomes the new host id.  No new NetBox device is created — this
+    the ``oob`` slot (preserving its bare-int to dict-form transition), and the incoming
+    LibreNMS device id becomes the new host id. No new NetBox device is created. This
     is a reassignment, not an import.
     """
 

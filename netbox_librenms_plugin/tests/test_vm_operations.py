@@ -284,7 +284,9 @@ class TestBulkImportVms:
 
         assert result["failed"] == []
         assert result["success"] == []
-        assert result["skipped"] == [{"device_id": 6203, "reason": f"VM already exists: {existing.name}"}]
+        # The reason reaches job data and job logs, so it carries no NetBox identity.
+        assert result["skipped"] == [{"device_id": 6203, "reason": "VM 6203 already exists in NetBox"}]
+        assert existing.name not in result["skipped"][0]["reason"]
 
     def test_live_import_applies_cluster_role_server_and_name_preferences(self, librenms_api):
         from dcim.models import DeviceRole

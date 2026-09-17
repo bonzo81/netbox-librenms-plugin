@@ -9,6 +9,7 @@ from django.http import QueryDict
 from django.test import RequestFactory
 from django.urls import reverse
 
+from netbox_librenms_plugin.tests.conftest import make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -180,7 +181,8 @@ class TestImportListContract:
         view._job_results_loaded = True
         view._import_data = import_data
         view._active_server_key = SERVER_KEY
-        request = RequestFactory().get(_import_url(), {"sort": "hostname"})
+        request = RequestFactory().get(_import_url(), {"import_sort": "-hostname"})
+        request.user = make_superuser()
 
         queryset = view.get_queryset(request)
         table = view.get_table(queryset, request)
@@ -190,6 +192,7 @@ class TestImportListContract:
         assert isinstance(table, DeviceImportTable)
         assert list(table.data) == import_data
         assert table.server_key == SERVER_KEY
+        assert tuple(table.order_by) == ("-hostname",)
 
     def test_import_queryset_stays_empty_until_a_valid_search_exists(self):
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
@@ -354,7 +357,8 @@ class TestImportListRequest:
         django_user_model,
         librenms_server,
     ):
-        """The device-count preflight failing means LibreNMS did not answer.
+        """
+        The device-count preflight failing means LibreNMS did not answer.
 
         should_use_background_job() never looks at that count, so a superuser still queued a job
         that only repeats the failing call, and the outage disappeared behind a polling response.

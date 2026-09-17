@@ -638,6 +638,7 @@ class TestValidateDeviceForImport:
             "serial_action",
             "serial_confirmed",
             "serial_duplicate",
+            "serial_conflict",
             "serial_role_choice_available",
             "librenms_id_needs_migration",
             "oob_candidate",
