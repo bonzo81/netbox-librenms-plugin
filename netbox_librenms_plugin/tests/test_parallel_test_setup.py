@@ -744,6 +744,22 @@ def test_playwright_state_machine_has_a_required_separate_ci_job():
     )
 
 
+def test_devcontainer_installs_the_pinned_opengrep_release():
+    """Install the repository security gate in the development container."""
+    setup = (REPOSITORY_ROOT / ".devcontainer/scripts/setup.sh").read_text()
+
+    assert 'OPENGREP_VERSION="v1.30.0"' in setup
+    assert "net-tools git curl" in setup
+    assert "opengrep_manylinux_x86" in setup
+    assert "35779bdd72e92129c8df2a77f0c55e8c08356801ea92591ef32108d6b28d564c" in setup
+    assert "opengrep_manylinux_aarch64" in setup
+    assert "a5d5a4a58ba5d46ff51e921663da1c2bba38f4b03987f4aeec87f16c6ad3ecae" in setup
+    assert "sha256sum -c" in setup
+    assert 'install -m 0755 "$opengrep_binary" /usr/local/bin/opengrep' in setup
+    assert "install.sh" not in setup
+    assert "opengrep --version" in setup
+
+
 def test_testing_guide_requires_a_test_database_only_for_database_backed_tests():
     """Describe the test database without claiming that the full suite has no database dependency."""
     testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()

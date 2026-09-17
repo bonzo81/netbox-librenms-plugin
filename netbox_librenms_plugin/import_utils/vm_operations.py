@@ -210,10 +210,12 @@ def bulk_import_vms(
                 result["skipped"].append(
                     {
                         "device_id": vm_id,
-                        "reason": f"VM already exists: {validation['existing_device'].name}",
+                        # No name: the match came from an unrestricted search and this string
+                        # reaches job data and job logs, readable by any core.view_job holder.
+                        "reason": f"VM {vm_id} already exists in NetBox",
                     }
                 )
-                log.info(f"VM already exists: {validation['existing_device'].name}")
+                log.info(f"VM {vm_id} already exists in NetBox")
                 continue
 
             # Apply manual cluster and role selections
