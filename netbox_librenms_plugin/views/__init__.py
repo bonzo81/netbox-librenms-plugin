@@ -159,6 +159,7 @@ from .sync.device_fields import (  # noqa: F401
 from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView  # noqa: F401
 from .sync.interfaces import (  # noqa: F401
     DeleteNetBoxInterfacesView,
+    SyncInterfaceBridgeView,
     SyncInterfaceLagView,
     SyncInterfaceParentView,
     SyncInterfacesView,

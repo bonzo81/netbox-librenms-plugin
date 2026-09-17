@@ -8,8 +8,8 @@ from typing import Optional
 
 import netaddr
 from dcim.models import Device, Interface
-from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core import signing
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -439,17 +439,18 @@ def validate_regex_field(value, field_name):
         raise ValidationError({field_name: f"Invalid regex: {exc}"}) from exc
 
 
-def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
+def normalize_relationship_maps(relationships) -> tuple[dict, dict, dict]:
     """
     Normalize a cached ``port_stack_relationships`` mapping into int-keyed relationship maps.
 
-    Returns ``(lag_members, sub_interfaces)``. The single home for the corruption guard + key
+    Returns ``(lag_members, sub_interfaces, bridge_members)``. This is the single home for the corruption guard + key
     normalization shared by :func:`build_relationship_maps` and the bulk sync writer, so the
     readers and writer cannot drift.
 
     Fails soft against a corrupt / partial-write / format-migrated cache: a None or non-dict
     ``relationships`` (e.g. a list), or a present-but-None / non-dict nested ``lag_members`` /
-    ``sub_interfaces``, collapses to ``{}`` so ``.items()`` never raises ``AttributeError``. Keys
+    ``sub_interfaces`` / ``bridge_members``, collapses to ``{}`` so ``.items()`` never raises
+    ``AttributeError``. Keys
     and values are normalized via :func:`normalize_librenms_port_id` so int-keyed lookups never miss
     stringified JSON values. An edge is dropped unless both endpoint IDs are valid.
 
@@ -457,7 +458,7 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
         relationships (object): Cached relationship mapping to normalize.
 
     Returns:
-        tuple[dict[int, int], dict[int, int]]: Normalized lag member and sub-interface maps.
+        tuple[dict[int, int], dict[int, int], dict[int, int]]: Normalized relationship maps.
 
     """
     if not isinstance(relationships, dict):
@@ -468,6 +469,9 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
     sub_interfaces_raw = relationships.get("sub_interfaces")
     if not isinstance(sub_interfaces_raw, dict):
         sub_interfaces_raw = {}
+    bridge_members_raw = relationships.get("bridge_members")
+    if not isinstance(bridge_members_raw, dict):
+        bridge_members_raw = {}
 
     def _normalize_edges(raw_edges):
         normalized = {}
@@ -487,7 +491,8 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict]:
 
     lag_members = _normalize_edges(lag_members_raw)
     sub_interfaces = _normalize_edges(sub_interfaces_raw)
-    return lag_members, sub_interfaces
+    bridge_members = _normalize_edges(bridge_members_raw)
+    return lag_members, sub_interfaces, bridge_members
 
 
 def get_virtual_chassis_member(

@@ -1171,10 +1171,9 @@ function initializeCheckboxes() {
 /**
  * Selection dependency rules for the interface tables.
  *
- * A row cannot sync unless the rows it depends on are synced too: a sub-interface needs its
- * parent, and a LAG member needs its aggregate. Both are read off the row as LibreNMS port ids
- * (data-parent-port-id, data-member-of-lag) and both chain, so et-0/0/6.0 pulls in et-0/0/6,
- * which in turn pulls in ae2.
+ * A row cannot sync unless the rows it depends on are synced too. A sub-interface needs its
+ * parent, a LAG member needs its aggregate, and a bridge member needs its bridge. Each dependency
+ * is read from the row as a LibreNMS port id and can chain through another relationship.
  *
  * Requirements are recomputed from the rows the user checked rather than propagated hop by hop.
  * A recompute is idempotent and needs no unwind bookkeeping, so an aggregate that is only
@@ -1209,13 +1208,13 @@ function _rowsByPortId() {
 }
 
 /**
- * Return the port ids a row depends on: its parent interface and its aggregate.
+ * Return the port ids a row depends on.
  *
  * @param {HTMLTableRowElement} row - The row to read.
  * @returns {string[]} Port ids that must be selected alongside this row.
  */
 function _requiredPortIds(row) {
-    return [row.dataset.parentPortId, row.dataset.memberOfLag].filter(Boolean);
+    return [row.dataset.parentPortId, row.dataset.memberOfLag, row.dataset.bridgePortId].filter(Boolean);
 }
 
 /**
@@ -1284,9 +1283,12 @@ function refreshRequiredSelections() {
                 } else if (!offPage.has(portId)) {
                     // Name the relationship so the notice can say which row is missing and why.
                     const isParent = row.dataset.parentPortId === portId;
+                    const isBridge = row.dataset.bridgePortId === portId;
                     offPage.set(portId, {
-                        kind: isParent ? 'Parent' : 'LAG',
-                        name: (isParent ? row.dataset.parentName : row.dataset.lagName) || portId,
+                        kind: isParent ? 'Parent' : (isBridge ? 'Bridge' : 'LAG'),
+                        name: (
+                            isParent ? row.dataset.parentName : (isBridge ? row.dataset.bridgeName : row.dataset.lagName)
+                        ) || portId,
                     });
                 }
             });
@@ -2520,10 +2522,10 @@ function handleInterfaceChange(select, value) {
         select._lastVerifiedMember = selectedOption ? selectedOption.value : null;
     }
 
-    // Disable this row's LAG/parent sync buttons while the verify is in flight. A click landing
+    // Disable this row's relationship buttons while the verify is in flight. A click landing
     // before the response repaints the row would otherwise POST the freshly-selected member's
-    // objectId together with the *previous* member's stale relationship metadata (lag/parent
-    // port_id + name) carried by the old button markup, syncing the wrong relationship.
+    // objectId together with the previous member's stale relationship metadata carried by the
+    // old button markup, syncing the wrong relationship.
     // Tag the buttons *this* flow disables with data-verify-locked so re-enabling can target
     // exactly them by re-querying the live row, rather than replaying a captured list. Two
     // reasons: (1) on rapid changes a second handler captures an empty set (the buttons are
@@ -2533,7 +2535,9 @@ function handleInterfaceChange(select, value) {
     // re-enable a button it owns — only ones we marked. We only lock currently-enabled buttons,
     // so a button already disabled by an in-flight sync is left untouched.
     if (row) {
-        row.querySelectorAll('.lag-sync-btn:not([disabled]), .parent-sync-btn:not([disabled])').forEach((b) => {
+        row.querySelectorAll(
+            '.lag-sync-btn:not([disabled]), .parent-sync-btn:not([disabled]), .bridge-sync-btn:not([disabled])'
+        ).forEach((b) => {
             b.disabled = true;
             b.dataset.verifyLocked = '1';
         });
@@ -2544,7 +2548,9 @@ function handleInterfaceChange(select, value) {
         // even buttons a superseded (aborted) request had locked. Buttons whose cell a successful
         // verify repainted are gone from the row (replaced by fresh enabled markup), so they're
         // simply not found here.
-        row.querySelectorAll('.lag-sync-btn[data-verify-locked], .parent-sync-btn[data-verify-locked]').forEach((b) => {
+        row.querySelectorAll(
+            '.lag-sync-btn[data-verify-locked], .parent-sync-btn[data-verify-locked], .bridge-sync-btn[data-verify-locked]'
+        ).forEach((b) => {
             delete b.dataset.verifyLocked;
             b.disabled = false;
         });
@@ -2554,7 +2560,7 @@ function handleInterfaceChange(select, value) {
     // the last confirmed member so the visible selection matches the row's current HTML, then
     // re-enable the controls — the row is now consistent again and the user can retry. With no
     // confirmed baseline yet, keep the controls locked rather than re-enabling on an unverified
-    // selection (which would let a retry post the previous member's stale lag/parent port_id).
+    // selection, which would let a retry post stale relationship data from the previous member.
     const rollbackToLastVerified = () => {
         if (select._lastVerifiedMember != null) {
             // The member control is TomSelect-enhanced, so assigning select.value alone
@@ -2626,16 +2632,27 @@ function handleInterfaceChange(select, value) {
                 if (parentCell && typeof formattedRow.parent !== 'undefined') {
                     parentCell.innerHTML = formattedRow.parent;
                 }
+                [
+                    ['parentPortId', 'librenms_parent_port_id'],
+                    ['parentName', 'librenms_parent_name'],
+                    ['memberOfLag', 'librenms_lag_port_id'],
+                    ['lagName', 'librenms_lag_name'],
+                    ['bridgePortId', 'librenms_bridge_port_id'],
+                    ['bridgeName', 'librenms_bridge_name'],
+                ].forEach(([datasetKey, responseKey]) => {
+                    row.dataset[datasetKey] = formattedRow[responseKey] ?? '';
+                });
                 initializeVlanGroupSelects();
                 initializeFilters();
+                refreshRequiredSelections();
                 // This member is now server-confirmed: record it as the rollback target and
                 // re-enable the relationship controls (the row HTML now matches this member).
                 select._lastVerifiedMember = value;
                 reenableRelationshipButtons();
             } else {
                 // 2xx with data.status !== 'success' (application-level failure/conflict): the
-                // row was NOT repainted, so the verify-locked LAG/parent buttons still carry the
-                // previous member's lag/parent port_id. Roll the dropdown back to the last
+                // row was not repainted, so the verify-locked relationship buttons still carry
+                // the previous member's related port ID. Roll the dropdown back to the last
                 // confirmed member (restoring a consistent row) before re-enabling.
                 console.error('Interface verification rejected:', data.error || data.message || 'Unknown error');
                 rollbackToLastVerified();
@@ -3760,19 +3777,22 @@ document.body.addEventListener('htmx:timeout', function (event) {
     showHtmxModalError('The request timed out before the server answered.');
 });
 
-// Event delegation for LAG and parent interface sync buttons.
+// Event delegation for interface relationship sync buttons.
 // Buttons are rendered inline in the interface table's data-col="parent" cell
-// (render_parent in tables/interfaces.py renders BOTH the LAG-sync and parent-sync
-// buttons there; there is no separate data-col="lag" cell)
-// and carry data attributes: port-id, lag-port-id / parent-port-id, object-type, object-id.
+// (render_parent in tables/interfaces.py renders every relationship button there)
+// and carry the source and related LibreNMS port ids plus the NetBox owner.
 document.addEventListener('click', function (e) {
-    const btn = e.target.closest('.lag-sync-btn, .parent-sync-btn');
+    const btn = e.target.closest('.lag-sync-btn, .parent-sync-btn, .bridge-sync-btn');
     if (!btn) return;
     e.preventDefault();
 
-    const isLag = btn.classList.contains('lag-sync-btn');
+    const relation = btn.classList.contains('lag-sync-btn')
+        ? 'lag'
+        : (btn.classList.contains('bridge-sync-btn') ? 'bridge' : 'parent');
     const portId = btn.dataset.portId || '';
-    const relatedPortId = isLag ? (btn.dataset.lagPortId || '') : (btn.dataset.parentPortId || '');
+    const relatedPortId = relation === 'lag'
+        ? (btn.dataset.lagPortId || '')
+        : (relation === 'bridge' ? (btn.dataset.bridgePortId || '') : (btn.dataset.parentPortId || ''));
     const url = btn.dataset.syncUrl || '';
     // On a Virtual Chassis page the row carries a member-select dropdown; prefer the user's
     // live selection over the server-rendered data-object-id (a name-based heuristic), so the
@@ -3785,7 +3805,7 @@ document.addEventListener('click', function (e) {
     // member. Only fall back to data-object-id when there is no select at all (non-VC page).
     const objectId =
         vcMemberSelect ? vcMemberSelect.value : (btn.dataset.objectId || '');
-    const relatedKey = isLag ? 'lag_port_id' : 'parent_port_id';
+    const relatedKey = `${relation}_port_id`;
 
     if (!portId || !relatedPortId || !objectId || !url) {
         btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';

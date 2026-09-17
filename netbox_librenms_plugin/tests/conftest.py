@@ -12,7 +12,6 @@ import requests
 
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
-
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
 
 
@@ -111,7 +110,7 @@ def _seeded_rule_rows():
     """
     import importlib
 
-    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule, PortStackLagPattern
 
     inventory = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
     for rule in inventory.INITIAL_INVENTORY_IGNORE_RULES:
@@ -123,6 +122,16 @@ def _seeded_rule_rows():
         NormalizationRule,
         {"scope": rules.SERIAL_RULE["scope"], "match_pattern": rules.SERIAL_RULE["match_pattern"]},
         rules.SERIAL_RULE,
+    )
+    bridge = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    yield (
+        PortStackLagPattern,
+        {"librenms_os": bridge.BRIDGE_OS},
+        {
+            "lag_name_pattern": bridge.LAG_PATTERN,
+            "bridge_name_pattern": bridge.BRIDGE_PATTERN,
+            "description": bridge.SEEDED_DESCRIPTION,
+        },
     )
 
 
@@ -170,8 +179,8 @@ def _seeds_are_intact():
         if not stored.issuperset(rows):
             return False
 
-    for model, _lookup, defaults in _seeded_rule_rows():
-        if not model.objects.filter(**defaults).exists():
+    for model, lookup, defaults in _seeded_rule_rows():
+        if not model.objects.filter(**lookup).filter(**defaults).exists():
             return False
 
     custom_field = CustomField.objects.filter(name="librenms_id", type="json").first()

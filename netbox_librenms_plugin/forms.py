@@ -850,7 +850,7 @@ class PortStackLagPatternForm(NetBoxModelForm):
         """Meta options."""
 
         model = PortStackLagPattern
-        fields = ["librenms_os", "lag_name_pattern", "sap_name_pattern", "description"]
+        fields = ["librenms_os", "lag_name_pattern", "bridge_name_pattern", "sap_name_pattern", "description"]
 
 
 class PortStackLagPatternImportForm(NetBoxModelImportForm):
@@ -860,7 +860,7 @@ class PortStackLagPatternImportForm(NetBoxModelImportForm):
         """Meta options."""
 
         model = PortStackLagPattern
-        fields = ["librenms_os", "lag_name_pattern", "sap_name_pattern", "description"]
+        fields = ["librenms_os", "lag_name_pattern", "bridge_name_pattern", "sap_name_pattern", "description"]
 
 
 class PortStackLagPatternFilterForm(NetBoxModelFilterSetForm):
@@ -868,6 +868,7 @@ class PortStackLagPatternFilterForm(NetBoxModelFilterSetForm):
 
     librenms_os = forms.CharField(required=False, label="LibreNMS OS")
     lag_name_pattern = forms.CharField(required=False, label="LAG Name Pattern")
+    bridge_name_pattern = forms.CharField(required=False, label="Bridge Name Pattern")
     sap_name_pattern = forms.CharField(required=False, label="SAP Name Pattern")
     description = forms.CharField(required=False, label="Description")
 

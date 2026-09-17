@@ -113,11 +113,11 @@ class TestInterfaceSyncContentTemplateMigratedMode:
 
     def test_relationship_incomplete_renders_persistent_banner(self):
         html = self._render(migrated=None, relationship_incomplete=True)
-        assert "LAG / sub-interface relationship data could not be fetched" in html
+        assert "Interface relationship data could not be fetched" in html
 
     def test_no_relationship_banner_when_complete(self):
         html = self._render(migrated=None, relationship_incomplete=False)
-        assert "LAG / sub-interface relationship data could not be fetched" not in html
+        assert "Interface relationship data could not be fetched" not in html
 
     def test_migrated_mode_hides_destructive_delete_controls(self):
         # Migrated mode is move-only: the donor-side bulk-delete UI (select-all + per-row

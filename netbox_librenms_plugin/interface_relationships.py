@@ -1,6 +1,6 @@
 """Shared interface relationship discovery and row resolution."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dcim.models import Device, Interface
 from django.db.models import Q
@@ -15,7 +15,6 @@ from netbox_librenms_plugin.utils import (
     normalize_relationship_maps,
 )
 
-
 RELATIONSHIP_CANDIDATE_BATCH_SIZE = 64
 
 
@@ -26,6 +25,7 @@ class RelationshipMaps:
     lag_members: dict
     sub_interfaces: dict
     ports_by_id: dict
+    bridge_members: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -239,7 +239,9 @@ def _resolve_interface_by_name_hint(obj, name_hint, index=None, expected_owner=N
 
 def build_relationship_maps(cached_data):
     """Normalize relationship maps and index host ports by stable ID."""
-    lag_members, sub_interfaces = normalize_relationship_maps(cached_data.get("port_stack_relationships"))
+    lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(
+        cached_data.get("port_stack_relationships")
+    )
     ports = cached_data.get("ports", [])
     if not is_list_of_dicts(ports):
         ports = []
@@ -250,7 +252,7 @@ def build_relationship_maps(cached_data):
         port_id = normalize_librenms_port_id(port.get("port_id"))
         if port_id is not None:
             ports_by_id[port_id] = port
-    return RelationshipMaps(lag_members, sub_interfaces, ports_by_id)
+    return RelationshipMaps(lag_members, sub_interfaces, ports_by_id, bridge_members)
 
 
 def build_candidate_relationship_context(obj, server_key, user, can_write, port_ids, names):
@@ -291,7 +293,7 @@ def enrich_port_relationships(
     interface_name_field="ifName",
     server_key="",
 ):
-    """Add LAG and parent comparison fields to a cached port row."""
+    """Add LAG, parent, and bridge comparison fields to a cached port row."""
     port_id = normalize_librenms_port_id(port.get("port_id"))
     netbox_interface = port.get("netbox_interface")
 
@@ -343,6 +345,14 @@ def enrich_port_relationships(
     port["librenms_parent_port_id"] = parent_port_id
     port["parent_sync_status"] = parent_status
 
+    bridge_name, bridge_port_id, bridge_status = relationship_context(
+        relationship_maps.bridge_members,
+        "bridge",
+    )
+    port["librenms_bridge_name"] = bridge_name
+    port["librenms_bridge_port_id"] = bridge_port_id
+    port["bridge_sync_status"] = bridge_status
+
 
 def _row_relationship_source_is_actionable(
     context,
@@ -355,7 +365,7 @@ def _row_relationship_source_is_actionable(
     name_hint,
     expected_owner,
 ):
-    """Return whether this row can write a LAG or parent relationship."""
+    """Return whether this row can write an interface relationship."""
     if not (
         context.can_write
         and owner.pk in context.actionable_owner_ids
@@ -406,6 +416,7 @@ def resolve_relationship_row(
         port["relationship_source_resolvable"] = False
         port["lag_target_resolvable"] = False
         port["parent_target_resolvable"] = False
+        port["bridge_target_resolvable"] = False
         return None
 
     name_fallback_allowed = port_id in unambiguous_name_port_ids
@@ -437,7 +448,7 @@ def resolve_relationship_row(
     )
 
     enrich_port_relationships(port, relationship_maps, interface_name_field, context.server_key)
-    for relation in ("lag", "parent"):
+    for relation in ("lag", "parent", "bridge"):
         related_port_id = port.get(f"librenms_{relation}_port_id")
         related_port = relationship_maps.ports_by_id.get(related_port_id)
         related_interface = None

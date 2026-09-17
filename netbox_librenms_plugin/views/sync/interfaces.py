@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface, VirtualChassis
@@ -36,19 +37,19 @@ from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     build_migrated_context,
     convert_speed_to_kbps,
-    validation_error_detail,
     find_by_librenms_id,
     get_interface_name_field,
-    get_librenms_sync_device,
     get_interface_port_identity_sets,
+    get_librenms_sync_device,
     interface_name_fallback_matches_port,
+    interface_name_rejection_reason,
     is_list_of_dicts,
-    normalize_librenms_port_id,
     netbox_clean_reads_parent_virtual_chassis,
+    normalize_librenms_port_id,
     normalize_relationship_maps,
     resolve_interface_row_device,
-    interface_name_rejection_reason,
     syncable_interface_name,
+    validation_error_detail,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -60,6 +61,26 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _BulkRelationshipContext:
+    """Shared immutable inputs for one locked bulk relationship pass."""
+
+    obj: object
+    port_by_id: dict
+    lag_members: dict
+    sub_interfaces: dict
+    bridge_members: dict
+    catalog_index: dict
+    source_index: dict
+    related_index: dict
+    changeable_ids: set
+    server_key: str
+    interface_name_field: str
+    unique_host_port_ids: set
+    unambiguous_name_port_ids: set
+    excluded_columns: set
 
 
 class SyncInterfacesView(
@@ -135,7 +156,7 @@ class SyncInterfacesView(
             return redirect(redirect_url)
 
         relationships = self._get_cached_relationships(obj, server_key)
-        lag_members, sub_interfaces = normalize_relationship_maps(relationships)
+        lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
         if request.POST.get("auto_select_lag_members"):
             while True:
                 related_rows = {
@@ -145,6 +166,9 @@ class SyncInterfacesView(
                 }
                 related_rows.update(
                     parent_id for child_id, parent_id in sub_interfaces.items() if child_id in self._selected_port_ids
+                )
+                related_rows.update(
+                    bridge_id for member_id, bridge_id in bridge_members.items() if member_id in self._selected_port_ids
                 )
                 added = related_rows - self._selected_port_ids
                 if not added:
@@ -192,7 +216,7 @@ class SyncInterfacesView(
                     # Keep the target-device locks and their current object map through relationship
                     # validation and persistence. Reusing the map also avoids one permission-filtered
                     # Device lookup per selected VC relationship edge.
-                    self._sync_lag_and_parent_relationships(
+                    self._sync_interface_relationships(
                         self.object,
                         ports_data,
                         relationships,
@@ -362,7 +386,7 @@ class SyncInterfacesView(
             return cached_data.get("port_stack_relationships", {})
         return {}
 
-    def _sync_lag_and_parent_relationships(
+    def _sync_interface_relationships(
         self,
         obj,
         ports_data,
@@ -372,7 +396,7 @@ class SyncInterfacesView(
         excluded_columns=(),
     ):
         """
-        Set LAG member and sub-interface parent relationships for synced interfaces.
+        Set the relationships discovered for synced interfaces.
 
         Runs after sync_selected_interfaces() so all interfaces already exist in NetBox.
         Only processes relationships where this interface is a member/child — the
@@ -382,7 +406,7 @@ class SyncInterfacesView(
         Args:
             obj: The Device (or VirtualMachine) being synced.
             ports_data: The LibreNMS port dicts for the device.
-            relationships (dict): The ``{lag_members, sub_interfaces}`` mapping to apply.
+            relationships (dict): The normalized relationship maps to apply.
             server_key (str): The LibreNMS server key scoping stored-id reads.
 
         Returns:
@@ -390,84 +414,30 @@ class SyncInterfacesView(
         """
         if not relationships:
             return
-        excluded_columns = set(excluded_columns)
-
-        # Normalize the relationship-map keys once at load through the helper used by both
-        # readers, so the bulk path cannot drift on the corruption guard or key normalization.
-        # resolve_port_relationships
-        # emits normalized int keys, but a JSON cache round-trip stringifies dict keys, so the cached
-        # map can arrive str- or int-keyed; re-normalizing lets every lookup below use a single
-        # normalize_librenms_port_id(port_id) call. The helper also coerces a non-dict relationships
-        # (e.g. a list from a corrupt / partial-write cache) to {} — the local `if not relationships`
-        # guard above only catches a falsy value, so a truthy non-dict would otherwise AttributeError
-        # on .get()/.items() here.
-        lag_members, sub_interfaces = normalize_relationship_maps(relationships)
-        if not lag_members and not sub_interfaces:
+        lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
+        if not lag_members and not sub_interfaces and not bridge_members:
             return
-
         interface_name_field = self.interface_name_field
         unique_host_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(
             ports_data, interface_name_field
         )
-
-        # Resolve the selection to stable LibreNMS port IDs.
-        port_by_id = {}
-        selected_port_ids = {
-            str(port_id)
-            for raw_port_id in getattr(self, "_selected_port_ids", set())
-            if (port_id := normalize_librenms_port_id(raw_port_id)) is not None
-        }
-        selected_edge_source_ids = {
-            port_id
-            for port_id in selected_port_ids
-            if normalize_librenms_port_id(port_id) in lag_members
-            or normalize_librenms_port_id(port_id) in sub_interfaces
-        }
-        # Same rule as the writer gate below: read the concrete model, since the default would
-        # admit a name VMInterface refuses and the pass would then persist its parent anyway.
-        relationship_writer_model = VMInterface if isinstance(obj, VirtualMachine) else Interface
-        valid_name_port_ids = {
-            normalize_librenms_port_id(port.get("port_id"))
-            for port in ports_data
-            if port.get("_source") != "oob"
-            and syncable_interface_name(port, interface_name_field, relationship_writer_model) is not None
-        }
-        selected_edge_source_ids &= {str(port_id) for port_id in valid_name_port_ids if port_id is not None}
+        relationship_maps = (lag_members, sub_interfaces, bridge_members)
+        selected_edge_source_ids, port_by_id = self._relationship_source_rows(
+            obj,
+            ports_data,
+            relationship_maps,
+            unique_host_port_ids,
+            interface_name_field,
+        )
         if not selected_edge_source_ids:
             return
-        for port in ports_data:
-            # OOB-controller rows are context-only (merged for shared-LOM display); sync_selected_interfaces()
-            # already skips them. Exclude them here too: on a page where an OOB row shares the host display
-            # name, adding its port_id would let the LAG/parent pass persist links on the hidden controller
-            # row instead of the host interface.
-            if port.get("_source") == "oob":
-                continue
-            pid = normalize_librenms_port_id(port.get("port_id"))
-            if pid is None or pid not in unique_host_port_ids:
-                continue
-            canonical_pid = str(pid)
-            port_by_id[canonical_pid] = port
-
-        candidate_port_ids = []
-        candidate_names = []
-        for source_port_id in selected_edge_source_ids:
-            source_entry = port_by_id.get(source_port_id)
-            if source_entry is None:
-                continue
-            related_ids = (
-                lag_members.get(normalize_librenms_port_id(source_port_id)),
-                sub_interfaces.get(normalize_librenms_port_id(source_port_id)),
-            )
-            for raw_candidate_id in (source_entry.get("port_id"), *related_ids):
-                candidate_id = normalize_librenms_port_id(raw_candidate_id)
-                if candidate_id is None:
-                    continue
-                candidate_entry = port_by_id.get(str(candidate_id), {})
-                candidate_port_ids.append(candidate_entry.get("port_id", raw_candidate_id))
-                if candidate_id in unambiguous_name_port_ids:
-                    candidate_name = candidate_entry.get(interface_name_field) or candidate_entry.get("ifName")
-                    if candidate_name:
-                        candidate_names.append(candidate_name)
+        candidate_port_ids, candidate_names = self._relationship_candidate_hints(
+            selected_edge_source_ids,
+            port_by_id,
+            relationship_maps,
+            unambiguous_name_port_ids,
+            interface_name_field,
+        )
         try:
             with transaction.atomic():
                 obj, locked_device_ids = _lock_relationship_scope(
@@ -489,99 +459,196 @@ class SyncInterfacesView(
                     locked_device_ids,
                     candidate_ids=candidate_ids,
                 )
-
-                for port_id in selected_edge_source_ids:
-                    if port_id not in port_by_id:
-                        continue
-
-                    # Pin both ends of the relationship to the owner this row was synced onto (the
-                    # per-row device_selection target, or the VM). The VC-wide port_id search can
-                    # otherwise resolve a child/parent uniquely onto a *different* member that carries
-                    # the same stale librenms_id, persisting lag/parent on the wrong interface.
-                    target_device = self._resolve_row_target_device(obj, port_id=port_id)
-                    if target_device is None:
-                        continue
-                    expected_owner = interface_owner_for_object(target_device)
-
-                    # LAG membership: this interface is a member of a LAG aggregate. Both ends are
-                    # resolved/validated/persisted by the shared helpers below (same flow as the
-                    # parent pass), differing only in the Interface-only source guard and the
-                    # aggregate type=lag promotion.
-                    raw_lag = lag_members.get(normalize_librenms_port_id(port_id))
-                    if raw_lag is not None and normalize_librenms_port_id(raw_lag) in unique_host_port_ids:
-                        member_iface, agg_iface = self._resolve_relationship_ends(
-                            obj,
-                            port_id,
-                            raw_lag,
-                            port_by_id,
-                            catalog_index,
-                            source_index,
-                            related_index,
-                            server_key,
-                            expected_owner,
-                            interface_name_field,
-                            unambiguous_name_port_ids,
-                            "LAG",
-                            require_interface_source=True,  # VMInterface has no lag field
-                        )
-                        if member_iface and (
-                            member_iface.lag_id != agg_iface.pk or _lag_aggregate_needs_promotion(agg_iface)
-                        ):
-                            if agg_iface.type != "lag" and "type" in excluded_columns:
-                                logger.warning(
-                                    "Bulk sync: skipping LAG link %s -> %s because interface type is excluded",
-                                    member_iface.name,
-                                    agg_iface.name,
-                                )
-                                self._record_skipped_conflict(
-                                    member_iface.name,
-                                    "aggregate type is excluded",
-                                )
-                            elif agg_iface.type != "lag" and agg_iface.pk not in changeable_ids:
-                                logger.warning(
-                                    "Bulk sync: skipping LAG link %s -> %s because the aggregate cannot be changed",
-                                    member_iface.name,
-                                    agg_iface.name,
-                                )
-                            else:
-                                if self._apply_relationship_edge(
-                                    member_iface, "lag", agg_iface, self._prepare_bulk_lag_aggregate, "LAG"
-                                ):
-                                    self._mutated = True
-
-                    # Sub-interface parent: this interface is a child of a parent interface.
-                    raw_parent = sub_interfaces.get(normalize_librenms_port_id(port_id))
-                    if raw_parent is not None and normalize_librenms_port_id(raw_parent) in unique_host_port_ids:
-                        child_iface, parent_iface = self._resolve_relationship_ends(
-                            obj,
-                            port_id,
-                            raw_parent,
-                            port_by_id,
-                            catalog_index,
-                            source_index,
-                            related_index,
-                            server_key,
-                            expected_owner,
-                            interface_name_field,
-                            unambiguous_name_port_ids,
-                            "parent",
-                        )
-                        if child_iface and child_iface.parent_id != parent_iface.pk:
-                            if self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent"):
-                                self._mutated = True
+                context = _BulkRelationshipContext(
+                    obj=obj,
+                    port_by_id=port_by_id,
+                    lag_members=lag_members,
+                    sub_interfaces=sub_interfaces,
+                    bridge_members=bridge_members,
+                    catalog_index=catalog_index,
+                    source_index=source_index,
+                    related_index=related_index,
+                    changeable_ids=changeable_ids,
+                    server_key=server_key,
+                    interface_name_field=interface_name_field,
+                    unique_host_port_ids=unique_host_port_ids,
+                    unambiguous_name_port_ids=unambiguous_name_port_ids,
+                    excluded_columns=set(excluded_columns),
+                )
+                self._apply_bulk_relationships(context, selected_edge_source_ids)
         except IntegrityError:
             # Immediate conflicts (a unique violation, a row already gone at write time) surface
             # here and roll the relationship pass back as a unit. Deferred FK violations do NOT:
             # Postgres validates those at the outermost COMMIT, which post() handles.
             logger.warning(
-                "Bulk sync: LAG/parent relationship pass rolled back by a concurrent DB conflict",
+                "Bulk sync: relationship pass rolled back by a concurrent DB conflict",
                 exc_info=True,
             )
             messages.warning(
                 self.request,
-                "Interfaces synced, but LAG/parent relationships hit a concurrent change and were "
-                "not applied. Re-run the sync.",
+                "Interfaces synced, but relationships hit a concurrent change and were not applied. Re-run the sync.",
             )
+
+    def _relationship_source_rows(
+        self,
+        obj,
+        ports_data,
+        relationship_maps,
+        unique_host_port_ids,
+        interface_name_field,
+    ):
+        """Return selected relationship source IDs and the unambiguous host-port index."""
+        relationship_source_ids = set().union(*(mapping.keys() for mapping in relationship_maps))
+        selected_source_ids = {
+            str(port_id)
+            for raw_port_id in getattr(self, "_selected_port_ids", set())
+            if (port_id := normalize_librenms_port_id(raw_port_id)) in relationship_source_ids
+        }
+        writer_model = VMInterface if isinstance(obj, VirtualMachine) else Interface
+        valid_name_ids = {
+            normalize_librenms_port_id(port.get("port_id"))
+            for port in ports_data
+            if port.get("_source") != "oob"
+            and syncable_interface_name(port, interface_name_field, writer_model) is not None
+        }
+        selected_source_ids &= {str(port_id) for port_id in valid_name_ids if port_id is not None}
+        port_by_id = {
+            str(port_id): port
+            for port in ports_data
+            if port.get("_source") != "oob"
+            and (port_id := normalize_librenms_port_id(port.get("port_id"))) in unique_host_port_ids
+        }
+        return selected_source_ids, port_by_id
+
+    @staticmethod
+    def _relationship_candidate_hints(
+        selected_source_ids,
+        port_by_id,
+        relationship_maps,
+        unambiguous_name_port_ids,
+        interface_name_field,
+    ):
+        """Collect stable IDs and safe names for one bounded candidate query."""
+        candidate_port_ids = []
+        candidate_names = []
+        for source_id in selected_source_ids:
+            source_port = port_by_id.get(source_id)
+            if source_port is None:
+                continue
+            normalized_source_id = normalize_librenms_port_id(source_id)
+            related_ids = tuple(mapping.get(normalized_source_id) for mapping in relationship_maps)
+            for raw_candidate_id in (source_port.get("port_id"), *related_ids):
+                candidate_id = normalize_librenms_port_id(raw_candidate_id)
+                if candidate_id is None:
+                    continue
+                candidate_port = port_by_id.get(str(candidate_id), {})
+                candidate_port_ids.append(candidate_port.get("port_id", raw_candidate_id))
+                if candidate_id in unambiguous_name_port_ids:
+                    candidate_name = candidate_port.get(interface_name_field) or candidate_port.get("ifName")
+                    if candidate_name:
+                        candidate_names.append(candidate_name)
+        return candidate_port_ids, candidate_names
+
+    def _apply_bulk_relationships(self, context, selected_source_ids):
+        """Apply every relationship map while the owners and candidates remain locked."""
+        for port_id in selected_source_ids:
+            if port_id not in context.port_by_id:
+                continue
+            target = self._resolve_row_target_device(context.obj, port_id=port_id)
+            if target is None:
+                continue
+            expected_owner = interface_owner_for_object(target)
+            self._apply_bulk_lag(context, port_id, expected_owner)
+            self._apply_bulk_parent(context, port_id, expected_owner)
+            self._apply_bulk_bridge(context, port_id, expected_owner)
+
+    def _resolve_bulk_relationship(self, context, port_id, related_port_id, expected_owner, label, **kwargs):
+        """Resolve one relationship pair from the locked bulk indexes."""
+        return self._resolve_relationship_ends(
+            context.obj,
+            port_id,
+            related_port_id,
+            context.port_by_id,
+            context.catalog_index,
+            context.source_index,
+            context.related_index,
+            context.server_key,
+            expected_owner,
+            context.interface_name_field,
+            context.unambiguous_name_port_ids,
+            label,
+            **kwargs,
+        )
+
+    def _apply_bulk_lag(self, context, port_id, expected_owner):
+        """Apply one LAG edge, including aggregate type preparation."""
+        raw_lag = context.lag_members.get(normalize_librenms_port_id(port_id))
+        if raw_lag is None or normalize_librenms_port_id(raw_lag) not in context.unique_host_port_ids:
+            return
+        member, aggregate = self._resolve_bulk_relationship(
+            context,
+            port_id,
+            raw_lag,
+            expected_owner,
+            "LAG",
+            require_interface_source=True,
+        )
+        if member is None or (member.lag_id == aggregate.pk and not _lag_aggregate_needs_promotion(aggregate)):
+            return
+        if aggregate.type != "lag" and "type" in context.excluded_columns:
+            logger.warning(
+                "Bulk sync: skipping LAG link %s -> %s because interface type is excluded",
+                member.name,
+                aggregate.name,
+            )
+            self._record_skipped_conflict(member.name, "aggregate type is excluded")
+            return
+        if aggregate.type != "lag" and aggregate.pk not in context.changeable_ids:
+            logger.warning(
+                "Bulk sync: skipping LAG link %s -> %s because the aggregate cannot be changed",
+                member.name,
+                aggregate.name,
+            )
+            return
+        if self._apply_relationship_edge(member, "lag", aggregate, self._prepare_bulk_lag_aggregate, "LAG"):
+            self._mutated = True
+
+    def _apply_bulk_parent(self, context, port_id, expected_owner):
+        """Apply one parent edge, including child type preparation."""
+        raw_parent = context.sub_interfaces.get(normalize_librenms_port_id(port_id))
+        if raw_parent is None or normalize_librenms_port_id(raw_parent) not in context.unique_host_port_ids:
+            return
+        child, parent = self._resolve_bulk_relationship(context, port_id, raw_parent, expected_owner, "parent")
+        if child is None or (child.parent_id == parent.pk and not _parent_child_needs_promotion(child)):
+            return
+        if _parent_child_needs_promotion(child) and "type" in context.excluded_columns:
+            logger.warning(
+                "Bulk sync: skipping parent link %s -> %s because interface type is excluded",
+                child.name,
+                parent.name,
+            )
+            self._record_skipped_conflict(child.name, "child type is excluded")
+            return
+        if self._apply_relationship_edge(
+            child,
+            "parent",
+            parent,
+            None,
+            "parent",
+            prepare_source=self._prepare_bulk_parent_child,
+        ):
+            self._mutated = True
+
+    def _apply_bulk_bridge(self, context, port_id, expected_owner):
+        """Apply one bridge edge independently from LAG and parent state."""
+        raw_bridge = context.bridge_members.get(normalize_librenms_port_id(port_id))
+        if raw_bridge is None or normalize_librenms_port_id(raw_bridge) not in context.unique_host_port_ids:
+            return
+        member, bridge = self._resolve_bulk_relationship(context, port_id, raw_bridge, expected_owner, "bridge")
+        if member is None or member.bridge_id == bridge.pk:
+            return
+        if self._apply_relationship_edge(member, "bridge", bridge, None, "bridge"):
+            self._mutated = True
 
     @staticmethod
     def _prepare_bulk_lag_aggregate(agg_iface):
@@ -604,6 +671,11 @@ class SyncInterfacesView(
         """
         return _promote_lag_aggregate(agg_iface, with_restore=True)
 
+    @staticmethod
+    def _prepare_bulk_parent_child(child_iface):
+        """Promote a parent child and retain a restore hook for the shared bulk index."""
+        return _promote_parent_child(child_iface, with_restore=True)
+
     def _resolve_relationship_ends(
         self,
         obj,
@@ -622,7 +694,7 @@ class SyncInterfacesView(
         require_interface_source=False,
     ):
         """
-        Resolve the ``(source, related)`` interface pair for one bulk LAG/parent edge.
+        Resolve the ``(source, related)`` interface pair for one bulk relationship edge.
 
         Both ends are resolved by stable LibreNMS port_id. The source is pinned to the row target.
         A selected related row is pinned to its own target, which can be another member of the same
@@ -713,7 +785,16 @@ class SyncInterfacesView(
             return None, None
         return source_iface, related_iface
 
-    def _apply_relationship_edge(self, source_iface, relation_field, related_iface, prepare_related, log_kind):
+    def _apply_relationship_edge(
+        self,
+        source_iface,
+        relation_field,
+        related_iface,
+        prepare_related,
+        log_kind,
+        *,
+        prepare_source=None,
+    ):
         """
         Set ``source_iface.<relation_field> = related_iface`` and persist, validating first.
 
@@ -740,7 +821,13 @@ class SyncInterfacesView(
             # move-to-winner flow in migrate.py. It also keeps the pair atomic: a related-side
             # persist (LAG type bump) can't outlive a failed source save.
             with transaction.atomic():
-                _apply_interface_relationship(source_iface, relation_field, related_iface, prepare_related)
+                _apply_interface_relationship(
+                    source_iface,
+                    relation_field,
+                    related_iface,
+                    prepare_related,
+                    prepare_source,
+                )
         except ValidationError as exc:
             logger.warning(
                 "Bulk sync: skipping invalid %s link %s -> %s: %s",
@@ -913,7 +1000,7 @@ class SyncInterfacesView(
 
         A stable port-ID-keyed override must identify an accessible VC member. An invalid, stale,
         or inaccessible explicit target returns ``None``. The relationship phase reuses this
-        result so a LAG or parent link stays on the same owner as the synced row.
+        result so an interface relationship stays on the same owner as the synced row.
 
         Args:
             obj: The page Device (or VirtualMachine); returned as-is for VMs.
@@ -1440,6 +1527,12 @@ def _promote_lag_aggregate(agg, *, with_restore):
     agg.type = "lag"
 
     def _persist():
+        # NetBox 4.4 can crash while it validates a cross-member parent before it reports
+        # the type conflict. Reject the invalid aggregate state before calling clean().
+        if agg.parent_id is not None:
+            raise ValidationError({"type": "A LAG aggregate cannot have a parent interface."})
+        # Validate the rest of the prepared aggregate state before saving its new type.
+        agg.clean()
         agg.save(update_fields=["type"])
         logger.info("Set interface %s type=lag", agg.name)
 
@@ -1448,20 +1541,42 @@ def _promote_lag_aggregate(agg, *, with_restore):
     return _persist
 
 
-def _validate_relationship(source_iface, relation_field, related_iface):
+def _parent_child_needs_promotion(child):
+    """Return whether a physical device interface needs promotion before it can have a parent."""
+    return isinstance(child, Interface) and child.is_wired and getattr(child, "channel_id", None) is None
+
+
+def _promote_parent_child(child, *, with_restore):
+    """Promote a non-channel child to type=virtual before parent validation."""
+    if not _parent_child_needs_promotion(child):
+        return None
+    original_type = child.type
+    child.type = "virtual"
+
+    def _persist():
+        child.save(update_fields=["type"])
+        logger.info("Set interface %s type=virtual", child.name)
+
+    if with_restore:
+        return (_persist, lambda: setattr(child, "type", original_type))
+    return _persist
+
+
+def _validate_relationship(source_iface, relation_field):
     """
     Run NetBox's model validation for the new relationship FK.
 
     NetBox 4.4.x reads ``self.parent.virtual_chassis`` when the parent sits on another device.
-    ``Interface`` has no such attribute (4.6 reads ``self.device.virtual_chassis``), so the
-    validation NetBox means to run raises AttributeError instead. Tolerate it only for the edge
-    that comparison exists to allow, two interfaces on members of one virtual chassis, and only
-    when the failure really is that attribute.
+    ``Interface`` has no such attribute (4.4.1 fixed the dereference), so the validation NetBox
+    means to run raises AttributeError instead. Work around it only when the
+    source has that exact cross-member parent state and the failure really is that attribute.
+    The failing parent check also runs when this call validates a different relationship, such
+    as adding the same sub-interface to a bridge. After proving the parent is valid, rerun
+    validation without it so NetBox still checks the relationship being written.
 
     Args:
         source_iface: The interface whose FK was set.
-        relation_field: The FK attribute that changed (``"lag"`` | ``"parent"``).
-        related_iface: The interface the FK now points at.
+        relation_field: The FK attribute that changed (``"lag"`` | ``"parent"`` | ``"bridge"``).
 
     Raises:
         ValidationError: when NetBox rejects the relationship.
@@ -1470,27 +1585,42 @@ def _validate_relationship(source_iface, relation_field, related_iface):
     try:
         source_iface.clean()
     except AttributeError as exc:
-        source_chassis = getattr(getattr(source_iface, "device", None), "virtual_chassis_id", None)
-        related_chassis = getattr(getattr(related_iface, "device", None), "virtual_chassis_id", None)
+        source_device = getattr(source_iface, "device", None)
+        parent_iface = getattr(source_iface, "parent", None)
+        parent_device = getattr(parent_iface, "device", None)
+        source_chassis = getattr(source_device, "virtual_chassis_id", None)
+        parent_chassis = getattr(parent_device, "virtual_chassis_id", None)
         if not (
-            relation_field == "parent"
             # exc.name is the attribute the failed access asked for (Python 3.10+), so this
             # matches the one dereference rather than any message mentioning it.
-            and getattr(exc, "name", None) == "virtual_chassis"
+            getattr(exc, "name", None) == "virtual_chassis"
+            and getattr(source_iface, "device_id", None) != getattr(parent_iface, "device_id", None)
             and source_chassis is not None
-            and source_chassis == related_chassis
+            and source_chassis == parent_chassis
             and netbox_clean_reads_parent_virtual_chassis()
         ):
             raise
+        source_iface.parent_id = None
+        try:
+            source_iface.clean()
+        finally:
+            source_iface.parent = parent_iface
         logger.debug(
-            "Interface %s: this NetBox cannot validate a parent on another chassis member; "
-            "both interfaces belong to virtual chassis %s, so the edge is accepted.",
+            "Interface %s: this NetBox cannot validate its parent on another chassis member; "
+            "both interfaces belong to virtual chassis %s, so the %s edge is accepted.",
             source_iface.name,
             source_chassis,
+            relation_field,
         )
 
 
-def _apply_interface_relationship(source_iface, relation_field, related_iface, prepare_related=None):
+def _apply_interface_relationship(
+    source_iface,
+    relation_field,
+    related_iface,
+    prepare_related=None,
+    prepare_source=None,
+):
     """
     Set ``source_iface.<relation_field> = related_iface``, validate, and persist both sides.
 
@@ -1498,11 +1628,9 @@ def _apply_interface_relationship(source_iface, relation_field, related_iface, p
     bulk pass (:meth:`SyncInterfacesView._apply_relationship_edge`) and the inline single-row
     endpoints (:class:`_BaseRelationshipSyncView`) so a fix applies once, not twice.
 
-    ``prepare_related`` may mutate the related interface in memory before validation (e.g. bump
-    an aggregate to ``type=lag``) and return either a ``persist`` callable or a
-    ``(persist, restore)`` pair: ``persist`` runs only after the source validates, and
-    ``restore`` undoes the in-memory mutation when validation fails — needed when the related
-    object is reused across calls (a shared aggregate in the bulk pass).
+    The optional preparation hooks may mutate either interface before validation. Each hook
+    returns a persist callable or a ``(persist, restore)`` pair. The persist call runs only after
+    validation. The restore call repairs shared in-memory objects after a failed edge.
 
     Both rows are persisted with ``update_fields`` so a concurrent edit to their other columns
     isn't clobbered: the objects may have been loaded into a shared index outside any row lock,
@@ -1520,14 +1648,19 @@ def _apply_interface_relationship(source_iface, relation_field, related_iface, p
     relation_id_field = f"{relation_field}_id"
     original_related_id = getattr(source_iface, relation_id_field)
     setattr(source_iface, relation_field, related_iface)
-    prepared = prepare_related(related_iface) if prepare_related else None
-    if isinstance(prepared, tuple):
-        persist_related, restore_related = prepared
-    else:
-        persist_related, restore_related = prepared, None
+    prepared_source = prepare_source(source_iface) if prepare_source else None
+    prepared_related = prepare_related(related_iface) if prepare_related else None
+
+    def _callbacks(prepared):
+        return prepared if isinstance(prepared, tuple) else (prepared, None)
+
+    persist_source, restore_source = _callbacks(prepared_source)
+    persist_related, restore_related = _callbacks(prepared_related)
 
     def _restore_in_memory():
         setattr(source_iface, relation_id_field, original_related_id)
+        if restore_source:
+            restore_source()
         if restore_related:
             restore_related()
 
@@ -1536,9 +1669,11 @@ def _apply_interface_relationship(source_iface, relation_field, related_iface, p
         # NetBox's model clean() contains the cross-owner/type/self-link rules that matter here.
         # Running full_clean() would revalidate every unchanged FK and uniqueness constraint,
         # adding several SELECTs per edge while all relationship rows remain locked.
-        _validate_relationship(source_iface, relation_field, related_iface)
+        _validate_relationship(source_iface, relation_field)
         if persist_related:
             persist_related()
+        if persist_source:
+            persist_source()
         source_iface.save(update_fields=[relation_field])
     except (ValidationError, IntegrityError):
         # clean() rejection OR a statement-time persist failure (the savepoint rolls back
@@ -1556,19 +1691,18 @@ class _BaseRelationshipSyncView(
     View,
 ):
     """
-    Shared skeleton for the inline single-row relationship-sync endpoints (LAG / parent).
+    Shared skeleton for the inline single-row relationship-sync endpoints.
 
-    SyncInterfaceLagView and SyncInterfaceParentView share the permission gate, current-cache
+    The LAG, parent, and bridge views share the permission gate, current-cache
     edge validation, stable port ID resolution, and one transactional write path. They differ
-    only in the FK attribute set, the POST field/label wording, VM support, and the LAG-only
-    aggregate type bump. Keeping
-    one flow here stops the two endpoints drifting (a fix to the resolve/validate/persist
+    only in the FK attribute, POST field, wording, VM support, and preparation hooks. Keeping
+    one flow here stops the endpoints drifting (a fix to the resolve/validate/persist
     sequence applies once, not twice).
 
     Subclass contract (class attributes):
-        relation_field   -- the Interface FK attribute set ("lag" | "parent").
+        relation_field   -- the interface FK attribute set ("lag" | "parent" | "bridge").
         related_port_param -- the POST field carrying the related port ID.
-        relation_label   -- human label in messages ("LAG" | "parent").
+        relation_label   -- human label in messages.
         source_label / related_label -- the two interfaces' roles ("Member"/"Aggregate",
             "Child"/"Parent"), used in the resolution error prefixes.
         supports_vm      -- whether VMInterface is a valid target (parent: yes; lag: no,
@@ -1627,8 +1761,16 @@ class _BaseRelationshipSyncView(
         """
         return None
 
+    def _prepare_source(self, source_iface):
+        """Prepare the source interface before validation when a subclass requires it."""
+        return None
+
     def _related_needs_preparation(self, related_iface):
         """Hook: whether _prepare_related still has work to do on an already-linked pair."""
+        return False
+
+    def _source_needs_preparation(self, source_iface):
+        """Return whether source preparation must repair an existing relationship."""
         return False
 
     def _get_current_edge(self, obj, server_key, request, port_id, related_port_id):
@@ -1641,12 +1783,22 @@ class _BaseRelationshipSyncView(
         relationships = cached_data.get("port_stack_relationships")
         if not is_list_of_dicts(ports) or not isinstance(relationships, dict):
             return None
-        raw_edges = relationships.get("lag_members" if self.relation_field == "lag" else "sub_interfaces")
+        relationship_map_names = {
+            "lag": "lag_members",
+            "parent": "sub_interfaces",
+            "bridge": "bridge_members",
+        }
+        map_name = relationship_map_names[self.relation_field]
+        raw_edges = relationships.get(map_name)
         if not isinstance(raw_edges, dict):
             return None
 
-        lag_members, sub_interfaces = normalize_relationship_maps(relationships)
-        edges = lag_members if self.relation_field == "lag" else sub_interfaces
+        lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
+        edges = {
+            "lag": lag_members,
+            "parent": sub_interfaces,
+            "bridge": bridge_members,
+        }[self.relation_field]
         source_id = normalize_librenms_port_id(port_id)
         related_id = normalize_librenms_port_id(related_port_id)
         if source_id is None or related_id is None or edges.get(source_id) != related_id:
@@ -1798,11 +1950,17 @@ class _BaseRelationshipSyncView(
                 # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
                 # saves with update_fields.
                 try:
-                    if getattr(
-                        source_iface, f"{self.relation_field}_id"
-                    ) != related_iface.pk or self._related_needs_preparation(related_iface):
+                    if (
+                        getattr(source_iface, f"{self.relation_field}_id") != related_iface.pk
+                        or self._related_needs_preparation(related_iface)
+                        or self._source_needs_preparation(source_iface)
+                    ):
                         _apply_interface_relationship(
-                            source_iface, self.relation_field, related_iface, self._prepare_related
+                            source_iface,
+                            self.relation_field,
+                            related_iface,
+                            self._prepare_related,
+                            self._prepare_source,
                         )
                         relationship_changed = True
                 except ValidationError as exc:
@@ -1896,4 +2054,23 @@ class SyncInterfaceParentView(_BaseRelationshipSyncView):
     relation_label = "parent"
     source_label = "Child"
     related_label = "Parent"
+    supports_vm = True
+
+    def _prepare_source(self, source_iface):
+        """Promote a non-channel device interface so NetBox accepts its parent."""
+        return _promote_parent_child(source_iface, with_restore=False)
+
+    def _source_needs_preparation(self, source_iface):
+        """Repair a parent child that was edited back to a physical type."""
+        return _parent_child_needs_promotion(source_iface)
+
+
+class SyncInterfaceBridgeView(_BaseRelationshipSyncView):
+    """Set Interface.bridge or VMInterface.bridge from LibreNMS port-stack data."""
+
+    relation_field = "bridge"
+    related_port_param = "bridge_port_id"
+    relation_label = "bridge"
+    source_label = "Member"
+    related_label = "Bridge"
     supports_vm = True

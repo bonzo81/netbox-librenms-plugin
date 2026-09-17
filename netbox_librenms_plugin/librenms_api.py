@@ -765,9 +765,11 @@ class LibreNMSAPI:
         interface_name_field: str = "ifName",
         compiled_lag_patterns: list | None = None,
         compiled_sap_patterns: list | None = None,
+        bridge_patterns: dict | None = None,
+        compiled_bridge_patterns: list | None = None,
     ) -> dict:
         """
-        Resolve LAG membership and sub-interface parent relationships from LibreNMS data.
+        Resolve LAG, parent, and bridge relationships from LibreNMS port-stack data.
 
         Universal rules (vendor-agnostic, hardcoded):
           1. The LAG aggregate is normally the 'low' entry in a port_stack pair, but the
@@ -778,6 +780,9 @@ class LibreNMSAPI:
           3. Strip a '.N' suffix in the active name field to resolve a physical-level port.
           4. A pair in the active name field where one name is the other plus a numeric '.N'
              suffix is a parent/child pair. The child may be on either side.
+          5. A configured bridge-name pattern identifies the bridge side from ifName or ifDescr.
+             This classification is stable across name-field fallback, so one pair cannot be
+             reinterpreted as a different relationship kind.
 
         Configurable via PortStackLagPattern model:
           - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
@@ -808,6 +813,11 @@ class LibreNMSAPI:
                                    rows stored for device_os only when the LAG patterns are read
                                    from there too, so a caller that supplies its own patterns
                                    stays DB-free; an empty list disables the skip.
+            bridge_patterns: Optional dict of ``{librenms_os: pattern_str}`` that overrides the
+                             bridge-pattern database lookup. Pass an empty dict to disable bridge
+                             matching.
+            compiled_bridge_patterns: Optional pre-compiled bridge-name regexes. These take
+                                      priority over bridge_patterns and the database lookup.
 
         Returns:
             dict with keys (port_ids are canonical normalized positive ints, so every
@@ -815,6 +825,7 @@ class LibreNMSAPI:
             str/int fallbacks):
                 'lag_members':    {member_port_id: aggregate_port_id}
                 'sub_interfaces': {child_port_id: parent_port_id}
+                'bridge_members': {member_port_id: bridge_port_id}
         """
         from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS
         from netbox_librenms_plugin.utils import normalize_librenms_port_id
@@ -861,6 +872,24 @@ class LibreNMSAPI:
                 # A caller that supplies LAG patterns also supplies the SAP policy.
                 compiled_sap_patterns = []
 
+        if compiled_bridge_patterns is None:
+            if bridge_patterns is None and compiled_lag_patterns is None and lag_patterns is None:
+                from netbox_librenms_plugin.models import PortStackLagPattern
+
+                compiled_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(device_os)
+            elif bridge_patterns is None:
+                # A caller that supplies another pattern policy stays database-free.
+                compiled_bridge_patterns = []
+            else:
+                import re as _re
+
+                compiled_bridge_patterns = []
+                for pattern_str in bridge_patterns.values():
+                    try:
+                        compiled_bridge_patterns.append(_re.compile(pattern_str))
+                    except (_re.error, TypeError) as exc:
+                        logger.warning("Skipping invalid bridge name pattern %r: %s", pattern_str, exc)
+
         def _has_sap_name(*ports) -> bool:
             """Return whether any name on these ports matches an excluded SAP pattern."""
             names = tuple(
@@ -892,7 +921,8 @@ class LibreNMSAPI:
                 continue
             filtered_port_pairs.append((high_port, low_port))
 
-        def _resolve_with(field: str) -> tuple[dict, dict]:  # noqa: C901
+        def _resolve_with(field: str, excluded_pairs=None) -> tuple[dict, dict, dict, set]:  # noqa: C901
+            excluded_pairs = excluded_pairs or set()
             by_name: dict[str, dict] = {}
             ambiguous_names: set[str] = set()
             for port in ports_with_id:
@@ -910,14 +940,33 @@ class LibreNMSAPI:
 
             lag_members: dict = {}
             sub_interfaces: dict = {}
+            bridge_members: dict = {}
             conflicted_lag_members: set = set()
             conflicted_sub_interfaces: set = set()
+            conflicted_bridge_members: set = set()
+            claimed_pairs: set[frozenset[int]] = set()
+
+            def _pair_key(first_port: dict, second_port: dict) -> frozenset[int] | None:
+                """Return one order-independent normalized port pair."""
+                first_id = normalize_librenms_port_id(first_port.get("port_id"))
+                second_id = normalize_librenms_port_id(second_port.get("port_id"))
+                if first_id is None or second_id is None:
+                    return None
+                return frozenset((first_id, second_id))
 
             def _is_lag_aggregate(port: dict) -> bool:
                 if port.get("ifType") == "ieee8023adLag":
                     return True
                 name = port.get(field)
                 return isinstance(name, str) and any(pattern.search(name) for pattern in compiled_patterns)
+
+            def _is_bridge(port: dict) -> bool:
+                return any(
+                    pattern.search(name)
+                    for name_field in INTERFACE_NAME_FIELDS
+                    if isinstance(name := port.get(name_field), str)
+                    for pattern in compiled_bridge_patterns
+                )
 
             def _relate(mapping: dict, conflicted_keys: set, key_port: dict, value_port: dict) -> None:
                 """Store a normalized edge and drop keys that have conflicting targets."""
@@ -962,12 +1011,27 @@ class LibreNMSAPI:
                 return child_name.startswith(parent_name + ".") and child_name[len(parent_name) + 1 :].isdigit()
 
             for high_port, low_port in filtered_port_pairs:
+                pair_key = _pair_key(high_port, low_port)
+                if pair_key is None or pair_key in excluded_pairs:
+                    continue
                 # ifStack ordering does not determine which side is the child.
                 if _is_sub_unit_of(low_port, high_port):
                     _relate(sub_interfaces, conflicted_sub_interfaces, low_port, high_port)
+                    claimed_pairs.add(pair_key)
                     continue
                 if _is_sub_unit_of(high_port, low_port):
                     _relate(sub_interfaces, conflicted_sub_interfaces, high_port, low_port)
+                    claimed_pairs.add(pair_key)
+                    continue
+
+                low_is_bridge = _is_bridge(low_port)
+                high_is_bridge = _is_bridge(high_port)
+                if low_is_bridge != high_is_bridge:
+                    if low_is_bridge:
+                        _relate(bridge_members, conflicted_bridge_members, high_port, low_port)
+                    else:
+                        _relate(bridge_members, conflicted_bridge_members, low_port, high_port)
+                    claimed_pairs.add(pair_key)
                     continue
 
                 high_phys = _resolve_physical_port(high_port)
@@ -985,12 +1049,16 @@ class LibreNMSAPI:
                     high_struct = high_phys.get("ifType") == "ieee8023adLag"
                     if low_struct and not high_struct:
                         _relate(lag_members, conflicted_lag_members, high_phys, low_phys)
+                        claimed_pairs.add(pair_key)
                     elif high_struct and not low_struct:
                         _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
+                        claimed_pairs.add(pair_key)
                 elif low_is_agg:
                     _relate(lag_members, conflicted_lag_members, high_phys, low_phys)
+                    claimed_pairs.add(pair_key)
                 elif high_is_agg:
                     _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
+                    claimed_pairs.add(pair_key)
 
             # Every sub-interface edge shortens the active-field name, so the graph cannot contain a cycle.
             for port in ports_with_id:
@@ -1000,20 +1068,27 @@ class LibreNMSAPI:
                 parent_port = _name_derived_parent(port)
                 if parent_port is None or normalize_librenms_port_id(parent_port.get("port_id")) is None:
                     continue
+                pair_key = _pair_key(port, parent_port)
+                if pair_key is None or pair_key in excluded_pairs or pair_key in claimed_pairs:
+                    continue
                 # This loop walks ports_with_id, not filtered_port_pairs, so rule 2 is reapplied here.
                 if _has_sap_name(port, parent_port):
                     continue
                 _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
+                claimed_pairs.add(pair_key)
 
-            return lag_members, sub_interfaces
+            return lag_members, sub_interfaces, bridge_members, claimed_pairs
 
         if not isinstance(interface_name_field, str) or interface_name_field not in INTERFACE_NAME_FIELDS:
             interface_name_field = DEFAULT_INTERFACE_NAME_FIELD
-        lag_members, sub_interfaces = _resolve_with(interface_name_field)
+        lag_members, sub_interfaces, bridge_members, claimed_pairs = _resolve_with(interface_name_field)
         # Take each empty map from the other field without mixing fields within a map.
-        if not lag_members or not sub_interfaces:
+        if not lag_members or not sub_interfaces or not bridge_members:
             fallback_field = next(field for field in INTERFACE_NAME_FIELDS if field != interface_name_field)
-            fallback_lag_members, fallback_sub_interfaces = _resolve_with(fallback_field)
+            fallback_lag_members, fallback_sub_interfaces, fallback_bridge_members, _ = _resolve_with(
+                fallback_field,
+                claimed_pairs,
+            )
             if not lag_members:
                 logger.debug(
                     "The lag_members map from %s is empty. The resolver uses %s alone.",
@@ -1028,7 +1103,18 @@ class LibreNMSAPI:
                     fallback_field,
                 )
                 sub_interfaces = fallback_sub_interfaces
-        return {"lag_members": lag_members, "sub_interfaces": sub_interfaces}
+            if not bridge_members:
+                logger.debug(
+                    "The bridge_members map from %s is empty. The resolver uses %s alone.",
+                    interface_name_field,
+                    fallback_field,
+                )
+                bridge_members = fallback_bridge_members
+        return {
+            "lag_members": lag_members,
+            "sub_interfaces": sub_interfaces,
+            "bridge_members": bridge_members,
+        }
 
     def add_device(self, data):
         """

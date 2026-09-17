@@ -1153,7 +1153,7 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
 
 class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
     """
-    Maps a LibreNMS OS name to the regex identifying LAG aggregate interfaces.
+    Map a LibreNMS OS name to regexes that classify port-stack interfaces.
 
     Used as fallback when a port's ifType is not 'ieee8023adLag'.
     Example: Cisco IOS port-channels have ifType='propVirtual' and need name-based
@@ -1193,6 +1193,16 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             "Example: ':' for Nokia SR OS (lag-1:10)"
         ),
     )
+    bridge_name_pattern = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text=(
+            "Regular expression matching bridge interface names. "
+            "A matching side of a port-stack pair is the bridge for the other side. "
+            r"Example: ^(vmbr|br|bridge)\d+$"
+        ),
+    )
     description = models.TextField(blank=True)
 
     @functools.cached_property
@@ -1210,6 +1220,16 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             return None
         try:
             return re.compile(self.sap_name_pattern)
+        except re.error:
+            return None
+
+    @functools.cached_property
+    def _compiled_bridge_pattern(self):
+        """Return the compiled bridge regex, or None when it is blank or invalid."""
+        if not self.bridge_name_pattern:
+            return None
+        try:
+            return re.compile(self.bridge_name_pattern)
         except re.error:
             return None
 
@@ -1312,8 +1332,28 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             compiled.append(regex)
         return compiled
 
+    @classmethod
+    def compiled_bridge_patterns_for_os(cls, device_os):
+        """Return the compiled bridge-name regexes scoped to the LibreNMS OS."""
+        queryset = cls._patterns_for_os_queryset(device_os)
+        if queryset is None:
+            return []
+        compiled = []
+        for pattern in queryset:
+            regex = pattern._compiled_bridge_pattern
+            if regex is None:
+                if pattern.bridge_name_pattern:
+                    logger.warning(
+                        "Skipping invalid bridge name pattern for OS %r: %r",
+                        pattern.librenms_os,
+                        pattern.bridge_name_pattern,
+                    )
+                continue
+            compiled.append(regex)
+        return compiled
+
     def clean(self):
-        """Validate OS name is non-blank and both stored patterns are valid regexes."""
+        """Normalize the OS name and validate each stored regex."""
         super().clean()
         # Invalidate the cached compiled pattern so it recompiles from the edited value.
         self.__dict__.pop("_compiled_pattern", None)
@@ -1333,6 +1373,10 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         self.sap_name_pattern = (self.sap_name_pattern or "").strip()
         if self.sap_name_pattern:
             validate_regex_field(self.sap_name_pattern, "sap_name_pattern")
+        self.__dict__.pop("_compiled_bridge_pattern", None)
+        self.bridge_name_pattern = (self.bridge_name_pattern or "").strip()
+        if self.bridge_name_pattern:
+            validate_regex_field(self.bridge_name_pattern, "bridge_name_pattern")
 
     def get_absolute_url(self):
         """Return URL for this pattern's detail page."""
@@ -1343,6 +1387,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             "librenms_os": self.librenms_os,
             "lag_name_pattern": self.lag_name_pattern,
             "sap_name_pattern": self.sap_name_pattern,
+            "bridge_name_pattern": self.bridge_name_pattern,
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)
@@ -1351,8 +1396,8 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         """Meta options for PortStackLagPattern."""
 
         ordering = ["librenms_os"]
-        verbose_name = "Port Stack LAG Pattern"
-        verbose_name_plural = "Port Stack LAG Patterns"
+        verbose_name = "Port Stack Pattern"
+        verbose_name_plural = "Port Stack Patterns"
         constraints = [
             # Enforce the same trimmed, case-insensitive key that the OS-scoped pattern lookup
             # reads. A plain unique=True is case-sensitive, so at the DB level "ios" and "IOS"

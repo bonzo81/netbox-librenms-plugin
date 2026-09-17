@@ -295,7 +295,14 @@ class TestHasLagSignalsFieldSelection:
 
         PortStackLagPattern.objects.get_or_create(librenms_os="ios", lag_name_pattern=r"^Po\d+$")
         patterns = PortStackLagPattern.compiled_patterns_for_os(None)
-        assert view._has_lag_name_signals([{"ifName": "Po10", "ifType": "propVirtual"}], "ifName", patterns) is True
+        assert (
+            view._has_relationship_name_signals(
+                [{"ifName": "Po10", "ifType": "propVirtual"}],
+                "ifName",
+                patterns,
+            )
+            is True
+        )
 
     def test_non_string_name_is_skipped_not_crashed(self):
         """A truthy non-string ifName/ifDescr (numeric/list from a malformed payload) is skipped, not crashed.
@@ -328,11 +335,19 @@ class TestHasLagSignalsOsScoped:
         PortStackLagPattern.objects.create(librenms_os="znos", lag_name_pattern=r"^Zo\d+$")
         view = self._view()
         ports = [{"ifName": "Zo1", "ifType": "propVirtual"}]
-        assert view._has_lag_name_signals(ports, "ifName", PortStackLagPattern.compiled_patterns_for_os("znos"))
-        assert not view._has_lag_name_signals(
+        assert view._has_relationship_name_signals(
+            ports,
+            "ifName",
+            PortStackLagPattern.compiled_patterns_for_os("znos"),
+        )
+        assert not view._has_relationship_name_signals(
             ports, "ifName", PortStackLagPattern.compiled_patterns_for_os("some-other-os")
         )
-        assert view._has_lag_name_signals(ports, "ifName", PortStackLagPattern.compiled_patterns_for_os(None))
+        assert view._has_relationship_name_signals(
+            ports,
+            "ifName",
+            PortStackLagPattern.compiled_patterns_for_os(None),
+        )
 
     def test_structural_signal_is_os_independent(self):
         view = self._view()
@@ -576,7 +591,7 @@ class TestLagPatternSharedLoad:
         ports = [{"ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]
 
         with CaptureQueriesContext(connection) as ctx:
-            view._has_lag_name_signals(ports, "ifName", compiled)
+            view._has_relationship_name_signals(ports, "ifName", compiled)
 
         assert self._no_pattern_query(ctx)
 

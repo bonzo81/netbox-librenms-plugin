@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import expect
 
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
@@ -51,6 +52,10 @@ def _selection_row_markup(row):
         attrs.append(f'data-member-of-lag="{esc(row["lag"])}"')
     if row.get("lag_name"):
         attrs.append(f'data-lag-name="{esc(row["lag_name"])}"')
+    if row.get("bridge"):
+        attrs.append(f'data-bridge-port-id="{esc(row["bridge"])}"')
+    if row.get("bridge_name"):
+        attrs.append(f'data-bridge-name="{esc(row["bridge_name"])}"')
     companion = (
         f'<select name="device_selection_{esc(row["port_id"])}"><option value="7">m7</option></select>'
         if row.get("companion")
@@ -136,6 +141,112 @@ class TestRequirementCascade:
         page.check("#cb-4304")
 
         assert _checked_values(page) == {"4304", "4303"}
+
+    def test_bridge_member_pulls_in_its_bridge(self, page):
+        rows = [
+            {"port_id": "100", "name": "vmbr0"},
+            {"port_id": "103", "name": "nic0", "bridge": "100"},
+        ]
+        _load_selection_page(page, rows)
+
+        page.check("#cb-103")
+
+        assert _checked_values(page) == {"100", "103"}
+
+    def test_member_verification_replaces_relationship_metadata(self, page):
+        """Use the selected VC member's dependencies after its row is verified."""
+        html = """<!doctype html><html><body>
+            <input name="csrfmiddlewaretoken" value="test-token">
+            <input name="server_key" value="stub">
+            <input type="radio" name="interface_name_field" value="ifName" checked>
+            <input type="checkbox" id="autoSelectLagMembers" checked>
+            <table id="librenms-interface-table" data-interface-origin-device-id="1"><tbody>
+              <tr data-port-id="10" data-parent-port-id="20" data-parent-name="old-parent"
+                  data-member-of-lag="30" data-lag-name="old-lag"
+                  data-bridge-port-id="40" data-bridge-name="old-bridge">
+                <td><input type="checkbox" name="select" value="10" checked></td>
+                <td><select class="vc-member-select" data-interface="Ethernet1.100">
+                  <option value="1" selected>member-1</option><option value="2">member-2</option>
+                </select></td>
+                <td data-col="name"></td><td data-col="type"></td><td data-col="speed"></td>
+                <td data-col="mac_address"></td><td data-col="mtu"></td><td data-col="enabled"></td>
+                <td data-col="description"></td><td data-col="vlans"></td>
+                <td data-col="librenms_id"></td><td data-col="parent"></td>
+              </tr>
+              <tr data-port-id="20"><td><input type="checkbox" name="select" value="20"></td></tr>
+              <tr data-port-id="21"><td><input type="checkbox" name="select" value="21"></td></tr>
+              <tr data-port-id="30"><td><input type="checkbox" name="select" value="30"></td></tr>
+              <tr data-port-id="40"><td><input type="checkbox" name="select" value="40"></td></tr>
+              <tr data-port-id="41"><td><input type="checkbox" name="select" value="41"></td></tr>
+            </tbody></table>
+        </body></html>"""
+        page.set_content(html)
+        page.route(
+            "**/plugins/librenms_plugin/verify-interface/",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "status": "success",
+                        "formatted_row": {
+                            "name": "Ethernet1.100",
+                            "type": "virtual",
+                            "speed": "1 Gbps",
+                            "mac_address": "",
+                            "mtu": "1500",
+                            "enabled": "yes",
+                            "description": "",
+                            "vlans": "",
+                            "librenms_id": "10",
+                            "parent": "relationships",
+                            "librenms_parent_port_id": 21,
+                            "librenms_parent_name": "new-parent",
+                            "librenms_lag_port_id": None,
+                            "librenms_lag_name": None,
+                            "librenms_bridge_port_id": 41,
+                            "librenms_bridge_name": "new-bridge",
+                        },
+                    }
+                ),
+            ),
+        )
+        _add_page_scripts(page)
+        page.evaluate("initializeCheckboxes()")
+        page.evaluate("refreshRequiredSelections()")
+
+        assert _checked_values(page) == {"10", "20", "30", "40"}
+
+        with page.expect_response("**/plugins/librenms_plugin/verify-interface/"):
+            page.evaluate(
+                """() => {
+                    const select = document.querySelector('.vc-member-select');
+                    handleInterfaceChange(select, '2');
+                }"""
+            )
+
+        row = page.locator("tr[data-port-id='10']")
+        # The response event occurs before response.json() updates the row.
+        expect(row).to_have_attribute("data-bridge-name", "new-bridge")
+        relationship_data = row.evaluate(
+            """row => ({
+                parentPortId: row.dataset.parentPortId,
+                parentName: row.dataset.parentName,
+                memberOfLag: row.dataset.memberOfLag,
+                lagName: row.dataset.lagName,
+                bridgePortId: row.dataset.bridgePortId,
+                bridgeName: row.dataset.bridgeName,
+            })"""
+        )
+        assert relationship_data == {
+            "parentPortId": "21",
+            "parentName": "new-parent",
+            "memberOfLag": "",
+            "lagName": "",
+            "bridgePortId": "41",
+            "bridgeName": "new-bridge",
+        }
+        assert _checked_values(page) == {"10", "21", "41"}
 
     def test_clearing_the_last_dependent_releases_the_whole_chain(self, page):
         _load_selection_page(page, JUNOS_ROWS)
@@ -233,6 +344,16 @@ class TestRequirementCascade:
         notice = page.locator("#parent-cross-page-notices").inner_text()
         assert "LAG interface" in notice
         assert "ae2" in notice
+
+    def test_a_bridge_on_another_page_is_named_as_a_bridge(self, page):
+        rows = [{"port_id": "103", "name": "nic0", "bridge": "100", "bridge_name": "vmbr0"}]
+        _load_selection_page(page, rows)
+
+        page.check("#cb-103")
+
+        notice = page.locator("#parent-cross-page-notices").inner_text()
+        assert "Bridge interface" in notice
+        assert "vmbr0" in notice
 
     def test_turning_the_toggle_back_on_re_derives_the_chain(self, page):
         _load_selection_page(page, JUNOS_ROWS)

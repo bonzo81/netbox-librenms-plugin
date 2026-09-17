@@ -38,6 +38,28 @@ def _message_request():
 
 @pytest.mark.django_db
 class TestInterfaceRelationshipRefresh:
+    def test_bridge_name_signal_fetches_and_resolves_port_stack(self, mock_librenms_api):
+        """A configured bridge name triggers port-stack fetch without a LAG or parent signal."""
+        ports = [
+            {"port_id": 100, "ifName": "vmbr0", "ifType": "ethernetCsmacd"},
+            {"port_id": 103, "ifName": "nic0", "ifType": "ethernetCsmacd"},
+        ]
+        api = _RelationshipAPI(
+            mock_librenms_api,
+            device_info=(True, {"os": "linux"}),
+            port_stack=(True, [{"high_port_id": 100, "low_port_id": 103}]),
+        )
+        view = object.__new__(BaseInterfaceTableView)
+        view._librenms_api = api
+        view.librenms_id = 42
+        snapshot = {"ports": ports}
+
+        view._enrich_port_stack_relationships(_message_request(), snapshot, ports, "ifName")
+
+        assert api.device_info_calls == 1
+        assert api.port_stack_calls == 1
+        assert snapshot["port_stack_relationships"]["bridge_members"] == {103: 100}
+
     def test_structural_signal_resolves_the_device_os(self, mock_librenms_api):
         """The OS scopes the SAP colon skip, so a structural-only snapshot must resolve it too."""
         ports = [

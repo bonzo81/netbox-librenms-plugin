@@ -1223,6 +1223,12 @@ class TestInterfaceFormatting:
             "vlans",
             "librenms_id",
             "parent",
+            "librenms_lag_port_id",
+            "librenms_lag_name",
+            "librenms_parent_port_id",
+            "librenms_parent_name",
+            "librenms_bridge_port_id",
+            "librenms_bridge_name",
         }
 
     def test_matching_alias_is_cleared_in_the_real_formatted_result(self):

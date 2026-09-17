@@ -5,13 +5,11 @@ This module provides 100% test coverage for netbox_librenms_plugin/librenms_api.
 with particular focus on HTTP method correctness to prevent regression bugs.
 """
 
-from unittest.mock import MagicMock, patch
-
 import re
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
-
 
 from netbox_librenms_plugin.tests import test_librenms_api_helpers
 
@@ -2377,7 +2375,7 @@ class TestResolvePortRelationships:
             result = mock_librenms_api.resolve_port_relationships(
                 ports, [{"port_id_high": 1, "port_id_low": 2}], lag_patterns={}
             )
-        assert result == {"lag_members": {}, "sub_interfaces": {}}
+        assert result == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
         assert any("Unrecognized port_stack entry shape" in r.getMessage() for r in caplog.records)
 
     def test_nokia_lag_membership(self, mock_librenms_api):
@@ -2632,7 +2630,7 @@ class TestResolvePortRelationships:
             ports, [], lag_patterns={}, interface_name_field="ifName", compiled_sap_patterns=[]
         )
 
-        assert result == {"lag_members": {}, "sub_interfaces": {2: 1}}
+        assert result == {"lag_members": {}, "sub_interfaces": {2: 1}, "bridge_members": {}}
 
     def test_fallback_uses_other_field_alone_when_configured_field_yields_nothing(self, mock_librenms_api):
         """The resolver uses only ifDescr when configured ifName yields no relationship."""
@@ -2645,7 +2643,7 @@ class TestResolvePortRelationships:
             ports, [], lag_patterns={}, interface_name_field="ifName", compiled_sap_patterns=[]
         )
 
-        assert result == {"lag_members": {}, "sub_interfaces": {2: 1}}
+        assert result == {"lag_members": {}, "sub_interfaces": {2: 1}, "bridge_members": {}}
 
     def test_each_empty_relationship_map_falls_back_independently(self, mock_librenms_api):
         """Each empty configured-field map falls back without replacing a populated map."""
@@ -2661,7 +2659,7 @@ class TestResolvePortRelationships:
             ports, port_stack, lag_patterns={}, interface_name_field="ifDescr", compiled_sap_patterns=[]
         )
 
-        assert result == {"lag_members": {1: 2}, "sub_interfaces": {4: 3}}
+        assert result == {"lag_members": {1: 2}, "sub_interfaces": {4: 3}, "bridge_members": {}}
 
     def test_ifname_lag_pattern_resolves_in_ifdescr_mode(self, mock_librenms_api):
         """An ifName LAG pattern still resolves LAG members in ifDescr mode."""
@@ -2701,6 +2699,7 @@ class TestResolvePortRelationships:
         assert result == {
             "lag_members": {17343: 23722},
             "sub_interfaces": {23723: 23722},
+            "bridge_members": {},
         }
 
     def test_empty_configured_lag_map_falls_back_without_replacing_sub_interfaces(self, mock_librenms_api):
@@ -2721,7 +2720,7 @@ class TestResolvePortRelationships:
             compiled_sap_patterns=[],
         )
 
-        assert result == {"lag_members": {1: 2}, "sub_interfaces": {4: 3}}
+        assert result == {"lag_members": {1: 2}, "sub_interfaces": {4: 3}, "bridge_members": {}}
 
     def test_cisco_ios_lag_via_name_pattern(self, mock_librenms_api, ios_lag_patterns):
         """Cisco IOS: Po10 has propVirtual type but is a LAG via name pattern."""
@@ -2793,7 +2792,7 @@ class TestResolvePortRelationships:
             ports, [], lag_patterns={}, interface_name_field="ifDescr", compiled_sap_patterns=[]
         )
 
-        assert result == {"lag_members": {}, "sub_interfaces": {13: 11}}
+        assert result == {"lag_members": {}, "sub_interfaces": {13: 11}, "bridge_members": {}}
 
     def test_mutual_cross_field_names_resolve_from_ifname_only(self, mock_librenms_api):
         """A cross-field mutual pair resolves from ifName only."""
@@ -2991,7 +2990,7 @@ class TestResolvePortRelationships:
     def test_empty_port_stack_returns_empty_maps(self, mock_librenms_api):
         """Empty port_stack returns empty dicts."""
         result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, [], lag_patterns={})
-        assert result == {"lag_members": {}, "sub_interfaces": {}}
+        assert result == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
 
     def test_missing_port_ids_are_skipped(self, mock_librenms_api):
         """Entries where high_port_id or low_port_id is absent from ports list are skipped."""
@@ -3013,7 +3012,7 @@ class TestResolvePortRelationships:
         ]
         stack = [{"high_port_id": 501, "low_port_id": 502}]
         result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns={})
-        assert result == {"lag_members": {501: 502}, "sub_interfaces": {}}
+        assert result == {"lag_members": {501: 502}, "sub_interfaces": {}, "bridge_members": {}}
 
     @pytest.mark.django_db
     def test_db_patterns_scoped_to_device_os(self, mock_librenms_api):

@@ -28,11 +28,11 @@ from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_model_pk,
     get_interface_name_field,
+    get_interface_port_identity_sets,
     get_librenms_sync_device,
     get_missing_vlan_warning,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
-    get_interface_port_identity_sets,
     get_vlan_sync_css_class,
     is_valid_ports_payload,
     normalize_librenms_port_id,
@@ -281,7 +281,7 @@ class SingleInterfaceVerifyView(
                     server_key=server_key,
                 )
                 # Mirror the main table render: a migrated donor's verify response must not
-                # re-introduce the per-row LAG/parent sync button (which posts directly).
+                # re-introduce a per-row relationship sync button (which posts directly).
                 table.migrated_to_marker = bool(
                     build_migrated_context(origin_device, server_key).get("migrated_to_marker")
                 )
@@ -296,6 +296,7 @@ class SingleInterfaceVerifyView(
                 for related_port_id in (
                     relationship_maps.lag_members.get(port_id),
                     relationship_maps.sub_interfaces.get(port_id),
+                    relationship_maps.bridge_members.get(port_id),
                 ):
                     related_port = relationship_maps.ports_by_id.get(related_port_id)
                     if related_port is None:

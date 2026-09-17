@@ -1,6 +1,5 @@
 from django.urls import include, path
 
-from .utils import slashless_route_aliases
 from .models import (
     CarrierAutoInstallRule,
     DeviceTypeMapping,
@@ -13,6 +12,7 @@ from .models import (
     PlatformMapping,
     PortStackLagPattern,
 )
+from .utils import slashless_route_aliases
 from .views import (
     AddAsOOBView,
     AddBayTemplateView,
@@ -143,17 +143,18 @@ from .views import (
     PromoteToHostView,
     RemoveServerMappingView,
     ReplaceModuleView,
-    SetPreferredServerView,
     SaveUserPrefView,
     SaveVlanGroupOverridesView,
+    SetPreferredServerView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleIPAddressVerifyView,
     SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
+    SyncCablesView,
     SyncCacheFragmentView,
     SyncCacheStatusView,
-    SyncCablesView,
+    SyncInterfaceBridgeView,
     SyncInterfaceLagView,
     SyncInterfaceParentView,
     SyncInterfacesView,
@@ -337,6 +338,12 @@ urlpatterns = [
         "<str:object_type>/<int:object_id>/sync-interface-parent/",
         SyncInterfaceParentView.as_view(),
         name="sync_interface_parent",
+    ),
+    # Sync interface bridge membership URL
+    path(
+        "<str:object_type>/<int:object_id>/sync-interface-bridge/",
+        SyncInterfaceBridgeView.as_view(),
+        name="sync_interface_bridge",
     ),
     # Delete NetBox-only interfaces URL
     path(

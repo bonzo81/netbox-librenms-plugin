@@ -473,7 +473,14 @@ class TestSingleInterfaceVerifyView:
             cache.delete(cache_key)
 
         assert response.status_code == 200
-        assert parent.name in json.loads(response.content)["formatted_row"]["parent"]
+        formatted_row = json.loads(response.content)["formatted_row"]
+        assert parent.name in formatted_row["parent"]
+        assert formatted_row["librenms_parent_port_id"] == 20
+        assert formatted_row["librenms_parent_name"] == parent.name
+        assert formatted_row["librenms_lag_port_id"] is None
+        assert formatted_row["librenms_lag_name"] is None
+        assert formatted_row["librenms_bridge_port_id"] is None
+        assert formatted_row["librenms_bridge_name"] is None
 
     @pytest.mark.django_db
     @pytest.mark.parametrize(

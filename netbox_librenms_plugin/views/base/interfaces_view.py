@@ -18,9 +18,9 @@ from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
+    get_interface_port_identity_sets,
     get_librenms_oob,
     get_librenms_sync_device,
-    get_interface_port_identity_sets,
     is_list_of_dicts,
     is_valid_ports_payload,
     normalize_librenms_port_id,
@@ -150,7 +150,7 @@ class BaseInterfaceTableView(
         Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
 
         Also select the relationship fields used during enrichment. Device interfaces have
-        ``lag`` and ``parent``. VM interfaces have ``parent``.
+        ``lag``, ``parent``, and ``bridge``. VM interfaces have ``parent`` and ``bridge``.
 
         Args:
             obj: The NetBox device (or VM) whose interfaces are indexed.
@@ -167,10 +167,10 @@ class BaseInterfaceTableView(
 
         # Prefetch the M2M relations the table renderers dereference per matched row
         # (render_vlans -> tagged_vlans, render_mac_address -> mac_addresses); without this each
-        # rendered interface row issues its own query for these. Also select_related the lag/parent
+        # rendered interface row issues its own query for these. Also select related relationships
         # FKs that render_parent and render_lag dereference.
         related_field = self.get_select_related_field(obj)
-        extra_related = ["parent"] if related_field == "virtual_machine" else ["lag", "parent"]
+        extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
         interfaces = (
             self.get_interfaces(obj)
             .select_related(related_field, *extra_related)
@@ -446,7 +446,13 @@ class BaseInterfaceTableView(
         names_per_port = self._relationship_port_names(host_ports, interface_name_field)
         structural_signal = self._has_structural_relationship_signals(host_ports, interface_name_field, names_per_port)
         unscoped_patterns = PortStackLagPattern.compiled_patterns_for_os(None)
-        name_signal = self._has_lag_name_signals(host_ports, interface_name_field, unscoped_patterns, names_per_port)
+        unscoped_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(None)
+        name_signal = self._has_relationship_name_signals(
+            host_ports,
+            interface_name_field,
+            [*unscoped_patterns, *unscoped_bridge_patterns],
+            names_per_port,
+        )
 
         # The OS scopes the LAG name patterns AND the SAP colon skip in
         # resolve_port_relationships, so resolve it for a structural snapshot too. Leaving it
@@ -455,6 +461,7 @@ class BaseInterfaceTableView(
         device_os = ""
         device_os_known = False
         scoped_patterns = []
+        scoped_bridge_patterns = []
         if structural_signal or name_signal:
             info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if info_success and isinstance(device_info, dict):
@@ -464,13 +471,14 @@ class BaseInterfaceTableView(
                     device_os_known = True
         if name_signal:
             scoped_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
+            scoped_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(device_os)
         # Read the OS's SAP rule here too, so the resolver does not repeat the query per call.
         scoped_sap_patterns = PortStackLagPattern.compiled_sap_patterns_for_os(device_os)
 
-        scoped_name_signal = self._has_lag_name_signals(
+        scoped_name_signal = self._has_relationship_name_signals(
             host_ports,
             interface_name_field,
-            scoped_patterns,
+            [*scoped_patterns, *scoped_bridge_patterns],
             names_per_port,
         )
         relationship_fetch_failed = False
@@ -484,6 +492,7 @@ class BaseInterfaceTableView(
                     interface_name_field=interface_name_field,
                     compiled_lag_patterns=scoped_patterns,
                     compiled_sap_patterns=scoped_sap_patterns,
+                    compiled_bridge_patterns=scoped_bridge_patterns,
                 )
             else:
                 relationship_fetch_failed = True
@@ -491,8 +500,8 @@ class BaseInterfaceTableView(
                 librenms_data["relationship_data_incomplete"] = True
                 messages.warning(
                     request,
-                    "Interfaces refreshed, but LAG/sub-interface relationship data could not be "
-                    "fetched from LibreNMS; the Parent / LAG column may be incomplete. "
+                    "Interfaces refreshed, but relationship data could not be fetched from LibreNMS. "
+                    "The Relationships column may be incomplete. "
                     "See server logs for details.",
                 )
 
@@ -506,7 +515,7 @@ class BaseInterfaceTableView(
             messages.warning(
                 request,
                 "Interfaces refreshed, but the device OS could not be determined from LibreNMS. "
-                "The Parent / LAG column may be incomplete. See server logs for details.",
+                "The Relationships column may be incomplete. See server logs for details.",
             )
 
     def _enrich_ports_with_vlan_data(self, ports, interface_name_field):
@@ -620,7 +629,7 @@ class BaseInterfaceTableView(
 
         # The refresh path tags a cached snapshot when its port_stack request fails. Keep that
         # warning attached to the snapshot so later cached renders do not silently show an
-        # incomplete Parent / LAG column after the one-shot Django message has disappeared.
+        # incomplete Relationships column after the one-shot Django message has disappeared.
         relationship_data_incomplete = (
             bool(cached_data.get("relationship_data_incomplete")) if isinstance(cached_data, dict) else False
         )
@@ -676,7 +685,7 @@ class BaseInterfaceTableView(
             )
 
             # Pre-fetch all interfaces for all potential chassis members
-            # (_build_interface_lookup_maps select_relateds lag/parent for devices). Materialise the
+            # (_build_interface_lookup_maps selects related interface fields). Materialize the
             # VC members once and index them by vc_position and id so the per-port member resolution
             # and the netbox-only pass below reuse them instead of issuing a members.get(...) query
             # per port / per netbox-only interface (N+1).
@@ -817,7 +826,7 @@ class BaseInterfaceTableView(
 
             table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
             table.allowed_vc_member_ids = actionable_owner_ids
-            # Propagate donor "migrated mode" so the table suppresses per-row LAG/parent sync
+            # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
             # buttons (the bulk form is already hidden by the template; the row buttons POST
             # directly, so they must be stripped here too to keep a migrated donor read-only).
             table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
@@ -910,8 +919,14 @@ class BaseInterfaceTableView(
             for port, names in zip(ports, names_per_port)
         )
 
-    def _has_lag_name_signals(self, ports, interface_name_field, lag_patterns, names_per_port=None):
+    def _has_relationship_name_signals(
+        self,
+        ports,
+        interface_name_field,
+        relationship_patterns,
+        names_per_port=None,
+    ):
         """Return true when an interface name matches one of the supplied OS-scoped patterns."""
         if names_per_port is None:
             names_per_port = self._relationship_port_names(ports, interface_name_field)
-        return any(pat.search(name) for names in names_per_port for pat in lag_patterns for name in names)
+        return any(pat.search(name) for names in names_per_port for pat in relationship_patterns for name in names)
