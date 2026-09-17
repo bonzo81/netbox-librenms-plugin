@@ -17,29 +17,29 @@ from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, SERIAL_INVENTORY_SOURCE
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
     assign_cable_row_ids,
-    cache_remaining_ttl,
-    cable_manual_pick_cache_key,
-    cable_snapshot_token,
     build_librenms_id_qs,
     cable_far_terminations,
     cable_has_librenms_tag,
     cable_is_point_to_point,
+    cable_manual_pick_cache_key,
     cable_path_reaches,
+    cable_snapshot_token,
+    cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
     get_librenms_cable_tag,
     get_librenms_device_id,
-    get_migrated_to_marker,
     get_librenms_oob,
     get_librenms_sync_device,
+    get_migrated_to_marker,
     get_virtual_chassis_member,
     oob_badge_html,
     resolve_interface_on_device,
 )
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,

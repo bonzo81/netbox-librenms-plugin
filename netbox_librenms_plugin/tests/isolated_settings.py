@@ -38,7 +38,6 @@ os.environ["NETBOX_CONFIGURATION"] = _configuration.__name__
 
 from netbox.settings import *  # noqa: E402
 
-
 TEST_DB_NAME_PREFIX = "test_"
 
 _test_database_name = _required_environment("TEST_DB_NAME")

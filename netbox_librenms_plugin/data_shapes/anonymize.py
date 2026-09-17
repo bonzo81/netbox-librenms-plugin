@@ -25,8 +25,8 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_PLACEHOLDER_VALUES,
 )
 from netbox_librenms_plugin.data_shapes.ports import (
-    ANON_INTERFACE_NAME_RE,
     ANON_INTERFACE_NAME_PREFIX,
+    ANON_INTERFACE_NAME_RE,
     compile_lag_patterns,
     name_matches_lag_pattern,
 )

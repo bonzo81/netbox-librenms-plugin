@@ -7,8 +7,8 @@ from urllib.parse import quote_plus
 
 from dcim.models import Cable, CableTermination, ConsolePort, ConsoleServerPort, Device, Interface
 from django.contrib import messages
-from django.core.exceptions import PermissionDenied
 from django.core.cache import cache
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.shortcuts import redirect
 from django.urls import reverse

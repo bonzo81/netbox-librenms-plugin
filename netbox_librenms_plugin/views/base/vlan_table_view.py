@@ -4,8 +4,8 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
-from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     is_list_of_dicts,

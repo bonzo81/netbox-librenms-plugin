@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+
 import pytest
 
 FIXTURE_PATH = Path(__file__).parent / "acs6048_sensors_fixture.json"

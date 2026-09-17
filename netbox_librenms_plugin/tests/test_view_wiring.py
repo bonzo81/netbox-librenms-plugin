@@ -1905,8 +1905,8 @@ class TestInstallRefusesADuplicateSerial:
         """InstallSelectedView builds its work list from the cache, so the row's flags cannot guard it."""
         from types import SimpleNamespace
 
-        from django.core.cache import cache
         from dcim.models import Module
+        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -2377,8 +2377,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_move_refuses_a_conflict_module_outside_the_grant(self):
         """MoveModuleView reassigns the conflict module's bay/device, and its pk comes from the POST — a secondary lookup the primary scoping does not cover."""
-        from dcim.models import Device, Module, ModuleBay, ModuleType
-        from dcim.models import Manufacturer
+        from dcim.models import Device, Manufacturer, Module, ModuleBay, ModuleType
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.modules import MoveModuleView
@@ -2923,9 +2922,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_vc_serial_assign_refuses_a_member_outside_the_grant(self):
         """AssignVCSerialView overwrites the member's serial and takes its pk from the POST, guarded only by same-VC membership."""
-        from dcim.models import Device
-
-        from dcim.models import VirtualChassis
+        from dcim.models import Device, VirtualChassis
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.device_fields import AssignVCSerialView

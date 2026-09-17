@@ -1,8 +1,9 @@
 import netbox.models.deletion
-import netbox_librenms_plugin.models
 import taggit.managers
 import utilities.json
 from django.db import migrations, models
+
+import netbox_librenms_plugin.models
 
 INITIAL_LAG_PATTERNS = [
     ("ios", r"^Po\d+$"),

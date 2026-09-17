@@ -17,7 +17,6 @@ import ast
 import sys
 from pathlib import Path
 
-
 HASHABLE_NARROWING_TYPES = frozenset({"str", "int", "bytes", "float", "frozenset"})
 TAINTING_CALLS = frozenset({"get", "getlist", "loads", "pop"})
 # Literals that cannot be a set member or a dict key, so a read that can return one is tainting.

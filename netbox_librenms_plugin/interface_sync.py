@@ -11,13 +11,13 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
-    coerce_interface_mtu,
     AmbiguousLibreNMSIdError,
     bounded_interface_text,
-    interface_name_rejection_reason,
+    coerce_interface_mtu,
     convert_speed_to_kbps,
     find_by_librenms_id,
     interface_name_fallback_matches_port,
+    interface_name_rejection_reason,
     normalize_librenms_port_id,
     set_librenms_device_id,
 )

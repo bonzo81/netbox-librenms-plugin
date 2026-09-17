@@ -9,12 +9,11 @@ from netbox.views import generic
 from utilities.rqworker import get_workers_for_queue
 
 from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.import_utils import (
     get_active_cached_searches_for_servers,
     process_device_filters,
 )
-from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSUnreachable
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.server_selection import (
     build_configured_server_options,

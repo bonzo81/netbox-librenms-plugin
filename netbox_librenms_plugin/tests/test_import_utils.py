@@ -6,6 +6,7 @@ device retrieval, and device validation functions.
 """
 
 from copy import deepcopy
+
 import pytest
 
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server

@@ -297,8 +297,9 @@ class TestUpdateVcMemberSuggestedNames:
 class TestCreateVirtualChassisWithMembers:
     def test_a_taken_master_name_keeps_the_original_name(self, caplog):
         from dcim.models import Device
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
         master = make_device("vc-keep-name", serial="MASTER1")
@@ -322,6 +323,7 @@ class TestCreateVirtualChassisWithMembers:
         later comparison against a serial normalized elsewhere fails.
         """
         from dcim.models import Device
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
@@ -341,6 +343,7 @@ class TestCreateVirtualChassisWithMembers:
         and the member-count check counts the master row as a member it failed to create.
         """
         from dcim.models import Device
+
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
@@ -367,6 +370,7 @@ class TestCreateVirtualChassisWithMembers:
         member of its own virtual chassis.
         """
         from dcim.models import Device
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
@@ -408,8 +412,9 @@ class TestCreateVirtualChassisWithMembers:
 
     def test_a_member_serial_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
         master = make_device("vc-dup-serial", serial="MASTER2")
@@ -430,6 +435,7 @@ class TestCreateVirtualChassisWithMembers:
     def test_a_member_serial_matches_a_padded_stored_value(self, caplog):
         """Legacy padding in NetBox must not permit a duplicate normalized member serial."""
         from dcim.models import Device
+
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
@@ -451,8 +457,9 @@ class TestCreateVirtualChassisWithMembers:
 
     def test_a_member_name_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
         master = make_device("vc-dup-name", serial="MASTER3")
@@ -473,6 +480,7 @@ class TestCreateVirtualChassisWithMembers:
         from dcim.models import Device, VirtualChassis
         from django.core.exceptions import ValidationError
         from django.db import DatabaseError
+
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()

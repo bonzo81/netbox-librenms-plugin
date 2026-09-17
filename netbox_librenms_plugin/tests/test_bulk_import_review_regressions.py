@@ -181,8 +181,8 @@ def test_background_collision_gate_uses_job_user_scope(monkeypatch):
     from dcim.models import Device
     from virtualization.models import VirtualMachine
 
-    from netbox_librenms_plugin.jobs import ImportDevicesJob
     from netbox_librenms_plugin import librenms_api as librenms_api_module
+    from netbox_librenms_plugin.jobs import ImportDevicesJob
 
     target = make_device("visible-job-collision-target")
     hidden = make_device("hidden-job-collision-target")

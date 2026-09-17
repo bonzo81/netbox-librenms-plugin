@@ -157,6 +157,7 @@ class TestSiteMatching:
     def test_find_site_for_location_exact_match(self):
         """Location name matched to site."""
         from dcim.models import Site
+
         from netbox_librenms_plugin.utils import find_matching_site
 
         site = Site.objects.create(name="DC1", slug="utils-dc1")
@@ -180,6 +181,7 @@ class TestSiteMatching:
     def test_find_site_falls_back_to_mapping(self):
         """Resolve a stored alias when no exact site name matches."""
         from dcim.models import Site
+
         from netbox_librenms_plugin.models import LocationMapping
         from netbox_librenms_plugin.utils import find_matching_site
 
@@ -196,6 +198,7 @@ class TestSiteMatching:
     def test_find_site_exact_match_skips_mapping(self, django_assert_num_queries):
         """An exact site name wins without querying a conflicting alias."""
         from dcim.models import Site
+
         from netbox_librenms_plugin.models import LocationMapping
         from netbox_librenms_plugin.utils import find_matching_site
 
@@ -240,6 +243,7 @@ class TestPlatformMatching:
     def test_find_platform_for_os_exact_match(self):
         """OS string matched to platform."""
         from dcim.models import Platform
+
         from netbox_librenms_plugin.utils import find_matching_platform
 
         platform = Platform.objects.create(name="ios", slug="utils-ios")
