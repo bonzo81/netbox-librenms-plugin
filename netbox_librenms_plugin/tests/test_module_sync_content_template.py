@@ -1,4 +1,5 @@
-"""Render the real _module_sync_content.html template in both modes.
+"""
+Render the real _module_sync_content.html template in both modes.
 
 In migrated mode the Install-Selected POST form is dropped (a migrated donor must not be able
 to install modules). But the module table still renders interactive VC-member dropdowns whose
@@ -31,6 +32,7 @@ class TestModuleSyncContentTemplateMigratedMode:
             "table": table,
             "server_key": server_key,
             "cache_expiry": None,
+            "install_selected_inventory_binding": "test-inventory-binding",
         }
         ctx = {
             "module_sync": module_sync,
@@ -51,12 +53,14 @@ class TestModuleSyncContentTemplateMigratedMode:
         # POSTs (handleModuleChange) still authenticate and scope to the right server.
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
+        assert 'name="inventory_binding"' not in html
 
     def test_normal_mode_emits_install_form_with_csrf_and_server_key(self):
         html = self._render(migrated=None, has_write_permission=True)
         assert 'id="install-selected-form"' in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
+        assert 'name="inventory_binding" value="test-inventory-binding"' in html
 
     def test_normal_mode_omits_server_key_input_when_absent(self):
         # Single-server / default-server deployments have no server_key; the hidden input must be

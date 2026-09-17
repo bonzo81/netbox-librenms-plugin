@@ -1,6 +1,8 @@
 """Behavior tests for LibreNMS device and interface tables."""
 
+import json
 import re
+from html import unescape
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -141,6 +143,26 @@ class TestDeviceImportTable:
         repeated_device_queries = [query["sql"] for query in queries if 'FROM "dcim_device"' in query["sql"]]
         assert len(repeated_device_queries) == 1
 
+    def test_selected_host_render_reuses_the_scoped_device(self, django_assert_num_queries):
+        """Rendering a selected host must not fetch the already loaded Device again."""
+        from dcim.models import Device
+
+        user = make_superuser("selected-host-render-user")
+        host = make_device("selected-host-render-device")
+        selected_host = Device.objects.restrict(user, "view").get(pk=host.pk)
+        table = self._table(user=user)
+        record = _import_record(
+            import_as_vm=True,
+            vm_placement={"method": "host", "found": True, "host_device": selected_host},
+        )
+
+        with django_assert_num_queries(0):
+            html = str(table.render_import_setup(None, record))
+
+        assert 'name="host_device_4101"' in html
+        assert f'value="{host.pk}"' in html
+        assert host.name in html
+
     def test_bulk_import_builds_the_refreshed_table_outside_the_device_loop(self):
         """HTMX refreshes must pass the complete imported row batch to one table."""
         import ast
@@ -271,11 +293,137 @@ class TestDeviceImportTable:
         assert f'value="{cluster.pk}" selected' in select_html
         assert (
             reverse(
-                "plugins:netbox_librenms_plugin:device_cluster_update",
+                "plugins:netbox_librenms_plugin:device_import_plan_update",
                 kwargs={"device_id": 4101},
             )
             in select_html
         )
+
+    @pytest.mark.parametrize(
+        ("placement_method", "control_id"),
+        [("cluster", "cluster_4101"), ("host", "host_device_4101")],
+    )
+    def test_vm_import_setup_label_targets_the_primary_control(self, placement_method, control_id):
+        """The visible placement label must activate its cluster or host control."""
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+        cluster = make_cluster("Accessible import setup cluster")
+        host = make_device("accessible-import-setup-host")
+        validation = {
+            "import_as_vm": True,
+            "vm_placement": {
+                "method": placement_method,
+                "found": True,
+                "host_device": host if placement_method == "host" else None,
+            },
+            "cluster": {"found": placement_method == "cluster", "cluster": cluster},
+        }
+
+        html = str(self._table().render_import_setup(None, _import_record(**validation)))
+        primary_labels = [
+            label for label in open_tags(html, "label") if "import-source-label" in label.get("class", "")
+        ]
+        controls = open_tags(html, "select")
+
+        assert primary_labels == [{"class": "import-source-label text-secondary", "for": control_id}]
+        assert any(control.get("id") == control_id for control in controls)
+
+    def test_device_import_setup_label_targets_the_role_control(self):
+        """The required Device role label must activate its select control."""
+        from dcim.models import DeviceRole
+
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+        role = DeviceRole.objects.create(name="Accessible import role", slug="accessible-import-role")
+        html = str(
+            self._table().render_import_setup(
+                None,
+                _import_record(device_role={"found": True, "role": role}),
+            )
+        )
+        primary_label = next(
+            label for label in open_tags(html, "label") if "import-source-label" in label.get("class", "")
+        )
+
+        assert primary_label["for"] == "role_4101"
+        assert any(control.get("id") == "role_4101" for control in open_tags(html, "select"))
+
+    def test_import_option_labels_target_their_controls(self):
+        """Role and rack option labels must activate the corresponding select controls."""
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+        site = make_device("import-option-label-source").site
+        vm_html = str(
+            self._table().render_import_setup(
+                None,
+                _import_record(
+                    import_as_vm=True,
+                    vm_placement={"method": "cluster", "found": False, "host_device": None},
+                    cluster={"found": False, "cluster": None},
+                ),
+            )
+        )
+        device_html = str(
+            self._table().render_import_setup(
+                None,
+                _import_record(site={"found": True, "site": site}, rack={"rack": None, "available_racks": []}),
+            )
+        )
+
+        assert any(control.get("id") == "role_4101" for control in open_tags(vm_html, "select"))
+        assert any(control.get("id") == "rack_4101" for control in open_tags(device_html, "select"))
+
+    def test_matched_site_heading_is_not_a_label_for_an_unrelated_control(self):
+        """Static matched-site text must not identify the placement-method select as its control."""
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+        site = make_device("matched-site-heading-source").site
+        html = str(
+            self._table().render_import_setup(
+                None,
+                _import_record(
+                    import_as_vm=True,
+                    vm_placement={"method": "site", "found": True, "host_device": None},
+                    site={"found": True, "site": site},
+                ),
+            )
+        )
+
+        assert not any("import-source-label" in label.get("class", "") for label in open_tags(html, "label"))
+        assert any("import-source-label" in element.get("class", "") for element in open_tags(html, "div"))
+
+    def test_cluster_dropdown_only_caches_clusters_the_user_can_view(self):
+        """The import table must not disclose clusters outside the viewer's object scope."""
+        from virtualization.models import Cluster
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        visible = make_cluster("Visible import table cluster")
+        make_cluster("Hidden import table cluster")
+        user = make_user_with_perms("cluster-scoped-import-table-user", [])
+        user = grant(user, "view", Cluster, constraints={"pk": visible.pk})
+
+        table = self._table(user=user)
+
+        assert table._cached_clusters == [visible]
+
+    def test_role_dropdown_only_caches_roles_the_user_can_view(self):
+        """The import table must not disclose roles outside the viewer's object scope."""
+        from dcim.models import DeviceRole
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        visible = DeviceRole.objects.create(name="Visible import table role", slug="visible-import-table-role")
+        hidden = DeviceRole.objects.create(name="Hidden import table role", slug="hidden-import-table-role")
+        user = make_user_with_perms("role-scoped-import-table-user", [])
+        user = grant(user, "view", DeviceRole, constraints={"pk": visible.pk})
+
+        table = self._table(user=user)
+        html = str(table.render_netbox_role(None, _import_record(import_as_vm=True)))
+
+        assert table._cached_roles == [visible]
+        assert visible.name in html
+        assert hidden.name not in html
 
     def test_clusterless_vm_is_rendered_without_dereferencing_a_cluster(self):
         vm = make_vm("import-table-standalone-vm")
@@ -324,6 +472,22 @@ class TestDeviceImportTable:
         html = str(self._table().render_netbox_role(None, _import_record(import_as_vm=True)))
 
         assert "Select Role (Optional)" in html
+
+    def test_legacy_netbox_labels_the_clustered_host_requirement(self, monkeypatch):
+        """The host placement choice must explain the older NetBox constraint."""
+        monkeypatch.setattr(
+            "netbox_librenms_plugin.tables.device_status.netbox_allows_standalone_vm_host",
+            lambda: False,
+        )
+
+        html = str(
+            self._table().render_vm_placement_method(
+                None,
+                _import_record(import_as_vm=True),
+            )
+        )
+
+        assert "Host device (clustered host required)" in html
 
     def test_rack_dropdown_uses_real_location_and_rack_once(self):
         from dcim.models import Location, Rack
@@ -379,7 +543,7 @@ class TestDeviceImportTable:
             ({}, "—"),
             ({"is_stack": True, "member_count": 1}, "—"),
             ({"is_stack": True, "member_count": 2, "detection_error": "timeout"}, "Error"),
-            ({"is_stack": True, "member_count": 3}, "3 members"),
+            ({"is_stack": True, "member_count": 3}, "Stack, 3"),
         ],
     )
     def test_virtual_chassis_states_use_the_real_details_route(self, vc_data, expected):
@@ -398,13 +562,16 @@ class TestDeviceImportTable:
             )
             assert "server_key=server+with+space" in html
 
-    def test_validation_url_prefers_cluster_and_preserves_server_and_vc_state(self):
+    def test_validation_url_preserves_vm_cluster_intent_and_request_scope(self):
+        """Preserve VM cluster placement and server scope in validation URLs."""
         cluster = make_cluster("Validation URL cluster")
         table = self._table(server_key="secondary server")
 
         url = table._build_validation_details_url(
             9,
             {
+                "import_as_vm": True,
+                "vm_placement": {"method": "cluster", "found": True, "host_device": None},
                 "cluster": {"found": True, "cluster": cluster},
                 "_vc_detection_enabled": True,
             },
@@ -416,21 +583,69 @@ class TestDeviceImportTable:
             kwargs={"device_id": 9},
         )
         assert parse_qs(parsed.query) == {
-            "cluster_id": [str(cluster.pk)],
+            "cluster_9": [str(cluster.pk)],
             "enable_vc_detection": ["true"],
+            "object_type_9": ["virtualmachine"],
             "server_key": ["secondary server"],
+            "vm_placement_9": ["cluster"],
         }
 
-    def test_validation_url_uses_role_when_no_cluster_is_selected(self):
-        from dcim.models import DeviceRole
+    def test_validation_url_preserves_device_role_intent(self):
+        """Preserve device role and rack selections in validation URLs."""
+        from dcim.models import Rack
 
-        role = DeviceRole.objects.create(name="Validation URL role", slug="validation-url-role")
+        source = make_device("validation-url-device")
+        rack = Rack.objects.create(name="Validation URL rack", site=source.site, status="active")
         url = self._table()._build_validation_details_url(
             10,
-            {"device_role": {"found": True, "role": role}},
+            {
+                "device_role": {"found": True, "role": source.role},
+                "rack": {"found": True, "rack": rack},
+            },
         )
 
-        assert parse_qs(urlparse(url).query) == {"role_id": [str(role.pk)]}
+        assert parse_qs(urlparse(url).query) == {
+            "object_type_10": ["device"],
+            "rack_10": [str(rack.pk)],
+            "role_10": [str(source.role_id)],
+        }
+
+    def test_validation_url_preserves_vm_host_intent(self):
+        """Preserve VM host placement in validation URLs."""
+        host = make_device("Validation URL host")
+        url = self._table()._build_validation_details_url(
+            11,
+            {
+                "import_as_vm": True,
+                "vm_placement": {"method": "host", "found": True, "host_device": host},
+            },
+        )
+
+        assert parse_qs(urlparse(url).query) == {
+            "host_device_11": [str(host.pk)],
+            "object_type_11": ["virtualmachine"],
+            "vm_placement_11": ["host"],
+        }
+
+    def test_validation_details_button_does_not_duplicate_url_intent_fields(self):
+        """Keep validation intent in the details URL without duplicate controls."""
+        cluster = make_cluster("Validation details button cluster")
+        html = str(
+            self._table().render_actions(
+                None,
+                _import_record(
+                    import_as_vm=True,
+                    can_import=True,
+                    is_ready=True,
+                    vm_placement={"method": "cluster", "found": True, "host_device": None},
+                    cluster={"found": True, "cluster": cluster},
+                ),
+            )
+        )
+
+        assert 'hx-include="#use-sysname-toggle, #strip-domain-toggle"' in html
+        assert f"object_type_{4101}=virtualmachine" in html
+        assert f"cluster_{4101}={cluster.pk}" in html
 
     def test_actions_render_real_object_routes(self):
         device = make_device("actions-existing-device")
@@ -546,6 +761,92 @@ class TestDeviceImportTable:
         assert (
             reverse(
                 "plugins:netbox_librenms_plugin:device_validation_details",
+                kwargs={"device_id": 4101},
+            )
+            in html
+        )
+
+    def test_full_table_render_uses_the_focused_proposal_a_columns(self):
+        record = _import_record(
+            can_import=True,
+            is_ready=True,
+            resolved_name="edge-4101",
+            naming_criteria={"source": "sysname", "strip_domain": True},
+        )
+        table = self._table([record], server_key="secondary")
+
+        html = table.as_html(RequestFactory().get("/"))
+
+        assert list(table.columns.names()) == [
+            "selection",
+            "netbox_object",
+            "location",
+            "hardware",
+            "hostname",
+            "sysname",
+            "import_setup",
+            "actions",
+        ]
+        assert "NetBox object" in html
+        assert "Import setup" in html
+        assert 'data-import-column="hostname"' in html
+        assert 'data-import-column="sysname"' in html
+        assert "From sysName, domain removed" in html
+        assert "Role required" in html
+        assert "Optional placement" in html
+        assert "Object type" in html
+
+    @pytest.mark.parametrize(
+        ("sysname", "expected_name", "expected_source"),
+        [
+            ("999.1.2.3", "999", "sysName"),
+            (".example.test", "device-42", "fallback name"),
+        ],
+    )
+    def test_live_name_variants_come_from_the_importer_resolver(self, sysname, expected_name, expected_source):
+        record = _import_record(42)
+        record["sysName"] = sysname
+
+        rendered = str(self._table().render_netbox_object(None, record))
+        encoded_variants = re.search(r'data-import-name-variants="([^"]+)"', rendered).group(1)
+        variants = json.loads(unescape(encoded_variants))
+
+        assert variants["sysname_stripped"] == {
+            "name": expected_name,
+            "source": expected_source,
+        }
+
+    def test_vm_setup_keeps_cluster_inline_and_role_in_attached_options(self):
+        cluster = make_cluster("Focused setup cluster")
+        record = _import_record(
+            import_as_vm=True,
+            cluster={"found": True, "cluster": cluster},
+            resolved_name="compute-4101",
+        )
+        table = self._table([record])
+
+        html = str(table.rows[0].get_cell("import_setup"))
+
+        assert "Cluster" in html
+        assert f'value="{cluster.pk}" selected' in html
+        assert "VM role" in html
+        assert html.index(f'name="cluster_{record["device_id"]}"') < html.index("VM role")
+
+    def test_virtual_chassis_summary_is_attached_to_the_netbox_object(self):
+        record = _import_record(
+            resolved_name="stack-4101",
+            virtual_chassis={"is_stack": True, "member_count": 3},
+        )
+        table = self._table([record], server_key="secondary")
+
+        html = str(table.rows[0].get_cell("netbox_object"))
+
+        assert "Device" in html
+        assert "Stack, 3" in html
+        assert "device_vc_details" not in html
+        assert (
+            reverse(
+                "plugins:netbox_librenms_plugin:device_vc_details",
                 kwargs={"device_id": 4101},
             )
             in html

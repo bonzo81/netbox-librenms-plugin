@@ -657,6 +657,7 @@ class TestValidateDeviceForImport:
             "device_type",
             "device_role",
             "cluster",
+            "vm_placement",
             "platform",
             "rack",
             "location",
@@ -723,17 +724,18 @@ class TestValidateDeviceForImport:
         assert result["cluster"]["found"] is True
         assert result["is_ready"] is False
 
-    def test_new_vm_skips_device_fields_and_requires_a_cluster(self):
+    def test_new_vm_skips_device_fields_and_requires_valid_placement(self):
         cluster = make_cluster("Validation available cluster")
 
         result = self._validate(_device_payload(5403), import_as_vm=True)
 
         assert result["import_as_vm"] is True
-        assert result["site"]["found"] is True
+        assert result["site"]["found"] is False
         assert result["device_type"]["found"] is True
         assert result["device_role"]["found"] is True
         assert cluster in result["cluster"]["available_clusters"]
-        assert any("Cluster must be manually selected" in issue for issue in result["issues"])
+        assert result["vm_placement"] == {"method": "site", "found": False, "host_device": None}
+        assert any("VM placement" in issue for issue in result["issues"])
 
     def test_device_id_match_forces_device_mode_and_surfaces_link(self):
         device = make_device("validation-linked", librenms_cf={SERVER_KEY: 5404})
@@ -1426,6 +1428,7 @@ class TestImportSingleDevice:
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import make_superuser
 
         _api, _server = librenms_api
         site, device_type, role = self._infrastructure("manual")
@@ -1444,6 +1447,7 @@ class TestImportSingleDevice:
                 "rack_id": rack.pk,
             },
             libre_device=_device_payload(5603),
+            user=make_superuser(),
         )
 
         assert result["success"] is True
@@ -1452,6 +1456,42 @@ class TestImportSingleDevice:
         assert result["device"].role == role
         assert result["device"].platform == platform
         assert result["device"].rack == rack
+
+    def test_manual_rack_outside_the_user_view_scope_is_rejected(self, librenms_api):
+        """The persistence boundary must reject a forged hidden rack ID."""
+        from dcim.models import Device, Rack
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        _api, _server = librenms_api
+        site, device_type, role = self._infrastructure("hidden-rack")
+        visible = Rack.objects.create(name="Visible import boundary rack", site=site, status="active")
+        hidden = Rack.objects.create(name="Hidden import boundary rack", site=site, status="active")
+        user = make_user_with_perms(
+            "hidden-import-boundary-rack-user",
+            [("add", Device), ("change", Device)],
+        )
+        user = grant(user, "view", Rack, constraints={"pk": visible.pk})
+
+        result = import_single_device(
+            5612,
+            SERVER_KEY,
+            _validation(
+                site=site,
+                device_type=device_type,
+                role=role,
+                resolved_name="hidden-rack-import",
+            ),
+            manual_mappings={"rack_id": hidden.pk},
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5612),
+            user=user,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "Selected rack is unavailable"
+        assert not Device.objects.filter(name="hidden-rack-import").exists()
 
     def test_existing_and_ambiguous_validation_states_block_creation(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device

@@ -187,6 +187,26 @@ class TestDeviceNameDetermination:
         # IP addresses should not have domain stripped
         assert name == "192.168.1.1"
 
+    def test_determine_device_name_handles_a_padded_ip_address(self):
+        """The resolved name removes surrounding whitespace from an IP address."""
+        from netbox_librenms_plugin.import_utils import _determine_device_name
+
+        device_data = {"hostname": "198.18.0.1 "}
+
+        name = _determine_device_name(device_data, use_sysname=False, strip_domain=True)
+
+        assert name == "198.18.0.1"
+
+    def test_determine_device_name_treats_whitespace_only_sysname_as_absent(self):
+        """A whitespace-only sysName must not hide the hostname fallback."""
+        from netbox_librenms_plugin.import_utils import _determine_device_name
+
+        device_data = {"sysName": " \t\n", "hostname": "fallback-host"}
+
+        name = _determine_device_name(device_data, use_sysname=True)
+
+        assert name == "fallback-host"
+
     def test_determine_device_name_fallback_to_device_id(self):
         """Fallback to device_id when no name available."""
         from netbox_librenms_plugin.import_utils import _determine_device_name
@@ -2029,7 +2049,7 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["is_ready"] is False
 
     def test_vm_fresh_match_without_cluster_resets_stale_display(self):
-        """A newly matched clusterless VM clears a stale cluster selection but keeps available clusters."""
+        """A newly matched clusterless VM clears stale cluster and placement selections."""
         from virtualization.models import VirtualMachine
 
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
@@ -2045,6 +2065,8 @@ class TestRefreshExistingDeviceCrossModelIdWins:
             "issues": [],
             "warnings": [],
             "cluster": {"found": True, "cluster": stale, "available_clusters": ["keep-me"]},
+            "site": {"found": True},
+            "vm_placement": {"method": "host", "found": True, "host_device": stale},
         }
 
         _refresh_existing_device(
@@ -2055,6 +2077,11 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["cluster"]["found"] is False
         assert validation["cluster"]["cluster"] is None
         assert validation["cluster"]["available_clusters"] == ["keep-me"]
+        assert validation["vm_placement"] == {
+            "method": "site",
+            "found": True,
+            "host_device": None,
+        }
 
     def test_serial_fallback_ambiguity_fails_closed(self):
         """When the serial fallback resolves more than one NetBox device, the refresh re-check must fail closed (ambiguous match + can_import False), not bind to an arbitrary duplicate."""

@@ -1,4 +1,5 @@
-"""Render the real _ipaddress_sync_content.html template in normal vs migrated mode.
+"""
+Render the real _ipaddress_sync_content.html template in normal vs migrated mode.
 
 In migrated mode the POST form is removed (a migrated donor must not submit an IP sync), so the
 sync-only 'Set Primary IP' switch must not render as an active control with nowhere to submit.
@@ -29,6 +30,7 @@ class TestIpAddressSyncContentTemplateMigratedMode:
                 "table": table,
                 "server_key": server_key,
                 "set_primary_ip": False,
+                "create_missing_interfaces": False,
                 "cache_expiry": None,
                 "movable_ips": list(movable),
             },
@@ -47,6 +49,23 @@ class TestIpAddressSyncContentTemplateMigratedMode:
     def test_normal_mode_shows_set_primary_ip_switch(self):
         html = self._render(migrated=None)
         assert 'id="set-primary-ip-toggle-cb"' in html
+
+    def test_normal_mode_groups_ip_behavior_under_sync_options(self):
+        """The two IP behavior choices use the compact sync-options disclosure."""
+        html = self._render(migrated=None)
+
+        assert 'id="ip-sync-options"' in html
+        assert "Sync options" in html
+        menu_start = html.index('class="dropdown-menu')
+        set_primary = html.index('id="set-primary-ip-toggle-cb"')
+        create_missing = html.index('id="create-missing-interfaces-toggle-cb"')
+        reset = html.index('id="reset-ip-sync-options"')
+        assert menu_start < set_primary < create_missing < reset
+
+    def test_migrated_mode_hides_ip_sync_options(self):
+        html = self._render(migrated={"server_key": "default", "device_id": 1, "at": "now"})
+
+        assert 'id="ip-sync-options"' not in html
 
     def test_migrated_mode_renders_move_button_targeting_the_ip_view(self):
         """A write-permitted migrated donor shows a Move button posting to ipaddress_move_to_winner for the IP's pk."""
@@ -98,7 +117,8 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         assert "winner missing" in html
 
     def test_move_button_degrades_to_read_only_when_url_unregistered(self):
-        """A missing/restacked ipaddress_move_to_winner route must degrade to read-only, not 500.
+        """
+        A missing/restacked ipaddress_move_to_winner route must degrade to read-only, not 500.
 
         The shared include uses ``{% url ... as move_url %}`` + ``and move_url``, so an unresolved
         route yields an empty move_url and the read-only fallback instead of a bare {% url %} that

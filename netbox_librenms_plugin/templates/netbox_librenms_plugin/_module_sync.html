@@ -1,9 +1,9 @@
 {% load helpers %}
 
 <!-- Action Buttons -->
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h2>Module Sync</h2>
-    <div class="btn-list">
+<div class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar">
+    <div class="btn-list align-items-center">
+        {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=module_sync.cache_expiry cache_container_id="module-cache-countdown" cache_countdown_id="module-countdown-timer" %}
         <form method="post">
             {% csrf_token %}
             {% comment %}

@@ -1,5 +1,6 @@
 """Coverage tests for views/imports/actions.py missing lines."""
 
+import json
 from types import SimpleNamespace as Namespace
 
 import pytest
@@ -87,7 +88,7 @@ def _make_api():
 
 
 def _constrained_device_writer(constraints, username):
-    """A real non-superuser with plugin write access and a ``constraints``-scoped change_device grant."""
+    """Return a real user with plugin write access and a constrained change-device grant."""
     from core.models import ObjectType
     from dcim.models import Device
     from django.apps import apps
@@ -113,7 +114,7 @@ def _constrained_device_writer(constraints, username):
 
 
 def _scoped_device_writer(in_scope_device, username):
-    """A real non-superuser whose change_device grant covers only *in_scope_device*."""
+    """Return a real user whose change-device grant covers only *in_scope_device*."""
     return _constrained_device_writer({"pk": in_scope_device.pk}, username)
 
 
@@ -803,8 +804,9 @@ class TestBulkImportConfirmViewIntegration:
     def test_vm_row_shows_selected_cluster_and_role(self, settings, librenms_server):
         """A VM confirmation row shows its selected cluster and role in their own fields."""
         from dcim.models import DeviceRole
+        from virtualization.models import Cluster
 
-        cluster_issue = "Cluster must be manually selected before importing as VM"
+        placement_issue = "VM placement requires a matching site, selected cluster, or selected host device"
         server_key = "confirm-integration-vm-selections"
         role = DeviceRole.objects.create(
             name="Confirm Integration VM Selected Role",
@@ -821,12 +823,15 @@ class TestBulkImportConfirmViewIntegration:
             ip="198.18.0.31",
         )
         view = self._make_view(settings, librenms_server, server_key)
-        user = make_view_user("confirm-integration-vm-selections-user", [])
+        user = make_view_user("confirm-integration-vm-selections-user", [("view", Cluster)])
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": role.pk})
         request = make_view_request(
             "post",
             {
                 "server_key": server_key,
                 "select": ["31"],
+                "object_type_31": "virtualmachine",
+                "vm_placement_31": "cluster",
                 "cluster_31": str(cluster.pk),
                 "role_31": str(role.pk),
                 "use_sysname": "true",
@@ -844,8 +849,8 @@ class TestBulkImportConfirmViewIntegration:
         assert validation["cluster"]["found"] is True
         assert validation["device_role"]["role"] == role
         assert validation["device_role"]["found"] is True
-        assert cluster_issue not in validation["issues"]
-        assert cluster_issue.encode() not in response.content
+        assert placement_issue not in validation["issues"]
+        assert placement_issue.encode() not in response.content
         assert b"Virtual Machine" in response.content
         assert b"Confirm Integration VM Selected Role" in response.content
         assert b"<strong>Cluster:</strong> Confirm Integration VM Selected Cluster" in response.content
@@ -853,6 +858,129 @@ class TestBulkImportConfirmViewIntegration:
         assert f'name="cluster_31" value="{cluster.pk}"'.encode() in response.content
         assert f'name="role_31" value="{role.pk}"'.encode() in response.content
         assert view_message_texts(request, "error") == []
+
+    def test_vm_confirmation_rejects_a_cluster_outside_the_user_view_scope(self, settings, librenms_server):
+        """A forged hidden cluster must not appear in the confirmation modal."""
+        from virtualization.models import Cluster
+
+        server_key = "confirm-integration-hidden-cluster"
+        visible = make_cluster("Visible confirmation cluster")
+        hidden = make_cluster("Hidden confirmation cluster")
+        librenms_server.device_info_response(
+            device_id=32,
+            hostname="confirm-integration-hidden-cluster",
+            hardware="Test VM hardware",
+            os="test-vm-os",
+            serial="CONFIRM-INTEGRATION-HIDDEN-CLUSTER-SERIAL",
+            ip="198.18.0.32",
+        )
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-hidden-cluster-user", [])
+        user = grant_view_permission(user, "view", Cluster, constraints={"pk": visible.pk})
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["32"],
+                "object_type_32": "virtualmachine",
+                "vm_placement_32": "cluster",
+                "cluster_32": str(hidden.pk),
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"unavailable cluster selection" in response.content
+        assert hidden.name.encode() not in response.content
+
+    def test_vm_confirmation_rejects_a_role_outside_the_user_view_scope(self, settings, librenms_server):
+        """A forged hidden role must not appear in the confirmation modal."""
+        from dcim.models import DeviceRole
+        from virtualization.models import Cluster
+
+        server_key = "confirm-integration-hidden-role"
+        cluster = make_cluster("Hidden role confirmation cluster")
+        visible = DeviceRole.objects.create(name="Visible confirmation role", slug="visible-confirmation-role")
+        hidden = DeviceRole.objects.create(name="Hidden confirmation role", slug="hidden-confirmation-role")
+        librenms_server.device_info_response(
+            device_id=33,
+            hostname="confirm-integration-hidden-role",
+            hardware="Test VM hardware",
+            os="test-vm-os",
+            serial="CONFIRM-INTEGRATION-HIDDEN-ROLE-SERIAL",
+            ip="198.18.0.33",
+        )
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-hidden-role-user", [("view", Cluster)])
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": visible.pk})
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["33"],
+                "object_type_33": "virtualmachine",
+                "vm_placement_33": "cluster",
+                "cluster_33": str(cluster.pk),
+                "role_33": str(hidden.pk),
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"unavailable role selection" in response.content
+        assert hidden.name.encode() not in response.content
+        assert f'value="{hidden.pk}"'.encode() not in response.content
+
+    def test_device_confirmation_rejects_a_rack_outside_the_user_view_scope(self, settings, librenms_server):
+        """A forged hidden rack must not appear in the confirmation modal."""
+        from dcim.models import Rack
+
+        server_key = "confirm-integration-hidden-rack"
+        source = make_device("confirm-integration-hidden-rack-source")
+        visible = Rack.objects.create(name="Visible confirmation rack", site=source.site, status="active")
+        hidden = Rack.objects.create(name="Hidden confirmation rack", site=source.site, status="active")
+        librenms_server.device_info_response(
+            device_id=34,
+            hostname="confirm-integration-hidden-rack",
+            hardware=source.device_type.model,
+            os="test-device-os",
+            serial="CONFIRM-INTEGRATION-HIDDEN-RACK-SERIAL",
+            ip="198.18.0.34",
+            location=source.site.name,
+        )
+        librenms_server.vc_inventory_callable(34, [], {})
+        view = self._make_view(settings, librenms_server, server_key)
+        user = make_view_user("confirm-integration-hidden-rack-user", [])
+        user = grant_view_permission(user, "view", Rack, constraints={"pk": visible.pk})
+        request = make_view_request(
+            "post",
+            {
+                "server_key": server_key,
+                "select": ["34"],
+                "rack_34": str(hidden.pk),
+                "use_sysname": "true",
+                "strip_domain": "false",
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 200
+        assert b"unavailable rack selection" in response.content
+        assert hidden.name.encode() not in response.content
+        assert f'value="{hidden.pk}"'.encode() not in response.content
 
     def test_device_row_shows_selected_role_and_rack(self, settings, librenms_server):
         """A device confirmation row shows its selected role and rack in their own fields."""
@@ -883,6 +1011,8 @@ class TestBulkImportConfirmViewIntegration:
         librenms_server.vc_inventory_callable(41, [], {})
         view = self._make_view(settings, librenms_server, server_key)
         user = make_view_user("confirm-integration-device-selections-user", [])
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": role.pk})
+        user = grant_view_permission(user, "view", Rack, constraints={"pk": rack.pk})
         request = make_view_request(
             "post",
             {
@@ -1220,7 +1350,9 @@ class TestDeviceImportHelperMixin:
 
         assert libre_device["device_id"] == device_id
         assert validation is not None
-        assert selections == {"cluster_id": None, "role_id": None, "rack_id": None}
+        assert selections.object_type.value == "device"
+        assert selections.role_id is None
+        assert selections.rack_id is None
         assert response.status_code == 200
         assert b"helper-new-device" in response.content
         assert any(item["path"] == f"/api/v0/devices/{device_id}" for item in librenms_server.requests)
@@ -1849,6 +1981,34 @@ class TestSaveUserPrefView:
         stored_user = django_user_model.objects.get(pk=user.pk)
         assert stored_user.config.get("plugins.netbox_librenms_plugin.use_sysname") is True
 
+    def test_import_columns_preference_is_validated_and_persisted(self, client, django_user_model):
+        user = make_view_user("pref-import-columns-user", [])
+
+        response = self._post(
+            client,
+            user,
+            b'{"key":"import_columns","value":["hardware","hostname"]}',
+        )
+
+        assert response.status_code == 200
+        stored_user = django_user_model.objects.get(pk=user.pk)
+        assert stored_user.config.get("plugins.netbox_librenms_plugin.import_columns") == ["hardware", "hostname"]
+
+    @pytest.mark.parametrize(
+        "value",
+        ["hostname", ["hostname", "actions"], ["hostname", "hostname"], [1], [[]]],
+    )
+    def test_import_columns_preference_rejects_invalid_shapes(self, client, value):
+        user = make_view_user("pref-invalid-import-columns-user", [])
+
+        response = self._post(
+            client,
+            user,
+            json.dumps({"key": "import_columns", "value": value}),
+        )
+
+        assert response.status_code == 400
+
 
 @pytest.mark.django_db
 class TestDeviceVCDetailsView:
@@ -2062,6 +2222,23 @@ class TestBulkImportDevicesViewErrorPaths:
         )
         assert view_message_texts(request, "error") == ["Invalid device identifier supplied"]
 
+    def test_invalid_import_detail_is_not_returned(self, settings, librenms_server):
+        """A rejected import plan must not expose its internal reason in the HTMX response."""
+        server_key = "bulk-errors-private-intent"
+        view = self._make_view(settings, librenms_server, server_key)
+        request = make_view_request(
+            "post",
+            {"server_key": server_key, "select": ["1"], "object_type_1": "unsupported-object-type"},
+            user=make_view_user("bulk-errors-private-intent-user", []),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request)
+
+        assert response.status_code == 400
+        assert response.content == b"Invalid import selection"
+        assert b"Invalid selection for object_type_1" not in response.content
+
 
 class TestDeviceConflictActionViewVMGuard:
     """Tests for the DeviceConflictActionView VM action guard."""
@@ -2104,22 +2281,30 @@ class TestDeviceConflictActionViewVMGuard:
 
 
 @pytest.mark.django_db
-class TestApplyUserSelectionsToValidation:
+class TestApplyImportIntentToValidation:
     """Apply selected real NetBox rows and recalculate the validation state."""
 
     def test_vm_with_cluster_and_role(self):
-        from netbox_librenms_plugin.views.imports.actions import _apply_user_selections_to_validation
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent, VMPlacementMethod
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
 
         cluster = make_cluster("selection-cluster")
         role = make_device("selection-vm-role-source").role
         validation = {
             "cluster": {"found": False, "cluster": None},
+            "vm_placement": {"method": "site", "found": False, "host_device": None},
             "device_role": {"found": False, "role": None},
-            "issues": ["Cluster must be selected", "Device role must be selected"],
+            "issues": ["VM placement requires a selected cluster", "Device role must be selected"],
         }
-        selections = {"cluster_id": str(cluster.pk), "role_id": str(role.pk), "rack_id": None}
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.VIRTUAL_MACHINE,
+            role_id=role.pk,
+            vm_placement_method=VMPlacementMethod.CLUSTER,
+            cluster_id=cluster.pk,
+        )
 
-        _apply_user_selections_to_validation(validation, selections, is_vm=True)
+        _apply_import_intent_to_validation(validation, intent, is_vm=True, user=make_superuser())
 
         assert validation["cluster"] == {"found": True, "cluster": cluster}
         assert validation["device_role"] == {"found": True, "role": role}
@@ -2127,10 +2312,139 @@ class TestApplyUserSelectionsToValidation:
         assert validation["can_import"] is True
         assert validation["is_ready"] is True
 
+    def test_vm_rejects_a_cluster_outside_the_user_view_scope(self):
+        """A forged cluster selection must stay unavailable during row validation."""
+        from virtualization.models import Cluster
+
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent, VMPlacementMethod
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
+
+        visible = make_cluster("Visible row validation cluster")
+        hidden = make_cluster("Hidden row validation cluster")
+        user = make_view_user("cluster-scoped-row-validation-user", [])
+        user = grant_view_permission(user, "view", Cluster, constraints={"pk": visible.pk})
+        validation = {
+            "cluster": {"found": False, "cluster": None},
+            "vm_placement": {"method": "site", "found": False, "host_device": None},
+            "issues": ["VM placement requires a selected cluster"],
+        }
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.VIRTUAL_MACHINE,
+            vm_placement_method=VMPlacementMethod.CLUSTER,
+            cluster_id=hidden.pk,
+        )
+
+        _apply_import_intent_to_validation(validation, intent, is_vm=True, user=user)
+
+        assert validation["cluster"]["found"] is False
+        assert validation["cluster"]["cluster"] is None
+        assert hidden not in validation["cluster"].get("available_clusters", [])
+        assert validation["vm_placement"] == {
+            "method": "cluster",
+            "found": False,
+            "host_device": None,
+        }
+        assert validation["can_import"] is False
+
+    def test_vm_rejects_a_role_outside_the_user_view_scope(self):
+        """A forged role selection must stay unavailable during row validation."""
+        from dcim.models import DeviceRole
+
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent, VMPlacementMethod
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
+
+        cluster = make_cluster("Hidden role row validation cluster")
+        visible = DeviceRole.objects.create(name="Visible row validation role", slug="visible-row-validation-role")
+        hidden = DeviceRole.objects.create(name="Hidden row validation role", slug="hidden-row-validation-role")
+        user = make_view_user("role-scoped-row-validation-user", [])
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": visible.pk})
+        validation = {
+            "cluster": {"found": False, "cluster": None},
+            "vm_placement": {"method": "site", "found": False, "host_device": None},
+            "device_role": {"found": True, "role": None},
+            "issues": ["VM placement requires a selected cluster"],
+        }
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.VIRTUAL_MACHINE,
+            role_id=hidden.pk,
+            vm_placement_method=VMPlacementMethod.CLUSTER,
+            cluster_id=cluster.pk,
+        )
+
+        _apply_import_intent_to_validation(validation, intent, is_vm=True, user=user)
+
+        assert validation["device_role"] == {"found": True, "role": None}
+        assert hidden.name not in str(validation)
+
+    def test_standalone_host_placement_clears_a_stale_cluster(self, monkeypatch):
+        from netbox_librenms_plugin.import_validation_helpers import apply_host_to_validation
+
+        stale_cluster = make_cluster("selection-stale-host-cluster")
+        host = make_device("selection-standalone-host")
+        monkeypatch.setattr(
+            "netbox_librenms_plugin.utils.netbox_allows_standalone_vm_host",
+            lambda: True,
+        )
+        validation = {
+            "cluster": {
+                "found": True,
+                "cluster": stale_cluster,
+                "available_clusters": [stale_cluster],
+            },
+            "vm_placement": {"method": "cluster", "found": True, "host_device": None},
+            "issues": [],
+        }
+
+        apply_host_to_validation(validation, host)
+
+        assert validation["cluster"] == {
+            "found": False,
+            "cluster": None,
+            "available_clusters": [stale_cluster],
+        }
+        assert validation["vm_placement"] == {"method": "host", "found": True, "host_device": host}
+
+    @pytest.mark.parametrize(
+        ("method", "site_found"),
+        [("site", True), ("site", False), ("cluster", False), ("host", False)],
+        ids=["matched-site", "missing-site", "missing-cluster", "missing-host"],
+    )
+    def test_non_cluster_or_missing_placement_clears_a_stale_cluster(self, method, site_found):
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent, VMPlacementMethod
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
+
+        stale_cluster = make_cluster(f"selection-stale-{method}-{site_found}")
+        validation = {
+            "site": {"found": site_found},
+            "cluster": {
+                "found": True,
+                "cluster": stale_cluster,
+                "available_clusters": [stale_cluster],
+            },
+            "vm_placement": {"method": "cluster", "found": True, "host_device": None},
+            "issues": [],
+        }
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.VIRTUAL_MACHINE,
+            vm_placement_method=VMPlacementMethod(method),
+        )
+
+        _apply_import_intent_to_validation(validation, intent, is_vm=True, user=make_superuser())
+
+        assert validation["cluster"] == {
+            "found": False,
+            "cluster": None,
+            "available_clusters": [stale_cluster],
+        }
+
     def test_device_with_role_and_rack(self):
         from dcim.models import Rack
 
-        from netbox_librenms_plugin.views.imports.actions import _apply_user_selections_to_validation
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
 
         source = make_device("selection-device-role-source")
         rack = Rack.objects.create(name="Selection Rack", site=source.site, status="active")
@@ -2140,15 +2454,91 @@ class TestApplyUserSelectionsToValidation:
             "device_role": {"found": False, "role": None},
             "issues": ["Device role must be selected"],
         }
-        selections = {"cluster_id": None, "role_id": str(source.role.pk), "rack_id": str(rack.pk)}
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.DEVICE,
+            role_id=source.role.pk,
+            rack_id=rack.pk,
+        )
 
-        _apply_user_selections_to_validation(validation, selections, is_vm=False)
+        _apply_import_intent_to_validation(validation, intent, is_vm=False, user=make_superuser())
 
         assert validation["device_role"] == {"found": True, "role": source.role}
         assert validation["rack"] == {"found": True, "rack": rack}
         assert validation["issues"] == []
         assert validation["can_import"] is True
         assert validation["is_ready"] is True
+
+    def test_device_rejects_a_rack_outside_the_user_view_scope(self):
+        """A forged rack selection must stay unavailable during row validation."""
+        from dcim.models import Rack
+
+        from netbox_librenms_plugin.import_plan import ImportObjectType, ImportRowIntent
+        from netbox_librenms_plugin.views.imports.actions import _apply_import_intent_to_validation
+
+        source = make_device("selection-hidden-rack-source")
+        visible = Rack.objects.create(name="Visible row validation rack", site=source.site, status="active")
+        hidden = Rack.objects.create(name="Hidden row validation rack", site=source.site, status="active")
+        user = make_view_user("rack-scoped-row-validation-user", [])
+        user = grant_view_permission(user, "view", Rack, constraints={"pk": visible.pk})
+        validation = {
+            "site": {"found": True},
+            "device_type": {"found": True},
+            "device_role": {"found": True, "role": source.role},
+            "rack": {"found": False, "rack": None},
+            "issues": [],
+        }
+        intent = ImportRowIntent(
+            source_device_id=1,
+            object_type=ImportObjectType.DEVICE,
+            rack_id=hidden.pk,
+        )
+
+        _apply_import_intent_to_validation(validation, intent, is_vm=False, user=user)
+
+        assert validation["rack"] == {"found": False, "rack": None}
+        assert hidden.name not in str(validation)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("view_name", "method"),
+    [
+        ("DeviceValidationDetailsView", "get"),
+        ("DeviceConflictActionView", "post"),
+        ("AddAsOOBView", "post"),
+        ("PromoteToHostView", "post"),
+        ("MergeNetBoxDevicesView", "post"),
+        ("AddDeviceTypeMappingView", "post"),
+        ("AddPlatformMappingView", "post"),
+        ("CreatePlatformFromImportView", "get"),
+        ("CreatePlatformFromImportView", "post"),
+    ],
+)
+def test_import_action_boundaries_reject_malformed_row_intent(view_name, method):
+    """Every import fragment boundary must reject malformed intent before a lookup or mutation."""
+    from netbox_librenms_plugin.views.imports import actions
+
+    device_id = 8100
+    request = make_view_request(
+        method,
+        {
+            "server_key": "default",
+            f"object_type_{device_id}": "not-a-netbox-object",
+        },
+        user=make_superuser(),
+        HTTP_HX_REQUEST="true",
+    )
+
+    response = (get_view if method == "get" else post_view)(
+        getattr(actions, view_name)(),
+        request,
+        device_id=device_id,
+    )
+
+    assert response.status_code == 200
+    assert response["HX-Reswap"] == "none"
+    assert f"Invalid selection for object_type_{device_id}.".encode() in response.content
 
 
 @pytest.mark.django_db
@@ -3424,13 +3814,14 @@ class TestBulkImportDevicesViewBasicPaths:
 
     def test_sync_mode_import_runs(self, settings, monkeypatch):
         """The synchronous path fetches LibreNMS data and persists the imported device."""
-        from dcim.models import Device
+        from dcim.models import Device, DeviceRole
 
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
         monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         server_key = "bulk-basic-sync"
         mapping_source = make_device("bulk-basic-sync-mapping-source")
         user = self._device_import_user("bulk-basic-sync-user")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": mapping_source.role_id})
         with run_librenms_server() as server:
             server.device_info_response(
                 device_id=1,
@@ -3506,9 +3897,9 @@ class TestBulkImportDevicesMorePaths:
 
     @staticmethod
     def _vm_import_user(username):
-        from virtualization.models import VirtualMachine
+        from virtualization.models import Cluster, VirtualMachine
 
-        return make_view_user(username, [("add", VirtualMachine)])
+        return make_view_user(username, [("add", VirtualMachine), ("view", Cluster)])
 
     def _make_base_request(
         self,
@@ -3554,7 +3945,11 @@ class TestBulkImportDevicesMorePaths:
                 settings,
                 ["1"],
                 user,
-                {"cluster_1": cluster_value},
+                {
+                    "object_type_1": "virtualmachine",
+                    "vm_placement_1": "cluster",
+                    "cluster_1": cluster_value,
+                },
                 server_key=f"bulk-more-invalid-cluster-{case}",
                 server_url=server.url,
                 htmx=True,
@@ -3562,17 +3957,15 @@ class TestBulkImportDevicesMorePaths:
             response = post_view(view, request)
 
         assert response.status_code == 400
-        assert response.content == b"Invalid cluster or role selection"
+        assert response.content == b"Invalid import selection"
         assert set(VirtualMachine.objects.values_list("pk", flat=True)) == before
 
     @pytest.mark.parametrize(
         ("role_value", "case"),
         [("not-int", "text"), ("0", "zero"), ("-1", "negative"), (None, "overflow")],
     )
-    def test_invalid_role_on_a_valid_cluster_still_imports_the_vm(
-        self, settings, caplog, monkeypatch, role_value, case
-    ):
-        """A bad role id next to a valid cluster keeps the VM import and drops only the role."""
+    def test_invalid_role_on_a_valid_cluster_fails_closed(self, settings, monkeypatch, role_value, case):
+        """A malformed optional role blocks the submitted VM plan."""
         from virtualization.models import VirtualMachine
 
         from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
@@ -3594,20 +3987,22 @@ class TestBulkImportDevicesMorePaths:
                 settings,
                 ["1"],
                 user,
-                {"cluster_1": str(cluster.pk), "role_1": role_value},
+                {
+                    "object_type_1": "virtualmachine",
+                    "vm_placement_1": "cluster",
+                    "cluster_1": str(cluster.pk),
+                    "role_1": role_value,
+                },
                 server_key=f"bulk-more-invalid-role-{case}",
                 server_url=server.url,
             )
             response = post_view(view, request)
 
-        assert f"Ignoring invalid role id '{role_value}' for VM import of device 1" in caplog.text
-        imported = VirtualMachine.objects.get(name=f"bulk-more-invalid-role-{case}-imported")
-        assert imported.cluster_id == cluster.pk
-        assert imported.role_id is None
+        assert not VirtualMachine.objects.filter(name=f"bulk-more-invalid-role-{case}-imported").exists()
         assert response.status_code == 302
 
-    def test_invalid_device_role_and_rack_ids_do_not_abort_valid_rows(self, settings, caplog, monkeypatch):
-        """Invalid device mapping IDs must not prevent a valid row from importing."""
+    def test_invalid_device_role_and_rack_ids_reject_the_batch(self, settings, monkeypatch):
+        """Malformed Device selections reject the batch before any row is imported."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
@@ -3643,12 +4038,8 @@ class TestBulkImportDevicesMorePaths:
             )
             response = post_view(view, request)
 
-        assert f"Ignoring invalid role id '{invalid_id}' for device 1" in caplog.text
-        assert f"Ignoring invalid rack id '{invalid_id}' for device 2" in caplog.text
         assert not Device.objects.filter(name="bulk-more-invalid-device-mapping-1").exists()
-        imported = Device.objects.get(name="bulk-more-invalid-device-mapping-2")
-        assert imported.role_id == mapping_source.role_id
-        assert imported.rack_id is None
+        assert not Device.objects.filter(name="bulk-more-invalid-device-mapping-2").exists()
         assert response.status_code == 302
         assert (
             response["Location"]
@@ -3657,13 +4048,15 @@ class TestBulkImportDevicesMorePaths:
 
     def test_valid_role_and_rack_values_applied(self, settings, monkeypatch):
         """The importer persists the selected role and rack on the new device."""
-        from dcim.models import Device, Rack
+        from dcim.models import Device, DeviceRole, Rack
 
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
         monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
         mapped_device = make_device("bulk-more-mapping-source")
         rack = Rack.objects.create(name="Bulk More Rack", site=mapped_device.site, status="active")
         user = self._device_import_user("bulk-more-valid-mapping-user")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": mapped_device.role_id})
+        user = grant_view_permission(user, "view", Rack, constraints={"pk": rack.pk})
 
         with run_librenms_server() as server:
             server.device_info_response(
@@ -3723,12 +4116,13 @@ class TestBulkImportEdgePaths:
 
     @staticmethod
     def _vm_import_user(username):
-        from virtualization.models import VirtualMachine
+        from virtualization.models import Cluster, VirtualMachine
 
-        return make_view_user(username, [("add", VirtualMachine)])
+        return make_view_user(username, [("add", VirtualMachine), ("view", Cluster)])
 
     def test_cluster_with_role_applies_role_to_vm(self, settings, monkeypatch):
         """The VM importer persists both selected mappings."""
+        from dcim.models import DeviceRole
         from virtualization.models import VirtualMachine
 
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
@@ -3737,6 +4131,7 @@ class TestBulkImportEdgePaths:
         existing_vm = make_vm("bulk-edge-vm-seed")
         role_source = make_device("bulk-edge-role-source")
         user = self._vm_import_user("bulk-edge-vm-role-user")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": role_source.role_id})
         with run_librenms_server() as server:
             server.device_info_response(
                 device_id=1,
@@ -3750,6 +4145,8 @@ class TestBulkImportEdgePaths:
                 {
                     "server_key": server_key,
                     "select": ["1"],
+                    "object_type_1": "virtualmachine",
+                    "vm_placement_1": "cluster",
                     "cluster_1": str(existing_vm.cluster_id),
                     "role_1": str(role_source.role_id),
                 },
@@ -3765,6 +4162,44 @@ class TestBulkImportEdgePaths:
             response["Location"]
             == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
         )
+
+    def test_device_import_rejects_a_role_outside_the_user_view_scope(self, settings, monkeypatch):
+        """A forged hidden role ID must not be assigned to a new Device."""
+        from dcim.models import DeviceRole
+
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        server_key = "bulk-edge-hidden-device-role"
+        source = make_device("bulk-edge-hidden-role-source")
+        visible = DeviceRole.objects.create(name="Visible device import role", slug="visible-device-import-role")
+        hidden = DeviceRole.objects.create(name="Hidden device import role", slug="hidden-device-import-role")
+        user = self._device_import_user("bulk-edge-hidden-device-role-user")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": visible.pk})
+        with run_librenms_server() as server:
+            server.device_info_response(
+                device_id=2,
+                hostname="bulk-edge-hidden-role-imported",
+                hardware=source.device_type.model,
+                serial="",
+                ip="198.18.0.5",
+                location=source.site.name,
+            )
+            server.vc_inventory_callable(2, [], {})
+            view = self._make_view(settings, server_key, server.url)
+            request = make_view_request(
+                "post",
+                {
+                    "server_key": server_key,
+                    "select": ["2"],
+                    "role_2": str(hidden.pk),
+                },
+                user=user,
+            )
+            response = post_view(view, request)
+
+        assert response.status_code == 302
+        assert not type(source).objects.filter(name="bulk-edge-hidden-role-imported").exists()
+        assert hidden.name not in " ".join(view_message_texts(request))
 
 
 @pytest.mark.django_db
@@ -7094,7 +7529,7 @@ class TestConflictActionsObjectScope:
 
     @staticmethod
     def _vc_pair(name, *, sync_cf):
-        """A real 2-member VirtualChassis whose m1 holds ``sync_cf`` (so it is the sync device)."""
+        """Create a two-member chassis whose first member is the sync device."""
         from dcim.models import VirtualChassis
 
         vc = VirtualChassis.objects.create(name=name)

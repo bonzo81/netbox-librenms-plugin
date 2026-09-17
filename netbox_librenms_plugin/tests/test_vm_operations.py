@@ -7,7 +7,7 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_vm
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, missing_pk
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, missing_pk
 
 
 SERVER_KEY = "default"
@@ -69,11 +69,12 @@ def _validation(tag, *, platform=None, role=None, resolved_name=None):
 
 
 def _vm_writer(tag):
+    from virtualization.models import Cluster
     from virtualization.models import VirtualMachine
 
     return make_user_with_perms(
         f"vm-import-writer-{tag}",
-        [("add", VirtualMachine)],
+        [("view", Cluster), ("add", VirtualMachine)],
         plugin_write=False,
     )
 
@@ -295,6 +296,7 @@ class TestBulkImportVms:
         api, server = librenms_api
         cluster = make_cluster("bulk-live-cluster")
         role = DeviceRole.objects.create(name="Bulk VM role", slug="bulk-vm-role", color="00ff00")
+        user = grant(_vm_writer("live"), "view", DeviceRole, constraints={"pk": role.pk})
         server.register(
             "/api/v0/devices/6204",
             {
@@ -310,10 +312,10 @@ class TestBulkImportVms:
         )
 
         result = bulk_import_vms(
-            {6204: {"cluster_id": cluster.pk, "device_role_id": role.pk}},
+            {6204: {"placement": "cluster", "cluster_id": cluster.pk, "device_role_id": role.pk}},
             api,
             sync_options={"use_sysname": False, "strip_domain": True},
-            user=_vm_writer("live"),
+            user=user,
         )
 
         assert result["failed"] == []
@@ -334,7 +336,7 @@ class TestBulkImportVms:
         cluster = make_cluster("bulk-prefetched-cluster")
 
         result = bulk_import_vms(
-            {6205: {"cluster_id": cluster.pk}},
+            {6205: {"placement": "cluster", "cluster_id": cluster.pk}},
             api,
             libre_devices_cache={6205: _payload(6205, hostname="prefetched-vm")},
             user=_vm_writer("prefetched"),
@@ -351,16 +353,81 @@ class TestBulkImportVms:
         cluster_id = missing_pk(Cluster)
 
         result = bulk_import_vms(
-            {6206: {"cluster_id": cluster_id}},
+            {6206: {"placement": "cluster", "cluster_id": cluster_id}},
             api,
             libre_devices_cache={6206: _payload(6206)},
             user=_vm_writer("missing-cluster"),
         )
 
-        assert result["failed"] == [
-            {"device_id": 6206, "error": f"Selected cluster (id={cluster_id}) no longer exists"}
-        ]
+        assert result["failed"] == [{"device_id": 6206, "error": "Selected cluster is unavailable"}]
         assert not VirtualMachine.objects.filter(name="vm-6206.example.test").exists()
+
+    def test_cluster_outside_the_view_grant_is_unavailable(self, librenms_api):
+        """A posted cluster ID must not bypass the importer's object permission scope."""
+        from virtualization.models import Cluster, VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+
+        api, _server = librenms_api
+        visible_cluster = make_cluster("bulk-visible-cluster")
+        hidden_cluster = make_cluster("bulk-hidden-cluster")
+        user = make_user_with_perms(
+            "vm-import-writer-scoped-cluster",
+            [("add", VirtualMachine)],
+            plugin_write=False,
+        )
+        user = grant(user, "view", Cluster, constraints={"pk": visible_cluster.pk})
+
+        result = bulk_import_vms(
+            {6212: {"placement": "cluster", "cluster_id": hidden_cluster.pk}},
+            api,
+            libre_devices_cache={6212: _payload(6212)},
+            user=user,
+        )
+
+        assert result["success"] == []
+        assert result["failed"] == [{"device_id": 6212, "error": "Selected cluster is unavailable"}]
+        assert str(hidden_cluster.pk) not in result["failed"][0]["error"]
+        assert not VirtualMachine.objects.filter(name="vm-6212.example.test").exists()
+
+    @pytest.mark.parametrize("use_mapping", [False, True], ids=["exact", "mapping"])
+    def test_site_outside_the_view_grant_is_unavailable(self, librenms_api, use_mapping):
+        """An exact or mapped site match must not bypass the importer's object scope."""
+        from dcim.models import Site
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+        from netbox_librenms_plugin.models import LocationMapping
+
+        api, _server = librenms_api
+        visible_site = Site.objects.create(name="Visible VM import site", slug="visible-vm-import-site")
+        hidden_site = Site.objects.create(name="Hidden VM import site", slug="hidden-vm-import-site")
+        location = hidden_site.name
+        if use_mapping:
+            location = "Hidden VM site alias"
+            LocationMapping.objects.create(
+                field_type="site",
+                librenms_value=location,
+                netbox_object=hidden_site,
+            )
+        user = make_user_with_perms(
+            f"vm-import-writer-scoped-site-{use_mapping}",
+            [("add", VirtualMachine)],
+            plugin_write=False,
+        )
+        user = grant(user, "view", Site, constraints={"pk": visible_site.pk})
+
+        result = bulk_import_vms(
+            {6213: {"placement": "site"}},
+            api,
+            libre_devices_cache={6213: _payload(6213, location=location)},
+            user=user,
+        )
+
+        assert result["success"] == []
+        assert result["failed"] == [{"device_id": 6213, "error": "Matched site is unavailable"}]
+        assert hidden_site.name not in result["failed"][0]["error"]
+        assert not VirtualMachine.objects.filter(name="vm-6213.example.test").exists()
 
     def test_deleted_role_selection_fails_before_vm_creation(self, librenms_api):
         from dcim.models import DeviceRole
@@ -372,16 +439,48 @@ class TestBulkImportVms:
         role_id = missing_pk(DeviceRole)
 
         result = bulk_import_vms(
-            {6207: {"cluster_id": cluster.pk, "device_role_id": role_id}},
+            {6207: {"placement": "cluster", "cluster_id": cluster.pk, "device_role_id": role_id}},
             api,
             libre_devices_cache={6207: _payload(6207)},
             user=_vm_writer("missing-role"),
         )
 
-        assert result["failed"] == [{"device_id": 6207, "error": f"Selected role (id={role_id}) no longer exists"}]
+        assert result["failed"] == [{"device_id": 6207, "error": "Selected role is unavailable"}]
         assert not VirtualMachine.objects.filter(name="vm-6207.example.test").exists()
 
-    def test_missing_manual_cluster_stays_a_validation_failure(self, librenms_api):
+    def test_role_outside_the_view_grant_is_unavailable(self, librenms_api):
+        """A posted role ID must not bypass the importer's object permission scope."""
+        from dcim.models import DeviceRole
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+
+        api, _server = librenms_api
+        cluster = make_cluster("bulk-hidden-role-cluster")
+        visible_role = DeviceRole.objects.create(name="Visible VM role", slug="visible-vm-role")
+        hidden_role = DeviceRole.objects.create(name="Hidden VM role", slug="hidden-vm-role")
+        user = _vm_writer("scoped-role")
+        user = grant(user, "view", DeviceRole, constraints={"pk": visible_role.pk})
+
+        result = bulk_import_vms(
+            {
+                6214: {
+                    "placement": "cluster",
+                    "cluster_id": cluster.pk,
+                    "device_role_id": hidden_role.pk,
+                }
+            },
+            api,
+            libre_devices_cache={6214: _payload(6214)},
+            user=user,
+        )
+
+        assert result["success"] == []
+        assert result["failed"] == [{"device_id": 6214, "error": "Selected role is unavailable"}]
+        assert str(hidden_role.pk) not in result["failed"][0]["error"]
+        assert not VirtualMachine.objects.filter(name="vm-6214.example.test").exists()
+
+    def test_missing_placement_method_stays_a_validation_failure(self, librenms_api):
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         api, _server = librenms_api
@@ -396,7 +495,42 @@ class TestBulkImportVms:
         assert result["success"] == []
         assert len(result["failed"]) == 1
         assert result["failed"][0]["device_id"] == 6208
-        assert "Cluster must be manually selected" in result["failed"][0]["error"]
+        assert "valid virtual-machine placement method" in result["failed"][0]["error"]
+
+    def test_standalone_host_is_rejected_when_netbox_requires_a_cluster(self, librenms_api, monkeypatch):
+        """NetBox 4.4 must reject a standalone host before VM model validation."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+
+        api, _server = librenms_api
+        host = make_device("bulk-standalone-host")
+        user = make_user_with_perms(
+            "vm-import-writer-standalone-host",
+            [("view", Device), ("add", VirtualMachine)],
+            plugin_write=False,
+        )
+        monkeypatch.setattr(
+            "netbox_librenms_plugin.utils._get_netbox_version_tuple",
+            lambda: (4, 4, 0),
+        )
+
+        result = bulk_import_vms(
+            {6211: {"placement": "host", "host_device_id": host.pk}},
+            api,
+            libre_devices_cache={6211: _payload(6211)},
+            user=user,
+        )
+
+        assert result["success"] == []
+        assert result["failed"] == [
+            {
+                "device_id": 6211,
+                "error": "NetBox requires a clustered host device for VM placement",
+            }
+        ]
+        assert not VirtualMachine.objects.filter(name="vm-6211.example.test").exists()
 
     def test_one_bad_row_does_not_stop_later_real_imports(self, librenms_api):
         from virtualization.models import Cluster
@@ -412,8 +546,8 @@ class TestBulkImportVms:
 
         result = bulk_import_vms(
             {
-                6209: {"cluster_id": absent_cluster_id},
-                6210: {"cluster_id": cluster.pk},
+                6209: {"placement": "cluster", "cluster_id": absent_cluster_id},
+                6210: {"placement": "cluster", "cluster_id": cluster.pk},
             },
             api,
             libre_devices_cache=payloads,

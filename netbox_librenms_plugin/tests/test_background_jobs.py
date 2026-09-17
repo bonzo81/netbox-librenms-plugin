@@ -8,6 +8,7 @@ from django.http import QueryDict
 
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import grant as grant_view_permission
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 
@@ -71,13 +72,13 @@ def _job(user, tag):
 
 def _import_user(tag, *, devices=True, vms=True):
     from dcim.models import Device
-    from virtualization.models import VirtualMachine
+    from virtualization.models import Cluster, VirtualMachine
 
     permissions = []
     if devices:
         permissions.extend([("add", Device), ("change", Device)])
     if vms:
-        permissions.append(("add", VirtualMachine))
+        permissions.extend([("add", VirtualMachine), ("view", Cluster)])
     return make_user_with_perms(f"background-import-{tag}", permissions)
 
 
@@ -97,7 +98,7 @@ def _import_user(tag, *, devices=True, vms=True):
         ),
         pytest.param(
             "import",
-            {"device_ids": [], "vm_imports": {}},
+            {"import_plans": []},
             id="import-devices",
         ),
     ],
@@ -275,14 +276,64 @@ class TestFilterDevicesJob:
 
 @pytest.mark.django_db
 class TestImportDevicesJob:
+    def test_queued_legacy_payload_imports_real_objects_after_upgrade(self, librenms_server):
+        """A queued pre-upgrade payload must retain its Device and VM import intent."""
+        from core.choices import JobStatusChoices
+        from dcim.models import Device, DeviceRole
+        from virtualization.models import VirtualMachine
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        infrastructure = make_device("background-legacy-import-infrastructure")
+        cluster = make_cluster("background-legacy-import-cluster")
+        user = _import_user("legacy-mixed")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": infrastructure.role_id})
+        job = _job(user, "legacy-mixed-import")
+        rows = {
+            6411: _device_payload(
+                6411,
+                hostname="background-legacy-imported-device",
+                hardware=infrastructure.device_type.model,
+                location=infrastructure.site.name,
+            ),
+            6412: _device_payload(6412, hostname="background-legacy-imported-vm"),
+        }
+
+        ImportDevicesJob.handle(
+            job=job,
+            device_ids=[6411],
+            vm_imports={6412: {"cluster_id": cluster.pk}},
+            manual_mappings_per_device={
+                6411: {
+                    "site_id": infrastructure.site_id,
+                    "device_type_id": infrastructure.device_type_id,
+                    "device_role_id": infrastructure.role_id,
+                }
+            },
+            server_key=SERVER_KEY,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_devices_cache=rows,
+        )
+
+        job.refresh_from_db()
+        imported_device = Device.objects.get(name="background-legacy-imported-device")
+        imported_vm = VirtualMachine.objects.get(name="background-legacy-imported-vm")
+        assert job.data["imported_device_pks"] == [imported_device.pk]
+        assert job.data["imported_vm_pks"] == [imported_vm.pk]
+        assert job.data["imported_libre_device_ids"] == [6411]
+        assert job.data["imported_libre_vm_ids"] == [6412]
+        assert job.status == JobStatusChoices.STATUS_COMPLETED
+        assert job.data["success_count"] == 2
+        assert job.data["errors"] == []
+
     def test_mixed_device_and_vm_batch_imports_real_objects_and_persists_ids(self, librenms_server):
-        from dcim.models import Device
+        from dcim.models import Device, DeviceRole
         from virtualization.models import VirtualMachine
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-import-infrastructure")
         cluster = make_cluster("background-import-cluster")
         user = _import_user("mixed")
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": infrastructure.role_id})
         job = _job(user, "mixed-import")
         rows = {
             6401: _device_payload(
@@ -295,17 +346,22 @@ class TestImportDevicesJob:
         }
 
         ImportDevicesJob(job).run(
-            device_ids=[6401],
-            vm_imports={6402: {"cluster_id": cluster.pk}},
+            import_plans=[
+                {
+                    "source_device_id": 6401,
+                    "object_type": "device",
+                    "role_id": infrastructure.role_id,
+                    "rack_id": None,
+                },
+                {
+                    "source_device_id": 6402,
+                    "object_type": "virtualmachine",
+                    "placement": {"method": "cluster", "cluster_id": cluster.pk},
+                    "role_id": None,
+                },
+            ],
             server_key=SERVER_KEY,
             sync_options={"sync_interfaces": False, "sync_cables": False},
-            manual_mappings_per_device={
-                6401: {
-                    "site_id": infrastructure.site_id,
-                    "device_type_id": infrastructure.device_type_id,
-                    "device_role_id": infrastructure.role_id,
-                }
-            },
             libre_devices_cache=rows,
         )
 
@@ -325,11 +381,12 @@ class TestImportDevicesJob:
         assert job.data["completed"] is True
 
     def test_unresolved_row_is_skipped_while_a_checked_row_imports(self, librenms_server):
-        from dcim.models import Device
+        from dcim.models import Device, DeviceRole
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-unresolved-infrastructure")
         user = _import_user("unresolved", vms=False)
+        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": infrastructure.role_id})
         job = _job(user, "unresolved-import")
         librenms_server.register("/api/v0/devices/6403", {"status": "error"}, status=404)
         rows = {
@@ -340,20 +397,17 @@ class TestImportDevicesJob:
                 location=infrastructure.site.name,
             )
         }
-        mappings = {
-            device_id: {
-                "site_id": infrastructure.site_id,
-                "device_type_id": infrastructure.device_type_id,
-                "device_role_id": infrastructure.role_id,
-            }
-            for device_id in (6403, 6404)
-        }
-
         ImportDevicesJob(job).run(
-            device_ids=[6403, 6404],
-            vm_imports={},
+            import_plans=[
+                {
+                    "source_device_id": device_id,
+                    "object_type": "device",
+                    "role_id": infrastructure.role_id,
+                    "rack_id": None,
+                }
+                for device_id in (6403, 6404)
+            ],
             server_key=SERVER_KEY,
-            manual_mappings_per_device=mappings,
             libre_devices_cache=rows,
         )
 
@@ -380,8 +434,20 @@ class TestImportDevicesJob:
         vm_count = VirtualMachine.objects.count()
 
         ImportDevicesJob(job).run(
-            device_ids=[6405],
-            vm_imports={6406: {"cluster_id": cluster.pk}},
+            import_plans=[
+                {
+                    "source_device_id": 6405,
+                    "object_type": "device",
+                    "role_id": None,
+                    "rack_id": None,
+                },
+                {
+                    "source_device_id": 6406,
+                    "object_type": "virtualmachine",
+                    "placement": {"method": "cluster", "cluster_id": cluster.pk},
+                    "role_id": None,
+                },
+            ],
             server_key=SERVER_KEY,
             libre_devices_cache=rows,
         )
@@ -407,8 +473,14 @@ class TestImportDevicesJob:
 
         with pytest.raises(PermissionDenied, match="dcim.add_device"):
             ImportDevicesJob(job).run(
-                device_ids=[6407],
-                vm_imports={},
+                import_plans=[
+                    {
+                        "source_device_id": 6407,
+                        "object_type": "device",
+                        "role_id": None,
+                        "rack_id": None,
+                    }
+                ],
                 server_key=SERVER_KEY,
                 libre_devices_cache={6407: _device_payload(6407)},
             )
@@ -425,8 +497,14 @@ class TestImportDevicesJob:
         job = _job(user, "vm-only-import")
 
         ImportDevicesJob(job).run(
-            device_ids=[],
-            vm_imports={6408: {"cluster_id": cluster.pk}},
+            import_plans=[
+                {
+                    "source_device_id": 6408,
+                    "object_type": "virtualmachine",
+                    "placement": {"method": "cluster", "cluster_id": cluster.pk},
+                    "role_id": None,
+                }
+            ],
             server_key=SERVER_KEY,
             libre_devices_cache={6408: _device_payload(6408, hostname="background-vm-only")},
         )
@@ -442,8 +520,7 @@ class TestImportDevicesJob:
         job = _job(make_superuser("background-empty-import-owner"), "empty-import")
 
         ImportDevicesJob(job).run(
-            device_ids=[],
-            vm_imports={},
+            import_plans=[],
             server_key=SERVER_KEY,
         )
 
@@ -473,8 +550,7 @@ class TestImportDevicesJob:
 
         with pytest.raises(ValueError, match="configured LibreNMS server"):
             ImportDevicesJob(job).run(
-                device_ids=[],
-                vm_imports={},
+                import_plans=[],
                 server_key=SERVER_KEY,
             )
 

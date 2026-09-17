@@ -32,7 +32,8 @@ from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, 
 
 @pytest.mark.django_db
 class TestCachedInterfaceUrlFallback:
-    """index_ip_source_interfaces builds a by_pk map for a rename-safe interface_url fallback.
+    """
+    index_ip_source_interfaces builds a by_pk map for a rename-safe interface_url fallback.
 
     resolve_ip_source_interface implements that fallback, but the view discarded by_pk and the
     rebuilt entry dropped interface_url, so the last resort could never fire and a renamed
@@ -83,7 +84,8 @@ class TestCachedInterfaceUrlFallback:
         assert enriched[0]["interface_url"] == cached_url
 
     def test_a_deleted_interface_drops_its_cached_url(self):
-        """The cached URL feeds resolution; it is not an answer.
+        """
+        The cached URL feeds resolution; it is not an answer.
 
         When scoped resolution rejects it, the row kept the stale link and the table rendered a
         URL for an interface that is gone or out of scope.
@@ -113,7 +115,8 @@ class TestCachedInterfaceUrlFallback:
         assert "interface_url" not in enriched[0]
 
     def test_a_row_without_address_fields_is_skipped_not_raised(self):
-        """enrich_ip_data guards only isinstance/port_id, so an unparseable row aborted the
+        """
+        enrich_ip_data guards only isinstance/port_id, so an unparseable row aborted the
         whole call for a direct caller instead of being skipped like the first loop does."""
         device = make_device("ipurl-malformed")
         make_interface(device, "Ethernet1")
@@ -159,7 +162,8 @@ class TestCachedInterfaceUrlFallback:
 
 @pytest.mark.django_db
 class TestIPAddressTableSelectionColumn:
-    """identify_ip_sync_rows leaves row_id None for a duplicate address with no usable port_id.
+    """
+    identify_ip_sync_rows leaves row_id None for a duplicate address with no usable port_id.
 
     ToggleColumn passes default="" and django-tables2 substitutes a column default whenever the
     accessor resolves to None, so render() never runs and the cell carries no <input> at all.
@@ -294,7 +298,8 @@ def _librenms_ip_rows_response(rows, *, device_name, management_ip="198.18.0.254
 
 
 def _hidden_form_inputs(html):
-    """Return a rendered form's hidden inputs by name, as a browser would submit them.
+    """
+    Return a rendered form's hidden inputs by name, as a browser would submit them.
 
     Repeated names collapse, so use this only where one value per name is expected.
     """
@@ -1080,7 +1085,8 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
 
 @pytest.mark.django_db
 def test_an_empty_snapshot_is_not_reported_as_an_expired_cache(client, settings):
-    """A refresh that finds no IPs writes a valid snapshot whose ip_addresses list is empty.
+    """
+    A refresh that finds no IPs writes a valid snapshot whose ip_addresses list is empty.
 
     Treating that as a cache miss tells the user to refresh the data they just refreshed, and
     replaces the tab with the cache-miss prompt.
@@ -2616,6 +2622,8 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
 @pytest.mark.django_db
 def test_create_missing_interfaces_toggle_survives_a_table_refresh(client, settings):
     """The refreshed fragment must re-check the toggle the user posted, not silently drop it."""
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+
     _configure_test_server(settings)
     device = make_device("ip-toggle-state", librenms_cf={"default": {"id": 42}})
     client.force_login(make_superuser("ip-toggle-state-user"))
@@ -2631,7 +2639,11 @@ def test_create_missing_interfaces_toggle_survives_a_table_refresh(client, setti
         assert response.status_code == 200
         html = response.content.decode()
         assert 'id="create-missing-interfaces-toggle-cb"' in html
-        return html.split('id="create-missing-interfaces-toggle-cb"', 1)[1].split(">", 1)[0]
+        return next(
+            attributes
+            for attributes in open_tags(html, "input")
+            if attributes.get("id") == "create-missing-interfaces-toggle-cb"
+        )
 
     base = {"server_key": "default", "interface_name_field": "ifName"}
     # Positive control: without the toggle the box must stay clear, so the assertion below

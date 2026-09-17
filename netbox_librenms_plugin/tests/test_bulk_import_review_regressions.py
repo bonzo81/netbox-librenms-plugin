@@ -214,8 +214,23 @@ def test_background_collision_gate_uses_job_user_scope(monkeypatch):
     vm_count = VirtualMachine.objects.count()
 
     ImportDevicesJob(job_row).run(
-        device_ids=[96301, 96302, 96304, 96305],
-        vm_imports={96303: {"cluster_id": 1}},
+        import_plans=[
+            {
+                "source_device_id": device_id,
+                "object_type": "device",
+                "role_id": None,
+                "rack_id": None,
+            }
+            for device_id in (96301, 96302, 96304, 96305)
+        ]
+        + [
+            {
+                "source_device_id": 96303,
+                "object_type": "virtualmachine",
+                "placement": {"method": "cluster", "cluster_id": 1},
+                "role_id": None,
+            }
+        ],
         server_key="default",
         libre_devices_cache=rows,
     )

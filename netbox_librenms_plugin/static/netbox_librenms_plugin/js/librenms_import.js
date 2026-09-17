@@ -331,7 +331,7 @@
         if (!savePrefUrl) {
             return;
         }
-        fetch(savePrefUrl, {
+        return fetch(savePrefUrl, {
             method: 'POST',
             credentials: 'same-origin',
             headers: {
@@ -339,20 +339,95 @@
                 'X-CSRFToken': csrfToken
             },
             body: JSON.stringify({ key: key, value: value })
+        }).then(function (response) {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
         }).catch(function (err) {
             console.debug('savePref: fetch failed:', err.message);
         });
     }
 
     /**
-     * Initialize toggle listeners for use-sysname and strip-domain preferences.
-     * Persists toggle state to user preferences on change.
+     * Update names and the compact settings summary without refetching the result set.
      */
-    function initializeTogglePrefs() {
+    function updateImportNameDisplay() {
         const sysname = document.getElementById('use-sysname-toggle-cb');
         const strip = document.getElementById('strip-domain-toggle-cb');
-        if (sysname) sysname.addEventListener('change', function () { savePref('use_sysname', this.checked); });
-        if (strip) strip.addEventListener('change', function () { savePref('strip_domain', this.checked); });
+        const summary = document.getElementById('import-name-summary');
+        const countBadge = document.getElementById('import-options-count');
+        if (!sysname || !strip) return;
+
+        const sourceKey = sysname.checked ? 'sysname' : 'hostname';
+        const sourceLabel = sysname.checked ? 'sysName' : 'hostname';
+        document.querySelectorAll('[data-import-name]').forEach((nameElement) => {
+            const row = nameElement.closest('tr');
+            const variants = JSON.parse(nameElement.dataset.importNameVariants);
+            const variantKey = `${sourceKey}_${strip.checked ? 'stripped' : 'full'}`;
+            const variant = variants[variantKey];
+            nameElement.textContent = variant.name;
+            const sourceElement = row?.querySelector('[data-import-name-source]');
+            if (sourceElement) {
+                sourceElement.textContent = `From ${variant.source}${strip.checked ? ', domain removed' : ''}`;
+            }
+        });
+
+        if (summary) {
+            summary.textContent = `Name: ${sourceLabel}${strip.checked ? ', domain removed' : ''}`;
+        }
+        if (countBadge) {
+            const changedCount = Number(!sysname.checked) + Number(strip.checked);
+            countBadge.textContent = String(changedCount);
+            countBadge.classList.toggle('bg-secondary-lt', changedCount === 0);
+            countBadge.classList.toggle('bg-primary-lt', changedCount > 0);
+        }
+    }
+
+    /**
+     * Initialize naming and column preferences for the focused import table.
+     */
+    function initializeImportPreferences() {
+        const sysname = document.getElementById('use-sysname-toggle-cb');
+        const strip = document.getElementById('strip-domain-toggle-cb');
+        const reset = document.getElementById('reset-import-options');
+        const results = document.getElementById('device-import-results');
+        const columnToggles = Array.from(document.querySelectorAll('.import-column-toggle'));
+
+        const updateColumns = (persist) => {
+            if (!results) return;
+            const visibleColumns = columnToggles.filter((toggle) => toggle.checked).map((toggle) => toggle.value);
+            results.dataset.visibleColumns = visibleColumns.join(' ');
+            const countBadge = document.getElementById('import-columns-count');
+            if (countBadge) countBadge.textContent = String(visibleColumns.length);
+            if (persist) savePref('import_columns', visibleColumns);
+        };
+
+        if (sysname) {
+            sysname.addEventListener('change', function () {
+                savePref('use_sysname', this.checked);
+                updateImportNameDisplay();
+            });
+        }
+        if (strip) {
+            strip.addEventListener('change', function () {
+                savePref('strip_domain', this.checked);
+                updateImportNameDisplay();
+            });
+        }
+        reset?.addEventListener('click', () => {
+            if (sysname && !sysname.checked) {
+                sysname.checked = true;
+                savePref('use_sysname', true);
+            }
+            if (strip && strip.checked) {
+                strip.checked = false;
+                savePref('strip_domain', false);
+            }
+            updateImportNameDisplay();
+        });
+        columnToggles.forEach((toggle) => toggle.addEventListener('change', () => updateColumns(true)));
+        updateColumns(false);
+        updateImportNameDisplay();
     }
 
     // ============================================
@@ -1089,6 +1164,7 @@
             if (event.detail.target.tagName === 'TR') {
                 updateSelectionDisplay();
             }
+            updateImportNameDisplay();
 
             if (event.detail.target.id === 'import-results-modal-content') {
                 const failedCount = event.detail.target.querySelector('[data-failed-count]');
@@ -1536,7 +1612,7 @@
         initializeFilterForm();
         initializeBulkImport();
         initializeHTMXHandlers();
-        initializeTogglePrefs();
+        initializeImportPreferences();
         initializeCachedSearchCountdowns();
         initializeCacheExpirationMonitor();
     }

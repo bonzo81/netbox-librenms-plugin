@@ -1,4 +1,5 @@
-"""Shared drivers for tests that call a view's ``get``/``post`` directly.
+"""
+Shared drivers for tests that call a view's ``get``/``post`` directly.
 
 Production always reaches a view through ``dispatch()``, which runs ``View.setup()`` and binds
 ``self.request``. The object-scoped lookups read it, so a test that calls ``view.post(request, ...)``
@@ -94,6 +95,21 @@ def make_request(method="post", data=None, *, user=None, path="/", **factory_kwa
     request.session = SessionStore()
     request._messages = FallbackStorage(request)
     return request
+
+
+def module_row_binding(target_device, action, row, *, action_target=None, server_key="default"):
+    """Sign the cached module row that a rendered action form would submit."""
+    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+
+    ent_index = row.get("entPhysicalIndex")
+    return module_inventory_binding_token(
+        target_device.pk,
+        server_key,
+        action,
+        action_target or {},
+        ent_index,
+        module_inventory_row_digest(row),
+    )
 
 
 def _message_level(name):

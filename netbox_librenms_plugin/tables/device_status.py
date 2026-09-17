@@ -12,7 +12,15 @@ from netbox.tables.columns import ToggleColumn
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
-from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_sync_device
+from netbox_librenms_plugin.import_utils.naming import import_name_variants
+from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod, import_row_hx_include
+from netbox_librenms_plugin.utils import (
+    coerce_librenms_id,
+    get_librenms_sync_device,
+    netbox_allows_standalone_vm_host,
+)
+
+_IMPORT_NAMING_INCLUDE = "#use-sysname-toggle, #strip-domain-toggle"
 
 
 class DeviceStatusTable(DeviceTable):
@@ -105,6 +113,7 @@ class DeviceImportTable(tables.Table):
         # modal URL so the modal-open HTMX GET fetches from this server rather than whatever
         # LibreNMSSettings.selected_server happens to be when the modal is opened.
         self.server_key = kwargs.pop("server_key", None)
+        self.user = user
         super().__init__(*args, **kwargs)
         self.tab = "import"
         self.prefix = "import_"
@@ -120,8 +129,8 @@ class DeviceImportTable(tables.Table):
         from dcim.models import DeviceRole
         from virtualization.models import Cluster
 
-        self._cached_clusters = list(Cluster.objects.all().order_by("name"))
-        self._cached_roles = list(DeviceRole.objects.all().order_by("name"))
+        self._cached_clusters = list(Cluster.objects.restrict(user, "view").order_by("name"))
+        self._cached_roles = list(DeviceRole.objects.restrict(user, "view").order_by("name"))
 
         # Apply sorting if order_by is specified
         # Since we're working with dictionaries, not QuerySets, we handle sorting manually
@@ -139,6 +148,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             str: The escaped hx-vals attribute, or an empty string when no server key is set.
+
         """
         server_key = getattr(self, "server_key", None)
         if not server_key:
@@ -188,8 +198,8 @@ class DeviceImportTable(tables.Table):
         orderable=False,
         accessor="device_id",
         attrs={
-            "th": {"class": "w-1", "aria-label": "Select all"},
-            "td": {"class": "w-1"},
+            "th": {"class": "w-1 import-select-column", "aria-label": "Select all"},
+            "td": {"class": "w-1 import-select-column"},
             "input": {"name": "select"},
             "td__input": {
                 "name": "select",
@@ -214,42 +224,43 @@ class DeviceImportTable(tables.Table):
         },
     )
 
-    # LibreNMS device fields
-    hostname = Column(verbose_name="Hostname", accessor="hostname", orderable=True)
-    sysname = Column(verbose_name="System Name", accessor="sysName", orderable=True)
-    location = Column(verbose_name="Location", accessor="location", orderable=True)
-    hardware = Column(verbose_name="Hardware", accessor="hardware", orderable=True)
-
-    # Cluster selection - if selected, import as VM; otherwise import as Device
-    netbox_cluster = Column(
-        verbose_name="NetBox Cluster",
+    netbox_object = Column(
+        verbose_name="NetBox object",
         empty_values=(),
         orderable=False,
         accessor="device_id",
+        attrs={"th": {"class": "import-name-column"}, "td": {"class": "import-name-column"}},
     )
-
-    # NetBox role selection (for devices only)
-    netbox_role = Column(
-        verbose_name="NetBox Role",
-        empty_values=(),
-        orderable=False,
-        accessor="device_id",
+    location = Column(
+        verbose_name="Location",
+        accessor="location",
+        orderable=True,
+        attrs={"th": {"data-import-column": "location"}, "td": {"data-import-column": "location"}},
     )
-
-    # NetBox rack selection (for devices only, optional)
-    netbox_rack = Column(
-        verbose_name="NetBox Rack",
-        empty_values=(),
-        orderable=False,
-        accessor="device_id",
+    hardware = Column(
+        verbose_name="Hardware",
+        accessor="hardware",
+        orderable=True,
+        attrs={"th": {"data-import-column": "hardware"}, "td": {"data-import-column": "hardware"}},
     )
-
-    # Virtual Chassis detection column
-    virtual_chassis = Column(
-        verbose_name="Virtual Chassis",
+    hostname = Column(
+        verbose_name="Hostname",
+        accessor="hostname",
+        orderable=True,
+        attrs={"th": {"data-import-column": "hostname"}, "td": {"data-import-column": "hostname"}},
+    )
+    sysname = Column(
+        verbose_name="System Name",
+        accessor="sysName",
+        orderable=True,
+        attrs={"th": {"data-import-column": "sysname"}, "td": {"data-import-column": "sysname"}},
+    )
+    import_setup = Column(
+        verbose_name="Import setup",
         empty_values=(),
         orderable=False,
         accessor="device_id",
+        attrs={"th": {"class": "import-setup-column"}, "td": {"class": "import-setup-column"}},
     )
 
     # Actions column
@@ -258,19 +269,273 @@ class DeviceImportTable(tables.Table):
         empty_values=(),
         orderable=False,
         accessor="device_id",
+        attrs={"th": {"class": "import-actions-column text-end"}, "td": {"class": "import-actions-column text-end"}},
     )
 
     def render_hostname(self, value, record):
         """Render hostname with link to LibreNMS if available."""
         return format_html("<strong>{}</strong>", value)
 
+    def render_netbox_object(self, value, record):
+        """
+        Render the intended NetBox identity and any virtual-chassis summary.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered NetBox object summary.
+
+        """
+        validation = record.get("_validation", {})
+        existing = validation.get("existing_device")
+        is_vm = validation.get("import_as_vm", False) or isinstance(existing, VirtualMachine)
+        kind_label = "Virtual machine" if is_vm else "Device"
+        kind_class = "bg-purple-lt" if is_vm else "bg-blue-lt"
+
+        if existing:
+            url_name = "virtualization:virtualmachine" if is_vm else "dcim:device"
+            object_url = reverse(url_name, kwargs={"pk": existing.pk})
+            name_html = format_html(
+                '<a href="{}"><strong>{}</strong> <i class="mdi mdi-open-in-new"></i></a>',
+                object_url,
+                existing.name,
+            )
+            source_html = format_html(
+                '<div class="text-secondary small">Existing NetBox {}</div>',
+                "virtual machine" if is_vm else "device",
+            )
+        else:
+            resolved_name = (
+                validation.get("resolved_name")
+                or record.get("sysName")
+                or record.get("hostname")
+                or f"device-{record.get('device_id')}"
+            )
+            name_html = format_html(
+                '<strong data-import-name data-import-name-variants="{}">{}</strong>',
+                json.dumps(import_name_variants(record), separators=(",", ":")),
+                resolved_name,
+            )
+            criteria = validation.get("naming_criteria") or {}
+            source = criteria.get("source")
+            source_label = {"sysname": "sysName", "hostname": "hostname"}.get(source, "fallback name")
+            suffix = ", domain removed" if criteria.get("strip_domain") else ""
+            source_html = format_html(
+                '<div class="text-secondary small" data-import-name-source>From {}{}</div>',
+                source_label,
+                suffix,
+            )
+
+        vc_data = validation.get("virtual_chassis") or {}
+        vc_html = (
+            self.render_virtual_chassis(None, record)
+            if vc_data.get("is_stack") and vc_data.get("member_count", 0) > 1
+            else ""
+        )
+        return format_html(
+            '<div class="d-flex align-items-center gap-1 flex-wrap">{}<span class="badge {}">{}</span>{}</div>{}',
+            name_html,
+            kind_class,
+            kind_label,
+            vc_html,
+            source_html,
+        )
+
+    def render_import_setup(self, value, record):
+        """
+        Render the required choice inline and attach optional row choices.
+
+        Args:
+            value (object): The column value.
+            record (dict): The LibreNMS device and its validation state.
+
+        Returns:
+            SafeString: The rendered import setup controls.
+
+        """
+        validation = record.get("_validation", {})
+        existing = validation.get("existing_device")
+        if existing:
+            return mark_safe(
+                '<span class="badge bg-yellow-lt">Review existing match</span>'
+                '<div class="small text-secondary">Import setup is not applicable</div>'
+            )
+
+        intent = validation.get("_import_intent")
+        is_vm = intent.is_vm if intent is not None else validation.get("import_as_vm", False)
+        device_id = record.get("device_id")
+        if is_vm:
+            placement = validation.get("vm_placement", {})
+            legacy_cluster = validation.get("cluster", {}).get("cluster")
+            placement_method = VMPlacementMethod(
+                placement.get("method")
+                or (VMPlacementMethod.CLUSTER if legacy_cluster is not None else VMPlacementMethod.SITE)
+            )
+            placement_found = bool(
+                placement.get("found")
+                if "found" in placement
+                else legacy_cluster is not None or validation.get("site", {}).get("found")
+            )
+            label_class = "text-secondary" if placement_found else "text-danger"
+            primary_label = "Placement" if placement_found else "Placement required"
+            if placement_method is VMPlacementMethod.CLUSTER:
+                primary_target = f"cluster_{device_id}"
+                primary_control = self.render_netbox_cluster(None, record)
+            elif placement_method is VMPlacementMethod.HOST:
+                primary_target = f"host_device_{device_id}"
+                primary_control = self.render_netbox_host(None, record)
+            else:
+                primary_target = None
+                site = validation.get("site", {}).get("site")
+                primary_control = format_html(
+                    '<span class="badge {} import-placement-badge">{}</span>',
+                    "bg-green-lt" if site else "bg-red-lt",
+                    f"Matched site: {site.name}" if site else "Matched site unavailable",
+                )
+            role_control = self.render_netbox_role(None, record)
+            placement_control = self.render_vm_placement_method(None, record)
+            object_type_control = self.render_object_type(None, record)
+            options_count = int(bool(validation.get("device_role", {}).get("role"))) + int(
+                placement_method is not VMPlacementMethod.SITE
+            )
+            menu_html = format_html(
+                '<div class="small fw-bold mb-2">VM options</div>'
+                '<label class="form-label small" for="role_{}">VM role '
+                '<span class="text-secondary">(optional)</span></label>{}'
+                '<hr class="my-2"><label class="form-label small" for="vm_placement_{}">Placement method</label>{}'
+                '<hr class="my-2"><label class="form-label small" for="object_type_{}">Object type</label>{}',
+                device_id,
+                role_control,
+                device_id,
+                placement_control,
+                device_id,
+                object_type_control,
+            )
+        else:
+            role_found = bool(validation.get("device_role", {}).get("found"))
+            label_class = "text-secondary" if role_found else "text-danger"
+            primary_label = "Device role" if role_found else "Role required"
+            primary_target = f"role_{device_id}"
+            primary_control = self.render_netbox_role(None, record)
+            rack_control = self.render_netbox_rack(None, record)
+            object_type_control = self.render_object_type(None, record)
+            options_count = int(bool(validation.get("rack", {}).get("rack")))
+            menu_html = format_html(
+                '<div class="small fw-bold mb-2">Optional placement</div>'
+                '<label class="form-label small" for="rack_{}">Rack</label>{}'
+                '<hr class="my-2"><div class="small fw-bold mb-2">Object type</div>'
+                '<label class="form-label small" for="object_type_{}">Object type</label>{}',
+                device_id,
+                rack_control,
+                device_id,
+                object_type_control,
+            )
+
+        badge_html = (
+            format_html('<span class="badge bg-primary-lt ms-1">{}</span>', options_count) if options_count else ""
+        )
+        options_html = format_html(
+            '<div class="dropdown flex-shrink-0">'
+            '<button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" '
+            'data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false" '
+            'title="More import settings" aria-label="More import settings">'
+            '<i class="mdi mdi-tune"></i>{}</button>'
+            '<div class="dropdown-menu dropdown-menu-end p-3 import-row-options-menu">{}</div></div>',
+            badge_html,
+            menu_html,
+        )
+        if primary_target is None:
+            primary_heading = format_html('<div class="import-source-label {}">{}</div>', label_class, primary_label)
+        else:
+            primary_heading = format_html(
+                '<label class="import-source-label {}" for="{}">{}</label>',
+                label_class,
+                primary_target,
+                primary_label,
+            )
+        return format_html(
+            '{}<div class="d-flex gap-1 align-items-center">{}{}</div>',
+            primary_heading,
+            primary_control,
+            options_html,
+        )
+
+    def _row_update_url(self, device_id, validation):
+        """Return the shared row-update URL with virtual-chassis state."""
+        update_url = reverse(
+            "plugins:netbox_librenms_plugin:device_import_plan_update",
+            kwargs={"device_id": device_id},
+        )
+        if validation.get("_vc_detection_enabled"):
+            return f"{update_url}?enable_vc_detection=true"
+        return update_url
+
+    def render_object_type(self, value, record):
+        """Render the explicit NetBox object-type selector."""
+        device_id = record.get("device_id")
+        validation = record.get("_validation", {})
+        intent = validation.get("_import_intent")
+        selected_type = (
+            intent.object_type
+            if intent is not None
+            else ImportObjectType.VIRTUAL_MACHINE
+            if validation.get("import_as_vm")
+            else ImportObjectType.DEVICE
+        )
+        options = []
+        for object_type, label in (
+            (ImportObjectType.DEVICE, "Device"),
+            (ImportObjectType.VIRTUAL_MACHINE, "Virtual machine"),
+        ):
+            selected = " selected" if object_type is selected_type else ""
+            options.append(f'<option value="{object_type.value}"{selected}>{label}</option>')
+        return mark_safe(
+            f'<select class="form-select form-select-sm import-option-select" '
+            f'id="object_type_{device_id}" name="object_type_{device_id}" '
+            f'hx-post="{self._row_update_url(device_id, validation)}" hx-trigger="change" hx-swap="none" '
+            f'{self._server_key_hx_vals()}hx-include="{import_row_hx_include(device_id)}">'
+            f"{''.join(options)}</select>"
+        )
+
+    def render_vm_placement_method(self, value, record):
+        """Render the virtual-machine placement-method selector."""
+        device_id = record.get("device_id")
+        validation = record.get("_validation", {})
+        method = VMPlacementMethod(
+            validation.get("vm_placement", {}).get("method")
+            or (
+                VMPlacementMethod.CLUSTER
+                if validation.get("cluster", {}).get("cluster") is not None
+                else VMPlacementMethod.SITE
+            )
+        )
+        site = validation.get("site", {}).get("site")
+        host_label = "Host device"
+        if not netbox_allows_standalone_vm_host():
+            host_label = "Host device (clustered host required)"
+        options = []
+        for option, label in (
+            (VMPlacementMethod.SITE, f"Matched site ({site.name})" if site else "Matched site (unavailable)"),
+            (VMPlacementMethod.CLUSTER, "Cluster"),
+            (VMPlacementMethod.HOST, host_label),
+        ):
+            selected = " selected" if option is method else ""
+            options.append(f'<option value="{option.value}"{selected}>{escape(label)}</option>')
+        return mark_safe(
+            f'<select class="form-select form-select-sm import-option-select" '
+            f'id="vm_placement_{device_id}" name="vm_placement_{device_id}" '
+            f'hx-post="{self._row_update_url(device_id, validation)}" hx-trigger="change" hx-swap="none" '
+            f'{self._server_key_hx_vals()}hx-include="{import_row_hx_include(device_id)}">'
+            f"{''.join(options)}</select>"
+        )
+
     def render_netbox_cluster(self, value, record):
         """
         Render cluster selection dropdown.
 
-        Default is "-- Device (not VM) --" (empty value).
-        If a cluster is selected, the device will be imported as a VM.
-        If no cluster is selected, the device will be imported as a Device.
+        Cluster selection changes placement only. Object type is a separate control.
 
         Args:
             value (object): The column value.
@@ -278,6 +543,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered cluster selection HTML.
+
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -306,39 +572,64 @@ class DeviceImportTable(tables.Table):
             selected_cluster_id = validation["cluster"]["cluster"].pk
 
         # Build dropdown with HTMX attributes to update the row
-        options = ['<option value="">-- Device (not VM) --</option>']
+        options = ['<option value="">-- Select cluster --</option>']
         for cluster in clusters:
             selected = " selected" if cluster.pk == selected_cluster_id else ""
             options.append(f'<option value="{cluster.pk}"{selected}>{cluster.name}</option>')
 
-        # Add HTMX attributes to update the entire row when cluster is selected
-        from django.urls import reverse
-
-        update_url = reverse(
-            "plugins:netbox_librenms_plugin:device_cluster_update",
-            kwargs={"device_id": device_id},
-        )
-
-        # Include VC detection flag in URL if present in validation (from initial load)
-        vc_detection_flag = ""
-        if validation.get("_vc_detection_enabled"):
-            vc_detection_flag = "?enable_vc_detection=true"
-
         select_html = (
-            f'<select class="form-select form-select-sm cluster-select" '
-            f'name="cluster_{device_id}" '
+            f'<select class="form-select form-select-sm cluster-select import-setup-select" '
+            f'id="cluster_{device_id}" name="cluster_{device_id}" '
             f'data-device-id="{device_id}" '
-            f'hx-post="{update_url}{vc_detection_flag}" '
+            f'hx-post="{self._row_update_url(device_id, validation)}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="[name=role_{device_id}], [name=rack_{device_id}]" '
-            f'style="width: 180px;">'
+            f'hx-include="{import_row_hx_include(device_id)}">'
             f"{''.join(options)}"
             f"</select>"
         )
 
         return mark_safe(select_html)
+
+    def render_netbox_host(self, value, record):
+        """Render NetBox's remote Device selector for VM host placement."""
+        from django import forms
+        from utilities.forms.fields import DynamicModelChoiceField
+
+        device_id = record.get("device_id")
+        validation = record.get("_validation", {})
+        field_name = f"host_device_{device_id}"
+        selected_host = validation.get("vm_placement", {}).get("host_device")
+        form = forms.Form()
+        field = DynamicModelChoiceField(
+            queryset=Device.objects.restrict(self.user, "view"),
+            required=False,
+            selector=True,
+            label="Host device",
+        )
+        field.widget.attrs.update(
+            {
+                "id": field_name,
+                "class": "api-select form-select form-select-sm import-setup-select",
+                "hx-post": self._row_update_url(device_id, validation),
+                "hx-trigger": "change",
+                "hx-swap": "none",
+                "hx-include": import_row_hx_include(device_id),
+            }
+        )
+        if self.server_key:
+            field.widget.attrs["hx-vals"] = json.dumps({"server_key": str(self.server_key)})
+        form.fields[field_name] = field
+        if selected_host is not None:
+            form.initial[field_name] = selected_host.pk
+        bound_field = form[field_name]
+        if selected_host is not None:
+            field.widget.choices = [
+                ("", field.empty_label),
+                (field.prepare_value(selected_host), field.label_from_instance(selected_host)),
+            ]
+        return mark_safe(str(bound_field))
 
     def render_netbox_role(self, value, record):
         """
@@ -353,6 +644,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered role selection HTML.
+
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -387,29 +679,15 @@ class DeviceImportTable(tables.Table):
             selected = " selected" if role.pk == selected_role_id else ""
             options.append(f'<option value="{role.pk}"{selected}>{role.name}</option>')
 
-        # Add HTMX attributes to update the entire row when role is selected
-        from django.urls import reverse
-
-        update_url = reverse(
-            "plugins:netbox_librenms_plugin:device_role_update",
-            kwargs={"device_id": device_id},
-        )
-
-        # Include VC detection flag in URL if present in validation (from initial load)
-        vc_detection_flag = ""
-        if validation.get("_vc_detection_enabled"):
-            vc_detection_flag = "?enable_vc_detection=true"
-
         select_html = (
-            f'<select class="form-select form-select-sm device-role-select" '
-            f'name="role_{device_id}" '
+            f'<select class="form-select form-select-sm device-role-select import-setup-select" '
+            f'id="role_{device_id}" name="role_{device_id}" '
             f'data-device-id="{device_id}" '
-            f'hx-post="{update_url}{vc_detection_flag}" '
+            f'hx-post="{self._row_update_url(device_id, validation)}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="[name=cluster_{device_id}], [name=rack_{device_id}]" '
-            f'style="width: 150px;">'
+            f'hx-include="{import_row_hx_include(device_id)}">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -429,6 +707,7 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered rack selection HTML.
+
         """
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
@@ -470,29 +749,15 @@ class DeviceImportTable(tables.Table):
             selected = " selected" if rack.pk == selected_rack_id else ""
             options.append(f'<option value="{rack.pk}"{selected}>{escape(display_text)}</option>')
 
-        # Add HTMX attributes to update the entire row when rack is selected
-        from django.urls import reverse
-
-        update_url = reverse(
-            "plugins:netbox_librenms_plugin:device_rack_update",
-            kwargs={"device_id": device_id},
-        )
-
-        # Include VC detection flag in URL if present in validation (from initial load)
-        vc_detection_flag = ""
-        if validation.get("_vc_detection_enabled"):
-            vc_detection_flag = "?enable_vc_detection=true"
-
         select_html = (
-            f'<select class="form-select form-select-sm rack-select" '
-            f'name="rack_{device_id}" '
+            f'<select class="form-select form-select-sm rack-select import-option-select" '
+            f'id="rack_{device_id}" name="rack_{device_id}" '
             f'data-device-id="{device_id}" '
-            f'hx-post="{update_url}{vc_detection_flag}" '
+            f'hx-post="{self._row_update_url(device_id, validation)}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f"{self._server_key_hx_vals()}"
-            f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
-            f'style="width: 200px;">'
+            f'hx-include="{import_row_hx_include(device_id)}">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -512,12 +777,15 @@ class DeviceImportTable(tables.Table):
 
         Returns:
             SafeString: The rendered import action HTML.
+
         """
         validation = record.get("_validation", {})
         device_id = record.get("device_id")
         is_ready = validation.get("is_ready", False)
         can_import = validation.get("can_import", False)
         existing = validation.get("existing_device")
+        intent = validation.get("_import_intent")
+        is_vm = intent.is_vm if intent is not None else validation.get("import_as_vm", False)
 
         vc_attributes = self._build_vc_attributes(validation, record)
 
@@ -649,11 +917,11 @@ class DeviceImportTable(tables.Table):
                 f'class="btn btn-sm {btn_class}" '
                 f"{aria_attr}"
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
+                f'hx-include="{_IMPORT_NAMING_INCLUDE}" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="{btn_title}">'
-                f'<i class="mdi {btn_icon}"></i>{btn_label}</button>'
+                f'<i class="mdi {btn_icon}"></i><span class="device-import-action-label">{btn_label}</span></button>'
             )
         elif is_ready:
             # Ready to import - show Import and Details buttons
@@ -665,18 +933,18 @@ class DeviceImportTable(tables.Table):
                 f'data-device-id="{device_id}" '
                 f'data-import-mode="single"{vc_attributes} '
                 f'title="Import this device">'
-                f'<i class="mdi mdi-download"></i> Import</button>'
+                f'<i class="mdi mdi-download"></i><span class="device-import-action-label"> Import</span></button>'
             )
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm btn-outline-primary" '
                 f'aria-label="View details" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
+                f'hx-include="{_IMPORT_NAMING_INCLUDE}" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="View details">'
-                f'<i class="mdi mdi-information-outline"></i></button>'
+                f'<i class="mdi mdi-information-outline"></i><span class="device-import-action-label visually-hidden"> Details</span></button>'
             )
         elif can_import:
             # Has warnings - show Review button with Details
@@ -686,11 +954,11 @@ class DeviceImportTable(tables.Table):
                 f'<button type="button" '
                 f'class="btn btn-sm btn-warning" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
+                f'hx-include="{_IMPORT_NAMING_INCLUDE}" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="Review and import">'
-                f'<i class="mdi mdi-alert"></i> Review</button>'
+                f'<i class="mdi mdi-alert"></i><span class="device-import-action-label"> Review</span></button>'
             )
         else:
             # Cannot import (usually missing role) - show Import button (disabled until role selected) and Details
@@ -701,18 +969,18 @@ class DeviceImportTable(tables.Table):
                 f'class="btn btn-sm btn-success device-import-btn" '
                 f'data-device-id="{device_id}" '
                 f"disabled{vc_attributes} "
-                f'title="Select a role to enable import">'
-                f'<i class="mdi mdi-download"></i> Import</button>'
+                f'title="{"Select placement to enable import" if is_vm else "Select a role to enable import"}">'
+                f'<i class="mdi mdi-download"></i><span class="device-import-action-label"> Import</span></button>'
             )
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm btn-outline-danger" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
+                f'hx-include="{_IMPORT_NAMING_INCLUDE}" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="View validation details">'
-                f'<i class="mdi mdi-alert-circle"></i> Details</button>'
+                f'<i class="mdi mdi-alert-circle"></i><span class="device-import-action-label"> Details</span></button>'
             )
 
         return mark_safe('<div class="btn-group btn-group-sm">' + " ".join(buttons) + "</div>")
@@ -737,48 +1005,46 @@ class DeviceImportTable(tables.Table):
 
         # Show error button if detection failed
         if vc_data.get("detection_error"):
-            return mark_safe(
-                f'<button type="button" '
-                f'class="btn btn-sm btn-outline-warning" '
-                f'hx-get="{vc_url}" '
-                f'hx-target="#htmx-modal-content" '
-                f'hx-swap="innerHTML" '
-                f'title="View virtual chassis error details">'
-                f'<i class="mdi mdi-alert"></i> Error</button>'
+            return format_html(
+                '<button type="button" class="badge bg-yellow-lt border-0" '
+                'hx-get="{}" hx-target="#htmx-modal-content" hx-swap="innerHTML" '
+                'title="View virtual chassis error details">'
+                '<i class="mdi mdi-alert"></i> Stack Error</button>',
+                vc_url,
             )
 
         # Show member count button for valid multi-member stacks
         member_count = vc_data.get("member_count", 0)
-        return mark_safe(
-            f'<button type="button" '
-            f'class="btn btn-sm btn-outline-info" '
-            f'hx-get="{vc_url}" '
-            f'hx-target="#htmx-modal-content" '
-            f'hx-swap="innerHTML" '
-            f'title="View virtual chassis details">'
-            f'<i class="mdi mdi-server-network"></i> {member_count} members</button>'
+        return format_html(
+            '<button type="button" class="badge bg-cyan-lt border-0" '
+            'hx-get="{}" hx-target="#htmx-modal-content" hx-swap="innerHTML" '
+            'title="View virtual chassis details">'
+            '<i class="mdi mdi-server-network"></i> Stack, {}</button>',
+            vc_url,
+            member_count,
         )
 
     def _build_validation_details_url(self, device_id: int, validation: dict) -> str:
         """
-        Build validation details URL with appropriate query parameters.
+        Build a validation-details URL that preserves the complete import intent.
 
-        Constructs the URL for the device validation details modal, adding
-        cluster_id, role_id, and VC detection flag as query parameters.
+        The modal can open without access to the row's live controls, such as for an
+        existing match whose setup controls are hidden. Carry the same field names as
+        the import form so the details request cannot lose its model or placement.
 
         Args:
-            device_id: LibreNMS device ID
-            validation: Validation dict from validate_device_for_import()
+            device_id: LibreNMS device ID.
+            validation: Validation dict from ``validate_device_for_import()``.
 
         Returns:
-            str: Complete URL with query parameters
+            str: Complete URL with query parameters.
+
         """
         details_url = reverse(
             "plugins:netbox_librenms_plugin:device_validation_details",
             kwargs={"device_id": device_id},
         )
 
-        # Build query params based on import type
         params = []
 
         # Scope the modal to the server the import page was rendered for, so the modal-open GET
@@ -789,14 +1055,49 @@ class DeviceImportTable(tables.Table):
         if server_key:
             params.append(f"server_key={quote_plus(str(server_key))}")
 
-        # Add cluster_id if this is a VM import
-        if validation.get("cluster", {}).get("found") and validation.get("cluster", {}).get("cluster"):
-            cluster_id = validation["cluster"]["cluster"].id
-            params.append(f"cluster_id={cluster_id}")
-        # Add role_id if device role is found
-        elif validation.get("device_role", {}).get("found") and validation.get("device_role", {}).get("role"):
-            role_id = validation["device_role"]["role"].id
-            params.append(f"role_id={role_id}")
+        intent = validation.get("_import_intent")
+        existing = validation.get("existing_device")
+        is_vm = (
+            intent.is_vm
+            if intent is not None
+            else validation.get("import_as_vm", False) or isinstance(existing, VirtualMachine)
+        )
+        object_type = ImportObjectType.VIRTUAL_MACHINE if is_vm else ImportObjectType.DEVICE
+        params.append(f"object_type_{device_id}={object_type.value}")
+
+        role = validation.get("device_role", {}).get("role")
+        role_id = intent.role_id if intent is not None else getattr(role, "pk", None)
+        if role_id is not None:
+            params.append(f"role_{device_id}={role_id}")
+
+        if is_vm:
+            placement = validation.get("vm_placement", {})
+            placement_method = intent.vm_placement_method if intent is not None else placement.get("method")
+            if placement_method is None:
+                if getattr(existing, "device_id", None) or placement.get("host_device") is not None:
+                    placement_method = VMPlacementMethod.HOST
+                elif getattr(existing, "cluster_id", None) or validation.get("cluster", {}).get("cluster") is not None:
+                    placement_method = VMPlacementMethod.CLUSTER
+                else:
+                    placement_method = VMPlacementMethod.SITE
+            placement_method = VMPlacementMethod(placement_method)
+            params.append(f"vm_placement_{device_id}={placement_method.value}")
+
+            if placement_method is VMPlacementMethod.CLUSTER:
+                cluster = validation.get("cluster", {}).get("cluster")
+                cluster_id = intent.cluster_id if intent is not None else getattr(cluster, "pk", None)
+                if cluster_id is not None:
+                    params.append(f"cluster_{device_id}={cluster_id}")
+            elif placement_method is VMPlacementMethod.HOST:
+                host_device = placement.get("host_device") or getattr(existing, "device", None)
+                host_device_id = intent.host_device_id if intent is not None else getattr(host_device, "pk", None)
+                if host_device_id is not None:
+                    params.append(f"host_device_{device_id}={host_device_id}")
+        else:
+            rack = validation.get("rack", {}).get("rack")
+            rack_id = intent.rack_id if intent is not None else getattr(rack, "pk", None)
+            if rack_id is not None:
+                params.append(f"rack_{device_id}={rack_id}")
 
         # Add VC detection flag if it was enabled during initial load
         if validation.get("_vc_detection_enabled"):
@@ -856,26 +1157,22 @@ class DeviceImportTable(tables.Table):
 
         fields = (
             "selection",
-            "hostname",
-            "sysname",
+            "netbox_object",
             "location",
             "hardware",
-            "netbox_cluster",
-            "netbox_role",
-            "netbox_rack",
-            "virtual_chassis",
+            "hostname",
+            "sysname",
+            "import_setup",
             "actions",
         )
         sequence = (
             "selection",
-            "hostname",
-            "sysname",
+            "netbox_object",
             "location",
             "hardware",
-            "netbox_cluster",
-            "netbox_role",
-            "netbox_rack",
-            "virtual_chassis",
+            "hostname",
+            "sysname",
+            "import_setup",
             "actions",
         )
         default_columns = fields
