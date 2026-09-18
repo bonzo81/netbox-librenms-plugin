@@ -246,6 +246,84 @@ class TestCandidateBaysForItem:
         assert set(fallback) == {"Slot 1", "X2 Port 2"}
 
 
+class TestBayEligibilityPredicates:
+    """The two questions the fallback answers, asked one at a time.
+
+    They share one candidate set in production because _match_bay's method order would otherwise
+    be split across two searches. Asking them separately here is what keeps each rule legible.
+    """
+
+    @staticmethod
+    def _holder_of(device):
+        """Build the device-wide ancestry map the production code passes in."""
+        from dcim.models import Module
+
+        return dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+
+    def _nokia_chain(self, tag):
+        """IOM in a device bay, XIOM inside it, MDA inside that, each with one child bay."""
+        device = make_device_with_module_bays(tag, ["Slot 2"])
+        iom = install_module(device, "Slot 2", f"{tag}-IOM", child_bays=("2/x1",))
+        xiom = install_module(device, "2/x1", f"{tag}-XIOM", child_bays=("x1/1",), parent_module=iom)
+        mda = install_module(device, "x1/1", f"{tag}-MDA", child_bays=("1/c2",), parent_module=xiom)
+        return device, iom, xiom, mda
+
+    def _bay_named(self, device, name):
+        from dcim.models import ModuleBay
+
+        return ModuleBay.objects.select_related("installed_module").get(device=device, name=name)
+
+    def test_the_subtree_test_reaches_a_bay_owned_two_levels_down(self):
+        """The walk must not stop at the parent's direct children."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device, _iom, xiom, _mda = self._nokia_chain("pred-subtree-deep")
+        holder_of = self._holder_of(device)
+
+        assert InstallBranchView._bay_is_owned_within_subtree(self._bay_named(device, "1/c2"), xiom.pk, holder_of), (
+            "the MDA's bay is below the XIOM"
+        )
+
+    def test_the_subtree_test_rejects_a_bay_owned_by_a_sibling(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device = make_device_with_module_bays("pred-subtree-sibling", ["Slot 1", "Slot 2"])
+        first = install_module(device, "Slot 1", "PRED-SIB-A", child_bays=("Transceiver A",))
+        install_module(device, "Slot 2", "PRED-SIB-B", child_bays=("Transceiver B",))
+        holder_of = self._holder_of(device)
+
+        assert not InstallBranchView._bay_is_owned_within_subtree(
+            self._bay_named(device, "Transceiver B"), first.pk, holder_of
+        )
+
+    def test_the_subtree_test_rejects_the_bay_that_holds_the_parent(self):
+        """It is above the parent, not below, which is why identity is a separate question."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device, _iom, xiom, _mda = self._nokia_chain("pred-subtree-holder")
+        holder_of = self._holder_of(device)
+
+        assert not InstallBranchView._bay_is_owned_within_subtree(self._bay_named(device, "2/x1"), xiom.pk, holder_of)
+
+    def test_the_identity_test_finds_the_bay_holding_the_parent(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device, _iom, xiom, _mda = self._nokia_chain("pred-identity")
+
+        assert InstallBranchView._bay_holds_resolved_parent(self._bay_named(device, "2/x1"), xiom.pk)
+
+    def test_the_identity_test_rejects_an_empty_bay_and_another_modules_bay(self):
+        """An empty bay must not raise on the reverse one-to-one, and must answer False."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device, _iom, xiom, _mda = self._nokia_chain("pred-identity-negative")
+        empty = self._bay_named(device, "1/c2")
+        other = self._bay_named(device, "x1/1")
+
+        assert not InstallBranchView._bay_holds_resolved_parent(empty, xiom.pk)
+        assert not InstallBranchView._bay_holds_resolved_parent(other, xiom.pk)
+
+
 class TestMatchBay:
     """Bay matching falls through mappings, direct names, and finally position."""
 
