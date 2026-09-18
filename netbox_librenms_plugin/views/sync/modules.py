@@ -1507,7 +1507,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             exact_mappings, regex_mappings = load_bay_mappings()
 
         matched_bay = InstallBranchView._resolve_bay_for_item(
-            item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id, norm_rules_bay
+            device, item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id, norm_rules_bay
         )
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
@@ -1580,7 +1580,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         }
 
     @staticmethod
-    def _resolve_bay_for_item(item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id, norm_rules_bay):
+    def _resolve_bay_for_item(
+        device, item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id, norm_rules_bay
+    ):
         """
         Return the module bay to install *item* into, or None when nothing matches.
 
@@ -1590,10 +1592,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         installed on a first pass and then skipped as "no matching bay" on the next, which is what
         a second branch install, or installing the rows one at a time first, produces.
 
-        The fallback reuses the combined device + module-scoped set, which already drops names
-        owned by two different modules, so it can only ever land on an unambiguous bay.
+        The fallback widens to the device-level bays and to the resolved parent's own subtree.
+        A bay owned by a module OUTSIDE that subtree is never offered: it may be unambiguous, but
+        unambiguous is not the same as correctly owned, so installing into it is a wrong-bay write.
 
         Args:
+            device (Device): The device being installed onto.
             item (dict): The LibreNMS inventory item to place.
             index_map (dict): The inventory items keyed by index.
             bays: The device's module bays, with ``installed_module`` selected.
@@ -1607,11 +1611,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         """
 
-        def match_against(scoped_parent_module_id):
+        def match_against(candidate_bays):
             return InstallBranchView._match_bay(
                 item,
                 index_map,
-                InstallBranchView._candidate_bays_for_item(bays, scoped_parent_module_id),
+                candidate_bays,
                 exact_mappings,
                 regex_mappings,
                 manufacturer_id=manufacturer_id,
@@ -1622,10 +1626,86 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         parent_module_id = InstallBranchView._find_parent_module_id(
             item, index_map, bays, exact_mappings, regex_mappings
         )
-        matched = match_against(parent_module_id)
+        matched = match_against(InstallBranchView._candidate_bays_for_item(bays, parent_module_id))
         if not matched and parent_module_id:
-            matched = match_against(None)
+            matched = match_against(
+                InstallBranchView._fallback_bays_for_resolved_parent(device, bays, parent_module_id)
+            )
         return matched
+
+    @staticmethod
+    def _fallback_bays_for_resolved_parent(device, bays, parent_module_id):
+        """
+        Return the bays a row may fall back to once its resolved parent narrowed the search away.
+
+        The resolved parent bounds the search. Three kinds of bay qualify, and nothing else.
+
+        Bays outside every module, for the row whose NetBox bay is device-level.
+
+        Bays owned by the parent or by a module below it. LibreNMS can omit an intermediate
+        module, so a row can trace to an ancestor while its bay belongs to a descendant: a Nokia
+        connector reports as ``2/x1/1/c2`` under the XIOM when the MDA is missing, and its bay
+        ``1/c2`` belongs to that MDA. See _nest_synthetic_transceivers.
+
+        The bay the parent itself occupies, which is owned by the parent's own holder and so sits
+        outside the subtree. The row can BE that module, because LibreNMS reports a container and
+        the module inside it as two rows. The resulting "bay already occupied" carries the module
+        pk, and that is the only signal _should_attempt_bind_for_result accepts to bind the row's
+        LibreNMS port to an interface.
+
+        A bay owned by a module outside the subtree, a sibling above all, stays out.
+
+        A device-level bay wins a name collision, and a name owned by two modules in the subtree
+        is dropped rather than guessed. Both match _candidate_bays_for_item.
+
+        Args:
+            device (Device): The device being installed onto, used to read the module ancestry.
+            bays: The candidate module bays, with ``installed_module`` selected.
+            parent_module_id (int): The installed parent module the narrowed pass used.
+
+        Returns:
+            dict: A ``name -> bay`` mapping to match the inventory item against.
+
+        """
+        from dcim.models import Module
+
+        # Ancestry comes from every module on the device, never from *bays*: that queryset is
+        # permission-restricted, so a bay the user cannot change would cut the chain and hide a
+        # descendant bay they can. Only the candidates below stay restricted.
+        holder_of = dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+
+        def below_parent(module_id):
+            """Report whether *module_id* is the parent or sits under it."""
+            seen = set()
+            while module_id is not None and module_id not in seen:
+                if module_id == parent_module_id:
+                    return True
+                seen.add(module_id)
+                module_id = holder_of.get(module_id)
+            return False
+
+        fallback = {bay.name: bay for bay in bays if not bay.module_id}
+        scoped: dict = {}
+        for bay in bays:
+            if bay.name in fallback:
+                continue
+            installed = getattr(bay, "installed_module", None)
+            is_parents_own_bay = installed is not None and installed.pk == parent_module_id
+            if is_parents_own_bay or below_parent(bay.module_id):
+                scoped.setdefault(bay.name, []).append(bay)
+
+        for name, candidates in scoped.items():
+            if len(candidates) == 1:
+                fallback[name] = candidates[0]
+            else:
+                logger.info(
+                    "Bulk install: dropping ambiguous bay name %r — %d modules under the resolved "
+                    "parent define it; the row skips as 'no matching bay' instead of installing "
+                    "into an arbitrary one.",
+                    name,
+                    len(candidates),
+                )
+        return fallback
 
     @staticmethod
     def _find_parent_module_id(item, index_map, device_bays, exact_mappings, regex_mappings):  # noqa: C901
