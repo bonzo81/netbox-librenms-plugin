@@ -1,10 +1,11 @@
 """
 Error and skip paths of ``LibreNMSAPI._fetch_serial_port_sensors``.
 
-The success and malformed-payload branches live in ``test_librenms_api.py``. These are the
-paths that file does not reach: the two 404 meanings, a non-JSON body, and a sensor row whose
-type is unreadable. They are pinned here because that file is edited by every branch above
-this one, so appending to it would fight each restack.
+``test_librenms_api.py::TestGetSerialPortSensors`` covers the success and malformed-payload
+branches, the empty-table 404, and the non-JSON 200. These are the paths it does not reach: a
+404 that means the endpoint is missing rather than the table empty, a 404 whose body is not
+JSON, and the warning a row with an unreadable type has to raise. They are pinned here because
+that file is edited by every branch above this one, so appending to it would fight each restack.
 
 Every case drives the real HTTP client against the loopback LibreNMS.
 """
@@ -30,21 +31,11 @@ def _sensor(device_id, *, sensor_type="acsSerialPortTable", port_num=7):
 
 
 class TestSensorsEndpointNotFound:
-    """A 404 carries two different meanings and must not collapse into one."""
+    """A 404 carries two meanings and must not collapse into one.
 
-    def test_an_empty_sensor_table_reads_as_no_serial_sensors(self, mock_librenms_api, librenms_server):
-        """LibreNMS 404s an instance with no sensors at all, which is success with zero rows."""
-        librenms_server.register(
-            SENSORS_PATH,
-            {"status": "error", "message": "Sensors do not exist"},
-            status=404,
-        )
-        mock_librenms_api.librenms_url = librenms_server.url
-
-        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
-
-        assert success is True
-        assert data == []
+    The other meaning, an empty sensor table reading as success with zero rows, is pinned by
+    ``test_librenms_api.py::TestGetSerialPortSensors::test_librenms_empty_inventory_404_returns_empty``.
+    """
 
     def test_a_missing_endpoint_is_reported_as_a_failure(self, mock_librenms_api, librenms_server):
         """A 404 that does NOT say the table is empty is a real fetch failure."""
@@ -65,21 +56,6 @@ class TestSensorsEndpointNotFound:
 
         assert success is False
         assert message == "Sensors resource endpoint not found"
-
-
-class TestSensorsResponseIsNotJson:
-    """A 200 with an unparseable body must name the parse failure, not a connection problem."""
-
-    def test_a_non_json_body_is_reported_as_invalid_json(self, mock_librenms_api, librenms_server):
-        librenms_server.register_raw(SENSORS_PATH, "not json at all", content_type="text/plain")
-        mock_librenms_api.librenms_url = librenms_server.url
-
-        success, message = mock_librenms_api.get_serial_port_sensors(device_id=12)
-
-        assert success is False
-        # JSONDecodeError subclasses both ValueError and RequestException, so the wrong handler
-        # order would mislabel this as "Error connecting to LibreNMS".
-        assert message.startswith("Invalid JSON from LibreNMS:")
 
 
 class TestUnreadableSensorType:

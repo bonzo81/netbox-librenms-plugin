@@ -9,7 +9,7 @@ The **Cables** tab on a device's LibreNMS sync page builds cable rows from Libre
 
 Console servers (e.g. Avocent ACS, Cisco IOS async lines) don't expose their serial ports in the SNMP interface table, so they never appear in LibreNMS port listings. LibreNMS instead models them as **state sensors** in the "Serial Ports" group. The plugin maps those sensors to console-port cable rows:
 
-- The **local port** name is generated from the sensor's port number using a per-vendor pattern (e.g. `ttyS7`, `Line 2`). The device must have a **ConsoleServerPort with that exact name** for the row to become syncable.
+- The **local port** name is generated from the sensor's port number using the pattern configured for that sensor's `sensor_type` (e.g. `ttyS7`, `Line 2`). Matching is on the `sensor_type` value, not on the vendor, so a vendor that reports serial lines under more than one type needs a mapping row for each. The device must have a **ConsoleServerPort with that exact name** for the row to become syncable.
 - The **remote side** is resolved from the sensor's label (LibreNMS description with the trailing `Status` suffix stripped, e.g. `PROD-SW01 Status` → `PROD-SW01`): the plugin looks up a NetBox device by that name and auto-picks its first un-cabled ConsolePort.
 
 ### Configuring recognized sensor types
@@ -23,7 +23,7 @@ Two vendors ship pre-seeded:
 | `acsSerialPortTable` | `ttyS{N}` | Avocent ACS |
 | `OLD-CISCO-TS-MIB::ltsLineTable` | `Line {N}` | Cisco IOS async lines |
 
-To surface another vendor's serial lines, add a row with its `sensor_type` (matching is exact, including case) and the naming pattern you use for the device's ConsoleServerPorts — no code change or restart needed. Deleting a row stops that vendor's sensors from being recognized; there is no hidden fallback that resurrects the defaults. Entries support bulk YAML import/export and per-object change logging like the other rules.
+To surface another serial sensor type, add a row with its `sensor_type` (matching is exact, including case) and the naming pattern you use for the device's ConsoleServerPorts — no code change or restart needed. Deleting a row stops sensors of that type from being recognized; there is no hidden fallback that resurrects the defaults. Entries support bulk YAML import/export and per-object change logging like the other rules.
 
 ## Cable provenance
 
