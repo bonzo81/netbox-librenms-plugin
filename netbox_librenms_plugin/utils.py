@@ -1901,6 +1901,38 @@ def interface_name_rejection_reason(port, interface_name_field, model=None):
     return None
 
 
+def host_owned_interface_names(ports, interface_name_field, model=None) -> set[str]:
+    """
+    Return the interface names the host rows of a merged snapshot own.
+
+    A host and its OOB controller are two LibreNMS devices but one NetBox device, so both sides
+    write into the same ``(device, name)`` namespace. The host owns it: an OOB row carrying one
+    of these names must not create or bind that interface, or the host row can never resolve
+    its own interface again.
+
+    Derived from the rows on read rather than tagged onto the cached snapshot, so a snapshot
+    written before this existed cannot fail open, and the sync writer and the table reader
+    cannot drift apart on what "the host owns this name" means.
+
+    Args:
+        ports (list): The merged host + OOB port rows.
+        interface_name_field (str): Port field that contains the selected interface name.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        set[str]: The names owned by host rows, empty when *ports* is malformed.
+
+    """
+    if not is_list_of_dicts(ports):
+        return set()
+    return {
+        name
+        for port in ports
+        if port.get("_source") != OOB_INVENTORY_SOURCE
+        and (name := syncable_interface_name(port, interface_name_field, model)) is not None
+    }
+
+
 def bounded_interface_text(field_name, value, model=None):
     """
     Return *value* clipped to the column NetBox declares for *field_name*.

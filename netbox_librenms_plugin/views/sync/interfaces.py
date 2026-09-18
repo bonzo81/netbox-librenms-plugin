@@ -13,7 +13,7 @@ from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import HOST_NAME_COLLISION_REASON, OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_relationships import (
     build_interface_index,
     filter_interface_index,
@@ -42,6 +42,8 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_interface_port_identity_sets,
     get_librenms_sync_device,
+    host_owned_interface_names,
+    interface_field_limit,
     interface_name_fallback_matches_port,
     interface_name_rejection_reason,
     is_list_of_dicts,
@@ -914,32 +916,23 @@ class SyncInterfacesView(
                 if isinstance(obj, Device):
                     vlan_scope_devices = self._selected_vlan_scope_devices(obj, ports_data, interface_name_field)
                 self._prepare_vlan_lookup_maps(vlan_scope_devices)
+            # An OOB controller is a second device in LibreNMS but the SAME device in NetBox, so
+            # its ports are modelled as interfaces here and share the host's (device, name)
+            # namespace. The host owns that namespace; see host_owned_interface_names.
+            host_owned_names = host_owned_interface_names(ports_data, interface_name_field)
             try:
                 for port in ports_data:
-                    # An OOB controller is a second device in LibreNMS but the SAME device in
-                    # NetBox, so its ports are modelled as interfaces here. port_id is a LibreNMS
-                    # global primary key, so an OOB row can never resolve onto a host row's
-                    # interface by id; a name clash is caught by _resolve_device_interface and
-                    # recorded as a skipped conflict rather than overwriting the host interface.
-                    # A shared LOM is the exception: one physical port reported on both sides, so
-                    # syncing both rows would model it twice.
-                    if (
-                        port.get("_source") == OOB_INVENTORY_SOURCE
-                        and port.get("_dedup_conflict")
-                        and normalize_librenms_port_id(port.get("port_id")) in selected_port_ids
-                    ):
-                        self._record_skipped_conflict(
-                            port.get(interface_name_field),
-                            "shared LOM already synced from the host side",
-                        )
-                        continue
                     port_id = normalize_librenms_port_id(port.get("port_id"))
-
-                    if port_id in selected_port_ids:
-                        row_excludes = exclude_columns
-                        if port_id in getattr(self, "_auto_selected_port_ids", set()) and "vlans" not in row_excludes:
-                            row_excludes = [*row_excludes, "vlans"]
-                        self.sync_interface(obj, port, row_excludes, interface_name_field)
+                    if port_id not in selected_port_ids:
+                        continue
+                    if port.get("_source") == OOB_INVENTORY_SOURCE and self._oob_row_is_unsyncable(
+                        port, interface_name_field, host_owned_names
+                    ):
+                        continue
+                    row_excludes = exclude_columns
+                    if port_id in getattr(self, "_auto_selected_port_ids", set()) and "vlans" not in row_excludes:
+                        row_excludes = [*row_excludes, "vlans"]
+                    self.sync_interface(obj, port, row_excludes, interface_name_field)
             finally:
                 if not keep_locked_targets:
                     self.__dict__.pop("_locked_target_devices", None)
@@ -1106,6 +1099,7 @@ class SyncInterfacesView(
             )
             return
 
+        target_device = None
         if isinstance(obj, Device):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             target_device = self._resolve_row_target_device(obj, port_id=port_id)
@@ -1139,7 +1133,10 @@ class SyncInterfacesView(
             )
             # Record for the user-facing summary in post(). Defensive getattr: sync_interface
             # may be exercised directly (without post() initialising the list).
-            self._record_skipped_conflict(interface_name, "port already mapped elsewhere or ambiguous")
+            self._record_skipped_conflict(
+                interface_name,
+                self._unresolved_row_reason(librenms_interface, target_device, interface_name),
+            )
             return
 
         # An interface resolved and is being synced — count it explicitly (defensive getattr:
@@ -1175,6 +1172,63 @@ class SyncInterfacesView(
         skipped = getattr(self, "_skipped_conflicts", None)
         if skipped is not None:
             skipped.append(f"{interface_name or '(unnamed)'} ({reason})")
+
+    def _unresolved_row_reason(self, port, target_device, interface_name):
+        """
+        Return why a row resolved to no interface, naming a host name collision as one.
+
+        An OOB row can reach here with the name still owned by the host side: the host port has
+        dropped out of the LibreNMS snapshot, so the pre-loop guard saw no host row, but its
+        NetBox interface remains and holds a different port_id. "Port already mapped elsewhere
+        or ambiguous" describes a different failure and offers no remedy, where a collision has
+        one.
+
+        Args:
+            port (dict): The LibreNMS port row.
+            target_device (Device | None): The resolved owner, None on the VM path.
+            interface_name (str): The name the row would have been synced under.
+
+        Returns:
+            str: The skip reason to report.
+
+        """
+        if (
+            port.get("_source") == OOB_INVENTORY_SOURCE
+            and target_device is not None
+            and Interface.objects.filter(device=target_device, name=interface_name).exists()
+        ):
+            return HOST_NAME_COLLISION_REASON
+        return "port already mapped elsewhere or ambiguous"
+
+    def _oob_row_is_unsyncable(self, port, interface_name_field, host_owned_names):
+        """
+        Report whether a selected OOB row must be skipped, recording why.
+
+        Two conditions stop an OOB row before it reaches a write. A shared LOM is one physical
+        port reported on both sides, so syncing both rows would model it twice. A name owned by
+        a host row belongs to the host: letting the OOB row create it would bind the name to the
+        OOB port_id, after which the host row could never resolve its own interface again.
+
+        Args:
+            port (dict): The OOB port row.
+            interface_name_field (str): Port field that contains the selected interface name.
+            host_owned_names (set[str]): Names the host rows of this snapshot own.
+
+        Returns:
+            bool: True when the row was skipped and the skip recorded.
+
+        """
+        if port.get("_dedup_conflict"):
+            self._record_skipped_conflict(
+                port.get(interface_name_field),
+                "shared LOM already synced from the host side",
+            )
+            return True
+        name = syncable_interface_name(port, interface_name_field)
+        if name is not None and name in host_owned_names:
+            self._record_skipped_conflict(name, HOST_NAME_COLLISION_REASON)
+            return True
+        return False
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, oob=False):
         """Resolve a device interface using port_id first, then safe name fallback."""
@@ -1354,6 +1408,170 @@ class SyncInterfacesView(
                 vlan_group_map[vid] = str(selected_group.pk)
         result = self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, lookup_maps)
         return bool(result and result.get("changed"))
+
+
+class ResolveInterfaceNameCollisionView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
+):
+    """
+    Rename one side of a host/OOB interface-name collision so the OOB row can be modelled.
+
+    Host precedence keeps the collision safe, but it leaves the OOB port unmodelled and the
+    operator with a skipped row. This endpoint takes the decision the operator made: renaming
+    the OOB side (the proposed default) syncs that row under the new name, renaming the host
+    side frees the name so the OOB row can take it on the next sync. Nothing here runs until
+    the operator confirms a name, so a collision is never resolved silently.
+
+    Device-only: an OOB controller is linked to a Device, and VM rows never carry OOB sources.
+    """
+
+    def post(self, request, object_type, object_id):
+        """Apply the operator's chosen rename for one collided OOB row."""
+        if object_type != "device":
+            raise Http404("Name collisions apply to device interfaces only.")
+        self.required_object_permissions = {
+            "POST": [("view", Device), ("add", Interface), ("change", Interface)],
+        }
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        obj = self.restrict_object_or_404(Device, pk=object_id)
+        server_key = self.rebind_api_for_posted_server(request.POST)
+        if server_key is None:
+            return JsonResponse({"error": "Selected LibreNMS server is no longer configured."}, status=400)
+        if build_migrated_context(obj, server_key).get("migrated_to_marker"):
+            return JsonResponse(
+                {"error": "This LibreNMS source has been migrated and is read-only."},
+                status=409,
+            )
+
+        side = request.POST.get("side") or "oob"
+        if side not in ("oob", "host"):
+            return JsonResponse({"error": "Choose which side to rename."}, status=400)
+        new_name = (request.POST.get("new_name") or "").strip()
+        if not new_name:
+            return JsonResponse({"error": "A new interface name is required."}, status=400)
+        if len(new_name) > interface_field_limit("name", Interface):
+            return JsonResponse(
+                {"error": f"An interface name is at most {interface_field_limit('name', Interface)} characters."},
+                status=400,
+            )
+
+        interface_name_field = get_interface_name_field(request, obj)
+        port_id = normalize_librenms_port_id(request.POST.get("port_id"))
+        if port_id is None:
+            return JsonResponse({"error": "A valid LibreNMS port ID is required."}, status=400)
+
+        collision = self._collided_row(obj, server_key, interface_name_field, port_id)
+        if collision is None:
+            # The snapshot moved on (refreshed, renamed elsewhere, name field switched). Applying
+            # a rename against a collision that no longer exists would rename the wrong interface.
+            return JsonResponse(
+                {"error": "The name collision changed or expired. Refresh the interface data and retry."},
+                status=409,
+            )
+        oob_row, collided_name = collision
+
+        try:
+            with transaction.atomic():
+                if side == "host":
+                    message = self._rename_host_interface(obj, collided_name, new_name)
+                else:
+                    message = self._sync_oob_row_as(obj, oob_row, interface_name_field, server_key, new_name)
+        except ValidationError as exc:
+            return JsonResponse({"error": validation_error_detail(exc)}, status=409)
+        except IntegrityError:
+            logger.warning("Name collision rename hit a concurrent DB conflict on %s", obj, exc_info=True)
+            return JsonResponse(
+                {"error": "A concurrent change interrupted the rename. Refresh and retry."},
+                status=409,
+            )
+
+        schedule_request_cache_mutation(
+            request,
+            obj,
+            SyncTab.INTERFACES,
+            server_key,
+            source_fragment_required=True,
+        )
+        return apply_request_cache_transition(request, JsonResponse({"status": "success", "message": message}))
+
+    def _collided_row(self, obj, server_key, interface_name_field, port_id):
+        """
+        Return the cached OOB row for *port_id* and its name, or None when it no longer collides.
+
+        Re-derives the collision from the cached snapshot rather than trusting the POST: the
+        client tells us which row it acted on, never whether the rename is warranted.
+
+        Args:
+            obj (Device): The device whose snapshot to read.
+            server_key (str): The LibreNMS server the row came from.
+            interface_name_field (str): Port field that contains the selected interface name.
+            port_id (int): Normalized LibreNMS port ID of the OOB row.
+
+        Returns:
+            tuple[dict, str] | None: The OOB row and the contested name, or None.
+
+        """
+        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
+        cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
+        if not isinstance(cached_data, dict):
+            return None
+        ports = cached_data.get("ports")
+        if not is_list_of_dicts(ports):
+            return None
+        oob_row = next(
+            (
+                port
+                for port in ports
+                if port.get("_source") == OOB_INVENTORY_SOURCE
+                and normalize_librenms_port_id(port.get("port_id")) == port_id
+            ),
+            None,
+        )
+        if oob_row is None:
+            return None
+        name = syncable_interface_name(oob_row, interface_name_field)
+        if name is None or name not in host_owned_interface_names(ports, interface_name_field):
+            return None
+        return oob_row, name
+
+    def _rename_host_interface(self, obj, collided_name, new_name):
+        """Rename the host's NetBox interface, freeing the contested name for the OOB row."""
+        interface = self.restricted_queryset(Interface, "change").filter(device=obj, name=collided_name).first()
+        if interface is None:
+            raise ValidationError(f"No changeable interface named '{collided_name}' on {obj}.")
+        interface.name = new_name
+        interface.full_clean()
+        interface.save()
+        logger.info("Renamed host interface %s to %s on %s", collided_name, new_name, obj)
+        return f"Renamed the host interface to '{new_name}'. The OOB port can now sync as '{collided_name}'."
+
+    def _sync_oob_row_as(self, obj, oob_row, interface_name_field, server_key, new_name):
+        """Sync the OOB row under *new_name*, binding it to that row's LibreNMS port ID."""
+        if Interface.objects.filter(device=obj, name=new_name).exists():
+            raise ValidationError(f"{obj} already has an interface named '{new_name}'.")
+        port_id = normalize_librenms_port_id(oob_row.get("port_id"))
+        interface = find_by_librenms_id(Interface, port_id, server_key)
+        if interface is not None and interface.device_id != obj.pk:
+            raise ValidationError(f"LibreNMS port {port_id} is already bound to an interface on another device.")
+        if interface is None:
+            interface = Interface(device=obj, name=new_name)
+        elif not self.restricted_queryset(Interface, "change").filter(pk=interface.pk).exists():
+            raise ValidationError(f"The interface bound to LibreNMS port {port_id} cannot be changed.")
+
+        # Sync the row itself rather than only stamping a name: the operator asked for this port
+        # to be modelled, and update_interface_from_port is the same writer the bulk sync uses.
+        renamed_row = {**oob_row, interface_name_field: new_name}
+        update_interface_from_port(
+            interface,
+            renamed_row,
+            server_key=server_key,
+            interface_name_field=interface_name_field,
+            netbox_type=get_netbox_interface_type(renamed_row, speed_converter=convert_speed_to_kbps),
+        )
+        logger.info("Synced OOB port %s as %s on %s", port_id, new_name, obj)
+        return f"Synced the OOB port as '{new_name}'. The host keeps its own name."
 
 
 class DeleteNetBoxInterfacesView(
