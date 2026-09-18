@@ -1638,7 +1638,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         """
         Return the bays a row may fall back to once its resolved parent narrowed the search away.
 
-        The resolved parent bounds the search. Three kinds of bay qualify, and nothing else.
+        Two different questions decide membership, and _bay_is_owned_within_subtree and
+        _bay_holds_resolved_parent name them: where a NEW module may go, and whether this row IS
+        the module already there. They feed ONE candidate set on purpose. _match_bay resolves a
+        candidate name through exact mappings, then regex, then direct names, then position, each
+        as a pass over the whole set, and the positional pass rejects a position held by two bays.
+        Answering the two questions as separate searches would put every method of one ahead of
+        every method of the other, and would let a positional tie that this set rejects resolve
+        inside the smaller one. So they are merged here and searched together.
+
+        The resolved parent bounds the result. Three kinds of bay qualify, and nothing else.
 
         Bays outside every module, for the row whose NetBox bay is device-level.
 
@@ -1650,8 +1659,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         The bay the parent itself occupies, which is owned by the parent's own holder and so sits
         outside the subtree. The row can BE that module, because LibreNMS reports a container and
         the module inside it as two rows. The resulting "bay already occupied" carries the module
-        pk, and that is the only signal _should_attempt_bind_for_result accepts to bind the row's
-        LibreNMS port to an interface.
+        pk, and that is the only way a SKIPPED row reaches _should_attempt_bind_for_result and
+        binds its LibreNMS port to an interface. An installed row carries its own module pk.
 
         A bay owned by a module outside the subtree, a sibling above all, stays out.
 
@@ -1674,24 +1683,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # descendant bay they can. Only the candidates below stay restricted.
         holder_of = dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
 
-        def below_parent(module_id):
-            """Report whether *module_id* is the parent or sits under it."""
-            seen = set()
-            while module_id is not None and module_id not in seen:
-                if module_id == parent_module_id:
-                    return True
-                seen.add(module_id)
-                module_id = holder_of.get(module_id)
-            return False
-
         fallback = {bay.name: bay for bay in bays if not bay.module_id}
         scoped: dict = {}
         for bay in bays:
             if bay.name in fallback:
                 continue
-            installed = getattr(bay, "installed_module", None)
-            is_parents_own_bay = installed is not None and installed.pk == parent_module_id
-            if is_parents_own_bay or below_parent(bay.module_id):
+            if InstallBranchView._bay_holds_resolved_parent(
+                bay, parent_module_id
+            ) or InstallBranchView._bay_is_owned_within_subtree(bay, parent_module_id, holder_of):
                 scoped.setdefault(bay.name, []).append(bay)
 
         for name, candidates in scoped.items():
@@ -1706,6 +1705,64 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     len(candidates),
                 )
         return fallback
+
+    @staticmethod
+    def _bay_is_owned_within_subtree(bay, parent_module_id, holder_of):
+        """
+        Report whether *bay* belongs to the resolved parent or to a module below it.
+
+        This is the INSTALL question: may a new module go here. Ownership is strict, because a
+        bay owned by a module outside the subtree, a sibling above all, is not this row's to
+        take. It may be unambiguous, but unambiguous is not the same as correctly owned.
+
+        The subtree reaches all the way down, not one level. LibreNMS can omit an intermediate
+        module, so a row traces to an ancestor while its bay belongs to a descendant. A Nokia
+        connector reports as ``2/x1/1/c2`` and nests under the XIOM when the MDA is missing, and
+        the bay ``1/c2`` belongs to that MDA. See _nest_synthetic_transceivers.
+
+        Args:
+            bay (ModuleBay): The bay to judge.
+            parent_module_id (int): The installed parent module the narrowed pass used.
+            holder_of (dict): Module pk -> pk of the module whose bay holds it, device-wide.
+
+        Returns:
+            bool: True when the bay sits in the parent's subtree.
+
+        """
+        module_id = bay.module_id
+        seen = set()
+        while module_id is not None and module_id not in seen:
+            if module_id == parent_module_id:
+                return True
+            seen.add(module_id)
+            module_id = holder_of.get(module_id)
+        return False
+
+    @staticmethod
+    def _bay_holds_resolved_parent(bay, parent_module_id):
+        """
+        Report whether *bay* is the one the resolved parent already occupies.
+
+        This is the IDENTITY question, and it is a different one: not where a new module goes,
+        but whether this row IS the module that is already there. LibreNMS reports a container
+        and the module inside it as two rows, so a row can resolve its own module as its parent.
+        Matching this bay makes _install_single report "bay already occupied" carrying the module
+        pk, which is the only way a SKIPPED row reaches _should_attempt_bind_for_result and binds
+        its LibreNMS port to an interface. An installed row carries its own module pk instead.
+
+        The bay belongs to the parent's own holder, so the subtree test cannot reach it, and it
+        can be nested: a converter inside a line card occupies a module-scoped bay.
+
+        Args:
+            bay (ModuleBay): The bay to judge.
+            parent_module_id (int): The installed parent module the narrowed pass used.
+
+        Returns:
+            bool: True when the parent module is installed in this bay.
+
+        """
+        installed = getattr(bay, "installed_module", None)
+        return installed is not None and installed.pk == parent_module_id
 
     @staticmethod
     def _find_parent_module_id(item, index_map, device_bays, exact_mappings, regex_mappings):  # noqa: C901
