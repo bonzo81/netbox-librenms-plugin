@@ -169,7 +169,6 @@ from .sync.device_fields import (
 from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView
 from .sync.interfaces import (
     DeleteNetBoxInterfacesView,
-    ResolveInterfaceNameCollisionView,
     SyncInterfaceBridgeView,
     SyncInterfaceLagView,
     SyncInterfaceParentView,

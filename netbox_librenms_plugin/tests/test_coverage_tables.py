@@ -975,8 +975,8 @@ class TestInterfaceTableFields:
         assert "From OOB controller" in relationships_html
         assert "Shared LOM" in relationships_html
 
-    def test_a_name_collision_row_offers_a_rename_instead_of_only_reporting_a_skip(self):
-        """A collided OOB row is skipped on sync, so the column has to offer a way forward."""
+    def test_a_name_collision_row_is_reported_in_the_relationships_column(self):
+        """A collided OOB row is skipped on sync, so the column has to say why."""
         device = make_device("collision-pill-device")
         table = _interface_table(device)
         html = str(
@@ -995,32 +995,8 @@ class TestInterfaceTableFields:
         )
 
         assert "Name conflict" in html
-        assert "name-collision-btn" in html
-        assert 'data-proposed-name="eth0-oob"' in html, "the OOB side is what the modal proposes first"
-        assert "resolve-interface-name-collision" in html
-
-    def test_a_migrated_donor_reports_the_collision_without_offering_the_rename(self):
-        """A migrated source is read-only, so the button would post a change it must not make."""
-        device = make_device("collision-pill-migrated")
-        table = _interface_table(device)
-        table.migrated_to_marker = True
-        html = str(
-            table.render_parent(
-                None,
-                _port(
-                    ifName="eth0",
-                    port_id=9302,
-                    exists_in_netbox=False,
-                    _source="oob",
-                    host_name_collision=True,
-                    selected_object_id=device.pk,
-                    selected_object_type="device",
-                ),
-            )
-        )
-
-        assert "Name conflict" in html, "the operator still needs to know why the row is skipped"
-        assert "name-collision-btn" not in html
+        assert "the OOB port is not synced" in html
+        assert "<button" not in html, "the pill reports the skip; it does not offer an action"
 
     def test_a_host_row_never_shows_a_name_collision(self):
         """The host owns the name, so it is never the row that has to move."""
