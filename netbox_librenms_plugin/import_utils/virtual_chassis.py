@@ -318,7 +318,13 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
                 f"master could not be identified by serial"
             )
 
-        return {"is_stack": True, "member_count": len(members), "members": members}
+        return {
+            "is_stack": True,
+            "member_count": len(members),
+            "members": members,
+            "detection_failed": False,
+            "detection_error": None,
+        }
 
     except Exception as e:
         logger.exception(f"Error detecting virtual chassis for device {device_id}: {e}")

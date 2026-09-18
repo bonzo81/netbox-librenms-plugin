@@ -136,6 +136,24 @@ class TestStackDetectionCarriesItsMembers:
         assert detected["member_count"] == 3
         assert len(detected["members"]) == 3
 
+    def test_a_detected_stack_reports_the_documented_detection_fields(self, settings, librenms_server):
+        """The docstring documents detection_failed/detection_error on every return of this function.
+
+        get_virtual_chassis_data() normalizes the payload, so only a direct caller of the exported
+        detector sees the success return, and it must carry the same keys as the empty and failed
+        payloads.
+        """
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        _seed_stack(librenms_server, 903, serials=("SN-DOC-A", "SN-DOC-B"))
+        api = _api(settings, librenms_server, "default")
+
+        detected = detect_virtual_chassis_from_inventory(api, 903)
+
+        assert detected["is_stack"] is True
+        assert detected["detection_failed"] is False
+        assert detected["detection_error"] is None
+
     def test_members_survive_even_when_no_chassis_reports_a_serial(self, settings, librenms_server):
         """The serial-less path still carries members, which is what keeps the domain key stable."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
