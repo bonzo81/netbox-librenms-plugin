@@ -4,7 +4,7 @@ from netbox.plugins import PluginConfig
 from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
 
 __author__ = "Andy Norwood"
-__version__ = "0.4.7"
+__version__ = "0.4.8"
 
 
 class LibreNMSSyncConfig(PluginConfig):

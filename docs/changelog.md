@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.8 (2026-09-18)
+
+### New Features
+* **Out-of-Band (OOB) controller support**: Read-only OOB (iDRAC/iLO/IPMI) inventory shown in the host device's Interfaces, Cables, and Modules tabs; import offers an OOB link when an incoming IP matches an existing `oob_ip` (#314). Merge a host and its OOB controller into one NetBox device (#315). Bulk imports re-check rows against existing devices by serial, primary IP, and OOB IP before importing (#318)
+* **LibreNMS location mapping**: Map a LibreNMS location string to a NetBox Region/Site/Location/Rack/Tenant, with optional automatic location-string parsing (#302)
+* **Parent/LAG/child/bridge interface links**: Detect LAG (bonded) interfaces, parent/child sub-interfaces, and bridge interfaces from LibreNMS data, with a sync option (#326, #343)
+* **Multi-server support**: Choose which LibreNMS server to use per device or VM across imports, sync, caching, and background jobs (#338)
+* **Sync and import UI improvements**: VM placement by matched site/cluster/host, configurable import columns, and VLAN name-conflict confirmation (#342)
+* **Simpler navigation**: Collapse the sidebar's nine mapping menu items into two — Mappings, and Rules & Patterns (#319)
+
+### Fixes
+* A round of hardening fixes for the sync/import pages: safer handling of untrusted data, better validation, stricter serial number matching (#313)
+* Raise minimum supported NetBox version to 4.4.0 and test the floor in CI (#323)
+* Fixed IP address handling for NetBox 4.4, improved serial number matching, tightened permission checks (#324)
+* IP address sync is safer: addresses are normalized, existing VRF assignments are kept, confirmation required before changing an existing assignment (#334)
+* Fixed cached sync data going out of date after changes, so Device/VM sync tabs always show accurate status (#337)
+
+### Security
+* Fixed a permission check that could let a user access an object outside what they're allowed to see (#330)
+* Restored permission checks on plugin pages that use NetBox's built-in list/detail views (#335)
+* Import previews and notifications no longer show details of objects a user isn't allowed to see (#341)
+
+### Development
+* Expand CI matrix to test the NetBox floor (4.4.0), current stable (4.6.5), and `main`; pin `persist-credentials: false` on checkouts (#323)
+* Harden Ruff config with explicit lint-rule selection and Markdown exclusion (#323, #331)
+* Add static lint checks blocking raw, non-permission-scoped object lookups and cache keys missing `server_key` (#330)
+* Add a pre-commit lint tool (`tools/lint_import_disclosure.py` + Opengrep) that catches information-disclosure regressions (#341)
+* Routine GitHub Actions dependency updates (#312, #317, #325, #329)
+
+### Documentation
+* Reviewed and updated documentation for the 0.4.8 release: setup guides, import workflows, navigation (#340)
+
+> **Upgrade note:** This release raises the minimum supported NetBox version to **4.4.0**. It also adds new database tables and fields (location mapping, LAG/parent-child interfaces, OOB, device merge, multi-server support). Run `migrate` and `collectstatic` as part of the update process.
+
 ## 0.4.7 (2026-06-05)
 
 ### New Features
