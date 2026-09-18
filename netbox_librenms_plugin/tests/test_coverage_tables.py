@@ -958,18 +958,95 @@ class TestInterfaceTableFields:
         assert "<img" not in rendered
         assert "&lt;img" in rendered
 
-    def test_oob_and_shared_lom_badges_are_rendered_after_the_name(self):
+    def test_oob_and_shared_lom_markers_render_in_the_relationships_column(self):
+        """Both markers describe where the row came from, so they belong with the other pills.
+
+        Rendering them beside the interface name crowded the column with a second, unrelated
+        visual language (solid fills next to plain text).
+        """
+        table = _interface_table()
+        record = _port(ifName="mgmt0", exists_in_netbox=False, _source="oob", _dedup_conflict=True)
+
+        name_html = str(table.render_name("mgmt0", record))
+        relationships_html = str(table.render_parent(None, record))
+
+        assert "mgmt0" in name_html
+        assert "badge" not in name_html, "the name column carries the name, not row markers"
+        assert "From OOB controller" in relationships_html
+        assert "Shared LOM" in relationships_html
+
+    def test_a_name_collision_row_offers_a_rename_instead_of_only_reporting_a_skip(self):
+        """A collided OOB row is skipped on sync, so the column has to offer a way forward."""
+        device = make_device("collision-pill-device")
+        table = _interface_table(device)
+        html = str(
+            table.render_parent(
+                None,
+                _port(
+                    ifName="eth0",
+                    port_id=9301,
+                    exists_in_netbox=False,
+                    _source="oob",
+                    host_name_collision=True,
+                    selected_object_id=device.pk,
+                    selected_object_type="device",
+                ),
+            )
+        )
+
+        assert "Name conflict" in html
+        assert "name-collision-btn" in html
+        assert 'data-proposed-name="eth0-oob"' in html, "the OOB side is what the modal proposes first"
+        assert "resolve-interface-name-collision" in html
+
+    def test_a_migrated_donor_reports_the_collision_without_offering_the_rename(self):
+        """A migrated source is read-only, so the button would post a change it must not make."""
+        device = make_device("collision-pill-migrated")
+        table = _interface_table(device)
+        table.migrated_to_marker = True
+        html = str(
+            table.render_parent(
+                None,
+                _port(
+                    ifName="eth0",
+                    port_id=9302,
+                    exists_in_netbox=False,
+                    _source="oob",
+                    host_name_collision=True,
+                    selected_object_id=device.pk,
+                    selected_object_type="device",
+                ),
+            )
+        )
+
+        assert "Name conflict" in html, "the operator still needs to know why the row is skipped"
+        assert "name-collision-btn" not in html
+
+    def test_a_host_row_never_shows_a_name_collision(self):
+        """The host owns the name, so it is never the row that has to move."""
+        table = _interface_table(make_device("collision-pill-host"))
+        html = str(table.render_parent(None, _port(ifName="eth0", port_id=9303, exists_in_netbox=False)))
+
+        assert "Name conflict" not in html
+
+    def test_the_row_marker_pills_match_the_relationship_pill_styling(self):
+        """The markers sit in the same stack as LAG/Parent, so they read as one column.
+
+        Tabler's light (-lt) variants carry their own readable text colour in both themes; a
+        solid fill next to them is what made the column look unfinished.
+        """
         table = _interface_table()
         html = str(
-            table.render_name(
-                "mgmt0",
+            table.render_parent(
+                None,
                 _port(ifName="mgmt0", exists_in_netbox=False, _source="oob", _dedup_conflict=True),
             )
         )
 
-        assert "mgmt0" in html
-        assert "From OOB controller" in html
-        assert "Shared LOM" in html
+        assert "bg-purple-lt" in html, "the OOB pill keeps the purple the rest of the plugin uses"
+        assert "bg-warning-lt" in html
+        assert "bg-purple text-white" not in html, "the solid name-column fill must not follow it over"
+        assert html.count('<div class="text-nowrap lh-sm">') == 2, "each marker stacks like a relationship pill"
 
     def test_real_librenms_id_states(self):
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1525,9 +1602,11 @@ class TestSharedOobBadges:
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
+        # The interface table marks the row in its relationships column; modules and cables
+        # still mark it beside the name. The wording is what has to stay shared.
         interface_html = str(
-            _interface_table().render_name(
-                "mgmt0",
+            _interface_table().render_parent(
+                None,
                 _port(ifName="mgmt0", exists_in_netbox=False, _source="oob"),
             )
         )
@@ -1541,12 +1620,9 @@ class TestSharedOobBadges:
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
-        interface_html = str(
-            _interface_table().render_name(
-                "Ethernet1",
-                _port(exists_in_netbox=False, _source="main"),
-            )
-        )
+        table = _interface_table()
+        host_row = _port(exists_in_netbox=False, _source="main")
+        interface_html = str(table.render_name("Ethernet1", host_row)) + str(table.render_parent(None, host_row))
         module_html = str(object.__new__(LibreNMSModuleTable).render_name("PSU 1", {"depth": 0}))
         cable_html = str(object.__new__(LibreNMSCableTable).render_local_port("Gi0/1", {"_source": "main"}))
 

@@ -22,6 +22,7 @@ from netbox_librenms_plugin.utils import (
     get_interface_port_identity_sets,
     get_librenms_oob,
     get_librenms_sync_device,
+    host_owned_interface_names,
     is_list_of_dicts,
     is_valid_ports_payload,
     normalize_librenms_port_id,
@@ -782,7 +783,14 @@ class BaseInterfaceTableView(
                 can_write=can_write_relationships,
             )
 
+            # The host and its OOB controller are one NetBox device, so both write into the same
+            # (device, name) namespace and the host owns it. Derived per render because the name
+            # field is switchable, where the cached snapshot is not.
+            host_owned_names = host_owned_interface_names(ports_data, interface_name_field)
+
             for port in ports_data:
+                if port.get("_source") == OOB_INVENTORY_SOURCE:
+                    port["host_name_collision"] = port.get(interface_name_field) in host_owned_names
                 port["enabled"] = (
                     True
                     if port.get("ifAdminStatus") is None
@@ -850,15 +858,6 @@ class BaseInterfaceTableView(
             table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
             table.configure(request)
 
-            # Identify NetBox-only interfaces (interfaces in NetBox but not in LibreNMS)
-            # Exclude OOB-controller rows: their names belong to a different
-            # device and must not suppress main-device netbox-only detection.
-            librenms_interface_names = {
-                port.get(interface_name_field)
-                for port in ports_data
-                if port.get(interface_name_field) and port.get("_source") != OOB_INVENTORY_SOURCE
-            }
-
             netbox_only_interfaces = []
             for device_id, device_interface_maps in interfaces_by_device.items():
                 if device_id not in actionable_owner_ids:
@@ -866,7 +865,10 @@ class BaseInterfaceTableView(
                 for interface_name, interface in device_interface_maps["by_name"].items():
                     if interface.id not in viewable_interface_ids or interface.id in matched_interface_ids:
                         continue
-                    if interface_name not in librenms_interface_names:
+                    # host_owned_names is host rows only, so an OOB row's name cannot suppress
+                    # netbox-only detection here. It also drops names too long for NetBox to
+                    # store, which no NetBox interface name can equal anyway.
+                    if interface_name not in host_owned_names:
                         # Get device name for the interface (reuse the pre-indexed members — the
                         # device_id keys come from interfaces_by_device, which was built from them —
                         # instead of a members.get(id=...) query per netbox-only interface).

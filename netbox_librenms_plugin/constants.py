@@ -51,6 +51,11 @@ SERIAL_INVENTORY_SOURCE = "serial"
 # cable/module/interface tables and the cable-verify render that each hand-copied it.
 OOB_BADGE_HTML = '<span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
 
+# A host and its OOB controller share one NetBox device, so one interface name cannot serve both.
+# The host owns it. Shared by the sync writer (the skip reason) and the interface table (the pill
+# tooltip) so the two cannot describe the same condition differently.
+HOST_NAME_COLLISION_REASON = "name already owned by the host interface"
+
 
 def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:
     """

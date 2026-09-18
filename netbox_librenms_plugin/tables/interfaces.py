@@ -23,9 +23,9 @@ from netbox_librenms_plugin.utils import (
     get_table_paginate_count,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
+    interface_field_limit,
     interface_name_fallback_matches_port,
     normalize_librenms_port_id,
-    oob_badge_html,
     render_vc_member_options,
     resolve_interface_row_device,
 )
@@ -406,13 +406,8 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox."""
-        rendered = self._render_field(value, record, self.interface_name_field, "name")
-        badges = oob_badge_html(record)
-        if record.get("_dedup_conflict"):
-            badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
-        if badges:
-            return format_html("{}{}", rendered, mark_safe(badges))
-        return rendered
+        # Row markers (OOB, Shared LOM) belong to the relationship column; see render_parent.
+        return self._render_field(value, record, self.interface_name_field, "name")
 
     def _get_interface_status_display(self, enabled, record):
         """
@@ -518,6 +513,25 @@ class LibreNMSInterfaceTable(tables.Table):
 
         """
         parts = []
+
+        # Where the row came from, before what it is attached to. Both markers describe the row
+        # itself rather than a NetBox relationship, so they lead the stack and carry no sync
+        # button. The cable and module tables still badge their name column: those have no
+        # relationship column to move into.
+        if record.get("_source") == OOB_INVENTORY_SOURCE:
+            parts.append(self._render_row_marker_pill("purple", "mdi-chip", "OOB", "From OOB controller"))
+        if record.get("_dedup_conflict"):
+            parts.append(
+                self._render_row_marker_pill(
+                    "warning",
+                    "mdi-content-duplicate",
+                    "Shared LOM",
+                    "Same MAC seen on both main and OOB",
+                )
+            )
+
+        if record.get("host_name_collision"):
+            parts.append(self._render_name_collision_pill(record))
 
         lag_status = record.get("lag_sync_status")
         # LAG membership is device-only — VMInterface has no `lag` field and SyncInterfaceLagView
@@ -647,6 +661,93 @@ class LibreNMSInterfaceTable(tables.Table):
                 members_by_position=self._vc_members_by_position or None,
             ).pk
         return self.device.pk if self.device else ""
+
+    def _render_name_collision_pill(self, record):
+        """
+        Render the host/OOB name collision pill, with the rename the operator can confirm.
+
+        The host owns the name, so the OOB row is skipped on sync. Reporting that alone leaves
+        the port unmodelled with no way forward, so the pill carries a rename button. The button
+        only proposes: the modal it opens defaults to renaming the OOB side and lets the operator
+        rename the host side instead, or choose another name, before anything is written.
+
+        Args:
+            record (dict): The OOB table row that collides with a host row.
+
+        Returns:
+            SafeString: The pill, plus the rename button when the row can be acted on.
+
+        """
+        name = record.get(self.interface_name_field) or ""
+        # Static trusted markup: mark_safe, not format_html, which requires interpolation args.
+        badge = mark_safe(
+            '<span class="badge bg-danger-lt fw-normal d-inline-flex align-items-center gap-1" '
+            'title="The host interface of the same name owns it; the OOB port is not synced">'
+            '<i class="mdi mdi-alert-circle"></i>Name conflict</span>'
+        )
+        object_id = self._resolve_row_member_id(record)
+        # Same suppression as the relationship sync buttons: a migrated donor is read-only, and
+        # without a resolvable owner reverse() would raise and take down the whole table render.
+        if self.migrated_to_marker or not object_id:
+            return format_html('<div class="text-nowrap lh-sm">{}</div>', badge)
+        object_type = record.get("selected_object_type") or self.sync_object_type
+        resolve_url = reverse(
+            "plugins:netbox_librenms_plugin:resolve_interface_name_collision",
+            kwargs={"object_type": object_type, "object_id": object_id},
+        )
+        title = "Resolve the name conflict"
+        btn = format_html(
+            ' <button type="button" class="btn btn-sm btn-link p-0 name-collision-btn" '
+            'data-port-id="{}" data-interface="{}" data-proposed-name="{}" '
+            'data-object-type="{}" data-object-id="{}" data-resolve-url="{}" '
+            'title="{}" aria-label="{}"><i class="mdi mdi-pencil"></i></button>',
+            record.get("port_id") or "",
+            name,
+            self._proposed_oob_name(name),
+            object_type,
+            object_id,
+            resolve_url,
+            title,
+            title,
+        )
+        return format_html('<div class="text-nowrap lh-sm">{} {}</div>', badge, btn)
+
+    @staticmethod
+    def _proposed_oob_name(name):
+        """Return the OOB-side rename the modal prefills, clipped to what NetBox stores."""
+        # Interface, not VMInterface: OOB rows are device-only, so the VM table never gets here.
+        limit = interface_field_limit("name")
+        suffix = "-oob"
+        return (name[: limit - len(suffix)] + suffix) if len(name) + len(suffix) > limit else name + suffix
+
+    @staticmethod
+    def _render_row_marker_pill(color, icon, label, title):
+        """
+        Render one row-origin pill in the relationship column's badge language.
+
+        Matches the wrapper and badge classes :meth:`_render_relationship_column` emits, so the
+        markers stack with the LAG/Parent/Bridge pills instead of reading as a separate control.
+        Tabler's light (``-lt``) variants ship their own readable text colour in both themes.
+
+        Args:
+            color (str): Tabler colour name, used as ``bg-<color>-lt``.
+            icon (str): Material Design icon class.
+            label (str): The short pill text.
+            title (str): The hover description.
+
+        Returns:
+            SafeString: The pill markup.
+
+        """
+        return format_html(
+            '<div class="text-nowrap lh-sm">'
+            '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="{}">'
+            '<i class="mdi {}"></i>{}</span></div>',
+            color,
+            title,
+            icon,
+            label,
+        )
 
     def _render_relationship_column(
         self,

@@ -157,6 +157,7 @@ from .views import (
     SerialSensorTypePatternEditView,
     SerialSensorTypePatternListView,
     SerialSensorTypePatternView,
+    ResolveInterfaceNameCollisionView,
     SetPreferredServerView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -361,6 +362,12 @@ urlpatterns = [
         "<str:object_type>/<int:object_id>/sync-interface-bridge/",
         SyncInterfaceBridgeView.as_view(),
         name="sync_interface_bridge",
+    ),
+    # Resolve a host/OOB interface name collision by renaming one side
+    path(
+        "<str:object_type>/<int:object_id>/resolve-interface-name-collision/",
+        ResolveInterfaceNameCollisionView.as_view(),
+        name="resolve_interface_name_collision",
     ),
     # Delete NetBox-only interfaces URL
     path(
