@@ -90,8 +90,12 @@ class TestApiTokenStaysOnItsHost:
 
         assert isinstance(librenms_api._session, librenms_api._TokenScopedSession)
         source = inspect.getsource(librenms_api)
-        assert "requests.get(" not in source, "a call site still bypasses the token-scoped session"
-        assert "requests.post(" not in source, "a call site still bypasses the token-scoped session"
+        # Check every verb, not only the ones in use today: the client already issues PATCH
+        # through the session, and any new direct requests call bypasses the token scoping.
+        for verb in ("get", "post", "patch", "put", "delete", "head", "options", "request"):
+            assert f"requests.{verb}(" not in source, (
+                f"a call site still bypasses the token-scoped session with requests.{verb}()"
+            )
 
 
 # =============================================================================
