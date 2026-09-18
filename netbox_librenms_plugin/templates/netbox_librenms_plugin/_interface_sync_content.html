@@ -293,47 +293,6 @@
 </div>
 {% endif %} <!-- End if interface_sync.table -->
 
-<!-- Host/OOB name collision resolution modal -->
-<div class="modal fade" id="nameCollisionModal" tabindex="-1" aria-labelledby="nameCollisionModalLabel"
-    aria-hidden="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="nameCollisionModalLabel">Resolve name conflict</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <p class="text-muted mb-3">
-                    The host and its OOB controller are one device in NetBox, so
-                    <strong id="nameCollisionName"></strong> cannot name both interfaces. The host keeps the
-                    name. Choose which side to rename.
-                </p>
-                <div class="form-check mb-2">
-                    <input class="form-check-input" type="radio" name="name_collision_side" id="nameCollisionSideOob"
-                        value="oob" checked>
-                    <label class="form-check-label" for="nameCollisionSideOob">
-                        Rename the OOB interface and sync it
-                    </label>
-                </div>
-                <div class="form-check mb-3">
-                    <input class="form-check-input" type="radio" name="name_collision_side" id="nameCollisionSideHost"
-                        value="host">
-                    <label class="form-check-label" for="nameCollisionSideHost">
-                        Rename the host interface instead, freeing the name for the OOB port
-                    </label>
-                </div>
-                <label class="form-label" for="nameCollisionNewName">New interface name</label>
-                <input type="text" class="form-control" id="nameCollisionNewName" autocomplete="off">
-                <div class="invalid-feedback d-block" id="nameCollisionError" hidden></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-primary" id="nameCollisionApply">Rename</button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- Interface Type Help Modal -->
 <div class="modal fade" id="interfaceTypeHelpModal" tabindex="-1" aria-labelledby="interfaceTypeHelpModalLabel"
     aria-hidden="true">
