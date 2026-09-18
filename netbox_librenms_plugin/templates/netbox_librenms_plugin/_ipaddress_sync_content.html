@@ -1,43 +1,70 @@
 {% load helpers %}
 {% include 'inc/messages.html' %}
+{% if request.htmx %}
+{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=ip_sync.cache_expiry cache_container_id="ip-cache-countdown" cache_countdown_id="ip-countdown-timer" cache_oob=True %}
+{% endif %}
 
 <!-- IP Address Sync Table -->
 {% if ip_sync.table %}
+{# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=ip_sync.object|meta:"model_name" %}
-<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}">
+{% if migrated_to_marker %}
+<div>
+{% else %}
+<form method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}"
+      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}"
+      hx-target="#htmx-modal-content"
+      hx-swap="innerHTML">
+{% endif %}
 {% endwith %}
     {% csrf_token %}
     {% if ip_sync.server_key %}<input type="hidden" name="server_key" value="{{ ip_sync.server_key }}">{% endif %}
-    <input type="hidden" id="selected_ip" name="select" value="">
-    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
-        <div class="d-flex align-items-center gap-3">
+    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
+        <div class="d-flex align-items-center gap-2">
+            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected IP Addresses</span>
             </button>
-            <div class="form-check form-switch mb-0">
-                <input type="hidden" name="set-primary-ip-toggle" value="off">
-                <input class="form-check-input" type="checkbox" id="set-primary-ip-toggle-cb"
-                       name="set-primary-ip-toggle" value="on" {% if ip_sync.set_primary_ip %}checked{% endif %}
-                       data-bs-toggle="tooltip"
-                       title="When the synced IP equals the device's LibreNMS management IP and is assigned to an interface, set it as the Primary IP.">
-                <label class="form-check-label small" for="set-primary-ip-toggle-cb">
-                    Set Primary IP
-                </label>
+            <div class="dropdown" id="ip-sync-options">
+                <button class="btn btn-outline-secondary dropdown-toggle" type="button"
+                        data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                    <i class="mdi mdi-tune-variant"></i> Sync options
+                    <span class="badge bg-secondary-lt ms-1" id="ip-sync-options-count">0</span>
+                </button>
+                <div class="dropdown-menu p-3 ip-sync-options-menu">
+                    <div class="form-check form-switch mb-2">
+                        <input type="hidden" name="set-primary-ip-toggle" value="off">
+                        <input class="form-check-input ip-sync-option" type="checkbox" id="set-primary-ip-toggle-cb"
+                               name="set-primary-ip-toggle" value="on" {% if ip_sync.set_primary_ip %}checked{% endif %}
+                               data-default-checked="false"
+                               title="When the synced IP equals the device's LibreNMS management IP and is assigned to an interface, set it as the Primary IP.">
+                        <label class="form-check-label small" for="set-primary-ip-toggle-cb">Set Primary IP</label>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                        <input type="hidden" name="create-missing-interfaces-toggle" value="off">
+                        <input class="form-check-input ip-sync-option" type="checkbox" id="create-missing-interfaces-toggle-cb"
+                               name="create-missing-interfaces-toggle" value="on" {% if ip_sync.create_missing_interfaces %}checked{% endif %}
+                               data-default-checked="false"
+                               title="Create a missing NetBox interface from the cached LibreNMS port before assigning the selected IP address.">
+                        <label class="form-check-label small" for="create-missing-interfaces-toggle-cb">Create missing interfaces</label>
+                    </div>
+                    <hr class="my-2">
+                    <button class="btn btn-link btn-sm p-0" type="button" id="reset-ip-sync-options">
+                        Reset to defaults
+                    </button>
+                </div>
             </div>
+            {% endif %}
         </div>
-        {% if ip_sync.cache_expiry %}
-            <div id="ip-cache-countdown" class="me-3">
-                Cache expires in: <span id="ip-countdown-timer" data-expiry="{{ ip_sync.cache_expiry|date:'c' }}"></span>
-            </div>
-        {% endif %}
     </div>
 
     <div class="row mb-3">
         <div class="col col-md-12">
             <div class="d-flex justify-content-end align-items-center mb-3">
-                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#ipFilterSection" aria-expanded="false" aria-controls="ipFilterSection">
-                    <i class="mdi mdi-filter"></i> Toggle Filters
+                <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse" data-bs-target="#ipFilterSection" aria-expanded="false" aria-controls="ipFilterSection">
+                    <i class="mdi mdi-filter-outline"></i> Filters
                 </button>
             </div>
             <div class="collapse mb-3" id="ipFilterSection">
@@ -83,7 +110,11 @@
             </div>
         </div>
     </div>
+{% if migrated_to_marker %}
+</div>
+{% else %}
 </form>
+{% endif %}
 <script>
   // "Set Primary IP" toggle behaviour:
   //  - persist the choice as a user preference (remembered across visits)
@@ -128,6 +159,51 @@
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>
         <p class="mt-2 mb-0">No IP address data loaded. Click <strong>Refresh IP Addresses</strong> to fetch data from LibreNMS.</p>
+    </div>
+</div>
+{% endif %}
+
+{% comment %}
+Migrated donor: per-row "Move IP to winner" actions. Re-homes an interface-assigned IP to the
+winner's same-named interface (the backend validates and fails closed via an OOB toast). Mirrors
+the interface move-to-winner control in _interface_sync_content.html.
+{% endcomment %}
+{% if migrated_to_marker and ip_sync.movable_ips %}
+<div class="card mt-3">
+    <div class="card-header">
+        <i class="mdi mdi-transfer-right"></i>
+        Move IP addresses{% if migrated_to_winner %} to {{ migrated_to_winner.name }}{% endif %}
+    </div>
+    <div class="card-body">
+        {% if not migrated_to_winner %}
+        <div class="alert alert-warning py-2" role="alert">
+            The migration winner is unavailable. Restore the winner device before moving these IP addresses.
+        </div>
+        {% endif %}
+        <p class="text-muted small mb-2">
+            Re-home a donor interface-assigned IP to the winner's same-named interface
+            (move the interface first if it doesn't exist on the winner yet).
+        </p>
+        <table class="table table-hover" id="librenms-ipaddress-migrate-table">
+            <thead>
+                <tr>
+                    <th>IP Address</th>
+                    <th>Interface</th>
+                    <th class="text-end">Migrate</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ip in ip_sync.movable_ips %}
+                <tr>
+                    <td>{{ ip.address }}</td>
+                    <td>{{ ip.interface_name|default:"-" }}</td>
+                    <td class="text-end">
+                        {% include "netbox_librenms_plugin/inc/_migrate_move_button.html" with move_url_name="plugins:netbox_librenms_plugin:ipaddress_move_to_winner" obj_id=ip.id obj_label=ip.address entity_word="IP" obj_interface_name=ip.interface_name winner=migrated_to_winner server_key=migrated_to_marker.server_key|default:ip_sync.server_key %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
 </div>
 {% endif %}

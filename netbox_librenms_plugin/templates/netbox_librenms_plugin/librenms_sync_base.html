@@ -6,6 +6,11 @@
 {% load i18n %}
 {% load render_table from django_tables2 %}
 
+{% block head %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'netbox_librenms_plugin/css/librenms_sync.css' %}">
+{% endblock %}
+
 {% block javascript %}
 {{ block.super }}
 <script src="{% static 'netbox_librenms_plugin/js/librenms_sync.js' %}"></script>
@@ -35,16 +40,125 @@
 
 {% block content %}
 
+{% if server_selection_error %}
+<div class="alert {% if server_selection_state == 'selection_required' %}alert-info{% else %}alert-danger{% endif %}"
+     role="alert" id="librenms-server-selection-error">
+    <i class="mdi mdi-alert-circle-outline me-1"></i>{{ server_selection_error }}
+</div>
+{% endif %}
+
+{% if server_selection_warning %}
+<div class="alert alert-warning" role="alert" id="librenms-server-preference-warning">
+    <i class="mdi mdi-alert-outline me-1"></i>{{ server_selection_warning }}
+</div>
+{% endif %}
+
+{% if server_selection_blocked and not server_selection_has_usable_mapping %}
+<div class="alert alert-warning d-flex align-items-start" role="alert" id="librenms-server-selection-recovery">
+    <i class="mdi mdi-lifebuoy me-2 fs-3"></i>
+    <div>
+        <strong>No mapped LibreNMS server is usable.</strong>
+        Every mapping below is disabled, so no sync tab can run against this object.
+        {% if lookup_device_pk != object.pk %}
+        The mappings belong to the virtual chassis sync device. Correct or remove them on
+        <a href="{% if lookup_device_model_name == 'virtualmachine' %}{% url 'plugins:netbox_librenms_plugin:vm_librenms_sync' pk=lookup_device_pk %}{% else %}{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=lookup_device_pk %}{% endif %}"
+           class="alert-link">that device&#39;s LibreNMS tab</a>.
+        {% else %}
+        A mapping for a server that is no longer configured has a Remove button beside it. A mapping
+        for a configured server stays until its URL and API token are repaired in the plugin
+        configuration.
+        {% endif %}
+        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="alert-link">Open the LibreNMS settings page</a>
+        to check the configured servers.
+    </div>
+</div>
+{% endif %}
+
+{% if migrated_to_marker %}
+<div class="alert alert-warning d-flex align-items-start" role="alert">
+    <i class="mdi mdi-alert-octagon me-2 fs-3"></i>
+    <div class="flex-grow-1">
+        <strong>This device was merged into another NetBox device.</strong>
+        {% if migrated_to_winner %}
+            Standard LibreNMS sync actions are disabled here. Use the per-row
+            <em>Move&nbsp;to&nbsp;winner</em> actions below to migrate
+            interfaces, IP addresses, primary IP and OOB IP to
+            <a href="{{ migrated_to_winner.get_absolute_url }}">
+                <strong>{{ migrated_to_winner.name }}</strong>
+            </a>.
+        {% else %}
+            The winner device (<code>id={{ migrated_to_marker.device_id }}</code>)
+            no longer exists. The marker is stale &mdash; remove it manually
+            from <code>librenms_id.{{ migrated_to_marker.server_key }}._migrated_to</code>
+            to re-enable sync.
+        {% endif %}
+        <div class="text-muted small mt-1">
+            Marked at {{ migrated_to_marker.at }} on server
+            <code>{{ migrated_to_marker.server_key }}</code>.
+        </div>
+        {% comment %}
+        The transfer-IP URL resolves a Device by pk; this template also serves VMs, so open the
+        device-only guard FIRST — no transfer-IP reference (not even the probe below) is emitted on
+        a VM page, and a same-pk Device can't be mutated by mistake.
+        {% endcomment %}
+        {% if migrated_to_winner and has_write_permission and object|meta:"model_name" == "device" %}
+        {% comment %}
+        'as' form does not raise NoReverseMatch: device_transfer_ip is registered by the device-merge
+        feature further up the stack. Probe it here so on branches without the URL transfer_url is ''
+        and the whole transfer block is skipped rather than 500ing. All three buttons below share this
+        URL name, so one probe gates them all.
+        {% endcomment %}
+        {% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='primary4' as transfer_url %}
+        {% if transfer_url %}
+        <div class="mt-2 d-flex gap-2 flex-wrap">
+            {% if object.primary_ip4 %}
+            <button type="button" class="btn btn-sm btn-outline-warning"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='primary4' %}"
+                hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'
+                hx-confirm="Transfer primary IPv4 ({{ object.primary_ip4.address }}) to {{ migrated_to_winner.name }}?">
+                <i class="mdi mdi-transfer-right"></i> Transfer primary IPv4
+            </button>
+            {% endif %}
+            {% if object.primary_ip6 %}
+            <button type="button" class="btn btn-sm btn-outline-warning"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='primary6' %}"
+                hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'
+                hx-confirm="Transfer primary IPv6 ({{ object.primary_ip6.address }}) to {{ migrated_to_winner.name }}?">
+                <i class="mdi mdi-transfer-right"></i> Transfer primary IPv6
+            </button>
+            {% endif %}
+            {% if object.oob_ip %}
+            <button type="button" class="btn btn-sm btn-outline-warning"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='oob' %}"
+                hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'
+                hx-confirm="Transfer OOB IP ({{ object.oob_ip.address }}) to {{ migrated_to_winner.name }}?">
+                <i class="mdi mdi-transfer-right"></i> Transfer OOB IP
+            </button>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <!-- LibreNMS Server Information -->
 {% if all_server_mappings %}
-<div class="card mb-3">
+<div class="card mb-3" id="librenms-connections"
+     data-preferred-server-key="{{ server_selection_preferred_key|default:'' }}">
     <div class="card-header d-flex justify-content-between align-items-center py-2">
         <span><i class="mdi mdi-server-network text-primary me-1"></i><strong>LibreNMS Connections</strong></span>
-        {% if librenms_server_info and not librenms_server_info.is_legacy %}
-        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary">
-            <i class="mdi mdi-cog"></i> Change Server
-        </a>
-        {% endif %}
+        <div class="d-flex gap-2 align-items-center">
+            {% include "netbox_librenms_plugin/inc/_server_selector.html" %}
+            {% if librenms_server_info and not librenms_server_info.is_legacy %}
+            <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-secondary">
+                <i class="mdi mdi-cog"></i> Configure Servers
+            </a>
+            {% endif %}
+        </div>
     </div>
     <div class="card-body p-0">
         <table class="table table-sm mb-0">
@@ -52,7 +166,10 @@
             {% for mapping in all_server_mappings %}
             <tr>
                 <td class="ps-3" style="width:40%">
-                    {% if mapping.is_active %}
+                    {% if mapping.is_preferred %}
+                    <i class="mdi mdi-star text-warning me-1" title="Preferred server"></i>
+                    {% endif %}
+                    {% if mapping.is_active and mapping.is_selectable %}
                     <i class="mdi mdi-check-circle text-success me-1" title="Currently active server"></i>
                     {% elif mapping.is_configured %}
                     <i class="mdi mdi-server-network text-muted me-1"></i>
@@ -76,8 +193,35 @@
                     {% else %}
                     <span class="text-muted">ID {{ mapping.device_id }}</span>
                     {% endif %}
+                    {% if mapping.is_oob_only %}
+                    <span class="badge bg-info-lt ms-1" title="This server has only an OOB controller link (no host mapping)">OOB only</span>
+                    {% endif %}
                 </td>
                 <td class="text-end pe-3">
+                    {% if can_manage_server_preference and mapping.is_selectable %}
+                    {% if not mapping.is_preferred %}
+                    <form method="post"
+                          action="{% url 'plugins:netbox_librenms_plugin:set_preferred_server' pk=lookup_device_pk %}"
+                          class="d-inline me-2">
+                        {% csrf_token %}
+                        <input type="hidden" name="server_key" value="{{ mapping.server_key }}">
+                        <input type="hidden" name="active_server_key" value="{{ server_key|default:'' }}">
+                        <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
+                        <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
+                        <button type="submit" class="btn btn-sm btn-outline-warning"
+                                title="Make {{ mapping.display_name }} the preferred server"
+                                aria-label="Make {{ mapping.display_name }} the preferred server">
+                            <i class="mdi mdi-star-outline"></i>
+                        </button>
+                    </form>
+                    {% endif %}
+                    {% endif %}
+                    {% if mapping.is_configured and not mapping.is_selectable %}
+                    <span class="text-muted small"
+                          title="This server is configured without a usable URL and API token, so its mapping cannot be removed here">
+                        <i class="mdi mdi-information-outline me-1"></i>Repair this server in the plugin configuration
+                    </span>
+                    {% endif %}
                     {% if not mapping.is_configured %}
                     {% if lookup_device_model_name == "device" or lookup_device_model_name == "virtualmachine" %}
                     {% if lookup_device_pk == object.pk %}
@@ -87,6 +231,7 @@
                           onsubmit="return confirm('Remove mapping for server \'{{ mapping.server_key|escapejs }}\'? This cannot be undone.');">
                         {% csrf_token %}
                         <input type="hidden" name="server_key" value="{{ mapping.server_key }}">
+                        <input type="hidden" name="active_server_key" value="{{ server_key|default:'' }}">
                         <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
                         <button type="submit" class="btn btn-sm btn-danger"
                                 title="Remove stale mapping for unconfigured server '{{ mapping.server_key }}'">
@@ -130,8 +275,11 @@
 </div>
 {% endif %}
 
-<!-- Only show Device Status and Sync Cards if NOT a VC member OR if this device IS the sync device -->
-{% if not is_vc_member or object.pk == librenms_sync_device.pk %}
+{% if not server_selection_blocked %}
+<!-- Only show Device Status and Sync Cards if NOT a VC member OR if this device IS the sync device.
+     Hidden entirely for a migrated donor: its update/sync actions (name, type, serial,
+     platform, location, Add to LibreNMS) must not write back onto the merged-away device. -->
+{% if not migrated_to_marker and not is_vc_member or not migrated_to_marker and object.pk == librenms_sync_device.pk %}
 <!-- Device Status and Sync Cards Side by Side -->
 <div class="row mb-3">
     <!-- Left: Device Status Card (Smaller) -->
@@ -152,8 +300,10 @@
                         <tr>
                             <th scope="row" style="width: 40%; padding-left: 1rem;">Status</th>
                             <td>
-                                <span class="{% if has_librenms_id %}text-success{% else %}text-danger{% endif %}">
-                                    {% if found_in_librenms %}
+                                <span class="{% if device_info_unavailable %}text-warning{% elif found_in_librenms %}text-success{% else %}text-danger{% endif %}">
+                                    {% if device_info_unavailable %}
+                                    <i class="mdi mdi-alert-circle-outline"></i> Details unavailable
+                                    {% elif found_in_librenms %}
                                     <i class="mdi mdi-check-circle"></i> Found
                                     {% else %}
                                     <i class="mdi mdi-close-circle"></i> Not found
@@ -172,6 +322,12 @@
                                 <form style="display:inline" method="post"
                                       action="{% url 'plugins:netbox_librenms_plugin:convert_legacy_librenms_id' pk=lookup_device_pk %}">
                                     {% csrf_token %}
+                                    {% comment %}
+                                    Scope the conversion to the tab's server: the view rebinds from the POSTed
+                                    server_key, so omitting it would verify and write the mapping under the
+                                    GLOBAL selected server, not the ?server_key tab the user is acting on.
+                                    {% endcomment %}
+                                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                     <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
                                     {% if librenms_id_serial_confirmed %}
                                     <button type="submit" class="btn btn-sm btn-outline-warning py-0 px-1 ms-1"
@@ -302,7 +458,7 @@
                                 </a>
                             </td>
                         </tr>
-                        {% else %}
+                        {% elif not device_info_unavailable %}
                         <!-- Add to LibreNMS -->
                         <tr>
                             <th scope="row">Action</th>
@@ -356,6 +512,11 @@
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_name' pk=object.pk %}"
                                               style="display: inline;">
                                             {% csrf_token %}
+                                            {% comment %}
+                                            The view rebinds from the POSTed server_key; without it the sync runs
+                                            against the global selected server, not this tab's server.
+                                            {% endcomment %}
+                                            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                             <button type="submit" class="btn btn-sm btn-outline-primary"
                                                     title="Sync name to {{ resolved_name }}">
                                                 <i class="mdi mdi-sync"></i> Sync to NetBox
@@ -391,6 +552,7 @@
                                                   action="{% url 'plugins:netbox_librenms_plugin:update_device_type' pk=object.pk %}"
                                                   style="display: inline;">
                                                 {% csrf_token %}
+                                                {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                                 <button type="submit" class="btn btn-sm btn-outline-danger"
                                                         title="Sync to {{ librenms_device_hardware_match.device_type }}">
                                                     <i class="mdi mdi-sync"></i> Sync to NetBox
@@ -437,6 +599,11 @@
                                                     title="View VC member serials from inventory">
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
+                                        {% elif vc_inventory_not_loaded %}
+                                            <span class="badge bg-secondary text-white"
+                                                  title="Refresh this tab to load the VC member serials from LibreNMS inventory.">
+                                                <i class="mdi mdi-server-network"></i> VC Serials not loaded
+                                            </span>
                                         {% else %}
                                             {% if librenms_device_serial != "-" %}
                                                 {% if object.serial != librenms_device_serial %}
@@ -444,6 +611,7 @@
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
                                                       style="display: inline;">
                                                     {% csrf_token %}
+                                                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                                     <button type="submit" class="btn btn-sm btn-outline-primary"
                                                             title="Sync serial from LibreNMS: {{ librenms_device_serial }}">
                                                         <i class="mdi mdi-sync"></i> Sync to NetBox
@@ -486,6 +654,7 @@
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_platform' pk=object.pk %}"
                                                       style="display: inline;">
                                                     {% csrf_token %}
+                                                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                                     <button type="submit" class="btn btn-sm btn-outline-primary"
                                                             title="Set platform to {{ platform_info.matching_platform }}">
                                                         <i class="mdi mdi-sync"></i> Sync to NetBox
@@ -511,7 +680,7 @@
                                 <div class="d-flex align-items-center">
                                     <span>{{ platform_info.librenms_os }}</span>
                                     {% if not platform_info.platform_exists and platform_info.librenms_os and platform_info.librenms_os != "-" %}
-                                        <span class="badge bg-warning bg-opacity-75 ms-2" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
+                                        <span class="badge bg-warning bg-opacity-75 text-dark ms-2" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
                                             <i class="mdi mdi-alert"></i> Not in NetBox
                                         </span>
                                     {% endif %}
@@ -532,6 +701,7 @@
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_location' pk=object.pk %}"
                                               style="display: inline;">
                                             {% csrf_token %}
+                                            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                             <button type="submit" class="btn btn-sm btn-outline-primary"
                                                     title="Update LibreNMS location to match NetBox site: {{ object.site.name }}">
                                                 <i class="mdi mdi-sync"></i> Sync to LibreNMS
@@ -598,94 +768,144 @@
         {% endif %}
     </div>
     {% endif %}
-{% elif librenms_device_id %}
-{% if found_in_librenms %}
+{% elif librenms_device_id or migrated_to_marker or librenms_lookup_error %}
+{% comment %}
+A migrated donor has its active librenms_id cleared (so it is never found_in_librenms), but the
+banner above directs the user to the per-row "Move to winner" actions that live in these tabs.
+Render the tabs in migrated mode too, or those interface/IP move controls are unreachable.
+{% endcomment %}
+{% comment %}
+A failed lookup is not an answer about the device, so it is shown before the branch below rather
+than as one of its outcomes. Saying "not found" here would send the user to clear a librenms_id
+that may well be correct.
+{% endcomment %}
+{% if librenms_lookup_error %}
+<div class="alert alert-danger d-flex align-items-center">
+    <i class="mdi mdi-alert-circle me-2"></i>
+    <div>
+        <strong>LibreNMS lookup failed:</strong>
+        {{ librenms_lookup_error.message }}
+        {% if librenms_device_id %}
+        Whether LibreNMS has the device with <code>librenms_id</code> <code>{{ librenms_device_id }}</code> is unknown.
+        <hr class="my-2">
+        <span class="text-muted">
+            Leave the custom field as it is and retry once LibreNMS answers again. If this
+            continues, check the LibreNMS server and its logs for that device.
+        </span>
+        {% else %}
+        <hr class="my-2">
+        <span class="text-muted">
+            The discovered mapping was not stored. Resolve the reported conflict, then retry.
+        </span>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
 
+{% if found_in_librenms or migrated_to_marker or device_info_unavailable and has_librenms_id %}
+
+{% if sync_cache_status_url %}
+<div id="librenms-sync-cache-state"
+    data-status-url="{{ sync_cache_status_url }}"
+    data-server-key="{{ server_key }}"></div>
+{{ sync_cache_status|json_script:"librenms-sync-cache-initial" }}
+{{ sync_cache_contract|json_script:"librenms-sync-cache-contract" }}
+{% endif %}
+<div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}">
+{{ sync_cache_status|json_script:"librenms-sync-rendered-status" }}
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="interfaces-tab" data-tab="interfaces" data-bs-toggle="tab"
-                data-bs-target="#interfaces" type="button" role="tab" aria-controls="interfaces">
-                Interfaces
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces only %}
         </li>
         {% if cable_sync %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="cables-tab" data-tab="cables" data-bs-toggle="tab" data-bs-target="#cables"
-                type="button" role="tab" aria-controls="cables">
-                Cables
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables only %}
         </li>
         {% endif %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="ipaddresses-tab" data-tab="ipaddresses" data-bs-toggle="tab"
-                data-bs-target="#ipaddresses" type="button" role="tab" aria-controls="ipaddresses">
-                IP Addresses
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses only %}
         </li>
         {% with model_name=object|meta:"model_name" %}
         {% if model_name == "device" %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="vlans-tab" data-tab="vlans" data-bs-toggle="tab"
-                data-bs-target="#vlans" type="button" role="tab" aria-controls="vlans">
-                VLANs
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans only %}
         </li>
         {% endif %}
         {% endwith %}
         {% if module_sync and object|meta:"model_name" == "device" %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="modules-tab" data-tab="modules" data-bs-toggle="tab"
-                data-bs-target="#modules" type="button" role="tab" aria-controls="modules">
-                Modules
-            </button>
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules only %}
         </li>
         {% endif %}
     </ul>
-    <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top"
-        title="Select preferred interface name field"
-        data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
-        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifDescr"
-            id="ifDescr" {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
-        <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
-
-        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifName"
-            id="ifName" {% if interface_name_field == 'ifName' %}checked{% endif %}>
-        <label class="btn btn-outline-primary" for="ifName">ifName</label>
-    </div>
+    {% include 'netbox_librenms_plugin/inc/_interface_name_field_selector.html' %}
 </div>
 <!-- Tab Content -->
 <div class="tab-content mt-3" id="librenmsTabContent">
-    <div class="tab-pane fade" id="interfaces" role="tabpanel" aria-labelledby="interfaces-tab"
+    <div class="tab-pane{% if active_sync_tab == 'interfaces' %} show active{% endif %}" id="interfaces"
+        role="tabpanel" aria-labelledby="interfaces-tab"
         data-tab-id="interfaces">
+        {% if sync_cache_fragment_urls.interfaces %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.interfaces }}"
+            hx-trigger="librenms:load-fragment" hx-target="#interface-sync-content"
+            hx-sync="#interface-sync-content:abort" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_interface_sync.html' %}
     </div>
 
-    <div class="tab-pane fade" id="cables" role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables">
+    {% if cable_sync %}
+    <div class="tab-pane{% if active_sync_tab == 'cables' %} show active{% endif %}" id="cables"
+        role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables">
+        {% if sync_cache_fragment_urls.cables %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.cables }}"
+            hx-trigger="librenms:load-fragment" hx-target="#cable-sync-content"
+            hx-sync="#cable-sync-content:abort" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_cable_sync.html' %}
     </div>
+    {% endif %}
 
-    <div class="tab-pane fade" id="ipaddresses" role="tabpanel" aria-labelledby="ipaddresses-tab"
+    <div class="tab-pane{% if active_sync_tab == 'ipaddresses' %} show active{% endif %}" id="ipaddresses"
+        role="tabpanel" aria-labelledby="ipaddresses-tab"
         data-tab-id="ipaddresses">
+        {% if sync_cache_fragment_urls.ipaddresses %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.ipaddresses }}"
+            hx-trigger="librenms:load-fragment" hx-target="#ipaddress-sync-content"
+            hx-sync="#ipaddress-sync-content:abort" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
 
     {% if module_sync and object|meta:"model_name" == "device" %}
-    <div class="tab-pane fade" id="modules" role="tabpanel" aria-labelledby="modules-tab"
+    <div class="tab-pane{% if active_sync_tab == 'modules' %} show active{% endif %}" id="modules"
+        role="tabpanel" aria-labelledby="modules-tab"
         data-tab-id="modules">
+        {% if sync_cache_fragment_urls.modules %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.modules }}"
+            hx-trigger="librenms:load-fragment" hx-target="#module-sync-content"
+            hx-sync="#module-sync-content:abort" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_module_sync.html' %}
     </div>
     {% endif %}
 
     {% with model_name=object|meta:"model_name" %}
     {% if model_name == "device" %}
-    <div class="tab-pane fade" id="vlans" role="tabpanel" aria-labelledby="vlans-tab"
+    <div class="tab-pane{% if active_sync_tab == 'vlans' %} show active{% endif %}" id="vlans"
+        role="tabpanel" aria-labelledby="vlans-tab"
         data-tab-id="vlans">
+        {% if sync_cache_fragment_urls.vlans %}
+        <span class="d-none" data-fragment-loader hx-get="{{ sync_cache_fragment_urls.vlans }}"
+            hx-trigger="librenms:load-fragment" hx-target="#vlan-sync-content"
+            hx-sync="#vlan-sync-content:abort" hx-swap="innerHTML"></span>
+        {% endif %}
         {% include 'netbox_librenms_plugin/_vlan_sync.html' %}
     </div>
     {% endif %}
     {% endwith %}
+</div>
 </div>
 
 
@@ -802,6 +1022,7 @@
 {% endif %}
 
 
+{% if not found_in_librenms and not device_info_unavailable %}
 <!-- Add to LibreNMS Modal -->
 <div class="modal fade" id="add-device-modal" tabindex="-1" aria-labelledby="addDeviceModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg">
@@ -825,6 +1046,7 @@
                     id="snmpv1v2-form" name="snmpv1v2-form" style="display: block;">
                     {% csrf_token %}
                     <input type="hidden" name="object_type" value="{{ object_model_name }}">
+                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                     <!-- v1/v2c Toggle Button -->
                     <div class="mb-3">
                         <label class="form-label">Protocol Version</label>
@@ -875,6 +1097,7 @@
                     id="snmpv3-form" name="snmpv3-form" style="display: none;">
                     {% csrf_token %}
                     <input type="hidden" name="object_type" value="{{ object_model_name }}">
+                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                     {{ v3form.snmp_version }}
 
                     <div class="row">
@@ -929,6 +1152,7 @@
         </div>
     </div>
 </div>
+{% endif %}
 
 {% if object.virtual_chassis and vc_inventory_serials %}
 <!-- VC Member Serials Modal -->
@@ -949,6 +1173,8 @@
                 <form method="post" id="vc-serials-form"
                       action="{% url 'plugins:netbox_librenms_plugin:assign_vc_serial' pk=object.pk %}">
                     {% csrf_token %}
+                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+                    <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
                     <table class="table table-striped">
                         <thead>
                             <tr>
@@ -1013,6 +1239,7 @@
         </div>
     </div>
 </div>
+{% endif %}
 {% endif %}
 
 {% endblock %} <!-- End content -->

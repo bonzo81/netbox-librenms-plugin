@@ -1,0 +1,348 @@
+"""
+Render the real _interface_sync_content.html template in both modes.
+
+In migrated mode the POST form is replaced by a plain <div> (a migrated donor must not be
+able to POST an interface sync). The CSRF token AND the server_key hidden input must still be
+emitted in migrated mode — not because of the (absent) form, but because the interface table
+still renders interactive relationship/VC-member dropdowns whose verify-interface / LAG-sync
+POSTs read document.querySelector('[name=csrfmiddlewaretoken]').value and
+document.querySelector('input[name="server_key"]').value. Dropping either breaks those
+JS-driven requests: a null token → TypeError/403, a null server_key → the wrong LibreNMS
+server/cache on non-default servers. A bare hidden input never auto-submits, so emitting them
+doesn't reintroduce the live-form problem migrated mode exists to avoid.
+"""
+
+import re
+
+import pytest
+
+
+@pytest.mark.django_db
+class TestInterfaceSyncContentTemplateMigratedMode:
+    def _render(
+        self,
+        *,
+        migrated,
+        server_key="default",
+        netbox_only=(),
+        winner=None,
+        has_write=False,
+        relationship_incomplete=False,
+    ):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("iface-tmpl-dev")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()  # NetBox context processors read request.user
+        table = LibreNMSInterfaceTable([], device=device, server_key=server_key)
+        RequestConfig(request).configure(table)
+        interface_sync = {
+            "object": device,
+            "table": table,
+            "server_key": server_key,
+            # Caller-controlled: an item makes the NetBox-only modal (and its trigger link, whose
+            # title we assert) render. Kept empty by default so form-presence tests aren't perturbed
+            # by the modal's own <form>.
+            "netbox_only_interfaces": list(netbox_only),
+            "virtual_chassis_members": [],
+            "cache_expiry": None,
+            "oob_incomplete": False,
+            "relationship_data_incomplete": relationship_incomplete,
+        }
+        ctx = {
+            "interface_sync": interface_sync,
+            "interface_name_field": "ifName",
+            "migrated_to_marker": migrated,
+            "migrated_to_winner": winner,
+            "has_write_permission": has_write,
+        }
+        return render_to_string("netbox_librenms_plugin/_interface_sync_content.html", ctx, request=request)
+
+    def test_migrated_mode_drops_form_but_keeps_csrf_and_server_key(self):
+        # Use a non-default server_key so the assertion proves the actual value is emitted,
+        # not just any server_key input.
+        html = self._render(
+            migrated={"server_key": "prod", "device_id": 1, "at": "now"},
+            server_key="prod",
+        )
+        # The live POST form must be gone in migrated mode (a donor must not POST a sync).
+        assert "<form" not in html
+        # ...but BOTH the CSRF token and the server_key input must remain so JS-driven
+        # verify-interface / LAG-sync POSTs still target the right server.
+        assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
+        assert 'name="server_key"' in html
+        assert 'value="prod"' in html
+
+    def test_migrated_mode_hidden_server_key_prefers_marker_key(self):
+        # The migrated-mode standalone server_key input must prefer the marker-scoped key over the
+        # page's interface_sync.server_key (the same precedence the Move button uses), so a stale
+        # page key can't override the server the donor was migrated under.
+        html = self._render(
+            migrated={"server_key": "markerkey", "device_id": 1, "at": "now"},
+            server_key="pagekey",  # interface_sync.server_key differs from the marker
+        )
+        assert '<input type="hidden" name="server_key" value="markerkey">' in html
+        assert 'value="pagekey"' not in html  # the stale page key must not win
+
+    def test_normal_mode_emits_form_with_csrf_and_server_key(self):
+        html = self._render(migrated=None)
+        assert "<form" in html
+        assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
+        assert 'name="server_key"' in html
+
+    def test_netbox_only_link_title_is_move_in_migrated_mode(self):
+        # Migrated mode is transfer-only, so the NetBox-only modal trigger must advertise "move",
+        # not "delete" (the modal has no delete action for a donor).
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+        )
+        assert "Click to view and move NetBox-only interfaces" in html
+        assert "Click to view and delete NetBox-only interfaces" not in html
+
+    def test_netbox_only_link_title_is_delete_in_normal_mode(self):
+        html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
+        assert "Click to view and delete NetBox-only interfaces" in html
+        assert "Click to view and move NetBox-only interfaces" not in html
+
+    def test_relationship_incomplete_renders_persistent_banner(self):
+        html = self._render(migrated=None, relationship_incomplete=True)
+        assert "Interface relationship data could not be fetched" in html
+
+    def test_no_relationship_banner_when_complete(self):
+        html = self._render(migrated=None, relationship_incomplete=False)
+        assert "Interface relationship data could not be fetched" not in html
+
+    def test_migrated_mode_hides_destructive_delete_controls(self):
+        # Migrated mode is move-only: the donor-side bulk-delete UI (select-all + per-row
+        # checkboxes + "Delete Selected Interfaces") must not render next to the Move actions,
+        # or a donor could destructively delete interfaces mid-migration.
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+        )
+        assert "select-all-netbox-interfaces" not in html
+        assert "netbox-interface-checkbox" not in html
+        assert "Delete Selected Interfaces" not in html
+
+    def test_normal_mode_keeps_delete_controls(self):
+        # Without a migration marker the bulk-delete UI is the intended affordance and must render.
+        html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
+        assert "select-all-netbox-interfaces" in html
+        assert "netbox-interface-checkbox" in html
+        assert "Delete Selected Interfaces" in html
+
+    def test_migrated_warning_describes_move_not_delete(self):
+        # In migrated (move) mode WITH a resolved winner, the modal warning must describe transferring
+        # interfaces to the winner, not permanently deleting them.
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+            winner=make_device("iface-warn-winner"),
+        )
+        assert "to transfer that interface" in html
+        assert "permanently remove them from NetBox" not in html
+
+    def test_migrated_warning_handles_missing_winner(self):
+        """With the marker present but the winner gone (stale), the warning must not instruct a Move to a non-existent winner."""
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+            winner=None,
+        )
+        assert "migration winner is unavailable" in html
+        assert "Moving an interface reassigns it" not in html  # the move instruction is gated out
+
+    def test_normal_warning_describes_delete(self):
+        html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
+        assert "permanently remove them from NetBox" in html
+        assert "to transfer that interface" not in html
+
+    def test_delete_checkboxes_have_accessible_names(self):
+        # The select-all and per-row checkboxes must carry aria-labels for screen-reader users.
+        html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
+        assert 'aria-label="Select all NetBox-only interfaces"' in html
+        assert 'aria-label="Select interface eth-only"' in html
+
+    def test_migrated_mode_hides_exclude_from_sync_controls(self):
+        # The POST form is gone in migrated mode, so the sync-only "Exclude from Sync" checkboxes
+        # must not render as active controls with nowhere to submit.
+        html = self._render(migrated={"server_key": "default", "device_id": 1, "at": "now"})
+        assert "Exclude from Sync:" not in html
+
+    def test_normal_mode_groups_sync_controls_in_choice_a_dropdown(self):
+        html = self._render(migrated=None)
+
+        assert "Sync options" in html
+        assert "Exclude from sync" in html
+        assert 'id="interface-sync-options-count"' in html
+        assert 'id="reset-interface-sync-options"' in html
+        assert 'data-bs-auto-close="outside"' in html
+        assert html.index("Sync Selected Interfaces") < html.index("Sync options") < html.index("mdi-help-circle")
+
+    def test_normal_mode_keeps_choice_a_defaults_on_the_real_form_controls(self):
+        html = self._render(migrated=None)
+
+        assert re.search(r'id="autoSelectLagMembers"[^>]*data-default-checked="true"[^>]*checked', html)
+        assert len(re.findall(r'name="exclude_columns"[^>]*data-default-checked="false"', html)) == 7
+
+    def test_interface_type_help_uses_the_shared_modal_helper(self):
+        """The info link opens through NetBox's modal helper instead of competing Bootstrap trigger state."""
+        from netbox_librenms_plugin.tests._html_helpers import extract_enclosing_tag
+
+        html = self._render(migrated=None)
+        link = extract_enclosing_tag(html, "mdi-help-circle", tag="<a")
+
+        assert "showModal(document.getElementById('interfaceTypeHelpModal'))" in link
+        assert "data-bs-toggle" not in link
+        assert "data-bs-target" not in link
+
+    @staticmethod
+    def _patch_move_url_reverse(*, resolve):
+        """Force ``interface_move_to_winner`` registered/unregistered via the shared helper."""
+        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
+
+        return patch_move_url_reverse("interface_move_to_winner", resolve=resolve)
+
+    def test_migrated_move_button_hidden_for_read_only_users(self):
+        """The migrated 'Move' action is a mutating HTMX POST; without write permission it must not render as a live button (it would only fail at the permission gate) — show muted 'read-only' text instead."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-winner-dev")
+        iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
+        marker = {"server_key": "default", "device_id": 1, "at": "now"}
+
+        # Make the move URL resolvable so this test exercises the write-permission gate itself, not
+        # the branch-dependent absence of the URL (registered only up-stack); the negative assertion
+        # can then actually FAIL if the has_write_permission guard is removed.
+        with self._patch_move_url_reverse(resolve=True):
+            ro = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=False)
+        # Assert on the button's own rendered content, not the URL *name* (which never appears in
+        # HTML — the template emits the resolved path). The live Move button carries this confirm text.
+        assert "Move interface '" not in ro
+        assert "/fake/interface_move_to_winner/1/" not in ro
+        assert "read-only" in ro
+
+    def test_migrated_move_button_write_perm_degrades_when_url_unregistered(self):
+        """With write perm, an unregistered move-to-winner URL must degrade to read-only, not 500."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-winner-wp")
+        iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
+        marker = {"server_key": "default", "device_id": 1, "at": "now"}
+
+        # Force the forward-declared move URL to look unregistered on ANY branch (it IS registered
+        # up-stack) so the {% url ... as %} degrade path is exercised wherever this runs. Unfixed
+        # (bare {% url %}) this raises NoReverseMatch; the {% url ... as %} guard renders the
+        # read-only fallback instead, so the migrated tab never 500s where the URL isn't registered.
+        with self._patch_move_url_reverse(resolve=False):
+            html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
+        # Assert on the button's rendered content (the confirm text), not the URL name: with the URL
+        # unresolved, move_url is '' so the live button must be absent and the read-only span shown.
+        assert "Move interface '" not in html
+        assert "read-only" in html
+
+    def test_migrated_move_button_renders_for_write_users_when_url_registered(self):
+        """
+        Positive counterpart: with write perm + a resolvable move URL the live button renders.
+
+        This proves the negative assertions above key off the button's real rendered content — i.e.
+        they would actually fail if the button leaked into a read-only / unregistered render.
+        """
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-winner-write")
+        iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
+        marker = {"server_key": "default", "device_id": 1, "at": "now"}
+
+        with self._patch_move_url_reverse(resolve=True):
+            html = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=True)
+        assert "Move interface '" in html
+        assert 'hx-post="/fake/interface_move_to_winner/1/"' in html
+        assert "read-only" not in html
+
+    def test_move_button_emits_server_key_hx_vals_when_marker_has_key(self):
+        # When the migrated marker carries a server_key, the migrated-mode Move button must
+        # post it so the move hits the right LibreNMS server/cache (non-default servers).
+        # has_write=True so the Move button renders (it's gated on write permission).
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-tmpl-winner")
+        # Alphanumeric key so escapejs leaves it intact (it escapes e.g. '-' to -); the
+        # guard behaviour, not escapejs, is what this test pins.
+        with self._patch_move_url_reverse(resolve=True):
+            html = self._render(
+                migrated={"server_key": "edgelondon", "device_id": 1, "at": "now"},
+                winner=winner,
+                netbox_only=[{"id": 1, "name": "eth-only"}],
+                has_write=True,
+            )
+        # The Move button renders for the NetBox-only row and carries the server_key. Scope the
+        # hx-vals assertion to the Move button's own tag (mirroring the fallback test) so a
+        # different element carrying the key can't mask the button dropping its hx-vals.
+        assert "mdi-transfer-right" in html
+        from netbox_librenms_plugin.tests._html_helpers import extract_enclosing_tag
+
+        move_button_tag = extract_enclosing_tag(html, "mdi-transfer-right")
+        assert 'hx-vals=\'{"server_key": "edgelondon"}\'' in move_button_tag
+
+    def test_move_button_falls_back_to_active_server_key_when_marker_has_no_key(self):
+        # When the marker carries no server_key, the Move button must fall back to the active
+        # interface_sync.server_key (the server the donor is being viewed under) rather than drop
+        # the discriminator: omitting it lets the move resolve the marker against the session/default
+        # server, which on a multi-server install can be the WRONG server. Never POST an empty key.
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-tmpl-winner-nokey")
+        with self._patch_move_url_reverse(resolve=True):
+            html = self._render(
+                migrated={"device_id": 1, "at": "now"},  # marker has NO server_key
+                winner=winner,
+                netbox_only=[{"id": 1, "name": "eth-only"}],
+                has_write=True,
+            )
+        # The Move button still renders, and never with an empty server_key payload.
+        assert "mdi-transfer-right" in html
+        assert 'hx-vals=\'{"server_key": ""}\'' not in html
+        # Scope to the move button's own opening tag: it must carry the active server_key
+        # (interface_sync.server_key == "default" in this harness) as the fallback discriminator.
+        from netbox_librenms_plugin.tests._html_helpers import extract_enclosing_tag
+
+        move_button_tag = extract_enclosing_tag(html, "mdi-transfer-right")
+        assert 'hx-vals=\'{"server_key": "default"}\'' in move_button_tag
+
+
+@pytest.mark.django_db
+class TestInterfaceSyncRefreshButtonServerKey:
+    """The outer _interface_sync.html Refresh button must not POST a blank server_key on initial load."""
+
+    def test_refresh_button_falls_back_to_context_server_key_not_blank(self):
+        # On initial page load window.location.search has no server_key, so the Refresh button's
+        # hx-vals must fall back to the active server from context (librenms_server_info.server_key)
+        # rather than '' — a blank key would POST to the default/wrong LibreNMS server.
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("iface-refresh-dev")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()  # NetBox context processors read request.user
+        html = render_to_string(
+            "netbox_librenms_plugin/_interface_sync.html",
+            {"object": device, "has_librenms_id": True, "librenms_server_info": {"server_key": "prod"}},
+            request=request,
+        )
+
+        # The URL-empty fallback now resolves to the active server, not a blank string.
+        assert "get('server_key') || 'prod'" in html
+        assert "get('server_key') || ''" not in html

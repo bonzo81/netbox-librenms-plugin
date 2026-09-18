@@ -26,7 +26,7 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
 
     def get_interface_context(self, request, obj):
         """Return interface sync context for the virtual machine."""
-        interface_name_field = get_interface_name_field(request)
+        interface_name_field = get_interface_name_field(request, obj)
         interface_sync_view = VMInterfaceTableView()
         interface_sync_view.request = copy.copy(request)
         return interface_sync_view.get_context_data(interface_sync_view.request, obj, interface_name_field)

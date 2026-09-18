@@ -290,3 +290,6 @@ cython_debug/
 ca-bundle.crt
 *.pem
 .github/hooks/
+
+# Playwright MCP scratch snapshots (accessibility/page dumps from local UI verification)
+.playwright-mcp/

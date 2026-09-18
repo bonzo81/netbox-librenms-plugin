@@ -15,12 +15,17 @@ The F401 suppressions prevent linters from flagging them as unused.
 """
 
 from .bulk_import import (  # noqa: F401
+    BulkPrecheckOutcome,
     bulk_import_devices,
     bulk_import_devices_shared,
+    classify_bulk_precheck,
+    detect_collisions_for_device_ids,
     process_device_filters,
 )
 from .cache import (  # noqa: F401
     get_active_cached_searches,
+    get_active_cached_searches_for_servers,
+    get_cache_index_key,
     get_cache_metadata_key,
     get_import_device_cache_key,
     get_import_search_cache_key,
@@ -33,12 +38,18 @@ from .device_operations import (  # noqa: F401
     import_single_device,
     validate_device_for_import,
 )
+from .collisions import detect_bulk_collisions, scope_bulk_collisions  # noqa: F401
+from .disclosure import (  # noqa: F401
+    scope_validation_disclosure,
+    scope_validation_disclosures,
+    visible_object_label,
+)
 from .filters import (  # noqa: F401
     _apply_client_filters,
     get_device_count_for_filters,
     get_librenms_devices_for_import,
 )
-from .permissions import check_user_permissions, require_permissions  # noqa: F401
+from .permissions import check_user_permissions, require_permissions, required_import_permissions  # noqa: F401
 from .virtual_chassis import (  # noqa: F401
     _clone_virtual_chassis_data,
     _generate_vc_member_name,

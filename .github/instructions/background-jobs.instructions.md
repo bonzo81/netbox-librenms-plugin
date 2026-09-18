@@ -79,8 +79,13 @@ Filter fields: `librenms_location`, `librenms_type`, `librenms_os`, `librenms_ho
 - `permissions.py` — `check_user_permissions(user, permissions)`, `require_permissions(user, permissions, action_description)`.
 - `virtual_chassis.py` — `create_virtual_chassis_with_members()`, `_sync_module_bay_counter()`.
 
-## Validation Helpers (`import_validation_helpers.py`)
-Centralizes validation state mutation used by the role/cluster/rack update views:
-- `apply_role_to_validation()`, `apply_cluster_to_validation()`, `apply_rack_to_validation()` — update validation state when user selects a role/cluster/rack.
-- `remove_validation_issue()`, `recalculate_validation_status()` — maintain issue list and overall status.
-- `fetch_model_by_id()`, `extract_device_selections()` — helpers for reading form data.
+## Import Validation and Plans
+
+`import_validation_helpers.py` centralizes validation state mutation used by the role, placement, and rack update views:
+- `apply_role_to_validation()`, `apply_cluster_to_validation()`, `apply_host_to_validation()`, and `apply_rack_to_validation()` update validation state when a user changes an import selection.
+- `remove_validation_issue()` and `recalculate_validation_status()` maintain the issue list and overall status.
+- `fetch_model_by_id()` reads model selections.
+
+`import_plan.py` owns typed import selection parsing:
+- `parse_import_row_intent()` parses one row's object type and placement selection.
+- `parse_import_row_plan()` validates that intent and returns the immutable plan passed to import execution.

@@ -1,2 +1,9 @@
+Django>=5.2,<6.1
+packaging
+playwright>=1.58
+PyYAML
 pytest
-pytest-django
+pytest-cov>=7.1.0
+pytest-django>=4.6.0
+pytest-xdist>=3.8
+requests

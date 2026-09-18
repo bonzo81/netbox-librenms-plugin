@@ -6,6 +6,7 @@
 > - [background-jobs.instructions.md](instructions/background-jobs.instructions.md) – applies to `jobs.py`, import views, and import utilities
 > - [sync.instructions.md](instructions/sync.instructions.md) – applies to sync views, base views, tables, and sync JS
 > - [release.instructions.md](instructions/release.instructions.md) – applies to changelog, pyproject.toml, and `__init__.py` version bumps
+> - [release-prep.instructions.md](instructions/release-prep.instructions.md) – workflow for the develop → master prep PR ahead of a release (no version bump)
 
 ## Architecture & Key Modules
 - Plugin hooks into NetBox (Django 5) under `netbox_librenms_plugin/`; respect NetBox plugin APIs (`navigation.py`, `urls.py`, `api/`).

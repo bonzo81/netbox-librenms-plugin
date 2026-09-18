@@ -1,2314 +1,1172 @@
-"""Coverage tests for views/sync/device_fields.py (target >95%)."""
+"""Request-level coverage for device and VM field-sync actions."""
 
-from unittest.mock import MagicMock, patch
+from copy import deepcopy
 
+import pytest
+from django.core.cache import cache
+from django.urls import reverse
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_view(ViewClass):
-    """Create a view instance bypassing __init__, with a mock LibreNMS API."""
-    view = object.__new__(ViewClass)
-    view._librenms_api = MagicMock()
-    view._librenms_api.server_key = "default"
-    view.require_all_permissions = MagicMock(return_value=None)
-    return view
-
-
-def _make_request(post_data=None):
-    req = MagicMock()
-    req.POST = post_data or {}
-    return req
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_superuser,
+    make_virtual_chassis,
+    make_vm,
+)
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, message_texts
 
 
-# ---------------------------------------------------------------------------
-# UpdateDeviceNameView
-# ---------------------------------------------------------------------------
+SERVER_KEY = "default"
+SECONDARY_KEY = "secondary"
 
 
+def _configure_servers(settings, server):
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        SERVER_KEY: {
+            "display_name": "Default field-sync test server",
+            "librenms_url": server.url,
+            "api_token": "default-token",
+            "cache_timeout": 300,
+            "verify_ssl": False,
+        },
+        SECONDARY_KEY: {
+            "display_name": "Secondary field-sync test server",
+            "librenms_url": server.url,
+            "api_token": "secondary-token",
+            "cache_timeout": 300,
+            "verify_ssl": False,
+        },
+    }
+    plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+@pytest.fixture
+def librenms_server(settings, monkeypatch):
+    """Run a local HTTP server for real LibreNMS client requests."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        _configure_servers(settings, server)
+        yield server
+
+
+@pytest.fixture
+def logged_in_client(client):
+    client.force_login(make_superuser("device-fields-superuser"))
+    return client
+
+
+def _url(name, pk):
+    return reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": pk})
+
+
+def _post(client, name, obj, data=None):
+    submitted = {"server_key": SERVER_KEY}
+    submitted.update(data or {})
+    return client.post(_url(name, obj.pk), submitted)
+
+
+def _linked_device(name, device_id, **kwargs):
+    return make_device(name, librenms_cf={SERVER_KEY: device_id}, **kwargs)
+
+
+def _messages(response, level=None):
+    return message_texts(response.wsgi_request, level=level)
+
+
+@pytest.mark.django_db
 class TestUpdateDeviceNameView:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
+    def test_live_name_replaces_a_stale_api_snapshot(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
 
-        return _make_view(UpdateDeviceNameView)
+        device = _linked_device("old-live-name", 6501)
+        cache.set(
+            f"librenms_device_info_{SERVER_KEY}_6501",
+            {"device_id": 6501, "hostname": "stale-name", "sysName": "stale-name"},
+            300,
+        )
+        cache.set(
+            get_import_device_cache_key(6501, SERVER_KEY),
+            {"device_id": 6501, "hostname": "also-stale", "sysName": "also-stale"},
+            300,
+        )
+        librenms_server.device_info_response(device_id=6501, hostname="fresh-name.example.test")
 
-    def test_permission_denied_returns_error(self):
-        view = self._view()
-        error_response = MagicMock()
-        view.require_all_permissions = MagicMock(return_value=error_response)
+        response = _post(
+            logged_in_client,
+            "update_device_name",
+            device,
+            {"use_sysname": "on", "strip_domain": "on"},
+        )
 
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404") as mock_get:
-            result = view.post(_make_request(), pk=1)
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert response.url.endswith(f"?server_key={SERVER_KEY}")
+        assert device.name == "fresh-name"
+        assert any("Device name updated" in text for text in _messages(response, "success"))
 
-        assert result is error_response
-        mock_get.assert_not_called()
+    def test_missing_mapping_leaves_the_name_unchanged(self, logged_in_client, librenms_server):
+        device = make_device("name-without-mapping")
 
-    def test_no_librenms_id_returns_error(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = None
+        response = _post(logged_in_client, "update_device_name", device)
 
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
-        ):
-            view.post(_make_request(), pk=1)
+        device.refresh_from_db()
+        assert device.name == "name-without-mapping"
+        assert any("not found in LibreNMS" in text for text in _messages(response, "error"))
 
-        mock_msg.error.assert_called_once()
-        mock_redir.assert_called_once()
+    def test_live_response_without_a_name_is_informational(self, logged_in_client, librenms_server):
+        device = _linked_device("name-without-live-value", 6502)
+        librenms_server.register(
+            "/api/v0/devices/6502",
+            {"status": "ok", "devices": [{"device_id": 6502, "hostname": "", "sysName": ""}]},
+        )
 
-    def test_get_device_info_failure(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (False, None)
+        response = _post(logged_in_client, "update_device_name", device)
 
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
+        device.refresh_from_db()
+        assert device.name == "name-without-live-value"
+        assert any("No name could be determined" in text for text in _messages(response, "warning"))
 
-        mock_msg.error.assert_called_once()
+    def test_real_duplicate_name_validation_rolls_the_change_back(self, logged_in_client, librenms_server):
+        device = _linked_device("name-before-duplicate", 6503)
+        duplicate = make_device("occupied-name")
+        librenms_server.device_info_response(device_id=6503, hostname=duplicate.name)
 
-    def test_get_device_info_empty_dict(self):
-        """An empty (falsy) device_info dict triggers the 'Failed to retrieve' error path."""
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {})
+        response = _post(logged_in_client, "update_device_name", device)
 
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
+        device.refresh_from_db()
+        assert device.name == "name-before-duplicate"
+        assert any("Failed to update device name" in text for text in _messages(response, "error"))
 
-        # empty dict is falsy → triggers "Failed to retrieve device info" error
-        mock_msg.error.assert_called_once()
+    def test_a_pre_existing_invalid_field_is_reported_as_unrelated(self, logged_in_client, librenms_server):
+        """A device already failing validation elsewhere must not read as a name problem."""
+        from ipam.models import IPAddress
 
-    def test_no_sysname_returns_warning(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {"sysName": None, "hostname": None})
+        from dcim.models import Device
 
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.resolve_naming_preferences", return_value=(True, False)
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
+        device = _linked_device("name-before-invalid-oob", 6505)
+        stray = IPAddress.objects.create(address="192.0.2.50/24")
+        # Written past validation, which is how such a row reaches the database at all.
+        Device.objects.filter(pk=device.pk).update(oob_ip=stray)
+        librenms_server.device_info_response(device_id=6505, hostname="renamed-host")
 
-        mock_msg.warning.assert_called_once()
+        response = _post(logged_in_client, "update_device_name", device)
 
-    def test_save_success(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {"sysName": "router1"})
+        device.refresh_from_db()
+        assert device.name == "name-before-invalid-oob"
+        errors = _messages(response, "error")
+        assert any("validation fails on oob_ip" in text for text in errors), errors
+        # The old rendering dumped a raw error dict, which read as though the rename needed oob_ip.
+        assert not any("{'oob_ip'" in text for text in errors), errors
 
-        mock_device = MagicMock()
-        mock_device.name = "old-name"
-        mock_device.virtual_chassis = None
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.resolve_naming_preferences",
-                return_value=(True, False),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields._determine_device_name",
-                return_value="router1",
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
-        ):
-            view.post(_make_request(), pk=1)
+    def test_unknown_server_fails_closed_without_an_http_fallback(self, logged_in_client, librenms_server):
+        device = _linked_device("name-stale-server", 6504)
 
-        mock_device.full_clean.assert_called_once()
-        mock_device.save.assert_called_once()
-        assert mock_device.name == "router1"
-        mock_msg.success.assert_called_once()
-        mock_redir.assert_called_once()
+        response = logged_in_client.post(
+            _url("update_device_name", device.pk),
+            {"server_key": "retired"},
+        )
 
-    def test_save_validation_error_with_message_dict(self):
-        from django.core.exceptions import ValidationError
-
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {"sysName": "router1"})
-
-        mock_device = MagicMock()
-        mock_device.name = "old-name"
-        mock_device.virtual_chassis = None
-        exc = ValidationError({"name": ["duplicate"]})
-        mock_device.full_clean.side_effect = exc
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.resolve_naming_preferences",
-                return_value=(True, False),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields._determine_device_name",
-                return_value="router1",
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-
-        mock_msg.error.assert_called_once()
-        # Name should be restored
-        assert mock_device.name == "old-name"
-
-    def test_save_integrity_error_without_message_dict(self):
-        from django.db import IntegrityError
-
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {"sysName": "router1"})
-
-        mock_device = MagicMock()
-        mock_device.name = "old-name"
-        mock_device.virtual_chassis = None
-        mock_device.full_clean.side_effect = IntegrityError("duplicate key")
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.resolve_naming_preferences",
-                return_value=(True, False),
-            ),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields._determine_device_name",
-                return_value="router1",
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-
-        mock_msg.error.assert_called_once()
+        device.refresh_from_db()
+        assert device.name == "name-stale-server"
+        assert any("no longer configured" in text for text in _messages(response, "error"))
 
 
-# ---------------------------------------------------------------------------
-# UpdateDeviceSerialView
-# ---------------------------------------------------------------------------
-
-
+@pytest.mark.django_db
 class TestUpdateDeviceSerialView:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
+    def test_live_serial_is_normalized_and_persisted(self, logged_in_client, librenms_server):
+        device = _linked_device("serial-update", 6511, serial="OLD-SERIAL")
+        librenms_server.device_info_response(device_id=6511, hostname=device.name, serial=" NEW-SERIAL ")
 
-        return _make_view(UpdateDeviceSerialView)
+        response = _post(logged_in_client, "update_device_serial", device)
 
-    def test_permission_denied(self):
-        view = self._view()
-        err = MagicMock()
-        view.require_all_permissions = MagicMock(return_value=err)
+        device.refresh_from_db()
+        assert device.serial == "NEW-SERIAL"
+        assert any("updated from 'OLD-SERIAL'" in text for text in _messages(response, "success"))
 
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404") as mock_get:
-            result = view.post(_make_request(), pk=1)
-        assert result is err
-        mock_get.assert_not_called()
+    @pytest.mark.parametrize("serial", [None, "", "-"])
+    def test_missing_live_serial_preserves_the_stored_value(self, logged_in_client, librenms_server, serial):
+        device = _linked_device(f"serial-missing-{serial!s}", 6512, serial="KEPT-SERIAL")
+        librenms_server.register(
+            "/api/v0/devices/6512",
+            {
+                "status": "ok",
+                "devices": [{"device_id": 6512, "hostname": device.name, "serial": serial}],
+            },
+        )
 
-    def test_no_librenms_id(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = None
+        response = _post(logged_in_client, "update_device_serial", device)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+        device.refresh_from_db()
+        assert device.serial == "KEPT-SERIAL"
+        assert any("No serial number available" in text for text in _messages(response, "warning"))
 
-    def test_get_device_info_failure(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 5
-        view._librenms_api.get_device_info.return_value = (False, None)
+    def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
+        device = _linked_device("serial-first", 6513)
+        librenms_server.device_info_response(device_id=6513, hostname=device.name, serial="FIRST-SERIAL")
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+        response = _post(logged_in_client, "update_device_serial", device)
 
-    def test_serial_is_none(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 5
-        view._librenms_api.get_device_info.return_value = (True, {"serial": None})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.warning.assert_called_once()
-
-    def test_serial_is_dash(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 5
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "-"})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.warning.assert_called_once()
-
-    def test_save_success_with_old_serial(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 5
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN001"})
-
-        mock_device = MagicMock()
-        mock_device.serial = "OLDSERIAL"
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.success.assert_called_once()
-        assert "OLDSERIAL" in mock_msg.success.call_args[0][1]
-        assert mock_device.serial == "SN001"
-        mock_device.full_clean.assert_called_once()
-        mock_device.save.assert_called_once()
-
-    def test_save_success_no_old_serial(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 5
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN001"})
-
-        mock_device = MagicMock()
-        mock_device.serial = ""  # No old serial
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.success.assert_called_once()
-        assert "set to" in mock_msg.success.call_args[0][1]
-        assert mock_device.serial == "SN001"
-        mock_device.full_clean.assert_called_once()
-        mock_device.save.assert_called_once()
-
-    def test_save_validation_error_with_message_dict(self):
-        from django.core.exceptions import ValidationError
-
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 5
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN001"})
-
-        mock_device = MagicMock()
-        mock_device.serial = "OLD"
-        mock_device.full_clean.side_effect = ValidationError({"serial": ["err"]})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
-        assert mock_device.serial == "OLD"
-
-    def test_save_integrity_error(self):
-        from django.db import IntegrityError
-
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 5
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN001"})
-
-        mock_device = MagicMock()
-        mock_device.serial = "OLD"
-        mock_device.full_clean.side_effect = IntegrityError("dup")
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+        device.refresh_from_db()
+        assert device.serial == "FIRST-SERIAL"
+        assert any("serial set to 'FIRST-SERIAL'" in text for text in _messages(response, "success"))
 
 
-# ---------------------------------------------------------------------------
-# UpdateDeviceTypeView
-# ---------------------------------------------------------------------------
-
-
+@pytest.mark.django_db
 class TestUpdateDeviceTypeView:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceTypeView
+    def _device_type(self, tag, model):
+        from dcim.models import DeviceType, Manufacturer
 
-        return _make_view(UpdateDeviceTypeView)
+        manufacturer = Manufacturer.objects.create(
+            name=f"Device type manufacturer {tag}",
+            slug=f"device-type-manufacturer-{tag}",
+        )
+        return DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model=model,
+            slug=f"device-type-{tag}",
+        )
 
-    def test_permission_denied(self):
-        view = self._view()
-        err = MagicMock()
-        view.require_all_permissions = MagicMock(return_value=err)
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404") as mock_get:
-            result = view.post(_make_request(), pk=1)
-        assert result is err
-        mock_get.assert_not_called()
+    def test_an_error_the_write_itself_caused_is_not_called_pre_existing(self, logged_in_client, librenms_server):
+        """A new device type can invalidate the platform, which the sync caused rather than found."""
+        from dcim.models import Platform
 
-    def test_no_librenms_id(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = None
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+        device = _linked_device("device-type-causes-platform-error", 6529)
+        platform = Platform.objects.create(
+            name="Type-bound platform",
+            slug="type-bound-platform",
+            manufacturer=device.device_type.manufacturer,
+        )
+        device.platform = platform
+        device.full_clean()
+        device.save()
+        replacement = self._device_type("causes-conflict", "Conflicting Router")
+        librenms_server.device_info_response(
+            device_id=6529,
+            hostname=device.name,
+            hardware=replacement.model,
+        )
 
-    def test_get_device_info_failure(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 7
-        view._librenms_api.get_device_info.return_value = (False, None)
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+        response = _post(logged_in_client, "update_device_type", device)
 
-    def test_no_hardware(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 7
-        view._librenms_api.get_device_info.return_value = (True, {"hardware": None})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.warning.assert_called_once()
+        device.refresh_from_db()
+        assert device.device_type != replacement, "the incompatible type must not persist"
+        errors = _messages(response, "error")
+        assert errors, "the refusal must be reported"
+        # The device validated cleanly before this write, so blaming a pre-existing condition
+        # would send the operator looking for a fault that was never there.
+        assert not any("already fails validation" in text for text in errors), errors
+        assert any("platform" in text for text in errors), errors
 
-    def test_no_match_result(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 7
-        view._librenms_api.get_device_info.return_value = (True, {"hardware": "Cisco 3750"})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.match_librenms_hardware_to_device_type",
-                return_value={"matched": False},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+    def test_exact_hardware_match_changes_the_real_device_type(self, logged_in_client, librenms_server):
+        device = _linked_device("device-type-update", 6521)
+        replacement = self._device_type("replacement", "Replacement Router")
+        librenms_server.device_info_response(
+            device_id=6521,
+            hostname=device.name,
+            hardware=replacement.model,
+        )
 
-    def test_match_none_returns_ambiguous_error(self):
-        """match_librenms_hardware_to_device_type returns None → ambiguous-match error path."""
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 7
-        view._librenms_api.get_device_info.return_value = (True, {"hardware": "Cisco 3750"})
-        mock_device = MagicMock()
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.match_librenms_hardware_to_device_type",
-                return_value=None,
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
-        assert "Ambiguous" in mock_msg.error.call_args[0][1]
-        mock_device.full_clean.assert_not_called()
-        mock_device.save.assert_not_called()
+        response = _post(logged_in_client, "update_device_type", device)
 
-    def test_save_success(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 7
-        view._librenms_api.get_device_info.return_value = (True, {"hardware": "Cisco 3750"})
-        mock_dt = MagicMock()
-        mock_device = MagicMock()
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.match_librenms_hardware_to_device_type",
-                return_value={"matched": True, "device_type": mock_dt},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_device.full_clean.assert_called_once()
-        mock_device.save.assert_called_once()
-        assert mock_device.device_type is mock_dt
-        mock_msg.success.assert_called_once()
+        device.refresh_from_db()
+        assert device.device_type == replacement
+        assert any("Device type updated" in text for text in _messages(response, "success"))
 
-    def test_save_validation_error_with_message_dict(self):
-        from django.core.exceptions import ValidationError
+    def test_unmatched_hardware_preserves_the_device_type(self, logged_in_client, librenms_server):
+        device = _linked_device("device-type-unmatched", 6522)
+        original = device.device_type
+        librenms_server.device_info_response(
+            device_id=6522,
+            hostname=device.name,
+            hardware="No such hardware model",
+        )
 
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 7
-        view._librenms_api.get_device_info.return_value = (True, {"hardware": "Cisco 3750"})
-        mock_dt = MagicMock()
-        mock_device = MagicMock()
-        mock_device.full_clean.side_effect = ValidationError({"device_type": ["err"]})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.match_librenms_hardware_to_device_type",
-                return_value={"matched": True, "device_type": mock_dt},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+        response = _post(logged_in_client, "update_device_type", device)
 
-    def test_save_integrity_error(self):
-        from django.db import IntegrityError
+        device.refresh_from_db()
+        assert device.device_type == original
+        assert any("No matching DeviceType" in text for text in _messages(response, "error"))
 
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 7
-        view._librenms_api.get_device_info.return_value = (True, {"hardware": "Cisco 3750"})
-        mock_dt = MagicMock()
-        mock_device = MagicMock()
-        mock_device.full_clean.side_effect = IntegrityError("dup")
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.match_librenms_hardware_to_device_type",
-                return_value={"matched": True, "device_type": mock_dt},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+    def test_ambiguous_hardware_preserves_the_device_type(self, logged_in_client, librenms_server):
+        device = _linked_device("device-type-ambiguous", 6523)
+        original = device.device_type
+        self._device_type("ambiguous-a", "Shared Router")
+        self._device_type("ambiguous-b", "Shared Router")
+        librenms_server.device_info_response(device_id=6523, hostname=device.name, hardware="Shared Router")
+
+        response = _post(logged_in_client, "update_device_type", device)
+
+        device.refresh_from_db()
+        assert device.device_type == original
+        assert any("Ambiguous hardware match" in text for text in _messages(response, "error"))
+
+    def test_missing_hardware_is_informational(self, logged_in_client, librenms_server):
+        device = _linked_device("device-type-missing-hardware", 6524)
+        librenms_server.register(
+            "/api/v0/devices/6524",
+            {"status": "ok", "devices": [{"device_id": 6524, "hostname": device.name, "hardware": ""}]},
+        )
+
+        response = _post(logged_in_client, "update_device_type", device)
+
+        assert any("No hardware information" in text for text in _messages(response, "warning"))
 
 
-# ---------------------------------------------------------------------------
-# UpdateDevicePlatformView
-# ---------------------------------------------------------------------------
-
-
+@pytest.mark.django_db
 class TestUpdateDevicePlatformView:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import UpdateDevicePlatformView
+    def test_exact_platform_match_is_assigned(self, logged_in_client, librenms_server):
+        from dcim.models import Platform
 
-        return _make_view(UpdateDevicePlatformView)
+        device = _linked_device("platform-update", 6531)
+        platform = Platform.objects.create(name="Exact Platform", slug="exact-platform")
+        librenms_server.device_info_response(device_id=6531, hostname=device.name, os=platform.name)
 
-    def test_permission_denied(self):
-        view = self._view()
-        err = MagicMock()
-        view.require_all_permissions = MagicMock(return_value=err)
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"):
-            result = view.post(_make_request(), pk=1)
-        assert result is err
+        response = _post(logged_in_client, "update_device_platform", device)
 
-    def test_no_librenms_id(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = None
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+        device.refresh_from_db()
+        assert device.platform == platform
+        assert any("platform set" in text for text in _messages(response, "success"))
 
-    def test_get_device_info_failure(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 3
-        view._librenms_api.get_device_info.return_value = (False, None)
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+    def test_platform_mapping_is_honored(self, logged_in_client, librenms_server):
+        from dcim.models import Platform
+        from netbox_librenms_plugin.models import PlatformMapping
 
-    def test_no_os(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 3
-        view._librenms_api.get_device_info.return_value = (True, {"os": None})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.warning.assert_called_once()
+        device = _linked_device("platform-mapped", 6532)
+        platform = Platform.objects.create(name="Mapped NetBox Platform", slug="mapped-netbox-platform")
+        PlatformMapping.objects.create(librenms_os="mapped-os", netbox_platform=platform)
+        librenms_server.device_info_response(device_id=6532, hostname=device.name, os="mapped-os")
 
-    def test_platform_does_not_exist(self):
+        _post(logged_in_client, "update_device_platform", device)
 
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 3
-        view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
+        device.refresh_from_db()
+        assert device.platform == platform
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
-                return_value={"found": False, "platform": None, "match_type": None},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+    def test_missing_platform_returns_creation_guidance(self, logged_in_client, librenms_server):
+        device = _linked_device("platform-missing", 6533)
+        librenms_server.device_info_response(device_id=6533, hostname=device.name, os="missing-os")
 
-    def test_save_success_with_old_platform(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 3
-        view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
+        response = _post(logged_in_client, "update_device_platform", device)
 
-        mock_platform = MagicMock()
+        device.refresh_from_db()
+        assert device.platform is None
+        assert any("Create & Sync" in text for text in _messages(response, "error"))
 
-        mock_device = MagicMock()
-        mock_device.platform = MagicMock()  # old platform exists
+    def test_duplicate_platform_names_fail_closed(self, logged_in_client, librenms_server):
+        from dcim.models import Manufacturer, Platform
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
-                return_value={"found": True, "platform": mock_platform, "match_type": "exact"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.success.assert_called_once()
-        assert "updated from" in mock_msg.success.call_args[0][1]
-        assert mock_device.platform is mock_platform
-        mock_device.full_clean.assert_called_once()
-        mock_device.save.assert_called_once()
+        device = _linked_device("platform-ambiguous", 6534)
+        for suffix in ("a", "b"):
+            manufacturer = Manufacturer.objects.create(
+                name=f"Platform manufacturer {suffix}",
+                slug=f"platform-manufacturer-{suffix}",
+            )
+            Platform.objects.create(
+                name="Ambiguous Platform",
+                slug=f"ambiguous-platform-{suffix}",
+                manufacturer=manufacturer,
+            )
+        librenms_server.device_info_response(device_id=6534, hostname=device.name, os="Ambiguous Platform")
 
-    def test_save_success_no_old_platform(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 3
-        view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
+        response = _post(logged_in_client, "update_device_platform", device)
 
-        mock_platform = MagicMock()
+        device.refresh_from_db()
+        assert device.platform is None
+        assert any("Multiple platforms match" in text for text in _messages(response, "error"))
 
-        mock_device = MagicMock()
-        mock_device.platform = None  # no old platform
+    def test_missing_os_is_informational(self, logged_in_client, librenms_server):
+        device = _linked_device("platform-missing-os", 6535)
+        librenms_server.register(
+            "/api/v0/devices/6535",
+            {"status": "ok", "devices": [{"device_id": 6535, "hostname": device.name, "os": ""}]},
+        )
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
-                return_value={"found": True, "platform": mock_platform, "match_type": "exact"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.success.assert_called_once()
-        assert "set to" in mock_msg.success.call_args[0][1]
-        assert mock_device.platform is mock_platform
-        mock_device.full_clean.assert_called_once()
-        mock_device.save.assert_called_once()
+        response = _post(logged_in_client, "update_device_platform", device)
 
-    def test_save_success_via_platform_mapping(self):
-        """Sync button works when a PlatformMapping maps LibreNMS OS to a differently-named NetBox platform."""
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 3
-        view._librenms_api.get_device_info.return_value = (True, {"os": "junos"})
+        assert any("No OS information" in text for text in _messages(response, "warning"))
 
-        mock_platform = MagicMock()
-        mock_platform.__str__ = lambda self: "JunOS"
+    def test_existing_platform_is_replaced_and_named_in_the_message(self, logged_in_client, librenms_server):
+        from dcim.models import Platform
 
-        mock_device = MagicMock()
-        mock_device.platform = None
+        old_platform = Platform.objects.create(name="Old exact platform", slug="old-exact-platform")
+        new_platform = Platform.objects.create(name="New exact platform", slug="new-exact-platform")
+        device = _linked_device("platform-replace", 6536)
+        device.platform = old_platform
+        device.save()
+        librenms_server.device_info_response(device_id=6536, hostname=device.name, os=new_platform.name)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
-                return_value={"found": True, "platform": mock_platform, "match_type": "mapping"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.success.assert_called_once()
-        assert mock_device.platform is mock_platform
+        response = _post(logged_in_client, "update_device_platform", device)
 
-    def test_ambiguous_platform_returns_error(self):
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 3
-        view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
-                return_value={"found": False, "platform": None, "match_type": "ambiguous"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
-        assert "ambiguity" in mock_msg.error.call_args[0][1].lower()
-
-    def test_save_validation_error(self):
-        from django.core.exceptions import ValidationError
-
-        view = self._view()
-        view._librenms_api.get_librenms_id.return_value = 3
-        view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
-
-        mock_platform = MagicMock()
-
-        mock_device = MagicMock()
-        mock_device.platform = None
-        mock_device.full_clean.side_effect = ValidationError({"platform": ["err"]})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
-                return_value={"found": True, "platform": mock_platform, "match_type": "exact"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
+        device.refresh_from_db()
+        assert device.platform == new_platform
+        assert any("updated from 'Old exact platform'" in text for text in _messages(response, "success"))
 
 
-# ---------------------------------------------------------------------------
-# CreateAndAssignPlatformView
-# ---------------------------------------------------------------------------
-
-
+@pytest.mark.django_db
 class TestCreateAndAssignPlatformView:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+    def test_new_platform_and_mapping_are_created_and_assigned(self, logged_in_client, librenms_server):
+        from dcim.models import Platform
+        from netbox_librenms_plugin.models import PlatformMapping
 
-        return _make_view(CreateAndAssignPlatformView)
+        device = make_device("platform-create-device")
+        manufacturer = device.device_type.manufacturer
 
-    def test_permission_denied(self):
-        view = self._view()
-        err = MagicMock()
-        view.require_all_permissions = MagicMock(return_value=err)
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"):
-            result = view.post(_make_request(), pk=1)
-        assert result is err
-
-    def test_no_platform_name(self):
-        view = self._view()
-        req = _make_request({"platform_name": ""})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-        assert "required" in mock_msg.error.call_args[0][1].lower()
-
-    def test_platform_already_exists(self):
-        view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = True
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.warning.assert_called_once()
-
-    def test_manufacturer_not_found(self):
-        """manufacturer_id provided but Manufacturer.DoesNotExist: manufacturer stays None."""
-        view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": "99"})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
-        mock_platform_instance = MagicMock()
-        mock_platform_cls.return_value = mock_platform_instance
-
-        mock_manuf_cls = MagicMock()
-        mock_manuf_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_manuf_cls.objects.get.side_effect = mock_manuf_cls.DoesNotExist()
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Manufacturer", mock_manuf_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        # Should succeed (manufacturer silently ignored)
-        mock_msg.success.assert_called_once()
-        assert mock_locked.platform == mock_platform_instance
-        mock_locked.save.assert_called_once()
-
-    def test_success_no_manufacturer(self):
-        view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
-        mock_platform_instance = MagicMock()
-        mock_platform_cls.return_value = mock_platform_instance
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.success.assert_called_once()
-        assert mock_locked.platform == mock_platform_instance
-        mock_locked.save.assert_called_once()
-
-    def test_platform_constructor_includes_slug(self):
-        """Platform must be constructed with slug=slugify(name) — regression for #279."""
-        from django.utils.text import slugify
-
-        view = self._view()
-        platform_name = "Cisco IOS-XE 17.x"
-        req = _make_request({"platform_name": platform_name, "manufacturer": ""})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
-        mock_platform_instance = MagicMock()
-        mock_platform_cls.return_value = mock_platform_instance
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-
-        mock_platform_cls.assert_called_once_with(
-            name=platform_name,
-            slug=slugify(platform_name),
-            manufacturer=None,
-        )
-
-    def test_platform_validation_error(self):
-        from django.core.exceptions import ValidationError
-
-        view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
-        mock_platform_instance = MagicMock()
-        mock_platform_instance.full_clean.side_effect = ValidationError({"name": ["err"]})
-        mock_platform_cls.return_value = mock_platform_instance
-
-        mock_txn = MagicMock()
-        mock_txn.set_rollback = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def test_device_does_not_exist_inside_transaction(self):
-        view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
-        mock_platform_instance = MagicMock()
-        mock_platform_cls.return_value = mock_platform_instance
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.side_effect = DoesNotExist()
-
-        mock_txn = MagicMock()
-        mock_txn.set_rollback = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def test_device_validation_error(self):
-        from django.core.exceptions import ValidationError
-
-        view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
-        mock_platform_instance = MagicMock()
-        mock_platform_cls.return_value = mock_platform_instance
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.full_clean.side_effect = ValidationError({"platform": ["err"]})
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_txn = MagicMock()
-        mock_txn.set_rollback = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def test_integrity_error(self):
-        from django.db import IntegrityError
-
-        view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
-        mock_platform_instance = MagicMock()
-        # Make save raise IntegrityError
-        mock_platform_instance.save.side_effect = IntegrityError("duplicate")
-        mock_platform_cls.return_value = mock_platform_instance
-
-        # transaction.atomic().__exit__ must return False so IntegrityError propagates
-        mock_atomic_cm = MagicMock()
-        mock_atomic_cm.__enter__ = MagicMock(return_value=None)
-        mock_atomic_cm.__exit__ = MagicMock(return_value=False)
-        mock_txn = MagicMock()
-        mock_txn.atomic.return_value = mock_atomic_cm
-        mock_txn.set_rollback = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def _success_patches(self, platform_name="ios", librenms_os="ios", create_mapping="1"):
-        """Return (view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked)."""
-        view = self._view()
-        req = _make_request(
+        response = _post(
+            logged_in_client,
+            "create_and_assign_platform",
+            device,
             {
-                "platform_name": platform_name,
-                "manufacturer": "",
-                "librenms_os": librenms_os,
-                "create_mapping": create_mapping,
-            }
-        )
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
-        mock_platform_instance = MagicMock()
-        mock_platform_cls.return_value = mock_platform_instance
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-        return view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked
-
-    def test_mapping_created_when_name_differs(self):
-        """A PlatformMapping is created when name differs from librenms_os and checkbox is on."""
-        view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, _ = self._success_patches(
-            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
-        )
-        mock_mapping_cls = MagicMock()
-        mock_mapping_instance = MagicMock()
-        mock_mapping_cls.return_value = mock_mapping_instance
-        mock_mapping_cls.objects.filter.return_value.first.return_value = None
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
-        ):
-            view.post(req, pk=1)
-
-        mock_mapping_cls.assert_called_once_with(librenms_os="ios", netbox_platform=mock_platform_instance)
-        mock_mapping_instance.full_clean.assert_called_once()
-        mock_mapping_instance.save.assert_called_once()
-        success_msg = mock_msg.success.call_args[0][1]
-        assert "platform mapping" in success_msg
-
-    def test_mapping_skipped_when_checkbox_off(self):
-        """No PlatformMapping is created when checkbox is unchecked."""
-        view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, _ = self._success_patches(
-            platform_name="Cisco IOS", librenms_os="ios", create_mapping=""
-        )
-        mock_mapping_cls = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
-        ):
-            view.post(req, pk=1)
-
-        mock_mapping_cls.assert_not_called()
-
-    def test_mapping_skipped_when_already_exists(self):
-        """No duplicate PlatformMapping is created when one already exists for the OS."""
-        view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, _ = self._success_patches(
-            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
-        )
-        mock_mapping_cls = MagicMock()
-        mock_mapping_cls.objects.filter.return_value.first.return_value = MagicMock()  # existing mapping
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
-        ):
-            view.post(req, pk=1)
-
-        mock_mapping_cls.assert_not_called()
-
-    def test_required_object_permissions_include_platformmapping_when_create_mapping(self):
-        """When create_mapping is checked, ('add', PlatformMapping) is added to required_object_permissions
-        BEFORE require_all_permissions runs (so the authorization check sees it)."""
-        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
-
-        view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
-            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
+                "platform_name": "Created Platform",
+                "manufacturer": str(manufacturer.pk),
+                "librenms_os": " Created-OS ",
+                "create_mapping": "on",
+            },
         )
 
-        captured = {}
+        device.refresh_from_db()
+        platform = Platform.objects.get(name="Created Platform")
+        assert platform.slug == "created-platform"
+        assert platform.manufacturer == manufacturer
+        assert device.platform == platform
+        assert PlatformMapping.objects.get(librenms_os="created-os").netbox_platform == platform
+        assert any("Created platform" in text for text in _messages(response, "success"))
 
-        def fake_require(method):
-            captured["perms"] = view.required_object_permissions.get(method, [])
-            # Short-circuit by returning a sentinel response so post() exits early.
-            return MagicMock()
+    def test_existing_platform_is_reused_without_changing_manufacturer(self, logged_in_client, librenms_server):
+        from dcim.models import Platform
 
-        view.require_all_permissions = fake_require
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
-        ):
-            view.post(req, pk=1)
-
-        assert ("add", RealPlatformMapping) in captured["perms"], (
-            "Expected ('add', PlatformMapping) in required_object_permissions when create_mapping=True"
+        device = make_device("platform-reuse-device")
+        manufacturer = device.device_type.manufacturer
+        platform = Platform.objects.create(
+            name="Existing Platform",
+            slug="existing-platform",
+            manufacturer=manufacturer,
         )
 
-    def test_required_object_permissions_exclude_platformmapping_when_no_create_mapping(self):
-        """When create_mapping is NOT checked, ('add', PlatformMapping) must NOT be added."""
-        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
-
-        view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
-            platform_name="Cisco IOS", librenms_os="ios", create_mapping=""
+        response = _post(
+            logged_in_client,
+            "create_and_assign_platform",
+            device,
+            {"platform_name": " Existing Platform ", "librenms_os": "existing-os"},
         )
 
-        captured = {}
+        device.refresh_from_db()
+        platform.refresh_from_db()
+        assert device.platform == platform
+        assert platform.manufacturer == manufacturer
+        assert any("already existed" in text for text in _messages(response, "success"))
 
-        def fake_require(method):
-            captured["perms"] = view.required_object_permissions.get(method, [])
-            return MagicMock()
+    def test_missing_platform_name_does_not_change_the_device(self, logged_in_client, librenms_server):
+        device = make_device("platform-name-required")
 
-        view.require_all_permissions = fake_require
+        response = _post(logged_in_client, "create_and_assign_platform", device, {"platform_name": " "})
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
-        ):
-            view.post(req, pk=1)
+        device.refresh_from_db()
+        assert device.platform is None
+        assert any("Platform name is required" in text for text in _messages(response, "error"))
 
-        assert ("add", RealPlatformMapping) not in captured["perms"], (
-            "Did not expect ('add', PlatformMapping) when create_mapping is unchecked"
+    def test_mapping_conflict_is_reported_without_undoing_assignment(self, logged_in_client, librenms_server):
+        from dcim.models import Platform
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        device = make_device("platform-mapping-conflict")
+        existing_target = Platform.objects.create(name="Existing mapping target", slug="existing-mapping-target")
+        requested = Platform.objects.create(name="Requested target", slug="requested-target")
+        PlatformMapping.objects.create(librenms_os="conflicted-os", netbox_platform=existing_target)
+
+        response = _post(
+            logged_in_client,
+            "create_and_assign_platform",
+            device,
+            {
+                "platform_name": requested.name,
+                "librenms_os": "conflicted-os",
+                "create_mapping": "on",
+            },
         )
 
+        device.refresh_from_db()
+        assert device.platform == requested
+        assert PlatformMapping.objects.get(librenms_os="conflicted-os").netbox_platform == existing_target
+        assert any("could not be created" in text for text in _messages(response, "warning"))
 
-# ---------------------------------------------------------------------------
-# AssignVCSerialView
-# ---------------------------------------------------------------------------
+    def test_invalid_manufacturer_is_rejected_before_platform_creation(self, logged_in_client, librenms_server):
+        from dcim.models import Manufacturer, Platform
+        from netbox_librenms_plugin.tests.view_test_helpers import missing_pk
+
+        device = make_device("platform-invalid-manufacturer")
+
+        response = _post(
+            logged_in_client,
+            "create_and_assign_platform",
+            device,
+            {
+                "platform_name": "Manufacturer Rejected Platform",
+                "manufacturer": str(missing_pk(Manufacturer)),
+            },
+        )
+
+        assert not Platform.objects.filter(name="Manufacturer Rejected Platform").exists()
+        assert any("manufacturer is not available" in text for text in _messages(response, "error"))
+
+    def test_invalid_platform_slug_rolls_back_creation(self, logged_in_client, librenms_server):
+        from dcim.models import Platform
+
+        device = make_device("platform-invalid-slug")
+
+        response = _post(
+            logged_in_client,
+            "create_and_assign_platform",
+            device,
+            {"platform_name": "!!!"},
+        )
+
+        assert not Platform.objects.filter(name="!!!").exists()
+        assert any("could not be created" in text for text in _messages(response, "error"))
+
+    def test_incompatible_manufacturer_rolls_back_platform_and_assignment(
+        self,
+        logged_in_client,
+        librenms_server,
+    ):
+        from dcim.models import Manufacturer, Platform
+
+        device = make_device("platform-incompatible-manufacturer")
+        incompatible = Manufacturer.objects.create(
+            name="Incompatible platform manufacturer",
+            slug="incompatible-platform-manufacturer",
+        )
+
+        response = _post(
+            logged_in_client,
+            "create_and_assign_platform",
+            device,
+            {
+                "platform_name": "Incompatible Platform",
+                "manufacturer": str(incompatible.pk),
+            },
+        )
+
+        device.refresh_from_db()
+        assert device.platform is None
+        assert not Platform.objects.filter(name="Incompatible Platform").exists()
+        errors = _messages(response, "error")
+        # The platform is the field being written, so this reports as a failed write, not as a
+        # pre-existing problem elsewhere on the device.
+        assert any("Failed to assign platform 'Incompatible Platform'" in text for text in errors), errors
+        assert any("limited to Incompatible platform manufacturer" in text for text in errors), errors
+
+    def test_missing_mapping_permission_keeps_the_primary_assignment(self, client, librenms_server):
+        from dcim.models import Device, Platform
+
+        device = make_device("platform-no-mapping-permission")
+        platform = Platform.objects.create(name="Assignable without mapping", slug="assignable-without-mapping")
+        user = make_user_with_perms(
+            "platform-assignment-without-mapping",
+            [("change", Device), ("view", Platform)],
+        )
+        client.force_login(user)
+
+        response = _post(
+            client,
+            "create_and_assign_platform",
+            device,
+            {
+                "platform_name": platform.name,
+                "librenms_os": "permission-skipped-os",
+                "create_mapping": "on",
+            },
+        )
+
+        device.refresh_from_db()
+        assert device.platform == platform
+        assert any("lack permission to add mappings" in text for text in _messages(response, "warning"))
 
 
+@pytest.mark.django_db
 class TestAssignVCSerialView:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import AssignVCSerialView
+    def test_real_members_receive_normalized_serials(self, logged_in_client, librenms_server):
+        first = make_device("vc-serial-first")
+        second = make_device("vc-serial-second")
+        make_virtual_chassis("vc-serial-success", first, second)
 
-        return _make_view(AssignVCSerialView)
-
-    def test_permission_denied(self):
-        view = self._view()
-        err = MagicMock()
-        view.require_all_permissions = MagicMock(return_value=err)
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"):
-            result = view.post(_make_request(), pk=1)
-        assert result is err
-
-    def test_not_virtual_chassis(self):
-        view = self._view()
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = None
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request(), pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_no_serial_assignments_no_errors(self):
-        """Loop doesn't execute — no serial_N keys in POST."""
-        view = self._view()
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({}), pk=1)
-        mock_msg.info.assert_called_once()
-
-    def test_member_id_missing(self):
-        """member_id_{N} key is absent → counter incremented, no assignment."""
-        view = self._view()
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()
-        # serial_1 exists but member_id_1 is empty
-        req = _make_request({"serial_1": "SN100", "member_id_1": ""})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.info.assert_called_once()
-
-    def test_member_not_found(self):
-        view = self._view()
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock(pk=10)
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.get.side_effect = DoesNotExist()
-
-        req = _make_request({"serial_1": "SN100", "member_id_1": "99"})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        # Should call error for the missing device
-        mock_msg.error.assert_called()
-
-    def test_member_different_chassis(self):
-        view = self._view()
-        vc = MagicMock(pk=10)
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = vc
-
-        member = MagicMock()
-        member.name = "sw-member"
-        member.virtual_chassis = MagicMock(pk=99)  # different VC!
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.get.return_value = member
-
-        req = _make_request({"serial_1": "SN100", "member_id_1": "5"})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.error.assert_called()
-
-    def test_member_save_validation_error(self):
-        from django.core.exceptions import ValidationError
-
-        view = self._view()
-        vc = MagicMock(pk=10)
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = vc
-
-        member = MagicMock()
-        member.name = "sw-member"
-        member.virtual_chassis = vc  # same VC
-        member.serial = "OLD"
-        member.full_clean.side_effect = ValidationError({"serial": ["err"]})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.get.return_value = member
-
-        req = _make_request({"serial_1": "SN100", "member_id_1": "5"})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.error.assert_called()
-
-    def test_member_save_success(self):
-        view = self._view()
-        vc = MagicMock(pk=10)
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = vc
-
-        member = MagicMock()
-        member.name = "sw-member"
-        member.virtual_chassis = vc
-        member.serial = "OLD"
-        member.save = MagicMock()
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.get.return_value = member
-
-        req = _make_request({"serial_1": "SN100", "member_id_1": "5"})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.success.assert_called_once()
-        assert member.serial == "SN100"
-        member.save.assert_called_once()
-
-    def test_assignments_and_errors_both_reported(self):
-        """One success + one error → both messages emitted."""
-        from django.core.exceptions import ValidationError
-
-        view = self._view()
-        vc = MagicMock(pk=10)
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = vc
-
-        good_member = MagicMock()
-        good_member.name = "sw1"
-        good_member.virtual_chassis = vc
-        good_member.serial = ""
-
-        bad_member = MagicMock()
-        bad_member.name = "sw2"
-        bad_member.virtual_chassis = vc
-        bad_member.serial = ""
-        bad_member.full_clean.side_effect = ValidationError({"serial": ["dup"]})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.get.side_effect = [good_member, bad_member]
-
-        req = _make_request(
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
             {
-                "serial_1": "SN001",
-                "member_id_1": "1",
-                "serial_2": "SN002",
-                "member_id_2": "2",
-            }
+                "serial_1": " FIRST-VC-SERIAL ",
+                "member_id_1": str(first.pk),
+                "serial_2": "SECOND-VC-SERIAL",
+                "member_id_2": str(second.pk),
+            },
         )
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.success.assert_called()
-        mock_msg.error.assert_called()
-        assert good_member.serial == "SN001"
-        good_member.save.assert_called_once()
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert first.serial == "FIRST-VC-SERIAL"
+        assert second.serial == "SECOND-VC-SERIAL"
+        assert any("assigned 2 serial" in text for text in _messages(response, "success"))
+
+    def test_wrong_chassis_and_missing_member_are_both_reported(self, logged_in_client, librenms_server):
+        root = make_device("vc-serial-root")
+        sibling = make_device("vc-serial-sibling")
+        outsider = make_device("vc-serial-outsider")
+        make_virtual_chassis("vc-serial-main", root, sibling)
+        make_virtual_chassis("vc-serial-other", outsider)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            root,
+            {
+                "serial_1": "OUTSIDER-SERIAL",
+                "member_id_1": str(outsider.pk),
+                "serial_2": "MISSING-SERIAL",
+                "member_id_2": str(outsider.pk + 10000),
+            },
+        )
+
+        outsider.refresh_from_db()
+        assert outsider.serial == ""
+        errors = _messages(response, "error")
+        assert any("not part of the same virtual chassis" in text for text in errors)
+        assert any("not found" in text for text in errors)
+
+    def test_the_redirect_keeps_the_active_server_and_tab(self, logged_in_client, librenms_server):
+        """A multi-server user must land back on the server and tab the modal was opened from."""
+        first = make_device("vc-serial-context-first")
+        second = make_device("vc-serial-context-second")
+        make_virtual_chassis("vc-serial-context", first, second)
+
+        response = logged_in_client.post(
+            _url("assign_vc_serial", first.pk),
+            {
+                "server_key": SECONDARY_KEY,
+                "tab": "cables",
+                "serial_1": "CONTEXT-SERIAL",
+                "member_id_1": str(second.pk),
+            },
+        )
+
+        assert response.status_code == 302
+        assert response.url == f"{_url('device_librenms_sync', first.pk)}?tab=cables&server_key={SECONDARY_KEY}"
+        second.refresh_from_db()
+        assert second.serial == "CONTEXT-SERIAL"
+
+    def test_a_rejected_device_still_returns_to_its_server_and_tab(self, logged_in_client, librenms_server):
+        """The early error branch must preserve the context the success branch does."""
+        device = make_device("vc-serial-context-standalone")
+
+        response = logged_in_client.post(
+            _url("assign_vc_serial", device.pk),
+            {"server_key": SECONDARY_KEY, "tab": "cables"},
+        )
+
+        assert response.status_code == 302
+        assert response.url == f"{_url('device_librenms_sync', device.pk)}?tab=cables&server_key={SECONDARY_KEY}"
+        assert any("not part of a virtual chassis" in text for text in _messages(response, "error"))
+
+    def test_device_without_a_chassis_is_rejected(self, logged_in_client, librenms_server):
+        device = make_device("vc-serial-standalone")
+
+        response = _post(logged_in_client, "assign_vc_serial", device)
+
+        assert any("not part of a virtual chassis" in text for text in _messages(response, "error"))
+
+    def test_empty_assignment_form_is_informational(self, logged_in_client, librenms_server):
+        device = make_device("vc-serial-empty")
+        make_virtual_chassis("vc-serial-empty-chassis", device)
+
+        response = _post(logged_in_client, "assign_vc_serial", device)
+
+        assert any("No serial assignments" in text for text in _messages(response, "info"))
+
+    def test_assignment_without_a_member_id_is_ignored(self, logged_in_client, librenms_server):
+        device = make_device("vc-serial-no-member")
+        make_virtual_chassis("vc-serial-no-member-chassis", device)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            device,
+            {"serial_1": "UNUSED-SERIAL", "member_id_1": ""},
+        )
+
+        device.refresh_from_db()
+        assert device.serial == ""
+        assert any("No serial assignments" in text for text in _messages(response, "info"))
 
 
-# ---------------------------------------------------------------------------
-# RemoveServerMappingView — helper methods
-# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestRemoveServerMappingView:
+    def test_orphaned_mapping_is_removed_while_configured_mapping_remains(
+        self,
+        logged_in_client,
+        librenms_server,
+    ):
+        from netbox_librenms_plugin.server_mappings import PREFERRED_SERVER_FIELD
 
+        device = make_device(
+            "mapping-remove",
+            librenms_cf={SERVER_KEY: 6541, "retired": 9001, PREFERRED_SERVER_FIELD: "retired"},
+        )
 
-class TestRemoveServerMappingViewHelpers:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+        response = _post(
+            logged_in_client,
+            "remove_server_mapping",
+            device,
+            {
+                "object_type": "device",
+                "server_key": "retired",
+                "active_server_key": SERVER_KEY,
+                "tab": "interfaces",
+            },
+        )
 
-        view = object.__new__(RemoveServerMappingView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        return view
+        device.refresh_from_db()
+        mapping = device.custom_field_data["librenms_id"]
+        assert mapping == {SERVER_KEY: 6541}
+        assert response.url.endswith(f"?tab=interfaces&server_key={SERVER_KEY}")
+        assert any("Removed LibreNMS mapping" in text for text in _messages(response, "success"))
 
-    def test_get_object_device(self):
-        view = self._view()
-        mock_device = MagicMock()
+    def test_configured_mapping_cannot_be_removed(self, logged_in_client, librenms_server):
+        device = _linked_device("mapping-configured", 6542)
 
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device):
-            obj, model = view._get_object("device", 1)
-        assert obj is mock_device
+        response = _post(
+            logged_in_client,
+            "remove_server_mapping",
+            device,
+            {"object_type": "device", "server_key": SERVER_KEY},
+        )
 
-    def test_get_object_vm(self):
-        view = self._view()
-        mock_vm = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_vm):
-            obj, model = view._get_object("vm", 1)
-        assert obj is mock_vm
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6542}
+        assert any("Cannot remove mapping for configured server" in text for text in _messages(response, "error"))
 
-    def test_sync_url_name_device(self):
-        view = self._view()
-        assert view._sync_url_name("device") == "plugins:netbox_librenms_plugin:device_librenms_sync"
+    def test_vm_alias_targets_the_virtual_machine_model(self, logged_in_client, librenms_server):
+        vm = make_vm("mapping-remove-vm")
+        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 6543, "retired": 9002}
+        vm.save()
 
-    def test_sync_url_name_vm(self):
-        view = self._view()
-        assert view._sync_url_name("vm") == "plugins:netbox_librenms_plugin:vm_librenms_sync"
+        _post(
+            logged_in_client,
+            "remove_server_mapping",
+            vm,
+            {"object_type": "virtualmachine", "server_key": "retired"},
+        )
 
-    def test_normalize_bool(self):
-        view = self._view()
-        assert view._normalize_librenms_mapping(True) == {}
-        assert view._normalize_librenms_mapping(False) == {}
+        vm.refresh_from_db()
+        assert vm.custom_field_data["librenms_id"] == {SERVER_KEY: 6543}
 
-    def test_normalize_int(self):
-        view = self._view()
-        assert view._normalize_librenms_mapping(42) == {"default": 42}
+    def test_unsupported_object_type_is_a_400(self, logged_in_client, librenms_server):
+        device = make_device("mapping-invalid-type")
 
-    def test_normalize_string_digit(self):
-        view = self._view()
-        assert view._normalize_librenms_mapping("99") == {"default": 99}
+        response = _post(
+            logged_in_client,
+            "remove_server_mapping",
+            device,
+            {"object_type": "rack", "server_key": "retired"},
+        )
 
-    def test_normalize_dict(self):
-        view = self._view()
-        d = {"server1": 10}
-        assert view._normalize_librenms_mapping(d) == d
+        assert response.status_code == 400
+        assert b"Invalid object_type" in response.content
 
-    def test_normalize_non_digit_string_returns_empty(self):
-        view = self._view()
-        assert view._normalize_librenms_mapping("not-a-number") == {}
+    def test_missing_server_key_is_rejected(self, logged_in_client, librenms_server):
+        device = _linked_device("mapping-missing-key", 6544)
 
-    def test_normalize_none_returns_empty(self):
-        view = self._view()
-        assert view._normalize_librenms_mapping(None) == {}
+        response = _post(
+            logged_in_client,
+            "remove_server_mapping",
+            device,
+            {"object_type": "device", "server_key": ""},
+        )
 
+        assert any("No server_key provided" in text for text in _messages(response, "error"))
 
-# ---------------------------------------------------------------------------
-# RemoveServerMappingView — post()
-# ---------------------------------------------------------------------------
+    def test_absent_orphaned_mapping_is_informational(self, logged_in_client, librenms_server):
+        device = _linked_device("mapping-absent-key", 6545)
 
+        response = _post(
+            logged_in_client,
+            "remove_server_mapping",
+            device,
+            {"object_type": "device", "server_key": "retired"},
+        )
 
-class TestRemoveServerMappingViewPost:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+        assert any("No mapping found" in text for text in _messages(response, "warning"))
 
-        view = object.__new__(RemoveServerMappingView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        return view
-
-    def test_invalid_object_type_returns_400(self):
-        view = self._view()
-        req = _make_request({"object_type": "badtype"})
-        result = view.post(req, pk=1)
-        assert result.status_code == 400
-
-    def test_virtualmachine_object_type_normalized_to_vm(self):
-        """object_type='virtualmachine' is normalised to 'vm'."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        req = _make_request({"object_type": "virtualmachine", "server_key": "orphan"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_vm_cls = MagicMock()
-        mock_vm_cls.DoesNotExist = DoesNotExist
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan": 5}}
-        mock_vm_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.VirtualMachine", mock_vm_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.success.assert_called_once()
-
-    def test_permission_denied(self):
-        view = self._view()
-        err = MagicMock()
-        view.require_all_permissions = MagicMock(return_value=err)
-        req = _make_request({"object_type": "device", "server_key": "x"})
-        result = view.post(req, pk=1)
-        assert result is err
-
-    def test_no_server_key(self):
-        view = self._view()
-        req = _make_request({"object_type": "device", "server_key": ""})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_mapping_not_found_wrong_type(self):
-        """cf_value is not a dict → warning."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": None}
-
-        req = _make_request({"object_type": "device", "server_key": "default"})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.warning.assert_called_once()
-
-    def test_mapping_not_found_missing_key(self):
-        """server_key not in cf_value dict → warning."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"other": 5}}
-
-        req = _make_request({"object_type": "device", "server_key": "default"})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.warning.assert_called_once()
-
-    def test_configured_servers_non_dict_treated_as_empty(self):
-        """servers config is a list (non-dict) → treated as empty dict, orphan key can be removed."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.__name__ = "Device"
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        # servers is a list (non-dict) → line 496 normalises it to {}
-        mock_cfg = {"netbox_librenms_plugin": {"servers": ["not", "a", "dict"], "librenms_url": ""}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.success.assert_called_once()
-
-    def test_configured_server_key_in_servers_dict(self):
-        """server_key is in configured servers → error."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"production": 10}}
-
-        req = _make_request({"object_type": "device", "server_key": "production"})
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {"production": {}}, "librenms_url": ""}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-        assert "Cannot remove" in mock_msg.error.call_args[0][1]
-
-    def test_legacy_default_server_protected(self):
-        """Legacy mode with librenms_url set and server_key='default' → error."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"default": 7}}
-
-        req = _make_request({"object_type": "device", "server_key": "default"})
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": "https://librenms.example.com"}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_object_no_longer_exists_inside_transaction(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.__name__ = "Device"
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.side_effect = DoesNotExist()
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_mapping_already_removed_in_lock(self):
-        """server_key is gone from the locked object's cf → warning."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        # Key was removed between the first read and the lock
-        mock_locked.custom_field_data = {"librenms_id": {}}
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.warning.assert_called_once()
-
-    def test_validation_error_on_save(self):
+    @pytest.mark.parametrize(
+        ("failure_type", "expected_message"),
+        [
+            ("validation", "Validation error removing LibreNMS mapping"),
+            ("unexpected", "Unexpected error removing LibreNMS mapping"),
+        ],
+    )
+    def test_save_failures_roll_back_the_mapping(
+        self,
+        logged_in_client,
+        librenms_server,
+        failure_type,
+        expected_message,
+    ):
+        from dcim.models import Device
         from django.core.exceptions import ValidationError
-
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan": 5}}
-        mock_locked.full_clean.side_effect = ValidationError({"librenms_id": ["err"]})
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_txn = MagicMock()
-        mock_txn.set_rollback = MagicMock()
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def test_unexpected_error_on_save(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan": 5}}
-        mock_locked.full_clean.side_effect = RuntimeError("disk full")
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_txn = MagicMock()
-        mock_txn.set_rollback = MagicMock()
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def test_success_removes_mapping(self):
-        """Happy path: mapping removed, last entry → cf set to None."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
-        # After deleting the last key, cf should be set to None
-        assert mock_locked.custom_field_data["librenms_id"] is None
-
-    def test_success_keeps_remaining_mappings(self):
-        """Happy path: mapping removed, other entries remain → cf retains them."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5, "other": 6}}
-
-        req = _make_request({"object_type": "device", "server_key": "orphan"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan": 5, "other": 6}}
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
-        ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
-        mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
-        assert mock_locked.custom_field_data["librenms_id"] == {"other": 6}
-
-
-# ---------------------------------------------------------------------------
-# ConvertLegacyLibreNMSIdView — helper methods
-# ---------------------------------------------------------------------------
-
-
-class TestConvertLegacyLibreNMSIdViewHelpers:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
-
-        view = object.__new__(ConvertLegacyLibreNMSIdView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        view.require_all_permissions = MagicMock(return_value=None)
-        return view
-
-    def test_get_model_and_object_device(self):
-        view = self._view()
-        mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device):
-            model, obj = view._get_model_and_object("device", 1)
-        assert obj is mock_device
-
-    def test_get_model_and_object_vm(self):
-        view = self._view()
-        mock_vm = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_vm):
-            model, obj = view._get_model_and_object("vm", 1)
-        assert obj is mock_vm
-
-    def test_sync_url_device(self):
-        view = self._view()
-        with patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir:
-            view._sync_url("device", 1)
-        mock_redir.assert_called_once_with("plugins:netbox_librenms_plugin:device_librenms_sync", pk=1)
-
-    def test_sync_url_vm(self):
-        view = self._view()
-        with patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir:
-            view._sync_url("vm", 1)
-        mock_redir.assert_called_once_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=1)
-
-
-# ---------------------------------------------------------------------------
-# ConvertLegacyLibreNMSIdView — post()
-# ---------------------------------------------------------------------------
-
-
-class TestConvertLegacyLibreNMSIdViewPost:
-    def _view(self):
-        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
-
-        view = object.__new__(ConvertLegacyLibreNMSIdView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        view.require_all_permissions = MagicMock(return_value=None)
-        return view
-
-    def test_invalid_object_type_returns_400(self):
-        view = self._view()
-        req = _make_request({"object_type": "badtype"})
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"):
-            result = view.post(req, pk=1)
-        assert result.status_code == 400
-
-    def test_virtualmachine_object_type_normalised(self):
-        """object_type='virtualmachine' is accepted as 'vm'."""
-        view = self._view()
-        # Provide a legacy string int as cf_value
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": "42"}
-        mock_obj.serial = "SN-MATCH"
-
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": "42"}
-        mock_locked.serial = "SN-MATCH"
-
-        mock_vm_cls = MagicMock()
-        mock_vm_cls.DoesNotExist = DoesNotExist
-        mock_vm_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.VirtualMachine", mock_vm_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True
-            ) as mock_migrate,
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "virtualmachine"}), pk=1)
-        mock_msg.success.assert_called_once()
-        mock_migrate.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
-
-    def test_permission_denied(self):
-        view = self._view()
-        err = MagicMock()
-        view.require_all_permissions = MagicMock(return_value=err)
-        req = _make_request({"object_type": "device"})
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"):
-            result = view.post(req, pk=1)
-        assert result is err
-
-    def test_already_json_format_dict(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"default": 5}}
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.warning.assert_called_once()
-        assert "already" in mock_msg.warning.call_args[0][1].lower()
-
-    def test_already_json_format_bool(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": True}
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_non_digit_string_cf_value(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": "not-a-number"}
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_get_device_info_failure(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        view._librenms_api.get_device_info.return_value = (False, None)
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_serial_mismatch_empty_netbox_serial(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = ""
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-ABC"})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-        assert "Serial" in mock_msg.error.call_args[0][1]
-
-    def test_serial_mismatch_different(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-XYZ"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-ABC"})
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_object_no_longer_exists_in_lock(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.__name__ = "Device"
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.side_effect = DoesNotExist()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_cf_value_changed_to_json_after_lock(self):
-        """Locked row shows cf_value already as dict → warning."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"default": 42}}  # already dict
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.warning.assert_called_once()
-
-    def test_cf_value_not_int_after_lock(self):
-        """Locked row shows non-digit string → error: cannot convert."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": "not-a-digit"}
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_data_changed_before_lock(self):
-        """locked_id or locked_serial differs → error: aborting."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": 99}  # different id
-        mock_locked.serial = "SN-MATCH"
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-
-    def test_conflict_with_another_object(self):
-        """Another object already has the same librenms_id for this server."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": 42}
-        mock_locked.serial = "SN-MATCH"
-
-        other_obj = MagicMock()
-        other_obj.pk = 99  # different pk → conflict
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.__name__ = "Device"
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_txn = MagicMock()
-        mock_txn.set_rollback = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=other_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def test_migrate_returns_false(self):
-        """migrate_legacy_librenms_id returns False → warning."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": 42}
-        mock_locked.serial = "SN-MATCH"
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=False),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.warning.assert_called_once()
-
-    def test_validation_error_on_save(self):
-        from django.core.exceptions import ValidationError
-
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": 42}
-        mock_locked.serial = "SN-MATCH"
-        mock_locked.full_clean.side_effect = ValidationError({"librenms_id": ["err"]})
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_txn = MagicMock()
-        mock_txn.set_rollback = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def test_unexpected_error_on_save(self):
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": 42}
-        mock_locked.serial = "SN-MATCH"
-        mock_locked.full_clean.side_effect = RuntimeError("disk full")
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_txn = MagicMock()
-        mock_txn.set_rollback = MagicMock()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.error.assert_called_once()
-        mock_txn.set_rollback.assert_called_once_with(True)
-
-    def test_success_integer_cf_value(self):
-        """Happy path with integer cf_value → success message."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": 42}
-        mock_locked.serial = "SN-MATCH"
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
-        assert "42" in mock_msg.success.call_args[0][1]
-
-    def test_success_string_cf_value(self):
-        """Happy path with string digit cf_value → success message."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": "42"}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": "42"}
-        mock_locked.serial = "SN-MATCH"
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
-
-    def test_conflict_same_object_is_not_conflict(self):
-        """find_by_librenms_id returns the same object → no conflict, proceeds."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
-        view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": 42}
-        mock_locked.serial = "SN-MATCH"
-
-        # find_by_librenms_id returns the SAME object → match.pk == locked.pk → no conflict
-        same_obj = MagicMock()
-        same_obj.pk = 1
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=same_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Wiring assertions — ensure views keep required mixins and permissions
-# ---------------------------------------------------------------------------
-
-
-class TestDeviceFieldsViewWiring:
-    """Structural checks: views must retain required mixins and permissions."""
-
-    def test_convert_legacy_id_has_librenms_api_mixin(self):
-        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
-        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
-
-        assert issubclass(ConvertLegacyLibreNMSIdView, LibreNMSAPIMixin)
-
-    def test_convert_legacy_id_has_required_object_permissions(self):
-        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
-
-        assert "POST" in ConvertLegacyLibreNMSIdView.required_object_permissions
-
-    def test_remove_server_mapping_has_required_object_permissions(self):
+        from django.db.models.signals import pre_save
+
+        device = make_device(
+            f"mapping-{failure_type}-failure",
+            librenms_cf={SERVER_KEY: 6546, "retired": 9003},
+        )
+
+        def reject_save(sender, instance, **kwargs):
+            if instance.pk != device.pk:
+                return
+            if failure_type == "validation":
+                raise ValidationError({"custom_field_data": ["mapping rejected"]})
+            raise RuntimeError("database write failed")
+
+        pre_save.connect(reject_save, sender=Device, weak=False)
+        try:
+            response = _post(
+                logged_in_client,
+                "remove_server_mapping",
+                device,
+                {"object_type": "device", "server_key": "retired"},
+            )
+        finally:
+            pre_save.disconnect(reject_save, sender=Device)
+
+        device.refresh_from_db()
+        rendered_messages = _messages(response)
+        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6546, "retired": 9003}
+        assert any(expected_message in text for text in rendered_messages)
+        assert not any("Removed LibreNMS mapping" in text for text in rendered_messages)
+
+
+@pytest.mark.django_db
+class TestSetPreferredServerView:
+    @pytest.mark.parametrize("object_type", ["device", "virtualmachine"])
+    def test_preference_is_persisted_for_devices_and_vms(
+        self,
+        logged_in_client,
+        librenms_server,
+        object_type,
+    ):
+        from netbox_librenms_plugin.server_mappings import PREFERRED_SERVER_FIELD
+
+        owner = make_device("preferred-device") if object_type == "device" else make_vm("preferred-vm")
+        owner.custom_field_data["librenms_id"] = {SERVER_KEY: 6551, SECONDARY_KEY: 6552}
+        owner.save()
+
+        response = _post(
+            logged_in_client,
+            "set_preferred_server",
+            owner,
+            {
+                "object_type": object_type,
+                "server_key": SECONDARY_KEY,
+                "active_server_key": SERVER_KEY,
+                "tab": "interfaces",
+            },
+        )
+
+        owner.refresh_from_db()
+        assert owner.custom_field_data["librenms_id"][PREFERRED_SERVER_FIELD] == SECONDARY_KEY
+        assert f"server_key={SERVER_KEY}" in response.url
+        assert "tab=interfaces" in response.url
+        assert any("Preferred LibreNMS server changed" in text for text in _messages(response, "success"))
+
+    def test_single_usable_mapping_cannot_have_a_preference(self, logged_in_client, librenms_server):
+        device = _linked_device("preferred-single", 6553)
+
+        response = _post(
+            logged_in_client,
+            "set_preferred_server",
+            device,
+            {"object_type": "device", "server_key": SERVER_KEY},
+        )
+
+        assert any("requires at least two usable" in text for text in _messages(response, "error"))
+
+    def test_unknown_preference_key_is_rejected(self, logged_in_client, librenms_server):
+        device = make_device(
+            "preferred-unknown",
+            librenms_cf={SERVER_KEY: 6554, SECONDARY_KEY: 6555},
+        )
+
+        response = _post(
+            logged_in_client,
+            "set_preferred_server",
+            device,
+            {"object_type": "device", "server_key": "retired"},
+        )
+
+        assert any("not a usable mapping" in text for text in _messages(response, "error"))
+
+    def test_unsupported_object_type_is_a_400(self, logged_in_client, librenms_server):
+        device = make_device("preferred-invalid-type")
+
+        response = _post(
+            logged_in_client,
+            "set_preferred_server",
+            device,
+            {"object_type": "rack"},
+        )
+
+        assert response.status_code == 400
+
+    def test_missing_preference_key_is_rejected(self, logged_in_client, librenms_server):
+        device = make_device(
+            "preferred-missing-key",
+            librenms_cf={SERVER_KEY: 6556, SECONDARY_KEY: 6557},
+        )
+
+        response = _post(
+            logged_in_client,
+            "set_preferred_server",
+            device,
+            {"object_type": "device", "server_key": ""},
+        )
+
+        assert any("server key must be a non-empty string" in text for text in _messages(response, "error"))
+
+
+@pytest.mark.django_db
+class TestConvertLegacyLibreNMSIdView:
+    def test_matching_device_serial_converts_the_legacy_id(self, logged_in_client, librenms_server):
+        device = make_device("legacy-convert", serial="LEGACY-SERIAL", librenms_cf=" 6561 ")
+        librenms_server.device_info_response(
+            device_id=6561,
+            hostname=device.name,
+            serial=" LEGACY-SERIAL ",
+        )
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            device,
+            {"object_type": "device"},
+        )
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6561}
+        assert any("Converted legacy librenms_id" in text for text in _messages(response, "success"))
+
+    def test_serial_mismatch_preserves_the_legacy_id(self, logged_in_client, librenms_server):
+        device = make_device("legacy-mismatch", serial="NETBOX-SERIAL", librenms_cf=6562)
+        librenms_server.device_info_response(
+            device_id=6562,
+            hostname=device.name,
+            serial="LIBRENMS-SERIAL",
+        )
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            device,
+            {"object_type": "device"},
+        )
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == 6562
+        assert any("Serial number mismatch" in text for text in _messages(response, "error"))
+
+    def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
+        vm = make_vm("legacy-convert-vm")
+        vm.custom_field_data["librenms_id"] = 6563
+        vm.save()
+        librenms_server.device_info_response(device_id=6563, hostname=vm.name, serial="REMOTE-SERIAL")
+
+        _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            vm,
+            {"object_type": "virtualmachine"},
+        )
+
+        vm.refresh_from_db()
+        assert vm.custom_field_data["librenms_id"] == {SERVER_KEY: 6563}
+
+    @pytest.mark.parametrize(
+        ("value", "fragment"),
+        [
+            ({SERVER_KEY: 6564}, "already in the server-scoped"),
+            (True, "invalid boolean"),
+            ("not-an-id", "not a valid integer"),
+        ],
+    )
+    def test_nonconvertible_values_fail_without_http(
+        self,
+        logged_in_client,
+        librenms_server,
+        value,
+        fragment,
+    ):
+        device = make_device(f"legacy-invalid-{type(value).__name__}", librenms_cf=value)
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            device,
+            {"object_type": "device"},
+        )
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == value
+        assert any(fragment in text for text in _messages(response))
+
+    def test_live_lookup_failure_preserves_the_legacy_id(self, logged_in_client, librenms_server):
+        device = make_device("legacy-live-failure", serial="LEGACY-LIVE", librenms_cf=6565)
+        librenms_server.register("/api/v0/devices/6565", {"status": "error"}, status=404)
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            device,
+            {"object_type": "device"},
+        )
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == 6565
+        assert any("Could not retrieve device info" in text for text in _messages(response, "error"))
+
+    def test_stale_server_key_fails_closed(self, logged_in_client, librenms_server):
+        device = make_device("legacy-stale-server", serial="LEGACY-STALE", librenms_cf=6566)
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            device,
+            {"object_type": "device", "server_key": "retired"},
+        )
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == 6566
+        assert any("no longer configured" in text for text in _messages(response, "error"))
+
+    def test_conflicting_assignment_blocks_conversion(self, logged_in_client, librenms_server):
+        device = make_device("legacy-conflict-source", serial="LEGACY-CONFLICT", librenms_cf=6567)
+        make_device("legacy-conflict-owner", librenms_cf={SERVER_KEY: 6567})
+        librenms_server.device_info_response(
+            device_id=6567,
+            hostname=device.name,
+            serial=device.serial,
+        )
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            device,
+            {"object_type": "device"},
+        )
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == 6567
+        assert any("ambiguous" in text for text in _messages(response, "error"))
+
+    def test_unsupported_object_type_is_a_400(self, logged_in_client, librenms_server):
+        device = make_device("legacy-invalid-type")
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            device,
+            {"object_type": "rack"},
+        )
+
+        assert response.status_code == 400
+
+
+@pytest.mark.django_db
+class TestCommonFieldUpdateFailures:
+    @pytest.mark.parametrize(
+        "view_name",
+        [
+            "update_device_name",
+            "update_device_serial",
+            "update_device_type",
+            "update_device_platform",
+        ],
+    )
+    def test_real_permission_gate_denies_an_unprivileged_user(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+        view_name,
+    ):
+        device = _linked_device(f"permission-{view_name}", 6571)
+        user = django_user_model.objects.create_user(username=f"denied-{view_name}")
+        client.force_login(user)
+
+        response = _post(client, view_name, device)
+
+        assert response.status_code == 403
+
+    @pytest.mark.parametrize(
+        "view_name",
+        [
+            "update_device_name",
+            "update_device_serial",
+            "update_device_type",
+            "update_device_platform",
+        ],
+    )
+    def test_live_lookup_failure_is_reported_consistently(
+        self,
+        logged_in_client,
+        librenms_server,
+        view_name,
+    ):
+        device = _linked_device(f"lookup-failure-{view_name}", 6572)
+        librenms_server.register("/api/v0/devices/6572", {"status": "error"}, status=404)
+
+        response = _post(logged_in_client, view_name, device)
+
+        assert any("Failed to retrieve device info" in text for text in _messages(response, "error"))
+
+
+class TestDeviceFieldHelpers:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("device", "device"),
+            ("vm", "vm"),
+            ("virtualmachine", "vm"),
+            ("rack", None),
+            (None, None),
+        ],
+    )
+    def test_object_type_normalization(self, value, expected):
+        from netbox_librenms_plugin.views.sync.device_fields import _normalize_sync_object_type
+
+        assert _normalize_sync_object_type(value) == expected
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (42, {"default": 42}),
+            ("42", {"default": 42}),
+            ({"secondary": 42}, {"secondary": 42}),
+            (True, {}),
+            (" 42 ", {}),
+            (None, {}),
+            ([], {}),
+        ],
+    )
+    def test_mapping_normalization(self, value, expected):
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
 
-        assert "POST" in RemoveServerMappingView.required_object_permissions
+        assert RemoveServerMappingView()._normalize_librenms_mapping(value) == expected
+
+    def test_model_and_url_helpers_distinguish_devices_from_vms(self):
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+        from netbox_librenms_plugin.views.sync.device_fields import _sync_model, _sync_url_name
+
+        assert _sync_model("device") is Device
+        assert _sync_model("vm") is VirtualMachine
+        assert _sync_url_name("device").endswith("device_librenms_sync")
+        assert _sync_url_name("vm").endswith("vm_librenms_sync")

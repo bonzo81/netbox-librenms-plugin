@@ -1,0 +1,20 @@
+{% for search in cached_searches %}
+  <a href="?server_key={{ search.server_key|urlencode }}&amp;apply_filters=1{% for key, value in search.filters.items %}&amp;librenms_{{ key }}={{ value|urlencode }}{% endfor %}{% if search.vc_enabled %}&amp;enable_vc_detection=1{% endif %}&amp;use_sysname={% if search.use_sysname %}1{% else %}0{% endif %}&amp;strip_domain={% if search.strip_domain %}1{% else %}0{% endif %}"
+     class="btn btn-sm btn-outline-secondary"
+     data-cached-server-key="{{ search.server_key }}"
+     style="text-decoration: none;"
+     title="Click to load this cached search">
+    <i class="mdi mdi-filter-outline"></i>
+    <span class="badge text-bg-primary cached-search-server-label">{{ search.server_display_name }}</span>
+    {% with display_data=search.display_filters|default:search.filters %}
+      {% for key, value in display_data.items %}
+        {% if not forloop.first %} <span class="text-muted">|</span> {% endif %}
+        {{ value }}
+      {% endfor %}
+    {% endwith %}
+    {% if search.vc_enabled %}
+      <span class="text-muted">| VC</span>
+    {% endif %}
+    <span class="text-muted ms-2">({{ search.device_count }} devices, <span class="cached-search-countdown" data-cache-timestamp="{{ search.cached_at }}" data-cache-timeout="{{ search.cache_timeout }}">{{ search.remaining_seconds }}s</span> left)</span>
+  </a>
+{% endfor %}

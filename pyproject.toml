@@ -30,6 +30,15 @@ requires-python = ">=3.12.0"
 "Homepage" = "https://github.com/bonzo81/netbox-librenms-plugin/"
 "Bug Tracker" = "https://github.com/bonzo81/netbox-librenms-plugin/issues/"
 
+[project.optional-dependencies]
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocs-include-markdown-plugin",
+    "mkdocstrings[python]",
+    "pymdown-extensions",
+]
+
 # New: Restrict package discovery to our plugin only
 [tool.setuptools]
 include-package-data = true
@@ -42,18 +51,35 @@ exclude = ["site*", "netbox_librenms_plugin.tests*"]
 netbox_librenms_plugin = ["templates/**"]
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "netbox.settings"
+DJANGO_SETTINGS_MODULE = "netbox_librenms_plugin.tests.isolated_settings"
 pythonpath = ["/opt/netbox/netbox"]
 testpaths = ["netbox_librenms_plugin/tests"]
+# Setting this replaces pytest's built-in defaults, so they are re-listed here.
+norecursedirs = [
+    "*.egg",
+    ".*",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "node_modules",
+    "venv",
+    "{arch}",
+    "netbox_librenms_plugin/tests/browser",
+]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --cov=netbox_librenms_plugin --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 120
+# force-exclude so excluded paths are skipped even when passed explicitly (e.g. by the ruff
+# pre-commit hook). Keeps the opengrep rule-test fixtures, which deliberately contain
+# rule-violating code, out of ruff's scope.
+force-exclude = true
 # Python only (skip Ruff Markdown formatting).
-extend-exclude = ["*.md"]
+extend-exclude = ["*.md", ".opengrep"]
 
 [tool.ruff.lint]
 # Explicit defaults; stable across Ruff versions.

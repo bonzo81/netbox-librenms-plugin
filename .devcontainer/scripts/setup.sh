@@ -122,16 +122,54 @@ source /opt/netbox/venv/bin/activate
 
 # Choose installer (uv if available, else pip)
 if command -v uv >/dev/null 2>&1; then
-  PIP_CMD="uv pip"
+  PIP_CMD="uv --native-tls pip"
 else
   PIP_CMD="pip"
 fi
 
+# Detect the plugin before installing its development requirements.
+PLUGIN_WS_DIR="$(detect_plugin_workspace)"
+if [ -z "$PLUGIN_WS_DIR" ]; then
+  echo "❌ Could not locate plugin workspace directory (pyproject.toml not found)."
+  echo "   Checked: $PWD and /workspaces/*"
+  exit 1
+fi
+echo "📂 Plugin workspace: $PLUGIN_WS_DIR"
+
 # Install dev tools
 echo "🔧 Installing development dependencies..."
 apt-get update -qq
-apt-get install -y -qq net-tools git
-$PIP_CMD install pytest pytest-django ruff pre-commit
+apt-get install -y -qq net-tools git curl
+$PIP_CMD install -r "$PLUGIN_WS_DIR/requirements_dev.txt" ruff pre-commit
+python -m playwright install --with-deps chromium
+
+# Install the same OpenGrep release that the repository rules target.
+OPENGREP_VERSION="v1.30.0"
+case "$(uname -m)" in
+  x86_64 | amd64)
+    OPENGREP_ASSET="opengrep_manylinux_x86"
+    OPENGREP_SHA256="35779bdd72e92129c8df2a77f0c55e8c08356801ea92591ef32108d6b28d564c"
+    ;;
+  aarch64 | arm64)
+    OPENGREP_ASSET="opengrep_manylinux_aarch64"
+    OPENGREP_SHA256="a5d5a4a58ba5d46ff51e921663da1c2bba38f4b03987f4aeec87f16c6ad3ecae"
+    ;;
+  *)
+    echo "❌ OpenGrep ${OPENGREP_VERSION} does not support architecture $(uname -m)."
+    exit 1
+    ;;
+esac
+echo "🔧 Installing OpenGrep ${OPENGREP_VERSION}..."
+(
+  opengrep_binary=$(mktemp)
+  trap 'rm -f "$opengrep_binary"' EXIT
+  curl -fsSL \
+    "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/${OPENGREP_ASSET}" \
+    -o "$opengrep_binary"
+  printf '%s  %s\n' "$OPENGREP_SHA256" "$opengrep_binary" | sha256sum -c -
+  install -m 0755 "$opengrep_binary" /usr/local/bin/opengrep
+)
+opengrep --version
 
 # Install GitHub CLI (gh)
 # NOTE: The chained && commands below mean a partial failure (e.g. wget succeeds
@@ -154,15 +192,6 @@ if ! command -v gh >/dev/null 2>&1; then
     && echo "  ✓ GitHub CLI installed: $(gh --version | head -1)" \
     || echo "⚠️  GitHub CLI installation failed (non-fatal)"
 fi
-
-# Detect plugin workspace directory using the shared helper
-PLUGIN_WS_DIR="$(detect_plugin_workspace)"
-if [ -z "$PLUGIN_WS_DIR" ]; then
-  echo "❌ Could not locate plugin workspace directory (pyproject.toml not found)."
-  echo "   Checked: $PWD and /workspaces/*"
-  exit 1
-fi
-echo "📂 Plugin workspace: $PLUGIN_WS_DIR"
 
 # Install this plugin in development mode
 echo "📦 Installing plugin in development mode from: $PLUGIN_WS_DIR"

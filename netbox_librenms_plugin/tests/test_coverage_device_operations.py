@@ -1,1681 +1,1806 @@
-"""Coverage tests for import_utils/device_operations.py."""
+"""Behavior tests for device validation, import, and cached retrieval."""
 
-from unittest.mock import MagicMock, patch
+from copy import deepcopy
+
+import pytest
+from django.core.cache import cache
+from django.db import connection
+
+from netbox_librenms_plugin.tests.conftest import (
+    ip_on,
+    make_cluster,
+    make_device,
+    make_ip,
+    make_virtual_chassis,
+    make_vm,
+)
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
-class TestTryChassisDeviceTypeMatch:
-    """Tests for _try_chassis_device_type_match (lines 45-65)."""
+SERVER_KEY = "test-server"
 
-    def test_api_failure_returns_none(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
 
-        api = MagicMock()
-        api.get_inventory_filtered.return_value = (False, [])
-        result = _try_chassis_device_type_match(api, 1)
-        assert result is None
+@pytest.mark.django_db
+def test_a_padded_duplicate_serial_is_reported_alongside_the_exact_match():
+    """The caller blocks an import on len(matches) > 1, so a padded twin must not stay hidden."""
+    from netbox_librenms_plugin.utils import find_devices_by_serial
 
-    def test_empty_inventory_returns_none(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
+    exact = make_device("serial-exact", serial="DUP-SERIAL")
+    padded = make_device("serial-padded", serial="  DUP-SERIAL  ")
 
-        api = MagicMock()
-        api.get_inventory_filtered.return_value = (True, [])
-        result = _try_chassis_device_type_match(api, 1)
-        assert result is None
+    matches = find_devices_by_serial("DUP-SERIAL")
 
-    def test_matched_physical_name_returns_match(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
+    assert {device.pk for device in matches} == {exact.pk, padded.pk}, (
+        "an exact hit returned early and hid the whitespace-only duplicate"
+    )
 
-        mock_dt = MagicMock()
-        api = MagicMock()
-        api.get_inventory_filtered.return_value = (
-            True,
-            [{"entPhysicalName": "CHAS-BP-MX480-S", "entPhysicalModelName": "model1"}],
+
+@pytest.mark.django_db
+def test_trimmed_serial_lookup_uses_expression_index():
+    from netbox_librenms_plugin.utils import find_devices_by_serial
+
+    device = make_device("padded-serial", serial=" \t\n\r\v\fSERIAL-TRIM \t\n\r\v\f")
+    queries = []
+
+    def capture_query(execute, sql, params, many, context):
+        queries.append((sql, params))
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(capture_query):
+        assert find_devices_by_serial("SERIAL-TRIM") == [device]
+
+    fallback_queries = [(sql, params) for sql, params in queries if "BTRIM(" in sql]
+    assert len(fallback_queries) == 1
+    sql, params = fallback_queries[0]
+    # The trim characters come from the captured query, not a literal, so this compares what the
+    # ORM actually sends against what the index stores. Asserting on an EXPLAIN plan instead would
+    # be unsound: on a near-empty table the planner picks any index it likes, so the assertion
+    # passes or fails on table statistics rather than on the index being correct.
+    trim_characters = params[0]
+    index_name = "nblp_dcim_device_serial_trim_idx"
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT indisvalid, indrelid = to_regclass('dcim_device'),
+                   pg_get_expr(indexprs, indrelid)
+            FROM pg_index
+            WHERE indexrelid = to_regclass(%s)
+            """,
+            [index_name],
         )
+        index = cursor.fetchone()
+    assert index is not None, f"{index_name} is missing; migration 0018 did not run"
+    valid, on_device, expression = index
+    assert valid
+    assert on_device
+    # A drifted expression leaves the index present but unusable for this predicate.
+    assert expression == f"btrim((serial)::text, '{trim_characters}'::text)", expression
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type"
-        ) as mock_match:
-            mock_match.return_value = {"matched": True, "device_type": mock_dt, "match_type": "exact"}
-            result = _try_chassis_device_type_match(api, 1)
 
-        assert result is not None
-        assert result["matched"] is True
-        assert result["match_type"] == "chassis"
-        assert result["chassis_model"] == "CHAS-BP-MX480-S"
+@pytest.mark.django_db
+def test_preexisting_valid_serial_trim_index_is_reused():
+    """Retrying the serial trim migration accepts the existing index without rebuilding it."""
+    import importlib
 
-    def test_skips_empty_values(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
+    from django.apps import apps
 
-        api = MagicMock()
-        api.get_inventory_filtered.return_value = (True, [{"entPhysicalName": "", "entPhysicalModelName": "-"}])
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0018_device_serial_trim_index")
+    index_name = "nblp_dcim_device_serial_trim_idx"
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass(%s)::oid", [index_name])
+        original_oid = cursor.fetchone()[0]
+    assert original_oid is not None, f"{index_name} is missing; migration 0018 did not run"
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type"
-        ) as mock_match:
-            mock_match.return_value = {"matched": False}
-            result = _try_chassis_device_type_match(api, 1)
+    # This pins the shape check against the catalog's rendering of the trim characters.
+    with connection.schema_editor(atomic=False) as schema_editor:
+        module.ensure_device_serial_trim_index(apps, schema_editor)
 
-        mock_match.assert_not_called()
-        assert result is None
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass(%s)::oid", [index_name])
+        reused_oid = cursor.fetchone()[0]
+    assert reused_oid == original_oid
 
-    def test_exception_returns_none(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
 
-        api = MagicMock()
-        api.get_inventory_filtered.side_effect = RuntimeError("API Error")
-        result = _try_chassis_device_type_match(api, 1)
-        assert result is None
+def _device_payload(device_id=4101, **overrides):
+    """Return one complete LibreNMS device response row."""
+    payload = {
+        "device_id": device_id,
+        "hostname": f"edge-{device_id}.example.test",
+        "sysName": f"edge-{device_id}",
+        "hardware": "Test Router",
+        "serial": f"SERIAL-{device_id}",
+        "os": "linux",
+        "ip": f"198.18.0.{device_id % 250 + 1}",
+        "version": "1.0",
+        "location": "Test Lab",
+        "type": "network",
+        "status": 1,
+    }
+    payload.update(overrides)
+    return payload
 
-    def test_fallback_to_model_name_when_name_not_matched(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
 
-        mock_dt = MagicMock()
-        api = MagicMock()
-        api.get_inventory_filtered.return_value = (
-            True,
-            [{"entPhysicalName": "Unrecognized", "entPhysicalModelName": "710-017414"}],
-        )
+def _configure_server(settings, server):
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        SERVER_KEY: {
+            "display_name": "Test LibreNMS",
+            "librenms_url": server.url,
+            "api_token": "test-token",
+            "cache_timeout": 300,
+            "verify_ssl": False,
+        }
+    }
+    settings.PLUGINS_CONFIG = plugin_config
 
-        call_count = [0]
 
-        def match_side_effect(value):
-            call_count[0] += 1
-            if value == "Unrecognized":
-                return {"matched": False}
-            return {"matched": True, "device_type": mock_dt, "match_type": "exact"}
+@pytest.fixture(autouse=True)
+def isolated_cache():
+    cache.clear()
+    yield
+    cache.clear()
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-            side_effect=match_side_effect,
-        ):
-            result = _try_chassis_device_type_match(api, 1)
 
-        assert result is not None
-        assert result["matched"] is True
-        assert result["chassis_model"] == "710-017414"
+@pytest.fixture
+def librenms_api(settings):
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-    def test_match_returning_none_is_skipped(self):
-        """match_librenms_hardware_to_device_type returning None does not raise; continues."""
-        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
+    with librenms_mock_server() as server:
+        _configure_server(settings, server)
+        yield LibreNMSAPI(server_key=SERVER_KEY), server
 
-        api = MagicMock()
-        api.get_inventory_filtered.return_value = (
-            True,
-            [{"entPhysicalName": "SomeChassis", "entPhysicalModelName": ""}],
-        )
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-            return_value=None,
-        ):
-            result = _try_chassis_device_type_match(api, 1)
+def _stack_root(index=100):
+    return {
+        "entPhysicalIndex": index,
+        "entPhysicalClass": "stack",
+        "entPhysicalSerialNum": "",
+        "entPhysicalModelName": "",
+        "entPhysicalName": "StackSub-0/0",
+        "entPhysicalDescr": "Test stack",
+        "entPhysicalContainedIn": 0,
+    }
 
-        # None return from matcher is safely skipped; function returns None overall
-        assert result is None
+
+def _chassis(index, serial, position, model="Test Router"):
+    return {
+        "entPhysicalIndex": index,
+        "entPhysicalClass": "chassis",
+        "entPhysicalSerialNum": serial,
+        "entPhysicalModelName": model,
+        "entPhysicalName": f"Chassis-{position}",
+        "entPhysicalDescr": f"Member {position}",
+        "entPhysicalParentRelPos": position,
+    }
+
+
+def _validation(*, site=None, device_type=None, role=None, resolved_name="imported-edge", **overrides):
+    """Build the public validation contract needed by import_single_device."""
+    result = {
+        "existing_device": None,
+        "existing_match_type": None,
+        "ambiguous_librenms_id": False,
+        "resolved_name": resolved_name,
+        "site": {"site": site},
+        "device_type": {"device_type": device_type},
+        "device_role": {"role": role},
+        "platform": {"platform": None},
+        "rack": {"rack": None},
+    }
+    result.update(overrides)
+    return result
 
 
 class TestDetermineDeviceName:
-    """Tests for _determine_device_name (lines 68-122)."""
-
-    def test_use_sysname_true_prefers_sysname(self):
+    @pytest.mark.parametrize(
+        ("payload", "use_sysname", "strip_domain", "device_id", "expected"),
+        [
+            ({"sysName": "system", "hostname": "host"}, True, False, 1, "system"),
+            ({"sysName": "system", "hostname": "host"}, False, False, 1, "host"),
+            ({"sysName": "", "hostname": "host"}, True, False, 1, "host"),
+            ({"sysName": None, "hostname": None}, True, False, 7, "device-7"),
+            ({"device_id": 8}, True, False, None, "device-8"),
+            ({"sysName": "edge.example.test"}, True, True, 1, "edge"),
+            ({"sysName": "edge.a.example.test"}, True, True, 1, "edge"),
+            ({"sysName": "198.18.0.7"}, True, True, 1, "198.18.0.7"),
+            ({"sysName": ".example.test"}, True, True, 9, "device-9"),
+            ({"sysName": 123, "hostname": ["bad"]}, True, False, 10, "device-10"),
+            ({"sysName": 7, "hostname": "host"}, True, False, 1, "host"),
+        ],
+    )
+    def test_name_resolution(self, payload, use_sysname, strip_domain, device_id, expected):
         from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
 
-        result = _determine_device_name({"sysName": "router01", "hostname": "router01.example.com"}, use_sysname=True)
-        assert result == "router01"
-
-    def test_use_sysname_false_prefers_hostname(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"sysName": "router01", "hostname": "router01.example.com"}, use_sysname=False)
-        assert result == "router01.example.com"
-
-    def test_fallback_to_device_id_when_no_name(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({}, device_id=42)
-        assert result == "device-42"
-
-    def test_fallback_to_device_id_field_when_no_name_no_id(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"device_id": 99})
-        assert result == "device-99"
-
-    def test_strip_domain_true_strips_suffix(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"sysName": "router01.example.com"}, strip_domain=True)
-        assert result == "router01"
-
-    def test_strip_domain_does_not_strip_ip(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"sysName": "192.168.1.1"}, strip_domain=True)
-        assert result == "192.168.1.1"
-
-    def test_hostname_fallback_when_sysname_empty(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"sysName": "", "hostname": "sw01.example.com"}, use_sysname=True)
-        assert result == "sw01.example.com"
-
-    def test_none_sysname_falls_back_to_hostname(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"sysName": None, "hostname": "sw02"})
-        assert result == "sw02"
-
-    def test_none_hostname_falls_back_to_device_id(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"sysName": None, "hostname": None, "device_id": 7})
-        assert result == "device-7"
-
-    def test_result_is_never_empty_string(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({})
-        assert isinstance(result, str)
-        assert result != ""
-
-    def test_fqdn_multiple_dots_strips_to_first_label(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"sysName": "a.b.c.d.example.com"}, strip_domain=True)
-        assert result == "a"
-
-    def test_strip_domain_false_keeps_fqdn(self):
-        from netbox_librenms_plugin.import_utils.device_operations import _determine_device_name
-
-        result = _determine_device_name({"sysName": "router.example.com"}, strip_domain=False)
-        assert result == "router.example.com"
-
-
-class TestValidateDeviceStateMachine:
-    """Tests for validate_device_for_import is_ready / can_import state transitions."""
-
-    def _run_validate(self, libre_device, patches_overrides=None, **kwargs):
-        from unittest.mock import MagicMock, patch
-
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-
-        mock_device = MagicMock()
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
-
-        mock_vm = MagicMock()
-        mock_vm.objects.filter.return_value.first.return_value = None
-
-        mock_cluster = MagicMock()
-        mock_cluster.objects.all.return_value = []
-
-        mock_role = MagicMock()
-        mock_role.objects.all.return_value = []
-
-        mock_ip = MagicMock()
-        mock_ip.objects.filter.return_value.first.return_value = None
-
-        base_patches = [
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
-                return_value={"found": False, "site": None, "match_type": None, "suggestions": []},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                return_value={"matched": False, "device_type": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
-                return_value={"found": False, "platform": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
-            ),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType", MagicMock()),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site", MagicMock()),
-            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", mock_vm),
-        ]
-        if patches_overrides:
-            base_patches.extend(patches_overrides)
-
-        for p in base_patches:
-            p.start()
-        try:
-            result = validate_device_for_import(libre_device, api=api, **kwargs)
-        finally:
-            for p in reversed(base_patches):
-                p.stop()
-        return result
-
-    def _base_device(self, device_id=1, hostname="router01"):
-        return {
-            "device_id": device_id,
-            "hostname": hostname,
-            "sysName": hostname,
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
-        }
-
-    def test_new_device_without_any_matches_is_not_ready(self):
-        """New device with no site/type/role match must not be ready."""
-        result = self._run_validate(self._base_device())
-        assert result["existing_device"] is None
-        assert result["is_ready"] is False
-        assert result["can_import"] is False
-
-    def test_new_vm_without_cluster_is_not_ready(self):
-        """New VM import with no cluster available must not be ready."""
-        result = self._run_validate(self._base_device(hostname="vm01"), import_as_vm=True)
-        assert result["is_ready"] is False
-        assert result.get("import_as_vm") is True
-        assert result["cluster"]["found"] is False
-
-    def test_new_device_site_and_type_found_but_role_manual(self):
-        """
-        New device with site+type matched still requires manual role selection.
-
-        validate_device_for_import always sets device_role["found"]=False for new
-        devices and adds an issue. is_ready becomes True only AFTER the user selects
-        a role via apply_role_to_validation + recalculate_validation_status.
-        """
-        from unittest.mock import MagicMock, patch
-
-        site_mock = MagicMock()
-        dt_mock = MagicMock()
-        role_mock = MagicMock()
-        role_mock.pk = 1
-
-        result = self._run_validate(
-            self._base_device(),
-            patches_overrides=[
-                patch(
-                    "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
-                    return_value={"found": True, "site": site_mock, "match_type": "exact", "suggestions": []},
-                ),
-                patch(
-                    "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                    return_value={"matched": True, "device_type": dt_mock, "match_type": "exact"},
-                ),
-            ],
-        )
-        # Site and type found, but role is always manual for new devices
-        assert result["site"]["found"] is True
-        assert result["device_type"]["found"] is True
-        assert result["device_role"]["found"] is False
-        assert result["can_import"] is False  # blocked by role issue
-
-        # Simulate user selecting a role via apply_role_to_validation
-        from netbox_librenms_plugin.import_validation_helpers import (
-            apply_role_to_validation,
-            recalculate_validation_status,
+        assert (
+            _determine_device_name(
+                payload,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
+                device_id=device_id,
+            )
+            == expected
         )
 
-        apply_role_to_validation(result, role=role_mock, is_vm=False)
-        recalculate_validation_status(result, is_vm=False)
+    def test_resolve_device_name_reports_the_value_the_name_came_from(self):
+        """The source follows the post-strip decision: a stripped-empty sysName is the id fallback."""
+        from netbox_librenms_plugin.import_utils.device_operations import _resolve_device_name
 
-        # After role selection, device should be ready
-        assert result["device_role"]["found"] is True
-        assert result["can_import"] is True
-        assert result["is_ready"] is True
-
-    def test_is_ready_false_when_site_missing_even_with_type_and_role(self):
-        """is_ready requires ALL of site+type+role; missing site -> False."""
-        from unittest.mock import MagicMock, patch
-
-        dt_mock = MagicMock()
-        role_mock = MagicMock()
-
-        result = self._run_validate(
-            self._base_device(),
-            patches_overrides=[
-                patch(
-                    "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                    return_value={"matched": True, "device_type": dt_mock, "match_type": "exact"},
-                ),
-                patch(
-                    "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
-                    MagicMock(objects=MagicMock(all=MagicMock(return_value=[role_mock]))),
-                ),
-            ],
+        assert _resolve_device_name({"sysName": "", "hostname": "sw01.example.test"}, strip_domain=True) == (
+            "sw01",
+            "hostname",
         )
-        assert result["is_ready"] is False
-        assert result["site"]["found"] is False
-
-    def test_import_as_vm_skips_device_only_fields(self):
-        """VM import path must not fail on device-only type fields."""
-        from unittest.mock import MagicMock, patch
-
-        dt_mock = MagicMock()
-        result = self._run_validate(
-            self._base_device(hostname="vm01"),
-            import_as_vm=True,
-            patches_overrides=[
-                patch(
-                    "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                    return_value={"matched": True, "device_type": dt_mock, "match_type": "exact"},
-                ),
-            ],
+        assert _resolve_device_name(
+            {"sysName": ".example.test", "hostname": "sw02"}, strip_domain=True, device_id=7
+        ) == (
+            "device-7",
+            "device-7",
         )
-        assert result.get("import_as_vm") is True
-        assert result["is_ready"] is False  # no cluster found
 
 
-class TestGetLibreNMSDeviceById:
-    """Tests for get_librenms_device_by_id (lines 912-933)."""
-
-    def test_success_returns_device(self):
-        from netbox_librenms_plugin.import_utils.device_operations import get_librenms_device_by_id
-
-        api = MagicMock()
-        device = {"device_id": 42, "hostname": "router01"}
-        api.get_device_info.return_value = (True, device)
-
-        result = get_librenms_device_by_id(api, 42)
-        assert result is device
-
-    def test_api_failure_returns_none(self):
-        from netbox_librenms_plugin.import_utils.device_operations import get_librenms_device_by_id
-
-        api = MagicMock()
-        api.get_device_info.return_value = (False, None)
-
-        result = get_librenms_device_by_id(api, 42)
-        assert result is None
-
-    def test_device_not_found_returns_none(self):
-        from netbox_librenms_plugin.import_utils.device_operations import get_librenms_device_by_id
-
-        api = MagicMock()
-        api.get_device_info.return_value = (True, None)
-
-        result = get_librenms_device_by_id(api, 42)
-        assert result is None
-
-    def test_exception_returns_none(self):
-        from netbox_librenms_plugin.import_utils.device_operations import get_librenms_device_by_id
-
-        api = MagicMock()
-        api.get_device_info.side_effect = RuntimeError("Network error")
-
-        result = get_librenms_device_by_id(api, 42)
-        assert result is None
-
-
-class TestFetchDeviceWithCache:
-    """Tests for fetch_device_with_cache (lines 936-987)."""
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
-    def test_from_pre_fetched_cache_dict(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
-
-        api = MagicMock()
-        api.server_key = "default"
-        device = {"device_id": 1}
-        cache_dict = {1: device}
-
-        result = fetch_device_with_cache(1, api, libre_devices_cache=cache_dict)
-        assert result is device
-        mock_cache.get.assert_not_called()
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
-    def test_from_django_cache(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
-
-        api = MagicMock()
-        api.server_key = "default"
-        device = {"device_id": 1}
-        mock_cache.get.return_value = device
-
-        result = fetch_device_with_cache(1, api)
-        assert result is device
-        api.get_device_info.assert_not_called()
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
-    def test_cache_miss_falls_back_to_api(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
-
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        device = {"device_id": 1}
-        mock_cache.get.return_value = None
-        api.get_device_info.return_value = (True, device)
-
-        result = fetch_device_with_cache(1, api)
-        assert result is device
-        mock_cache.set.assert_called_once()
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
-    def test_api_returns_none_returns_none(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
-
-        api = MagicMock()
-        api.server_key = "default"
-        mock_cache.get.return_value = None
-        api.get_device_info.return_value = (False, None)
-
-        result = fetch_device_with_cache(1, api)
-        assert result is None
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
-    def test_uses_provided_server_key(self, mock_cache):
-        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
-
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        mock_cache.get.return_value = None
-        api.get_device_info.return_value = (True, {"device_id": 1})
-
-        fetch_device_with_cache(1, api, server_key="secondary")
-        # The cache key should use "secondary"
-        cache_key = mock_cache.get.call_args[0][0]
-        assert "secondary" in cache_key
-
-
-class TestValidateDeviceForImport:
-    """Tests for validate_device_for_import main validation logic."""
-
-    def _make_api(self):
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        api.get_device_info.return_value = (True, {"device_id": 1})
-        return api
-
-    def _patch_all_db(self):
-        """Context manager patches for all DB interactions."""
-        mock_device = MagicMock()
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device.objects.all.return_value = []
-
-        mock_vm = MagicMock()
-        mock_vm.objects.filter.return_value.first.return_value = None
-
-        mock_cluster = MagicMock()
-        mock_cluster.objects.all.return_value = []
-
-        mock_device_role = MagicMock()
-        mock_device_role.objects.all.return_value = []
-
-        mock_site = MagicMock()
-        mock_site.objects.all.return_value = []
-
-        mock_ip = MagicMock()
-        mock_ip.objects.filter.return_value.first.return_value = None
-
-        patches = [
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
-                return_value={"found": False, "site": None, "match_type": None, "suggestions": []},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                return_value={"matched": False, "device_type": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
-                return_value={"found": False, "platform": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
-            ),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_device_role),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType", MagicMock()),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site", mock_site),
-            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", mock_vm),
-            patch("ipam.models.IPAddress", mock_ip),
-        ]
-        return patches
-
-    def test_minimal_device_validation(self):
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "router01",
-            "sysName": "router01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
-            "type": "network",
-        }
-        api = self._make_api()
-
-        patches = self._patch_all_db()
-        try:
-            for p in patches:
-                p.start()
-            result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result is not None
-        assert "status" in result or "is_ready" in result
-
-    def test_vm_import_uses_correct_model(self):
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "vm01",
-            "sysName": "vm01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
-            "type": "network",
-        }
-        api = self._make_api()
-
-        patches = self._patch_all_db()
-        mock_vm_cls = MagicMock()
-        mock_vm_cls.objects.filter.return_value.first.return_value = None
-        try:
-            for p in patches:
-                p.start()
-            # Override with a controlled mock so we can assert the VM model was consulted
-            with patch("virtualization.models.VirtualMachine", mock_vm_cls):
-                result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result is not None
-        assert result.get("import_as_vm") is True
-        # Verify VirtualMachine model (not Device) was used for the hostname lookup
-        mock_vm_cls.objects.filter.assert_called()
-
-    def test_existing_device_detected(self):
-        """When device with same librenms_id exists, sets existing_device in result."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "router01",
-            "sysName": "router01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
-        }
-        api = self._make_api()
-
-        existing = MagicMock()
-        existing.name = "router01"
-        existing.serial = ""
-
-        patches = self._patch_all_db()
-        # Override find_by_librenms_id: return None for VM, existing for Device
-        try:
-            for p in patches:
-                p.start()
-
-            def _find_side_effect(model, device_id, server_key):
-                from virtualization.models import VirtualMachine as VM
-
-                return None if model is VM else existing
-
-            with patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
-                side_effect=_find_side_effect,
-            ):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result.get("existing_device") is existing
-
-
-class TestImportSingleDevice:
-    """Tests for import_single_device (lines 689-910)."""
-
-    def _make_libre_device(self):
-        return {
-            "device_id": 1,
-            "hostname": "router01",
-            "sysName": "router01",
-            "hardware": "Cisco",
-            "serial": "SN001",
-            "os": "ios",
-            "status": 1,
-            "location": "-",
-        }
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
-    def test_missing_site_returns_error(self, MockAPI):
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-
-        libre_device = self._make_libre_device()
-
-        validation = {
-            "existing_device": None,
-            "site": {"found": False, "site": None},
-            "device_type": {"matched": True, "device_type": MagicMock()},
-            "device_role": {"found": True, "role": MagicMock()},
-            "platform": {"found": False, "platform": None},
-            "rack": {"rack": None},
-        }
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Rack"),
-        ):
-            result = import_single_device(1, server_key="default", validation=validation, libre_device=libre_device)
-        assert result["success"] is False
-        assert "Site" in result["error"]
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
-    def test_missing_device_type_returns_error(self, MockAPI):
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-
-        libre_device = self._make_libre_device()
-
-        validation = {
-            "existing_device": None,
-            "site": {"found": True, "site": MagicMock()},
-            "device_type": {"matched": False, "device_type": None},
-            "device_role": {"found": True, "role": MagicMock()},
-            "platform": {"found": False, "platform": None},
-            "rack": {"rack": None},
-        }
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Rack"),
-        ):
-            result = import_single_device(1, server_key="default", validation=validation, libre_device=libre_device)
-        assert result["success"] is False
-        assert "device type" in result["error"].lower()
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
-    def test_missing_device_role_returns_error(self, MockAPI):
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-
-        libre_device = self._make_libre_device()
-
-        validation = {
-            "existing_device": None,
-            "site": {"found": True, "site": MagicMock()},
-            "device_type": {"matched": True, "device_type": MagicMock()},
-            "device_role": {"found": False, "role": None},
-            "platform": {"found": False, "platform": None},
-            "rack": {"rack": None},
-        }
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Rack"),
-        ):
-            result = import_single_device(1, server_key="default", validation=validation, libre_device=libre_device)
-        assert result["success"] is False
-        assert "role" in result["error"].lower()
-
-
-class TestValidateDeviceForImportEdgeCases:
-    """Additional edge case tests to cover missing lines."""
-
-    def _make_api(self):
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        return api
-
-    def _start_patches(self, extra_patches=None):
-        mock_device = MagicMock()
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device.objects.all.return_value = []
-
-        mock_vm = MagicMock()
-        mock_vm.objects.filter.return_value.first.return_value = None
-
-        mock_cluster = MagicMock()
-        mock_cluster.objects.all.return_value = []
-
-        mock_role = MagicMock()
-        mock_role.objects.all.return_value = []
-
-        mock_ip = MagicMock()
-        mock_ip.objects.filter.return_value.first.return_value = None
-
-        mock_site = MagicMock()
-        mock_site.objects.all.return_value = []
-
-        patches = [
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
-                return_value={"found": False, "site": None, "match_type": None, "suggestions": []},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                return_value={"matched": False, "device_type": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
-                return_value={"found": False, "platform": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
-            ),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType", MagicMock()),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site", mock_site),
-            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", mock_vm),
-            patch("ipam.models.IPAddress", mock_ip),
-        ]
-        if extra_patches:
-            patches.extend(extra_patches)
-        started = []
-        for p in patches:
-            started.append(p.start())
-        return patches, started
-
-    def _stop_patches(self, patches):
-        for p in reversed(patches):
-            p.stop()
-
-    def test_vm_librenms_id_not_int_falls_back(self):
-        """Lines 288-290: librenms_id ValueError/TypeError in VM check."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": None,
-            "hostname": "vm01",
-            "sysName": "vm01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
-        }
-        api = self._make_api()
-
-        patches, _ = self._start_patches()
-        try:
-            result = validate_device_for_import(libre_device, api=api)
-        finally:
-            self._stop_patches(patches)
-
-        assert result is not None
-
-    def test_vm_with_legacy_librenms_id_flags_migration(self):
-        """Line 307: existing VM has legacy bare-int librenms_id → flags migration."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 42,
-            "hostname": "vm01",
-            "sysName": "vm01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
-        }
-        api = self._make_api()
-
-        existing_vm = MagicMock()
-        existing_vm.name = "vm01"
-        existing_vm.serial = ""
-        existing_vm.custom_field_data = {"librenms_id": 42}  # Legacy bare-int
-
-        patches, _ = self._start_patches()
-        try:
-            with patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id") as mock_find:
-                mock_find.side_effect = [existing_vm, None]  # VM found, then no Device
-                result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
-        finally:
-            self._stop_patches(patches)
-
-        assert result.get("existing_device") is existing_vm
-        assert result.get("librenms_id_needs_migration") is True
-
-    def test_vc_detection_called_for_device_with_api(self):
-        """Lines 616-638: VC detection executed when include_vc_detection=True and api provided."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "sw01",
-            "sysName": "sw01",
-            "hardware": "Cisco",
-            "serial": "SN001",
-            "os": "ios",
-            "location": "-",
-        }
-        api = self._make_api()
-
-        vc_data = {"is_stack": True, "member_count": 2, "members": [{"serial": "SN001"}, {"serial": "SN002"}]}
-
-        patches, _ = self._start_patches(
-            [
-                patch(
-                    "netbox_librenms_plugin.import_utils.device_operations.update_vc_member_suggested_names",
-                    return_value=vc_data,
-                ),
-            ]
+class TestOobNormalization:
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("leaf01-oob-idrac9", "idrac"),
+            ("leaf01-oob", "oob"),
+            ("server-ilo5", "ilo"),
+            ("Cisco-CIMC", "cimc"),
+            ("normal-router", None),
+            ("", None),
+        ],
+    )
+    def test_name_detection_prefers_specific_controller_types(self, name, expected):
+        from netbox_librenms_plugin.import_utils.device_operations import _detect_oob_type_from_name
+
+        assert _detect_oob_type_from_name(name) == expected
+
+    @pytest.mark.parametrize(
+        ("os_name", "hardware", "expected"),
+        [
+            ("oob", "iDRAC9", "idrac"),
+            ("drac9", "iDRAC9", "drac"),
+            ("", "Cisco CIMC", "cimc"),
+            ("dracut", "ipmitool", None),
+            ("oob", "", "oob"),
+        ],
+    )
+    def test_payload_normalization_uses_whole_tokens(self, os_name, hardware, expected):
+        from netbox_librenms_plugin.constants import normalize_oob_type
+
+        assert normalize_oob_type(os_name, hardware) == expected
+
+
+class TestLinkNotes:
+    @pytest.mark.parametrize(
+        ("link", "expected"),
+        [
+            ({"host_id": 42, "oob_id": None}, "currently linked to LibreNMS device #42"),
+            ({"host_id": None, "oob_id": 7}, "currently linked to LibreNMS as an OOB controller"),
+            ({"host_id": 42, "oob_id": 7}, "currently linked to LibreNMS device #42"),
+            ({"host_id": None, "oob_id": None}, "not linked to LibreNMS"),
+            (None, "not linked to LibreNMS"),
+        ],
+    )
+    def test_link_note_contract(self, link, expected):
+        from netbox_librenms_plugin.import_utils.device_operations import _describe_link_note
+
+        assert _describe_link_note(link) == expected
+
+    @pytest.mark.django_db
+    def test_existing_link_description_reads_real_custom_field_data(self):
+        from netbox_librenms_plugin.import_utils.device_operations import _describe_existing_librenms_link
+
+        device = make_device(
+            "described-link",
+            librenms_cf={SERVER_KEY: {"id": "42", "oob": {"id": "7", "type": "idrac"}}},
         )
-        # Override get_virtual_chassis_data to return VC stack
 
-        try:
-            with patch(
-                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data", return_value=vc_data
-            ) as mock_get_vc:
-                with patch(
-                    "netbox_librenms_plugin.import_utils.device_operations.update_vc_member_suggested_names",
-                    return_value=vc_data,
-                ) as mock_update_vc:
-                    result = validate_device_for_import(libre_device, api=api)
-        finally:
-            self._stop_patches(patches)
-
-        assert result["virtual_chassis"] is not None
-        assert result["virtual_chassis"]["is_stack"] is True
-        assert result["virtual_chassis"]["member_count"] == 2
-        mock_get_vc.assert_called_once()
-        mock_update_vc.assert_called_once()
-
-    def test_no_vc_detection_when_disabled(self):
-        """VC detection skipped when include_vc_detection=False."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "sw01",
-            "sysName": "sw01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
+        assert _describe_existing_librenms_link(device, SERVER_KEY) == {
+            "host_id": 42,
+            "oob_id": 7,
+            "oob_type": "idrac",
         }
-        api = self._make_api()
 
-        patches, _ = self._start_patches()
-        try:
-            with patch("netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data") as mock_vc:
-                validate_device_for_import(libre_device, api=api, include_vc_detection=False)
-                mock_vc.assert_not_called()
-        finally:
-            self._stop_patches(patches)
 
-    def test_chassis_inventory_fallback_used(self):
-        """Lines 534-539: Chassis inventory fallback when hardware doesn't match."""
+@pytest.mark.django_db
+class TestChassisDeviceTypeMatch:
+    def _device_type(self, tag, *, model, part_number=""):
+        from dcim.models import DeviceType, Manufacturer
+
+        manufacturer, _ = Manufacturer.objects.get_or_create(
+            name=f"Chassis manufacturer {tag}",
+            slug=f"chassis-manufacturer-{tag}",
+        )
+        return DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model=model,
+            slug=f"chassis-type-{tag}",
+            part_number=part_number,
+        )
+
+    def test_real_inventory_name_matches_a_real_device_type(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
 
-        api = MagicMock()
-        mock_dt = MagicMock()
-
-        api.get_inventory_filtered.return_value = (
-            True,
-            [{"entPhysicalName": "MX480", "entPhysicalModelName": "Juniper MX480"}],
+        api, server = librenms_api
+        matched = self._device_type("name", model="MX480", part_number="CHAS-BP-MX480-S")
+        server.register(
+            "/api/v0/inventory/5101",
+            {
+                "status": "ok",
+                "inventory": [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalName": "CHAS-BP-MX480-S",
+                        "entPhysicalModelName": "710-017414",
+                    }
+                ],
+            },
         )
 
-        with patch(
-            "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type"
-        ) as mock_match:
-            mock_match.side_effect = [
-                {"matched": False},
-                {"matched": True, "device_type": mock_dt, "match_type": "exact"},
-            ]
-            result = _try_chassis_device_type_match(api, 1)
+        result = _try_chassis_device_type_match(api, 5101)
 
-        # Should have found a match via model name fallback
-        assert result is not None
-        assert mock_match.call_count == 2
         assert result["matched"] is True
-        assert result.get("device_type") is mock_dt
+        assert result["device_type"] == matched
+        assert result["match_type"] == "chassis"
+        assert result["chassis_model"] == "CHAS-BP-MX480-S"
 
-    def test_primary_ip_match_check(self):
-        """Lines 474-489: IP address match detection."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+    def test_inventory_model_is_used_after_an_unmatched_name(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
 
-        libre_device = {
-            "device_id": 1,
-            "hostname": "router01",
-            "sysName": "router01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
-            "ip": "192.168.1.1",
-        }
-        api = self._make_api()
+        api, server = librenms_api
+        matched = self._device_type("model", model="Model 710-017414")
+        server.register(
+            "/api/v0/inventory/5102",
+            {
+                "status": "ok",
+                "inventory": [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalName": "Unspecified",
+                        "entPhysicalModelName": "Model 710-017414",
+                    }
+                ],
+            },
+        )
 
-        mock_device = MagicMock()
-        mock_device.name = "existing_router"
+        result = _try_chassis_device_type_match(api, 5102)
 
-        mock_ip = MagicMock()
-        mock_ip.assigned_object.device = mock_device
-        mock_ip_model = MagicMock()
-        mock_ip_model.objects.filter.return_value.first.return_value = mock_ip
+        assert result["device_type"] == matched
+        assert result["chassis_model"] == "Model 710-017414"
 
-        patches, _ = self._start_patches()
-        try:
-            with patch("ipam.models.IPAddress", mock_ip_model):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            self._stop_patches(patches)
+    @pytest.mark.parametrize("status", [404, 500])
+    def test_inventory_lookup_failure_returns_no_match(self, librenms_api, status):
+        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
 
-        # The IP match should set existing_device to the mock device and match_type to "primary_ip"
-        assert result.get("existing_device") is mock_device
-        assert result.get("existing_match_type") == "primary_ip"
+        api, server = librenms_api
+        server.register("/api/v0/inventory/5103", {"status": "error"}, status=status)
 
-    def test_no_hostname_adds_issue(self):
-        """When hostname and sysName are both empty, _determine_device_name falls back to device-{id}."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        assert _try_chassis_device_type_match(api, 5103) is None
 
-        libre_device = {
-            "device_id": 1,
-            "hostname": "",
-            "sysName": "",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "-",
-        }
-        api = self._make_api()
+    def test_empty_and_placeholder_inventory_have_no_match(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
 
-        patches, _ = self._start_patches()
-        try:
-            result = validate_device_for_import(libre_device, api=api)
-        finally:
-            self._stop_patches(patches)
+        api, server = librenms_api
+        server.register(
+            "/api/v0/inventory/5104",
+            {
+                "status": "ok",
+                "inventory": [{"entPhysicalName": "-", "entPhysicalModelName": "BUILTIN"}],
+            },
+        )
 
-        # _determine_device_name always falls back to "device-{id}" so
-        # "Device has no hostname" issue is not expected here.
-        assert isinstance(result, dict)
-        assert "Device has no hostname" not in result.get("issues", [])
-        assert result.get("resolved_name", "").startswith("device-")
+        assert _try_chassis_device_type_match(api, 5104) is None
+
+    def test_ambiguous_inventory_model_has_no_match(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
+
+        api, server = librenms_api
+        self._device_type("ambiguous-a", model="Shared chassis model")
+        self._device_type("ambiguous-b", model="Shared chassis model")
+        server.register(
+            "/api/v0/inventory/5105",
+            {
+                "status": "ok",
+                "inventory": [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalName": "Unspecified",
+                        "entPhysicalModelName": "Shared chassis model",
+                    }
+                ],
+            },
+        )
+
+        assert _try_chassis_device_type_match(api, 5105) is None
 
 
-class TestValidateDeviceMoreEdgeCases:
-    """More edge case tests for validate_device_for_import."""
+@pytest.mark.django_db
+class TestDeviceFetching:
+    def test_live_device_lookup_uses_the_real_http_client(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import get_librenms_device_by_id
 
-    def _make_api(self):
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        return api
+        api, server = librenms_api
+        server.device_info_response(device_id=5201, hostname="live-device")
 
-    def _get_patches(self):
-        mock_device = MagicMock()
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device.objects.all.return_value = []
+        result = get_librenms_device_by_id(api, 5201, use_cache=False)
 
-        mock_vm = MagicMock()
-        mock_vm.objects.filter.return_value.first.return_value = None
+        assert result["device_id"] == 5201
+        assert result["hostname"] == "live-device"
 
-        mock_site = MagicMock()
-        mock_site.objects.all.return_value = []
+    @pytest.mark.parametrize("status", [404, 500])
+    def test_absent_or_failed_live_lookup_returns_none(self, librenms_api, status):
+        from netbox_librenms_plugin.import_utils.device_operations import get_librenms_device_by_id
 
-        mock_cluster = MagicMock()
-        mock_cluster.objects.all.return_value = []
-        mock_role = MagicMock()
-        mock_role.objects.all.return_value = []
-        mock_ip = MagicMock()
-        mock_ip.objects.filter.return_value.first.return_value = None
+        api, server = librenms_api
+        server.register(
+            "/api/v0/devices/5202",
+            {"status": "error"},
+            status=status,
+        )
 
-        return [
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
-                return_value={"found": False, "site": None, "match_type": None, "suggestions": []},
+        assert get_librenms_device_by_id(api, 5202, use_cache=False) is None
+
+    def test_prefetched_cache_is_first_and_rejects_a_mis_keyed_row(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        api, server = librenms_api
+        prefetched = {5203: _device_payload(5203, hostname="prefetched")}
+        assert fetch_device_with_cache(5203, api, libre_devices_cache=prefetched)["hostname"] == "prefetched"
+
+        server.device_info_response(device_id=5204, hostname="live-after-miskey")
+        mis_keyed = {5204: _device_payload(9999, hostname="wrong")}
+        assert fetch_device_with_cache(5204, api, libre_devices_cache=mis_keyed)["hostname"] == "live-after-miskey"
+
+    def test_django_cache_precedes_http_and_is_server_scoped(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        api, _server = librenms_api
+        cached = _device_payload(5205, hostname="django-cache")
+        cache.set(get_import_device_cache_key(5205, SERVER_KEY), cached, 300)
+
+        assert fetch_device_with_cache(5205, api, server_key=SERVER_KEY) == cached
+        assert cache.get(get_import_device_cache_key(5205, "other-server")) is None
+
+    def test_http_fallback_populates_the_import_cache(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        api, server = librenms_api
+        server.device_info_response(device_id=5206, hostname="cache-after-live")
+
+        result = fetch_device_with_cache(5206, api)
+
+        assert result["hostname"] == "cache-after-live"
+        assert cache.get(get_import_device_cache_key(5206, SERVER_KEY)) == result
+
+
+@pytest.mark.django_db
+class TestHostIpResolution:
+    def test_single_real_interface_owner_is_resolved(self):
+        from netbox_librenms_plugin.import_utils.device_operations import resolve_device_by_host_ip
+
+        device = make_device("host-ip-single")
+        ip_on(device, "198.18.10.9/24", "management")
+
+        resolved, ambiguous, matching = resolve_device_by_host_ip("198.18.10.9")
+
+        assert resolved == device
+        assert ambiguous is False
+        assert matching.count() == 1
+
+    def test_device_and_oob_owners_for_the_same_host_fail_closed(self):
+        from netbox_librenms_plugin.import_utils.device_operations import resolve_device_by_host_ip
+
+        first = make_device("host-ip-first")
+        ip_on(first, "198.18.10.10/24", "management")
+        second = make_device("host-ip-second")
+        second.oob_ip = make_ip("198.18.10.10/32")
+        second.save()
+
+        resolved, ambiguous, _matching = resolve_device_by_host_ip("198.18.10.10")
+
+        assert resolved is None
+        assert ambiguous is True
+
+    def test_unassigned_address_has_no_owner(self):
+        from netbox_librenms_plugin.import_utils.device_operations import resolve_device_by_host_ip
+
+        make_ip("198.18.10.11/32")
+
+        resolved, ambiguous, matching = resolve_device_by_host_ip("198.18.10.11")
+
+        assert resolved is None
+        assert ambiguous is False
+        assert matching.count() == 1
+
+
+@pytest.mark.django_db
+class TestSerialRoleDecision:
+    def _role(self, device, payload):
+        from netbox_librenms_plugin.import_utils.device_operations import (
+            _describe_existing_librenms_link,
+            _detect_serial_match_role,
+        )
+        from netbox_librenms_plugin.utils import normalize_serial
+
+        link = _describe_existing_librenms_link(device, SERVER_KEY)
+        return _detect_serial_match_role(
+            device,
+            link,
+            payload["hostname"],
+            normalize_serial(payload.get("serial")),
+            payload,
+            SERVER_KEY,
+        )
+
+    def test_same_name_unlinked_device_is_a_plain_link(self):
+        device = make_device("serial-link")
+        result = self._role(device, _device_payload(5301, hostname=device.name, sysName=device.name))
+
+        assert result["serial_action"] == "link"
+        assert result["oob_candidate"] is None
+        assert any("not linked" in warning for warning in result["warnings"])
+
+    def test_incoming_controller_is_an_oob_candidate(self):
+        device = make_device("serial-host")
+        result = self._role(
+            device,
+            _device_payload(
+                5302,
+                hostname="serial-host-idrac",
+                sysName="serial-host-idrac",
+                hardware="iDRAC9",
+                os="idrac",
             ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                return_value={"matched": False, "device_type": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
-                return_value={"found": False, "platform": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
-            ),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType", MagicMock()),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site", mock_site),
-            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", mock_vm),
-            patch("ipam.models.IPAddress", mock_ip),
-        ]
+        )
 
-    def test_serial_dash_normalized(self):
-        """Line 346: serial '-' is normalized to empty string."""
+        assert result["serial_action"] == "oob_candidate"
+        assert result["oob_candidate"]["device"] == device
+        assert result["oob_candidate"]["type"] == "idrac"
+
+    def test_existing_named_controller_can_be_promoted_to_host(self):
+        device = make_device("serial-leaf-idrac", librenms_cf={SERVER_KEY: 99})
+        result = self._role(
+            device,
+            _device_payload(7, hostname="serial-leaf", sysName="serial-leaf", hardware="server"),
+        )
+
+        assert result["serial_action"] == "promote_to_host"
+        assert result["promote_to_host"]["existing_libre_id"] == 99
+        assert result["serial_role_choice_available"] is True
+
+    def test_existing_oob_link_turns_repeat_controller_into_information(self):
+        device = make_device(
+            "serial-linked-oob",
+            librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 99, "type": "idrac"}}},
+        )
+        result = self._role(
+            device,
+            _device_payload(7, hostname="serial-linked-oob-idrac", hardware="iDRAC9", os="idrac"),
+        )
+
+        assert result["serial_action"] == "oob_already_linked"
+        assert any("already has an OOB controller" in warning for warning in result["warnings"])
+
+    def test_unclassified_hostname_difference_is_a_reinstall_warning(self):
+        device = make_device("serial-old-name")
+        result = self._role(
+            device,
+            _device_payload(5303, hostname="serial-new-name", sysName="serial-new-name", hardware="server"),
+        )
+
+        assert result["serial_action"] == "hostname_differs"
+        assert result["serial_role_choice_available"] is False
+
+    def test_weak_role_signal_defaults_to_the_less_destructive_oob_action(self):
+        device = make_device("serial-role-neutral", librenms_cf={SERVER_KEY: 99})
+
+        result = self._role(
+            device,
+            _device_payload(5304, hostname="serial-role-renamed", hardware="server", os="linux"),
+        )
+
+        assert result["serial_action"] == "oob_candidate"
+        assert result["serial_role_choice_available"] is True
+
+    def test_unlinked_named_controller_can_only_be_an_oob_candidate(self):
+        device = make_device("serial-role-bmc")
+
+        result = self._role(
+            device,
+            _device_payload(5305, hostname="serial-role-host", hardware="server", os="linux"),
+        )
+
+        assert result["serial_action"] == "oob_candidate"
+        assert result["serial_role_choice_available"] is False
+
+
+@pytest.mark.django_db
+class TestValidateDeviceForImport:
+    def _validate(self, payload, **kwargs):
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
-        existing = MagicMock()
-        existing.name = "router01"
-        existing.serial = "SN001"
-        existing.custom_field_data = {"librenms_id": {"default": 1}}
-        existing.virtual_chassis = MagicMock()  # Has VC
-        existing.vc_position = 1
+        kwargs.setdefault("include_vc_detection", False)
+        return validate_device_for_import(payload, api=None, server_key=SERVER_KEY, **kwargs)
 
-        libre_device = {
-            "device_id": 1,
-            "hostname": "router01",
-            "sysName": "router01",
-            "hardware": "-",
-            "serial": "-",  # Dash serial
-            "os": "-",
-            "location": "",
+    def test_result_key_contract_and_new_device_blockers(self):
+        result = self._validate(_device_payload(5401, hardware="-", location="-", serial="-", os="-"))
+
+        assert set(result) == {
+            "is_ready",
+            "can_import",
+            "import_as_vm",
+            "resolved_name",
+            "existing_device",
+            "existing_match_type",
+            "ambiguous_librenms_id",
+            "serial_action",
+            "serial_confirmed",
+            "serial_duplicate",
+            "serial_conflict",
+            "serial_role_choice_available",
+            "librenms_id_needs_migration",
+            "oob_candidate",
+            "existing_librenms_link",
+            "merge_candidates",
+            "name_matches",
+            "name_sync_available",
+            "suggested_name",
+            "device_type_mismatch",
+            "naming_criteria",
+            "virtual_chassis",
+            "issues",
+            "warnings",
+            "site",
+            "region",
+            "device_type",
+            "device_role",
+            "cluster",
+            "vm_placement",
+            "platform",
+            "rack",
+            "location",
+            "tenant",
         }
-        api = self._make_api()
-
-        patches = self._get_patches()
-        try:
-            for p in patches:
-                p.start()
-
-            # Return None for VM, existing for Device
-            def _device_side_effect(model, device_id, server_key):
-                from virtualization.models import VirtualMachine as VM
-
-                return None if model is VM else existing
-
-            with patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
-                side_effect=_device_side_effect,
-            ):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result is not None
-        # serial '-' must be treated as empty — no serial mismatch should be flagged
-        assert result.get("serial_action") is None
-
-    def test_serial_conflict_with_existing_device(self):
-        """Lines 373-375: incoming serial already used by another device."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        existing = MagicMock()
-        existing.name = "router01"
-        existing.serial = "OLD_SN"  # Different from incoming
-        existing.custom_field_data = {"librenms_id": {"default": 1}}
-        existing.virtual_chassis = None
-
-        conflict_device = MagicMock()
-        conflict_device.name = "router02"
-        conflict_device.pk = 99
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "router01",
-            "sysName": "router01",
-            "hardware": "-",
-            "serial": "NEW_SN",  # Different serial
-            "os": "-",
-            "location": "",
-        }
-        api = self._make_api()
-
-        mock_device = MagicMock()
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
-
-        patches = self._get_patches()
-        try:
-            for p in patches:
-                p.start()
-
-            # Return None for VM check, existing for Device check
-            def _find_side_effect(model, device_id, server_key):
-                from virtualization.models import VirtualMachine as VM
-
-                if model is VM:
-                    return None
-                return existing
-
-            with (
-                patch(
-                    "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
-                    side_effect=_find_side_effect,
-                ),
-                patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
-            ):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result.get("serial_action") == "conflict"
-
-    def test_both_vm_and_device_with_same_hostname(self):
-        """Lines 395-399: both VM and Device have same hostname - ambiguous match."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "server01",
-            "sysName": "server01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "",
-        }
-        api = self._make_api()
-
-        existing_vm = MagicMock()
-        existing_vm.name = "server01"
-        existing_device = MagicMock()
-        existing_device.name = "server01"
-
-        mock_vm = MagicMock()
-        mock_vm.objects.filter.return_value.first.return_value = existing_vm
-
-        mock_device = MagicMock()
-        mock_device.objects.filter.return_value.first.return_value = existing_device
-        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device.objects.all.return_value = []
-
-        mock_site = MagicMock()
-        mock_site.objects.all.return_value = []
-
-        patches = self._get_patches()
-        try:
-            for p in patches:
-                p.start()
-            with (
-                patch("virtualization.models.VirtualMachine", mock_vm),
-                patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
-                patch("netbox_librenms_plugin.import_utils.device_operations.Site", mock_site),
-            ):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        # Ambiguous - should have a warning about both existing
-        assert result is not None
-        assert any("VM" in w and "Device" in w for w in result.get("warnings", []))
-
-    def test_existing_vm_by_hostname(self):
-        """Lines 406-413: VM found by hostname (no Device match)."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "vm01",
-            "sysName": "vm01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "",
-        }
-        api = self._make_api()
-
-        existing_vm = MagicMock()
-        existing_vm.name = "vm01"
-        existing_vm.custom_field_data = {}
-
-        mock_vm = MagicMock()
-        mock_vm.objects.filter.return_value.first.return_value = existing_vm  # VM found
-
-        mock_device = MagicMock()
-        mock_device.objects.filter.return_value.first.return_value = None  # No device match
-        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device.objects.all.return_value = []
-
-        patches = self._get_patches()
-        try:
-            for p in patches:
-                p.start()
-            with (
-                patch("virtualization.models.VirtualMachine", mock_vm),
-                patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
-            ):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result.get("existing_device") is existing_vm
-        assert result.get("existing_match_type") == "hostname"
-
-    def test_vc_detection_exception_handled(self):
-        """Lines 634-636: VC detection exception is caught and stored."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "sw01",
-            "sysName": "sw01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "",
-        }
-        api = self._make_api()
-
-        patches = self._get_patches()
-        try:
-            for p in patches:
-                p.start()
-            with patch(
-                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                side_effect=Exception("VC error"),
-            ):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result is not None
-        assert "detection_error" in result.get("virtual_chassis", {})
-
-
-class TestImportSingleDeviceEdgeCases:
-    """Tests for import_single_device edge cases (lines 737-739, 777-789)."""
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
-    def test_no_libre_device_api_failure(self, MockAPI):
-        """Lines 737-739: libre_device=None and API fails → returns error dict."""
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        mock_api.get_device_info.return_value = (False, None)
-        MockAPI.return_value = mock_api
-
-        result = import_single_device(device_id=1, libre_device=None, server_key="default")
-        assert result["success"] is False
-        assert "Failed to retrieve device" in result.get("error", "")
-
-    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
-    def test_manual_mappings_are_applied(self, MockAPI):
-        """Lines 777-789: manual_mappings override site/device_type/device_role."""
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        MockAPI.return_value = mock_api
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "router01",
-            "hardware": "Cisco",
-            "serial": "SN001",
-            "os": "ios",
-            "location": "",
-        }
-        validation = {
-            "is_ready": True,
-            "can_import": True,
-            "existing_device": None,
-            "import_as_vm": False,
-            "site": {"found": True, "site": None},
-            "device_type": {"found": True, "device_type": None},
-            "device_role": {"found": False, "role": None},
-            "platform": {"found": False, "platform": None},
-            "rack": {"rack": None},
-            "issues": [],
-        }
-
-        mock_site = MagicMock()
-        mock_site.pk = 1
-        mock_dt = MagicMock()
-        mock_dt.pk = 1
-        mock_role = MagicMock()
-        mock_role.pk = 1
-
-        manual_mappings = {"site_id": 1, "device_type_id": 1, "device_role_id": 1}
-
-        mock_tx = MagicMock()
-        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-
-        with patch("netbox_librenms_plugin.import_utils.device_operations.transaction", mock_tx):
-            with patch("netbox_librenms_plugin.import_utils.device_operations.Site") as mock_site_cls:
-                mock_site_cls.objects.filter.return_value.first.return_value = mock_site
-                with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType") as mock_dt_cls:
-                    mock_dt_cls.objects.filter.return_value.first.return_value = mock_dt
-                    with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole") as mock_role_cls:
-                        mock_role_cls.objects.filter.return_value.first.return_value = mock_role
-                        with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as mock_rack_cls:
-                            mock_rack_cls.objects.select_related.return_value.filter.return_value.first.return_value = (
-                                None
-                            )
-                            with patch(
-                                "netbox_librenms_plugin.import_utils.device_operations.Device"
-                            ) as mock_device_cls:
-                                mock_device_cls.objects.filter.return_value.first.return_value = None
-                                mock_new_device = MagicMock()
-                                mock_device_cls.return_value = mock_new_device
-                                mock_new_device.full_clean.return_value = None
-                                mock_new_device.save.return_value = None
-                                mock_new_device.pk = 99
-                                with patch(
-                                    "netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"
-                                ) as mock_set_id:
-                                    with patch(
-                                        "netbox_librenms_plugin.import_utils.device_operations.validate_device_for_import",
-                                        return_value=validation,
-                                    ):
-                                        with patch(
-                                            "netbox_librenms_plugin.import_utils.device_operations.timezone"
-                                        ) as mock_tz:
-                                            mock_tz.now.return_value.strftime.return_value = "2024-01-01 00:00:00 UTC"
-                                            result = import_single_device(
-                                                device_id=1,
-                                                libre_device=libre_device,
-                                                validation=validation,
-                                                manual_mappings=manual_mappings,
-                                                server_key="default",
-                                            )
-        # Should have succeeded
-        assert result.get("success") is True
-        mock_new_device.full_clean.assert_called_once()
-        mock_new_device.save.assert_called_once()
-        mock_set_id.assert_called_once()
-        # Verify Device was constructed with the resolved site, device_type, and role
-        mock_device_cls.assert_called_once()
-        call_kwargs = mock_device_cls.call_args[1]
-        assert call_kwargs["site"] is mock_site
-        assert call_kwargs["device_type"] is mock_dt
-        assert call_kwargs["role"] is mock_role
-
-
-class TestImportSingleDeviceMoreEdgeCases:
-    """Tests for device_operations additional coverage (lines 539, 783-785, 789)."""
-
-    def _make_api(self):
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        return api
-
-    def _base_validation(self):
-        return {
-            "is_ready": True,
-            "can_import": True,
-            "existing_device": None,
-            "import_as_vm": False,
-            "site": {"found": True, "site": MagicMock()},
-            "device_type": {"found": True, "device_type": MagicMock()},
-            "device_role": {"found": True, "role": MagicMock()},
-            "platform": {"found": False, "platform": None},
-            "rack": {"rack": None},
-            "issues": [],
-        }
-
-    def _mock_tx(self):
-        mock_tx = MagicMock()
-        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-        return mock_tx
-
-    def test_platform_manual_mapping(self):
-        """Lines 783-785: manual_mappings with platform_id applied."""
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-
-        libre_device = {"device_id": 1, "hostname": "r01", "serial": "-", "hardware": "-", "os": "-", "location": ""}
-        validation = self._base_validation()
-        manual_mappings = {"platform_id": 3}
-
-        mock_platform = MagicMock()
-        mock_new_device = MagicMock()
-        mock_new_device.full_clean.return_value = None
-        mock_new_device.save.return_value = None
-        mock_new_device.pk = 10
-
-        with patch("netbox_librenms_plugin.import_utils.device_operations.transaction", self._mock_tx()):
-            with patch("netbox_librenms_plugin.import_utils.device_operations.Site") as MockSite:
-                MockSite.objects.filter.return_value.first.return_value = MagicMock()
-                with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType") as MockDT:
-                    MockDT.objects.filter.return_value.first.return_value = MagicMock()
-                    with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole") as MockRole:
-                        MockRole.objects.filter.return_value.first.return_value = MagicMock()
-                        with patch("netbox_librenms_plugin.import_utils.device_operations.Device") as MockDevice:
-                            MockDevice.objects.filter.return_value.first.return_value = None
-                            MockDevice.return_value = mock_new_device
-                            with patch("dcim.models.Platform") as MockPlatform:
-                                MockPlatform.objects.filter.return_value.first.return_value = mock_platform
-                                with patch(
-                                    "netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"
-                                ):
-                                    with patch(
-                                        "netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"
-                                    ) as MockAPI:
-                                        MockAPI.return_value = self._make_api()
-                                        with patch(
-                                            "netbox_librenms_plugin.import_utils.device_operations.timezone"
-                                        ) as mock_tz:
-                                            mock_tz.now.return_value.strftime.return_value = "2024-01-01"
-                                            result = import_single_device(
-                                                device_id=1,
-                                                libre_device=libre_device,
-                                                validation=validation,
-                                                manual_mappings=manual_mappings,
-                                                server_key="default",
-                                            )
-
-        assert result.get("success") is True
-        # Verify that the platform was looked up with the correct ID and passed to Device()
-        MockPlatform.objects.filter.assert_called_with(id=manual_mappings["platform_id"])
-        assert MockDevice.call_args.kwargs.get("platform") is mock_platform
-
-    def test_rack_manual_mapping(self):
-        """Line 789: manual_mappings with rack_id applied."""
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-
-        libre_device = {"device_id": 1, "hostname": "r01", "serial": "-", "hardware": "-", "os": "-", "location": ""}
-        validation = self._base_validation()
-        manual_mappings = {"rack_id": 5}
-
-        mock_rack = MagicMock()
-        mock_new_device = MagicMock()
-        mock_new_device.full_clean.return_value = None
-        mock_new_device.save.return_value = None
-        mock_new_device.pk = 10
-
-        with patch("netbox_librenms_plugin.import_utils.device_operations.transaction", self._mock_tx()):
-            with patch("netbox_librenms_plugin.import_utils.device_operations.Site") as MockSite:
-                MockSite.objects.filter.return_value.first.return_value = MagicMock()
-                with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType") as MockDT:
-                    MockDT.objects.filter.return_value.first.return_value = MagicMock()
-                    with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole") as MockRole:
-                        MockRole.objects.filter.return_value.first.return_value = MagicMock()
-                        with patch("netbox_librenms_plugin.import_utils.device_operations.Device") as MockDevice:
-                            MockDevice.objects.filter.return_value.first.return_value = None
-                            MockDevice.return_value = mock_new_device
-                            with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack:
-                                MockRack.objects.select_related.return_value.filter.return_value.first.return_value = (
-                                    mock_rack
-                                )
-                                with patch(
-                                    "netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"
-                                ):
-                                    with patch(
-                                        "netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"
-                                    ) as MockAPI:
-                                        MockAPI.return_value = self._make_api()
-                                        with patch(
-                                            "netbox_librenms_plugin.import_utils.device_operations.timezone"
-                                        ) as mock_tz:
-                                            mock_tz.now.return_value.strftime.return_value = "2024-01-01"
-                                            result = import_single_device(
-                                                device_id=1,
-                                                libre_device=libre_device,
-                                                validation=validation,
-                                                manual_mappings=manual_mappings,
-                                                server_key="default",
-                                            )
-
-        assert result.get("success") is True
-        # Verify that the rack was looked up with the correct ID and passed to Device()
-        MockRack.objects.select_related.return_value.filter.assert_called_with(id=manual_mappings["rack_id"])
-        assert MockDevice.call_args.kwargs.get("rack") is mock_rack
-
-
-class TestValidateDeviceExistingVMGuard:
-    """Test that existing VMs skip device-specific validations (g06 fix)."""
-
-    def _make_api(self):
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        return api
-
-    def test_existing_vm_skips_device_validations(self):
-        """
-        When import_as_vm=True and existing_device is set, site/device_type/device_role
-        are marked found=True without running device-specific validation logic."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        existing_vm = MagicMock()
-        existing_vm.name = "vm01"
-        existing_vm.custom_field_data = {}
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "vm01",
-            "sysName": "vm01",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "unknown-location",
-        }
-        api = self._make_api()
-
-        mock_vm_model = MagicMock()
-        mock_vm_model.objects.filter.return_value.first.return_value = existing_vm
-
-        mock_device_model = MagicMock()
-        mock_device_model.objects.filter.return_value.first.return_value = None
-        mock_device_model.objects.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device_model.objects.all.return_value = []
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_model),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Cluster"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", new=mock_vm_model),
-            patch("ipam.models.IPAddress"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type"
-            ) as mock_match,
-            patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site") as mock_site,
-        ):
-            result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
-
-        # find_matching_site and match_librenms_hardware_to_device_type should NOT be called for VMs
-        mock_site.assert_not_called()
-        mock_match.assert_not_called()
-        # Device-specific fields are marked found=True for all VMs
-        assert result["site"]["found"] is True
+        assert result["existing_device"] is None
+        assert result["can_import"] is False
+        assert any("site" in issue.lower() for issue in result["issues"])
+        assert any("device type" in issue.lower() for issue in result["issues"])
+        assert any("role" in issue.lower() for issue in result["issues"])
+
+    def test_naming_criteria_ignores_a_non_string_sysname(self):
+        """naming_criteria reports the hostname source that the resolved name really came from."""
+        payload = _device_payload(5402, sysName=7, hostname="sw02", hardware="-", location="-", serial="-", os="-")
+
+        result = self._validate(payload, use_sysname=True)
+
+        assert result["resolved_name"] == "sw02"
+        criteria = result["naming_criteria"]
+        assert criteria["source"] == "hostname"
+        assert criteria["raw_sysname"] == ""
+        assert criteria["raw_hostname"] == "sw02"
+
+    def test_naming_criteria_reports_the_id_fallback_when_no_name_is_a_string(self):
+        """With no string name at all, both the resolved name and the source are the id fallback."""
+        payload = _device_payload(5403, sysName=7, hostname=None, hardware="-", location="-", serial="-", os="-")
+
+        result = self._validate(payload)
+
+        assert result["resolved_name"] == "device-5403"
+        assert result["naming_criteria"]["source"] == "device-5403"
+
+    def test_naming_criteria_reports_the_id_fallback_when_stripping_empties_the_name(self):
+        """A sysName that strips to nothing resolves to device-<id>, and the source must say so."""
+        payload = _device_payload(
+            5404, sysName=".example.test", hostname="", hardware="-", location="-", serial="-", os="-"
+        )
+
+        result = self._validate(payload, use_sysname=True, strip_domain=True)
+
+        assert result["resolved_name"] == "device-5404"
+        assert result["naming_criteria"]["source"] == "device-5404"
+
+    def test_real_site_type_roles_and_racks_are_exposed(self):
+        from dcim.models import Rack
+
+        infrastructure = make_device("validation-infrastructure")
+        rack = Rack.objects.create(name="Validation rack", site=infrastructure.site, status="active")
+        payload = _device_payload(
+            5402,
+            hostname="new-validation-device",
+            sysName="new-validation-device",
+            location=infrastructure.site.name,
+            hardware=infrastructure.device_type.model,
+        )
+
+        result = self._validate(payload)
+
+        assert result["site"]["site"] == infrastructure.site
+        assert result["device_type"]["device_type"] == infrastructure.device_type
+        assert infrastructure.role in result["device_role"]["available_roles"]
+        assert rack in result["rack"]["available_racks"]
+        assert result["rack"]["found"] is True
+        assert result["cluster"]["found"] is True
+        assert result["is_ready"] is False
+
+    def test_new_vm_skips_device_fields_and_requires_valid_placement(self):
+        cluster = make_cluster("Validation available cluster")
+
+        result = self._validate(_device_payload(5403), import_as_vm=True)
+
+        assert result["import_as_vm"] is True
+        assert result["site"]["found"] is False
         assert result["device_type"]["found"] is True
         assert result["device_role"]["found"] is True
-        # No cluster-required error for existing VMs
-        assert not any("Cluster must be" in i for i in result.get("issues", []))
+        assert cluster in result["cluster"]["available_clusters"]
+        assert result["vm_placement"] == {"method": "site", "found": False, "host_device": None}
+        assert any("VM placement" in issue for issue in result["issues"])
+
+    def test_device_id_match_forces_device_mode_and_surfaces_link(self):
+        device = make_device("validation-linked", librenms_cf={SERVER_KEY: 5404})
+        payload = _device_payload(
+            5404,
+            hostname=device.name,
+            sysName=device.name,
+            hardware=device.device_type.model,
+            location=device.site.name,
+            serial="-",
+        )
+
+        result = self._validate(payload, import_as_vm=True)
+
+        assert result["existing_device"] == device
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["import_as_vm"] is False
+        assert result["existing_librenms_link"]["host_id"] == 5404
+        assert result["name_matches"] is True
+
+    def test_vm_id_match_forces_vm_mode_and_populates_clusters(self):
+        vm = make_vm("validation-linked-vm")
+        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 5405}
+        vm.save()
+        payload = _device_payload(5405, hostname=vm.name, sysName=vm.name, serial="-")
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == vm
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["import_as_vm"] is True
+        assert vm.cluster in result["cluster"]["available_clusters"]
+
+    @pytest.mark.parametrize("legacy_value", [5406, " 5406 "])
+    def test_legacy_id_matches_and_requests_migration(self, legacy_value):
+        device = make_device("validation-legacy", librenms_cf=legacy_value)
+
+        result = self._validate(_device_payload(5406, hostname=device.name, sysName=device.name, serial="-"))
+
+        assert result["existing_device"] == device
+        assert result["librenms_id_needs_migration"] is True
+
+    def test_ambiguous_device_ids_are_terminal(self):
+        first = make_device("validation-ambiguous-id-a", librenms_cf={SERVER_KEY: 5407})
+        second = make_device("validation-ambiguous-id-b", librenms_cf={SERVER_KEY: 5407})
+
+        result = self._validate(_device_payload(5407, hostname="unmatched-ambiguous", serial="-"))
+
+        assert first != second
+        assert result["existing_device"] is None
+        assert result["ambiguous_librenms_id"] is True
+        assert result["existing_match_type"] == "ambiguous_librenms_id"
+        assert len(result["issues"]) == 1
+        assert result["can_import"] is False
+
+    def test_cross_model_id_collision_is_terminal(self):
+        device = make_device("validation-cross-device", librenms_cf={SERVER_KEY: 5408})
+        vm = make_vm("validation-cross-vm")
+        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 5408}
+        vm.save()
+
+        result = self._validate(_device_payload(5408, hostname="unmatched-cross", serial="-"))
+
+        assert device.pk is not None and vm.pk is not None
+        assert result["existing_device"] is None
+        assert result["ambiguous_librenms_id"] is True
+
+    def test_ambiguous_vm_ids_are_terminal(self):
+        first = make_vm("validation-ambiguous-vm-a")
+        second = make_vm("validation-ambiguous-vm-b", cluster=make_cluster("Validation VM ID cluster"))
+        for vm in (first, second):
+            vm.custom_field_data["librenms_id"] = {SERVER_KEY: 5421}
+            vm.save()
+
+        result = self._validate(_device_payload(5421, hostname="unmatched-vm-id", serial="-"))
+
+        assert result["existing_device"] is None
+        assert result["ambiguous_librenms_id"] is True
+        assert result["existing_match_type"] == "ambiguous_librenms_id"
+
+    def test_vm_id_with_ambiguous_device_owners_is_terminal(self):
+        vm = make_vm("validation-vm-with-device-collision")
+        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 5422}
+        vm.save()
+        make_device("validation-device-collision-a", librenms_cf={SERVER_KEY: 5422})
+        make_device("validation-device-collision-b", librenms_cf={SERVER_KEY: 5422})
+
+        result = self._validate(_device_payload(5422, hostname=vm.name, serial="-"))
+
+        assert result["existing_device"] is None
+        assert result["ambiguous_librenms_id"] is True
+
+    def test_legacy_vm_id_and_name_drift_offer_both_migrations(self):
+        vm = make_vm("validation-legacy-vm")
+        vm.custom_field_data["librenms_id"] = " 5423 "
+        vm.save()
+
+        result = self._validate(_device_payload(5423, hostname="validation-renamed-vm", serial="-"))
+
+        assert result["existing_device"] == vm
+        assert result["librenms_id_needs_migration"] is True
+        assert result["name_sync_available"] is True
+        assert result["suggested_name"] == "edge-5423"
+
+    def test_cross_model_hostname_is_not_bound_arbitrarily(self):
+        device = make_device("validation-shared-name")
+        vm = make_vm(device.name)
+
+        result = self._validate(_device_payload(5409, hostname=device.name, sysName=device.name, serial="-"))
+
+        assert vm.name == device.name
+        assert result["existing_device"] is None
+        assert any("Both a VM and Device" in warning for warning in result["warnings"])
+
+    def test_vm_hostname_match_uses_the_real_vm_and_link_state(self):
+        vm = make_vm("validation-hostname-vm")
+        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 99}
+        vm.save()
+
+        result = self._validate(
+            _device_payload(5424, hostname=vm.name, sysName=vm.name, serial="-"),
+            import_as_vm=False,
+        )
+
+        assert result["existing_device"] == vm
+        assert result["existing_match_type"] == "hostname"
+        assert result["import_as_vm"] is True
+        assert result["existing_librenms_link"]["host_id"] == 99
+        assert any("currently linked" in warning for warning in result["warnings"])
+
+    def test_cross_model_hostname_with_duplicate_devices_is_terminal(self):
+        from dcim.models import Device, Site
+
+        first = make_device("validation-duplicate-cross-name")
+        second_site = Site.objects.create(name="Validation duplicate site", slug="validation-duplicate-site")
+        Device.objects.create(
+            name=first.name,
+            device_type=first.device_type,
+            role=first.role,
+            site=second_site,
+            status="active",
+        )
+        make_vm(first.name)
+
+        result = self._validate(_device_payload(5425, hostname=first.name, sysName=first.name, serial="-"))
+
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert any("Multiple NetBox devices share" in issue for issue in result["issues"])
+
+    @pytest.mark.parametrize(
+        ("incoming", "stored"),
+        [
+            (" SERIAL-TRIM ", "SERIAL-TRIM"),
+            (123456, "123456"),
+            (0, "0"),
+        ],
+    )
+    def test_serial_matching_normalizes_real_payload_values(self, incoming, stored):
+        device = make_device(f"serial-normalized-{stored}", serial=stored)
+        payload = _device_payload(
+            5410,
+            hostname=f"unmatched-{stored}",
+            sysName=f"unmatched-{stored}",
+            serial=incoming,
+            hardware="-",
+            location="-",
+        )
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == device
+        assert result["existing_match_type"] == "serial"
+        assert not any("Validation error" in issue for issue in result["issues"])
+
+    def test_linked_serial_match_confirms_trimmed_stored_value(self):
+        device = make_device(
+            "validation-linked-serial",
+            serial=" SERIAL-LINKED ",
+            librenms_cf={SERVER_KEY: 5411},
+        )
+        payload = _device_payload(
+            5411,
+            hostname=device.name,
+            sysName=device.name,
+            serial="SERIAL-LINKED",
+            hardware=device.device_type.model,
+            location=device.site.name,
+        )
+
+        result = self._validate(payload)
+
+        assert result["serial_confirmed"] is True
+        assert result["serial_action"] is None
+
+    def test_linked_serial_drift_and_duplicate_are_distinguished(self):
+        linked = make_device(
+            "validation-serial-drift",
+            serial="OLD-SERIAL",
+            librenms_cf={SERVER_KEY: 5412},
+        )
+        payload = _device_payload(5412, hostname=linked.name, serial="NEW-SERIAL")
+
+        drift = self._validate(payload)
+        assert drift["serial_action"] == "update_serial"
+        assert drift["serial_duplicate"] is False
+
+        duplicate = make_device("validation-serial-owner", serial="DUPLICATE-SERIAL")
+        payload["serial"] = duplicate.serial
+        collision = self._validate(payload)
+        assert collision["serial_action"] == "conflict"
+        assert collision["serial_duplicate"] is True
+
+    def test_hostname_matched_serial_drift_and_duplicate_are_distinguished(self):
+        device = make_device("validation-hostname-serial-drift", serial="OLD-HOSTNAME-SERIAL")
+        payload = _device_payload(
+            5426,
+            hostname=device.name,
+            sysName=device.name,
+            serial="NEW-HOSTNAME-SERIAL",
+        )
+
+        drift = self._validate(payload)
+        assert drift["existing_match_type"] == "hostname"
+        assert drift["serial_action"] == "update_serial"
+
+        owner = make_device("validation-hostname-serial-owner", serial="OWNED-HOSTNAME-SERIAL")
+        payload["serial"] = owner.serial
+        collision = self._validate(payload)
+        assert collision["serial_action"] == "conflict"
+        assert collision["serial_duplicate"] is True
+
+    def test_duplicate_serial_without_a_unique_owner_is_terminal(self):
+        make_device("validation-duplicate-serial-a", serial="DUPLICATE-ONLY-SERIAL")
+        make_device("validation-duplicate-serial-b", serial="DUPLICATE-ONLY-SERIAL")
+
+        result = self._validate(
+            _device_payload(5427, hostname="unmatched-duplicate-serial", serial="DUPLICATE-ONLY-SERIAL")
+        )
+
+        assert result["existing_device"] is None
+        assert result["serial_duplicate"] is True
+        assert any("Multiple NetBox devices share serial" in issue for issue in result["issues"])
+
+    def test_primary_ip_match_forces_device_mode(self):
+        device = make_device("validation-primary-ip")
+        ip_on(device, "198.18.20.1/24", "management")
+        payload = _device_payload(
+            5413,
+            hostname="different-primary-name",
+            sysName="different-primary-name",
+            serial="-",
+            ip="198.18.20.1",
+        )
+
+        result = self._validate(payload, import_as_vm=True)
+
+        assert result["existing_device"] == device
+        assert result["existing_match_type"] == "primary_ip"
+        assert result["import_as_vm"] is False
+
+    def test_vm_interface_primary_ip_forces_vm_mode(self):
+        from virtualization.models import VMInterface
+
+        vm = make_vm("validation-primary-ip-vm")
+        interface = VMInterface.objects.create(virtual_machine=vm, name="management")
+        make_ip("198.18.20.4/24", assigned_object=interface)
+
+        result = self._validate(_device_payload(5428, hostname="unmatched-primary-vm", serial="-", ip="198.18.20.4"))
+
+        assert result["existing_device"] == vm
+        assert result["existing_match_type"] == "primary_ip"
+        assert result["import_as_vm"] is True
+
+    def test_ambiguous_primary_ip_is_terminal(self):
+        first = make_device("validation-primary-a")
+        second = make_device("validation-primary-b")
+        ip_on(first, "198.18.20.2/24", "management")
+        ip_on(second, "198.18.20.2/32", "management")
+        payload = _device_payload(5414, hostname="unmatched-primary", serial="-", ip="198.18.20.2")
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert len(result["issues"]) == 1
+
+    def test_unassigned_oob_ip_stages_an_oob_candidate(self):
+        device = make_device("validation-oob-ip")
+        device.oob_ip = make_ip("198.18.20.3/32")
+        device.save()
+        payload = _device_payload(
+            5415,
+            hostname="validation-oob-ip-idrac",
+            sysName="validation-oob-ip-idrac",
+            hardware="iDRAC9",
+            os="idrac",
+            serial="-",
+            ip="198.18.20.3",
+        )
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == device
+        assert result["existing_match_type"] == "primary_ip"
+        assert result["serial_action"] == "oob_candidate"
+        assert result["oob_candidate"]["type"] == "idrac"
+
+    def test_linked_oob_ip_is_informational_instead_of_a_new_candidate(self):
+        device = make_device(
+            "validation-linked-oob-ip",
+            librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 99, "type": "idrac"}}},
+        )
+        device.oob_ip = make_ip("198.18.20.5/32")
+        device.save()
+
+        result = self._validate(
+            _device_payload(
+                5429,
+                hostname="validation-linked-oob-ip-idrac",
+                hardware="iDRAC9",
+                os="idrac",
+                serial="-",
+                ip="198.18.20.5",
+            )
+        )
+
+        assert result["existing_device"] == device
+        assert result["existing_match_type"] == "primary_ip"
+        assert result["oob_candidate"] is None
+        assert any("OOB already linked" in warning for warning in result["warnings"])
+
+    def test_oob_id_reimport_is_not_a_host_serial_conflict(self):
+        device = make_device(
+            "validation-oob-linked",
+            serial="HOST-SERIAL",
+            librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 5416, "type": "idrac"}}},
+        )
+        payload = _device_payload(
+            5416,
+            hostname="validation-oob-linked-idrac",
+            sysName="validation-oob-linked-idrac",
+            serial="CONTROLLER-SERIAL",
+            hardware="iDRAC9",
+            os="idrac",
+        )
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == device
+        assert result["existing_match_type"] == "librenms_oob"
+        assert result["serial_action"] is None
+        assert result["device_type_mismatch"] is False
+
+    def test_hostname_and_serial_on_different_linked_devices_surface_merge_candidates(self):
+        host = make_device(
+            "validation-merge-host",
+            serial="MERGE-SERIAL",
+            librenms_cf={SERVER_KEY: {"id": 42}},
+        )
+        oob = make_device(
+            "validation-merge-idrac",
+            serial="MERGE-SERIAL",
+            librenms_cf={SERVER_KEY: {"id": 99}},
+        )
+        payload = _device_payload(
+            5417,
+            hostname=host.name,
+            sysName=host.name,
+            serial="MERGE-SERIAL",
+        )
+
+        result = self._validate(payload)
+
+        assert result["serial_action"] == "merge_netbox_devices"
+        assert result["merge_candidates"]["host_named"]["pk"] == host.pk
+        assert result["merge_candidates"]["oob_named"]["pk"] == oob.pk
+
+    def test_collision_only_returns_identity_without_prerequisite_noise(self):
+        result = self._validate(
+            _device_payload(5418, hardware="-", location="-", serial="-", os="-"),
+            collision_only=True,
+        )
+
+        assert result["existing_device"] is None
+        assert result["issues"] == []
+        assert result["device_role"]["available_roles"] == []
+
+    def test_name_preferences_are_recorded_in_the_result(self):
+        payload = _device_payload(
+            5419,
+            hostname="host.example.test",
+            sysName="system.example.test",
+            hardware="-",
+            location="-",
+            serial="-",
+        )
+
+        result = self._validate(payload, use_sysname=False, strip_domain=True)
+
+        assert result["resolved_name"] == "host"
+        assert result["naming_criteria"]["use_sysname"] is False
+        assert result["naming_criteria"]["strip_domain"] is True
+        assert result["naming_criteria"]["source"] == "hostname"
+
+    def test_absent_names_record_the_generated_name_as_the_source(self):
+        payload = _device_payload(5430, hardware="-", location="-", serial="-")
+        payload.pop("hostname")
+        payload.pop("sysName")
+
+        result = self._validate(payload)
+
+        assert result["resolved_name"] == "device-5430"
+        assert result["naming_criteria"]["source"] == "device-5430"
+
+    def test_non_string_names_fall_back_to_the_device_id(self):
+        payload = _device_payload(5420, hostname=["bad"], sysName=123, hardware="-", location="-", serial="-")
+
+        result = self._validate(payload)
+
+        assert result["resolved_name"] == "device-5420"
+        assert not any("Validation error" in issue for issue in result["issues"])
+
+    def test_virtual_chassis_member_name_uses_the_real_pattern_and_serial(self):
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+        settings_row.vc_member_name_pattern = "-{serial}"
+        settings_row.save()
+        device = make_device(
+            "validation-stack-master-SERIAL-VC-MEMBER",
+            serial=" SERIAL-VC-MEMBER ",
+            librenms_cf={SERVER_KEY: 5431},
+        )
+        make_virtual_chassis("validation-member-name-vc", device)
+
+        result = self._validate(
+            _device_payload(
+                5431,
+                hostname="validation-stack-master",
+                sysName="validation-stack-master",
+                serial="-",
+                hardware=device.device_type.model,
+                location=device.site.name,
+            )
+        )
+
+        assert result["existing_device"] == device
+        assert result["name_matches"] is True
+        assert result["suggested_name"] is None
+
+    def test_virtual_chassis_member_name_drift_offers_the_generated_name(self):
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+        settings_row.vc_member_name_pattern = "-{serial}"
+        settings_row.save()
+        device = make_device(
+            "validation-old-member-name",
+            serial="SERIAL-VC-DRIFT",
+            librenms_cf={SERVER_KEY: 5432},
+        )
+        make_virtual_chassis("validation-member-drift-vc", device)
+
+        result = self._validate(
+            _device_payload(
+                5432,
+                hostname="validation-new-stack",
+                sysName="validation-new-stack",
+                serial="-",
+                hardware=device.device_type.model,
+                location=device.site.name,
+            )
+        )
+
+        assert result["name_sync_available"] is True
+        assert result["suggested_name"] == "validation-new-stack-SERIAL-VC-DRIFT"
+
+    def test_ambiguous_device_types_are_a_terminal_prerequisite(self):
+        from dcim.models import DeviceType, Manufacturer
+
+        for suffix in ("a", "b"):
+            manufacturer = Manufacturer.objects.create(
+                name=f"Validation duplicate manufacturer {suffix}",
+                slug=f"validation-duplicate-manufacturer-{suffix}",
+            )
+            DeviceType.objects.create(
+                manufacturer=manufacturer,
+                model="Validation shared hardware",
+                slug=f"validation-shared-hardware-{suffix}",
+            )
+
+        result = self._validate(_device_payload(5433, hardware="Validation shared hardware", serial="-"))
+
+        assert result["device_type"]["match_type"] == "ambiguous"
+        assert any("Multiple device types match hardware" in issue for issue in result["issues"])
+
+    def test_duplicate_platform_names_are_reported_as_ambiguous(self):
+        from dcim.models import Manufacturer, Platform
+
+        for suffix in ("a", "b"):
+            manufacturer = Manufacturer.objects.create(
+                name=f"Validation platform manufacturer {suffix}",
+                slug=f"validation-platform-manufacturer-{suffix}",
+            )
+            Platform.objects.create(
+                name="Validation shared OS",
+                slug=f"validation-shared-os-{suffix}",
+                manufacturer=manufacturer,
+            )
+
+        result = self._validate(_device_payload(5434, os="Validation shared OS", serial="-"))
+
+        assert result["platform"]["match_type"] == "ambiguous"
+        assert any("Multiple Platforms match OS" in warning for warning in result["warnings"])
+
+    def test_linked_device_type_drift_is_reported(self):
+        from dcim.models import DeviceType, Manufacturer
+
+        device = make_device("validation-type-drift", librenms_cf={SERVER_KEY: 5435})
+        manufacturer = Manufacturer.objects.create(
+            name="Validation reported manufacturer",
+            slug="validation-reported-manufacturer",
+        )
+        reported_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Validation reported type",
+            slug="validation-reported-type",
+        )
+
+        result = self._validate(
+            _device_payload(
+                5435,
+                hostname=device.name,
+                sysName=device.name,
+                hardware=reported_type.model,
+                location=device.site.name,
+                serial="-",
+            )
+        )
+
+        assert result["device_type_mismatch"] is True
+        assert any("Device type mismatch" in warning for warning in result["warnings"])
 
 
-class TestValidateDeviceChassisMatch:
-    """Test chassis match path (line 539) in validate_device_for_import."""
-
-    def _make_api(self):
-        api = MagicMock()
-        api.server_key = "default"
-        return api
-
-    def test_chassis_match_overrides_hardware_match(self):
-        """Line 539: chassis_match succeeds → dt_match = chassis_match."""
+@pytest.mark.django_db
+class TestValidationWithRealLibreNMS:
+    def test_virtual_chassis_detection_uses_live_inventory(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
-        libre_device = {
-            "device_id": 1,
-            "hostname": "sw01",
-            "sysName": "sw01",
-            "hardware": "Cisco Catalyst 9300",
-            "serial": "SN001",
-            "os": "ios",
-            "location": "",
-        }
-        api = self._make_api()
+        api, server = librenms_api
+        infrastructure = make_device("vc-validation-infrastructure")
+        payload = _device_payload(
+            5501,
+            hostname="vc-validation-master",
+            sysName="vc-validation-master",
+            serial="MEMBER-A",
+            location=infrastructure.site.name,
+            hardware=infrastructure.device_type.model,
+        )
+        server.device_info_response(device_id=5501, hostname=payload["hostname"], serial="MEMBER-A")
+        server.vc_inventory_callable(
+            5501,
+            [_stack_root()],
+            {
+                100: [
+                    _chassis(101, "MEMBER-A", 1),
+                    _chassis(102, "MEMBER-B", 2),
+                ]
+            },
+        )
 
-        chassis_dt = MagicMock()
-        chassis_dt.model = "Catalyst 9300"
-        chassis_match = {"matched": True, "device_type": chassis_dt, "match_type": "chassis_inventory"}
+        result = validate_device_for_import(payload, api=api, include_vc_detection=True)
 
-        vm_no_match = MagicMock()
-        vm_no_match.objects.filter.return_value.first.return_value = None  # no hostname collision
+        assert result["virtual_chassis"]["is_stack"] is True
+        assert result["virtual_chassis"]["member_count"] == 2
+        assert [member["position"] for member in result["virtual_chassis"]["members"]] == [1, 2]
 
-        device_patch = patch("netbox_librenms_plugin.import_utils.device_operations.Device")
-        mock_device_cls = device_patch.start()
-        mock_device_cls.objects.filter.return_value.first.return_value = None
-        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+    def test_chassis_inventory_recovers_an_unmatched_hardware_string(self, librenms_api):
+        from dcim.models import DeviceType, Manufacturer
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
-        patches = [
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", new=vm_no_match),
-            patch("ipam.models.IPAddress"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                return_value={"matched": False},
+        api, server = librenms_api
+        infrastructure = make_device("chassis-validation-infrastructure")
+        manufacturer = Manufacturer.objects.create(name="Validation chassis manufacturer", slug="validation-chassis")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Validation chassis model",
+            slug="validation-chassis-model",
+            part_number="VALIDATION-CHASSIS-PN",
+        )
+        server.register(
+            "/api/v0/inventory/5502",
+            {
+                "status": "ok",
+                "inventory": [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalName": "VALIDATION-CHASSIS-PN",
+                        "entPhysicalModelName": "",
+                    }
+                ],
+            },
+        )
+        payload = _device_payload(
+            5502,
+            hostname="chassis-validation-new",
+            sysName="chassis-validation-new",
+            hardware="Unmatched hardware value",
+            location=infrastructure.site.name,
+        )
+
+        result = validate_device_for_import(payload, api=api, include_vc_detection=False)
+
+        assert result["device_type"]["device_type"] == device_type
+        assert result["device_type"]["match_type"] == "chassis"
+
+
+@pytest.mark.django_db
+class TestImportSingleDevice:
+    def _infrastructure(self, tag):
+        device = make_device(f"import-infrastructure-{tag}")
+        return device.site, device.device_type, device.role
+
+    def test_missing_required_mappings_fail_in_order(self, settings, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        _api, _server = librenms_api
+        site, device_type, role = self._infrastructure("missing")
+        payload = _device_payload(5601)
+
+        missing_site = import_single_device(5601, SERVER_KEY, _validation(), libre_device=payload)
+        missing_type = import_single_device(5601, SERVER_KEY, _validation(site=site), libre_device=payload)
+        missing_role = import_single_device(
+            5601,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type),
+            libre_device=payload,
+        )
+
+        assert missing_site["error"] == "Site is required but not provided"
+        assert missing_type["error"] == "Device type is required but not provided"
+        assert missing_role["error"] == "Device role is required but not provided"
+        assert role is not None
+
+    def test_real_import_persists_normalized_identity_and_location(self, librenms_api):
+        from dcim.models import Location
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        _api, _server = librenms_api
+        site, device_type, role = self._infrastructure("success")
+        location = Location.objects.create(
+            name="Import location",
+            slug="import-location",
+            site=site,
+            status="active",
+        )
+        payload = _device_payload(
+            5602,
+            hostname="imported.example.test",
+            sysName="imported.example.test",
+            serial=" SERIAL-5602 ",
+            location=location.name,
+            status=1,
+        )
+        validation = _validation(
+            site=site,
+            device_type=device_type,
+            role=role,
+            resolved_name="imported-edge-5602",
+        )
+
+        result = import_single_device(
+            5602,
+            SERVER_KEY,
+            validation,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=payload,
+        )
+
+        assert result["success"] is True
+        assert result["device"].name == "imported-edge-5602"
+        assert result["device"].serial == "SERIAL-5602"
+        assert result["device"].location == location
+        assert result["device"].status == "active"
+        assert get_librenms_device_id(result["device"], SERVER_KEY) == 5602
+        assert result["synced"] == {"interfaces": 0, "cables": 0, "ip_addresses": 0}
+
+    def test_manual_mappings_use_real_objects(self, librenms_api):
+        from dcim.models import Platform, Rack
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        _api, _server = librenms_api
+        site, device_type, role = self._infrastructure("manual")
+        platform = Platform.objects.create(name="Import platform", slug="import-platform")
+        rack = Rack.objects.create(name="Import manual rack", site=site, status="active")
+
+        result = import_single_device(
+            5603,
+            SERVER_KEY,
+            _validation(resolved_name="manual-import"),
+            manual_mappings={
+                "site_id": site.pk,
+                "device_type_id": device_type.pk,
+                "device_role_id": role.pk,
+                "platform_id": platform.pk,
+                "rack_id": rack.pk,
+            },
+            libre_device=_device_payload(5603),
+            user=make_superuser(),
+        )
+
+        assert result["success"] is True
+        assert result["device"].site == site
+        assert result["device"].device_type == device_type
+        assert result["device"].role == role
+        assert result["device"].platform == platform
+        assert result["device"].rack == rack
+
+    def test_manual_rack_outside_the_user_view_scope_is_rejected(self, librenms_api):
+        """The persistence boundary must reject a forged hidden rack ID."""
+        from dcim.models import Device, Rack
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        _api, _server = librenms_api
+        site, device_type, role = self._infrastructure("hidden-rack")
+        visible = Rack.objects.create(name="Visible import boundary rack", site=site, status="active")
+        hidden = Rack.objects.create(name="Hidden import boundary rack", site=site, status="active")
+        user = make_user_with_perms(
+            "hidden-import-boundary-rack-user",
+            [("add", Device), ("change", Device)],
+        )
+        user = grant(user, "view", Rack, constraints={"pk": visible.pk})
+
+        result = import_single_device(
+            5612,
+            SERVER_KEY,
+            _validation(
+                site=site,
+                device_type=device_type,
+                role=role,
+                resolved_name="hidden-rack-import",
             ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations._try_chassis_device_type_match",
-                return_value=chassis_match,
+            manual_mappings={"rack_id": hidden.pk},
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5612),
+            user=user,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "Selected rack is unavailable"
+        assert not Device.objects.filter(name="hidden-rack-import").exists()
+
+    def test_existing_and_ambiguous_validation_states_block_creation(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        _api, _server = librenms_api
+        existing = make_device("import-existing")
+        site, device_type, role = self._infrastructure("blocked")
+        payload = _device_payload(5604)
+
+        existing_result = import_single_device(
+            5604,
+            SERVER_KEY,
+            _validation(
+                site=site,
+                device_type=device_type,
+                role=role,
+                existing_device=existing,
             ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
-                return_value={"found": False, "platform": None, "match_type": None},
+            libre_device=payload,
+        )
+        id_ambiguity = import_single_device(
+            5604,
+            SERVER_KEY,
+            _validation(
+                site=site,
+                device_type=device_type,
+                role=role,
+                ambiguous_librenms_id=True,
             ),
-        ]
+            libre_device=payload,
+        )
+        identity_ambiguity = import_single_device(
+            5604,
+            SERVER_KEY,
+            _validation(
+                site=site,
+                device_type=device_type,
+                role=role,
+                existing_match_type="ambiguous_hostname_or_serial",
+            ),
+            libre_device=payload,
+        )
 
-        for p in patches:
-            p.start()
+        assert "already exists" in existing_result["error"]
+        assert "ambiguous LibreNMS ID" in id_ambiguity["error"]
+        assert "matches multiple NetBox devices" in identity_ambiguity["error"]
 
-        try:
-            result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-            device_patch.stop()
+    def test_assignment_conflict_is_checked_again_under_the_real_lock(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
-        assert result["device_type"].get("device_type") is chassis_dt
+        _api, _server = librenms_api
+        owner = make_device("import-id-owner", librenms_cf={SERVER_KEY: 5605})
+        site, device_type, role = self._infrastructure("conflict")
+
+        result = import_single_device(
+            5605,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role),
+            libre_device=_device_payload(5605),
+        )
+
+        assert result["success"] is False
+        # The claim search is unrestricted and this path takes no user, so the owner stays unnamed.
+        assert "already assigned to another device" in result["error"]
+        assert owner.name not in result["error"]
+
+    def test_vm_assignment_conflict_is_identified_as_a_vm(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        _api, _server = librenms_api
+        owner = make_vm("import-vm-id-owner")
+        owner.custom_field_data["librenms_id"] = {SERVER_KEY: 5609}
+        owner.save()
+        site, device_type, role = self._infrastructure("vm-conflict")
+
+        result = import_single_device(
+            5609,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role),
+            libre_device=_device_payload(5609),
+        )
+
+        assert result["success"] is False
+        assert "already assigned to another VM" in result["error"]
+        assert owner.name not in result["error"]
+
+    def test_empty_resolved_name_recomputes_from_sync_preferences(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        _api, _server = librenms_api
+        site, device_type, role = self._infrastructure("fallback-name")
+
+        result = import_single_device(
+            5610,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role, resolved_name=""),
+            sync_options={
+                "sync_interfaces": False,
+                "sync_cables": False,
+                "use_sysname": False,
+                "strip_domain": True,
+            },
+            libre_device=_device_payload(
+                5610,
+                hostname="fallback-import.example.test",
+                sysName="ignored-system.example.test",
+            ),
+        )
+
+        assert result["success"] is True
+        assert result["device"].name == "fallback-import"
+
+    def test_unknown_server_key_returns_a_scoped_import_error(self, settings):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {}
+        settings.PLUGINS_CONFIG = plugin_config
+
+        result = import_single_device(5611, "missing-server", libre_device=_device_payload(5611))
+
+        assert result["success"] is False
+        assert result["device"] is None
+        assert "missing-server" in result["error"]
+
+    def test_live_fetch_is_used_when_no_payload_is_supplied(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        _api, server = librenms_api
+        site, device_type, role = self._infrastructure("live")
+        server.device_info_response(
+            device_id=5606,
+            hostname="live-import",
+            hardware=device_type.model,
+            serial="LIVE-5606",
+            location=site.name,
+        )
+
+        result = import_single_device(
+            5606,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role, resolved_name="live-import"),
+        )
+
+        assert result["success"] is True
+        assert result["device"].name == "live-import"
+        assert result["device"].serial == "LIVE-5606"
+
+    def test_missing_live_device_returns_a_scoped_error(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        _api, server = librenms_api
+        server.register("/api/v0/devices/5607", {"status": "error"}, status=404)
+
+        result = import_single_device(5607, SERVER_KEY)
+
+        assert result["success"] is False
+        assert result["error"] == "Failed to retrieve device 5607 from LibreNMS"
+
+    def test_lazy_validation_runs_through_the_real_api_and_database(self, librenms_api):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        _api, server = librenms_api
+        infrastructure = make_device("lazy-import-infrastructure")
+        server.device_info_response(
+            device_id=5608,
+            hostname="lazy-import",
+            hardware=infrastructure.device_type.model,
+            serial="LAZY-5608",
+            location=infrastructure.site.name,
+        )
+        server.vc_inventory_callable(5608, [], {})
+
+        result = import_single_device(5608, SERVER_KEY)
+
+        assert result["success"] is False
+        assert result["device"] is None
+        assert result["error"] == "Device role is required but not provided"
+
+    def _import_location_payload(self, location, *, pattern, validation, manual_mappings=None):
+        """Import through the real parser and reload the persisted device."""
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(
+            pk=1,
+            defaults={"location_parse_pattern": pattern, "location_parse_is_regex": False},
+        )
+        result = import_single_device(
+            5620,
+            SERVER_KEY,
+            validation,
+            manual_mappings=manual_mappings,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5620, location=location, serial="-"),
+        )
+        assert result["success"] is True, result
+        result["device"].refresh_from_db()
+        return result["device"]
+
+    def test_rack_resolved_from_parsed_token_exact_match(self, librenms_api):
+        """Persist the rack matched by name within the imported device's site."""
+        from dcim.models import Rack
+
+        site, device_type, role = self._infrastructure("parsed-rack")
+        rack = Rack.objects.create(name="R1", site=site, status="active")
+
+        device = self._import_location_payload(
+            f"{site.name}, R1",
+            pattern="{site}, {rack}",
+            validation=_validation(site=site, device_type=device_type, role=role),
+        )
+
+        assert device.site == site
+        assert device.rack == rack
+
+    def test_rack_resolved_from_parsed_token_via_mapping(self, librenms_api):
+        """Persist the mapped rack when the parsed token has no exact match."""
+        from dcim.models import Rack
+        from netbox_librenms_plugin.models import LocationMapping
+
+        site, device_type, role = self._infrastructure("mapped-rack")
+        rack = Rack.objects.create(name="Mapped Rack", site=site, status="active")
+        LocationMapping.objects.create(field_type="rack", librenms_value="R1", netbox_object=rack)
+
+        device = self._import_location_payload(
+            f"{site.name}, R1",
+            pattern="{site}, {rack}",
+            validation=_validation(site=site, device_type=device_type, role=role),
+        )
+
+        assert device.rack == rack
+
+    def test_ambiguous_rack_name_skips_automatic_assignment(self, librenms_api, caplog):
+        """Leave the rack unset when duplicate names exist, even if an alias matches."""
+        from dcim.models import Location, Rack
+        from netbox_librenms_plugin.models import LocationMapping
+
+        site, device_type, role = self._infrastructure("ambiguous-rack")
+        first_location = Location.objects.create(name="Hall A", slug="hall-a", site=site)
+        second_location = Location.objects.create(name="Hall B", slug="hall-b", site=site)
+        first_rack = Rack.objects.create(name="R1", site=site, location=first_location, status="active")
+        Rack.objects.create(name="R1", site=site, location=second_location, status="active")
+        LocationMapping.objects.create(field_type="rack", librenms_value="R1", netbox_object=first_rack)
+
+        device = self._import_location_payload(
+            f"{site.name}, R1",
+            pattern="{site}, {rack}",
+            validation=_validation(site=site, device_type=device_type, role=role),
+        )
+
+        assert device.rack is None
+        assert "Multiple racks named" in caplog.text
+
+    def test_automatic_rack_is_reresolved_after_manual_site_override(self, librenms_api):
+        """Resolve the rack within the selected site instead of keeping the suggested rack."""
+        from dcim.models import Rack, Site
+
+        site, device_type, role = self._infrastructure("overridden-site")
+        original_rack = Rack.objects.create(name="R9", site=site, status="active")
+        selected_site = Site.objects.create(name="Selected Site", slug="selected-site")
+        selected_rack = Rack.objects.create(name="R9", site=selected_site, status="active")
+
+        device = self._import_location_payload(
+            f"{site.name}, R9",
+            pattern="{site}, {rack}",
+            validation=_validation(site=site, device_type=device_type, role=role, rack={"rack": original_rack}),
+            manual_mappings={"site_id": selected_site.pk},
+        )
+
+        assert device.site == selected_site
+        assert device.rack == selected_rack
+
+    def test_tenant_resolved_from_parsed_token_exact_match(self, librenms_api):
+        """Persist the tenant matched by its parsed name."""
+        from tenancy.models import Tenant
+
+        site, device_type, role = self._infrastructure("parsed-tenant")
+        tenant = Tenant.objects.create(name="Example Tenant", slug="example-tenant")
+
+        device = self._import_location_payload(
+            f"{site.name}, {tenant.name}",
+            pattern="{site}, {tenant}",
+            validation=_validation(site=site, device_type=device_type, role=role),
+        )
+
+        assert device.tenant == tenant
+
+    def test_tenant_resolved_from_parsed_token_via_mapping(self, librenms_api):
+        """Persist the mapped tenant when the parsed token has no exact match."""
+        from tenancy.models import Tenant
+        from netbox_librenms_plugin.models import LocationMapping
+
+        site, device_type, role = self._infrastructure("mapped-tenant")
+        tenant = Tenant.objects.create(name="Example Tenant", slug="example-tenant")
+        LocationMapping.objects.create(field_type="tenant", librenms_value="Tenant Alias", netbox_object=tenant)
+
+        device = self._import_location_payload(
+            f"{site.name}, Tenant Alias",
+            pattern="{site}, {tenant}",
+            validation=_validation(site=site, device_type=device_type, role=role),
+        )
+
+        assert device.tenant == tenant
+
+
+def test_lazy_bulk_import_export_and_unknown_attributes():
+    import netbox_librenms_plugin.import_utils.device_operations as operations
+
+    assert callable(operations.bulk_import_devices_shared)
+    with pytest.raises(AttributeError):
+        getattr(operations, "unknown_device_operation")

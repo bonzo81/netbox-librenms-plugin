@@ -1,6 +1,8 @@
 from django.core.exceptions import ImproperlyConfigured
 from netbox.plugins import PluginConfig
 
+from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
+
 __author__ = "Andy Norwood"
 __version__ = "0.4.7"
 
@@ -12,18 +14,23 @@ class LibreNMSSyncConfig(PluginConfig):
     author = __author__
     version = __version__
     base_url = "librenms_plugin"
-    min_version = "4.2.0"
+    min_version = "4.4.0"
     required_settings = []  # Custom validation in ready() method
     default_settings = {
         "enable_caching": True,
         "verify_ssl": True,
-        "interface_name_field": "ifName",
+        "interface_name_field": DEFAULT_INTERFACE_NAME_FIELD,
     }
 
     def ready(self):
         """
         Perform custom validation for plugin configuration.
+
         Supports both legacy single-server and new multi-server configurations.
+
+        Raises:
+            ImproperlyConfigured: If the server configuration is empty, has an invalid type, or omits a
+                required setting.
         """
         super().ready()
 
@@ -44,14 +51,25 @@ class LibreNMSSyncConfig(PluginConfig):
             dispatch_uid="netbox_librenms_plugin_ensure_cf",
         )
 
+        # Sync-tab caches follow the NetBox writes, so no view has to name the objects it changed.
+        from netbox_librenms_plugin import cache_signals
+
+        cache_signals.connect()
+
     def _validate_multi_server_config(self, servers_config):
         """Validate multi-server configuration."""
+        from netbox_librenms_plugin.server_mappings import require_server_key
+
         if not servers_config or not isinstance(servers_config, dict):
             raise ImproperlyConfigured(
                 f"Plugin {self.name} requires at least one server configuration in the 'servers' section."
             )
 
         for server_key, server_config in servers_config.items():
+            try:
+                require_server_key(server_key)
+            except ValueError as exc:
+                raise ImproperlyConfigured(f"Plugin {self.name} server key {server_key!r} is invalid: {exc}") from exc
             if not isinstance(server_config, dict):
                 raise ImproperlyConfigured(f"Plugin {self.name} server '{server_key}' must be a dictionary.")
 
@@ -71,12 +89,18 @@ class LibreNMSSyncConfig(PluginConfig):
 def _ensure_librenms_id_custom_field(sender, **kwargs):
     """
     Auto-create (or migrate) the 'librenms_id' custom field.
+
     Runs after migrations via post_migrate signal to ensure tables exist.
     Uses dispatch_uid to avoid duplicate connections.
 
     librenms_id stores a per-server JSON mapping {"server_key": device_id}.
     Legacy installations may have this field typed as 'integer'; we upgrade it
     to 'json' automatically so the UI and API accept the dict format.
+
+    Args:
+        sender (AppConfig): The application configuration that sent the post-migrate signal.
+        **kwargs (dict[str, object]): The post-migrate signal arguments. The ``using`` value selects the
+            database alias.
     """
     # Track per-alias execution so each database alias is bootstrapped exactly once.
     db_alias = kwargs.get("using") or "default"
@@ -118,6 +142,10 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         from virtualization.models import VirtualMachine, VMInterface
 
         required_models = [Device, VirtualMachine, Interface, VMInterface]
+        # post_migrate can run in a process that previously used another isolated test
+        # database. Do not reuse a ContentType object cached for that database when rebuilding
+        # this field's object-type relation.
+        ContentType.objects.clear_cache()
         current_types = set(cf.object_types.values_list("pk", flat=True))
 
         for model in required_models:

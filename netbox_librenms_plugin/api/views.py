@@ -5,6 +5,7 @@ from core.models import Job
 from django.http import JsonResponse
 from django.utils import timezone
 from django_rq import get_queue
+from drf_spectacular.utils import extend_schema
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission, SAFE_METHODS
@@ -17,10 +18,12 @@ from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
     InventoryIgnoreRuleFilterSet,
+    LocationMappingFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
     NormalizationRuleFilterSet,
     PlatformMappingFilterSet,
+    PortStackLagPatternFilterSet,
 )
 from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
 from netbox_librenms_plugin.models import (
@@ -28,10 +31,12 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 from .serializers import (
@@ -39,10 +44,14 @@ from .serializers import (
     DeviceTypeMappingSerializer,
     InterfaceTypeMappingSerializer,
     InventoryIgnoreRuleSerializer,
+    LocationMappingSerializer,
+    JobErrorSerializer,
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
     NormalizationRuleSerializer,
     PlatformMappingSerializer,
+    PortStackLagPatternSerializer,
+    SyncJobStatusSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +143,16 @@ class PlatformMappingViewSet(NetBoxModelViewSet):
     serializer_class = PlatformMappingSerializer
 
 
+class LocationMappingViewSet(NetBoxModelViewSet):
+    """API viewset for LocationMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = LocationMappingFilterSet
+
+    queryset = LocationMapping.objects.select_related("content_type")
+    serializer_class = LocationMappingSerializer
+
+
 class CarrierAutoInstallRuleViewSet(NetBoxModelViewSet):
     """API viewset for CarrierAutoInstallRule CRUD operations."""
 
@@ -144,6 +163,24 @@ class CarrierAutoInstallRuleViewSet(NetBoxModelViewSet):
     serializer_class = CarrierAutoInstallRuleSerializer
 
 
+class PortStackLagPatternViewSet(NetBoxModelViewSet):
+    """API viewset for PortStackLagPattern CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = PortStackLagPatternFilterSet
+
+    queryset = PortStackLagPattern.objects.all()
+    serializer_class = PortStackLagPatternSerializer
+
+
+@extend_schema(
+    request=None,
+    responses={
+        200: SyncJobStatusSerializer,
+        404: JobErrorSerializer,
+        500: JobErrorSerializer,
+    },
+)
 @api_view(["POST"])
 @permission_classes([LibreNMSPluginPermission])
 def sync_job_status(request, job_pk):

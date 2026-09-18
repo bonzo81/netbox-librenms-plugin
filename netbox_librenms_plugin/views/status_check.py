@@ -1,6 +1,7 @@
 import logging
 
 from dcim.models import Device
+from django.contrib import messages
 from django.db.models import BooleanField, Case, Value, When
 from netbox.views import generic
 from virtualization.models import VirtualMachine
@@ -12,14 +13,23 @@ from netbox_librenms_plugin.forms import (
 )
 from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGenericPermissionMixin
 
 logger = logging.getLogger(__name__)
 
 
-class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
+# The conflict lookup behind LibreNMSIDConflictError uses an unrestricted queryset, so its
+# message names an object the viewer may not be allowed to see. These list views report the
+# conflict generically; the object page resolves it through the scope-checked path.
+DISCOVERY_CONFLICT_MESSAGE = (
+    "A discovered LibreNMS ID is already assigned to another NetBox object. Open the object to resolve the conflict."
+)
+
+
+class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
-    Check the status of NetBox devices in LibreNMS.
+    Check NetBox device status in LibreNMS.
+
     Shows NetBox devices with their LibreNMS status.
     """
 
@@ -31,20 +41,29 @@ class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
     actions = {}
     title = "Device LibreNMS Status"
 
+    def get_required_permission(self):
+        """Return the NetBox permission required to view device status."""
+        from utilities.permissions import get_permission_for_model
+
+        return get_permission_for_model(Device, "view")
+
     def get_queryset(self, request):
-        """
-        Override get_queryset to return filtered devices and check LibreNMS status
-        """
+        """Override get_queryset to return filtered devices and check LibreNMS status."""
         # Only get devices if filters are applied
         if self.request.GET:
-            queryset = Device.objects.select_related("device_type__manufacturer").prefetch_related(
-                "site",
-                "location",
-                "rack",
+            queryset = (
+                Device.objects.restrict(request.user, "view")
+                .select_related("device_type__manufacturer")
+                .prefetch_related(
+                    "site",
+                    "location",
+                    "rack",
+                )
             )
 
             # Create a list to store device IDs and their status
             device_status_map = {}
+            lookup_errors = set()
 
             # Apply filters
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
@@ -52,10 +71,15 @@ class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             # Check LibreNMS status for each device
             for device in queryset:
                 try:
-                    librenms_id = self.librenms_api.get_librenms_id(device)
+                    librenms_id, lookup_error = self.resolve_librenms_id(device)
+                    if lookup_error is not None:
+                        lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
                     device_status_map[device.pk] = bool(librenms_id)
                 except Exception:
                     device_status_map[device.pk] = False
+
+            for error in sorted(lookup_errors):
+                messages.error(self.request, error)
 
             # Annotate the queryset with the status values
             case_when = []
@@ -71,10 +95,8 @@ class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         return Device.objects.none()
 
 
-class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
-    """
-    Check the status of virtual machines in NetBox against LibreNMS
-    """
+class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
+    """Check the status of virtual machines in NetBox against LibreNMS."""
 
     queryset = VirtualMachine.objects.select_related("cluster", "site")
     table = VMStatusTable
@@ -84,13 +106,20 @@ class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Object
     actions = {}
     title = "Virtual Machine LibreNMS Status"
 
+    def get_required_permission(self):
+        """Return the NetBox permission required to view VM status."""
+        from utilities.permissions import get_permission_for_model
+
+        return get_permission_for_model(VirtualMachine, "view")
+
     def get_queryset(self, request):
         """Return VMs annotated with their LibreNMS status."""
         if self.request.GET:
-            queryset = VirtualMachine.objects.select_related("cluster", "site")
+            queryset = VirtualMachine.objects.restrict(request.user, "view").select_related("cluster", "site")
 
             # Create a list to store VM IDs and their status
             vm_status_map = {}
+            lookup_errors = set()
 
             # Apply filters
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
@@ -98,10 +127,15 @@ class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Object
             # Check LibreNMS status for each VM
             for vm in queryset:
                 try:
-                    librenms_id = self.librenms_api.get_librenms_id(vm)
+                    librenms_id, lookup_error = self.resolve_librenms_id(vm)
+                    if lookup_error is not None:
+                        lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
                     vm_status_map[vm.pk] = bool(librenms_id)
                 except Exception:
                     vm_status_map[vm.pk] = False
+
+            for error in sorted(lookup_errors):
+                messages.error(self.request, error)
 
             # Annotate the queryset with the status values
             case_when = []

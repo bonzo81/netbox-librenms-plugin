@@ -7,6 +7,10 @@ bypassing __init__ with object.__new__.  No DB access required.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from netbox_librenms_plugin.tests._html_helpers import open_tags
+
 
 class TestLibreNMSModuleTable:
     """Direct unit tests for every render_* method on LibreNMSModuleTable."""
@@ -31,6 +35,7 @@ class TestLibreNMSModuleTable:
         table.device = device
         table.csrf_token = "test-csrf-token"
         table.server_key = ""
+        table.inventory_snapshot_digest = "test-snapshot-digest"
         table.has_write_permission = True
         table.can_add_module = can_add_module
         table.can_change_module = can_change_module
@@ -74,6 +79,21 @@ class TestLibreNMSModuleTable:
         assert "white-space: nowrap;" in result_str
         assert "└─" in result_str
         assert "Card" in result_str
+
+    def test_render_name_depth_zero_oob_badge_renders(self):
+        """Depth-0 OOB row must render the badge without raising (the badge was built with a no-arg format_html that raised TypeError)."""
+        table = self._make_table()
+        result_str = str(table.render_name("Card", {"depth": 0, "_source": "oob"}))
+        assert "Card" in result_str
+        assert "OOB" in result_str
+
+    def test_render_name_nested_oob_badge_inside_padded_container(self):
+        """OOB badge must sit inside the padded <span> so it stays indented on nested rows (was rendering at column 0, outside the container)."""
+        table = self._make_table()
+        result_str = str(table.render_name("Card", {"depth": 2, "_source": "oob"}))
+        assert "OOB" in result_str
+        # Badge span closes, then the padded outer span closes — i.e. badge is inside.
+        assert "OOB</span></span>" in result_str
 
     def test_render_name_depth_one_correct_padding(self):
         """Depth 1 produces 20 px of padding."""
@@ -313,6 +333,57 @@ class TestLibreNMSModuleTable:
         result = str(table.render_status("Matched", {}))
         assert "bg-info" in result
 
+    def test_render_status_wraps_live_badge_with_install_indicator(self):
+        """The live badge is wrapped and a hidden 'Installing…' spinner badge is appended."""
+        table = self._make_table()
+        result = str(table.render_status("Matched", {}))
+        # Live badge wrapper so CSS can hide it while an install POST is in flight.
+        assert "lnms-status-live" in result
+        # Hidden spinner badge revealed by tr.htmx-request (see _module_sync.html).
+        assert "lnms-installing" in result
+        assert "spinner-border" in result
+        assert "Installing" in result
+        # The real status badge is still present inside the wrapper.
+        assert "bg-info" in result
+
+    def test_render_status_install_indicator_present_for_every_status(self):
+        """The install spinner badge rides along on non-installable statuses too (hidden by CSS)."""
+        table = self._make_table()
+        for status in ("Installed", "No Bay", "Serial Mismatch"):
+            result = str(table.render_status(status, {}))
+            assert "lnms-installing" in result, status
+
+    def test_render_status_update_serial_row_spinner_says_updating(self):
+        """An installed-module row offering Update Serial labels the spinner 'Updating…', not 'Installing…'."""
+        table = self._make_table()
+        record = {"installed_module_id": 42, "can_update_serial": True}
+        result = str(table.render_status("Serial Mismatch", record))
+        assert "Updating…" in result
+        assert "Installing…" not in result
+
+    def test_render_status_update_interface_row_spinner_says_updating(self):
+        """An installed-module row offering Update Interface labels the spinner 'Updating…'."""
+        table = self._make_table()
+        record = {"installed_module_id": 42, "can_update_interface_binding": True}
+        result = str(table.render_status("Installed", record))
+        assert "Updating…" in result
+        assert "Installing…" not in result
+
+    def test_render_status_install_row_spinner_still_says_installing(self):
+        """An installable (not-yet-installed) row keeps the 'Installing…' spinner label."""
+        table = self._make_table()
+        result = str(table.render_status("Matched", {"can_install": True}))
+        assert "Installing…" in result
+        assert "Updating…" not in result
+
+    def test_render_status_carrier_row_spinner_says_installing(self):
+        """A No Bay carrier-install row labels the spinner 'Installing…' (it installs a module)."""
+        table = self._make_table()
+        record = {"carrier_install_options": [{"bay_id": 1, "module_type_id": 2}]}
+        result = str(table.render_status("No Bay", record))
+        assert "Installing…" in result
+        assert "Updating…" not in result
+
     def test_render_status_no_bay_uses_warning_badge(self):
         """'No Bay' status renders a bg-warning badge."""
         table = self._make_table()
@@ -437,18 +508,26 @@ class TestLibreNMSModuleTable:
             "can_install": True,
             "module_bay_id": 5,
             "module_type_id": 10,
-            "serial": "SN123",
+            "ent_physical_index": 123,
+            "inventory_digest": "install-row-digest",
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/install-url/"):
             result = str(table.render_actions(None, record))
 
         assert "Install" in result
         assert "/install-url/" in result
-        assert "SN123" in result
+        # The view reads the serial and the port identity from the cached row for this index.
+        assert 'name="ent_index" value="123"' in result
         assert "mdi-download" in result
+        # The install form posts via HTMX so a single install swaps just the module table
+        # in place instead of full-page reloading the whole sync view.
+        assert 'hx-post="/install-url/"' in result
+        assert 'hx-target="#module-sync-content"' in result
 
     def test_render_actions_has_installable_children_renders_branch_button(self):
         """has_installable_children + ent_physical_index renders Install Branch button."""
+        from netbox_librenms_plugin.utils import module_inventory_binding_matches
+
         device = MagicMock()
         device.pk = 2
         table = self._make_table(device=device)
@@ -462,6 +541,32 @@ class TestLibreNMSModuleTable:
         assert "Install Branch" in result
         assert "/branch-url/" in result
         assert "mdi-file-tree" in result
+        binding = next(tag["value"] for tag in open_tags(result, "input") if tag.get("name") == "inventory_binding")
+        assert module_inventory_binding_matches(
+            binding,
+            2,
+            "",
+            "install_branch",
+            {"parent_index": 42},
+            42,
+            "test-snapshot-digest",
+        )
+
+    def test_render_actions_without_snapshot_digest_skips_branch_button(self):
+        """The branch action must not render without a signed snapshot source."""
+        device = MagicMock()
+        device.pk = 2
+        table = self._make_table(device=device)
+        table.inventory_snapshot_digest = ""
+        record = {
+            "has_installable_children": True,
+            "ent_physical_index": 42,
+        }
+
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/branch-url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Install Branch" not in result
 
     def test_render_actions_both_buttons_rendered(self):
         """Both Install and Install Branch buttons render when both flags are set."""
@@ -475,6 +580,7 @@ class TestLibreNMSModuleTable:
             "serial": "SN-BOTH",
             "has_installable_children": True,
             "ent_physical_index": 99,
+            "inventory_digest": "combined-row-digest",
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
@@ -502,7 +608,13 @@ class TestLibreNMSModuleTable:
         device.pk = 5
         table = self._make_table(device=device)
         table.csrf_token = "my-csrf-value"
-        record = {"can_install": True, "module_bay_id": 1, "module_type_id": 1, "serial": ""}
+        record = {
+            "can_install": True,
+            "module_bay_id": 1,
+            "module_type_id": 1,
+            "ent_physical_index": 31,
+            "inventory_digest": "csrf-row-digest",
+        }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
 
@@ -510,6 +622,8 @@ class TestLibreNMSModuleTable:
 
     def test_render_actions_serial_mismatch_renders_update_serial_button(self):
         """can_update_serial=True renders an Update Serial form button."""
+        from netbox_librenms_plugin.utils import module_inventory_binding_matches
+
         device = MagicMock()
         device.pk = 6
         table = self._make_table(device=device)
@@ -517,14 +631,34 @@ class TestLibreNMSModuleTable:
             "can_update_serial": True,
             "installed_module_id": 42,
             "serial": "NS225161205",
+            "ent_physical_index": "8201",
+            "inventory_digest": "serial-row-digest",
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
 
         assert "Update Serial" in result
         assert "update-module-serial" in result or "/url/" in result
-        assert "NS225161205" in result
+        # The action reads the serial from the cached row, so the form posts the row index.
+        assert '<input type="hidden" name="ent_index" value="8201">' in result
+        binding = next(tag["value"] for tag in open_tags(result, "input") if tag.get("name") == "inventory_binding")
+        assert module_inventory_binding_matches(
+            binding,
+            6,
+            "",
+            "update_module_serial",
+            {"module_id": 42},
+            8201,
+            "serial-row-digest",
+        )
+        assert "NS225161205" not in result
         assert "mdi-sync" in result
+        # Posts via HTMX so the update swaps just the module table in place (with the
+        # closest-row spinner) instead of full-page reloading the whole sync view.
+        assert 'hx-post="/url/"' in result
+        assert 'hx-target="#module-sync-content"' in result
+        assert 'hx-indicator="closest tr"' in result
+        assert 'hx-disabled-elt="find button"' in result
 
     def test_render_actions_no_update_serial_without_flag(self):
         """Update Serial button not rendered when can_update_serial is not set."""
@@ -558,6 +692,8 @@ class TestLibreNMSModuleTable:
 
     def test_render_actions_can_update_interface_renders_button(self):
         """Installed row with a safe interface candidate renders Update Interface."""
+        from netbox_librenms_plugin.utils import module_inventory_binding_matches
+
         device = MagicMock()
         device.pk = 81
         table = self._make_table(device=device, can_change_interface=True)
@@ -570,6 +706,7 @@ class TestLibreNMSModuleTable:
             "librenms_ifdescr": "Te1/1/1",
             "name": "Te1/1/1",
             "description": "10G transceiver",
+            "inventory_digest": "interface-row-digest",
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
@@ -577,6 +714,22 @@ class TestLibreNMSModuleTable:
         assert "Update Interface" in result
         assert "mdi-link-variant" in result
         assert 'name="module_id" value="42"' in result
+        binding = next(tag["value"] for tag in open_tags(result, "input") if tag.get("name") == "inventory_binding")
+        assert module_inventory_binding_matches(
+            binding,
+            81,
+            "",
+            "update_module_interface",
+            {"module_id": 42},
+            77,
+            "interface-row-digest",
+        )
+        # Posts via HTMX so the update swaps just the module table in place (with the
+        # closest-row spinner) instead of full-page reloading the whole sync view.
+        assert 'hx-post="/url/"' in result
+        assert 'hx-target="#module-sync-content"' in result
+        assert 'hx-indicator="closest tr"' in result
+        assert 'hx-disabled-elt="find button"' in result
 
     def test_render_actions_update_interface_requires_permission(self):
         """Update Interface button is hidden without change-interface permission."""
@@ -593,6 +746,30 @@ class TestLibreNMSModuleTable:
 
         assert "Update Interface" not in result
 
+    def test_render_actions_carrier_install_option_renders_htmx_form(self):
+        """A No Bay row with a carrier_install_options entry renders an HTMX install form."""
+        device = MagicMock()
+        device.pk = 83
+        table = self._make_table(device=device)
+        record = {
+            "status": "No Bay",
+            "carrier_install_options": [
+                {"bay_id": 12, "module_type_id": 34, "module_type_name": "CARRIER-A", "bay_name": "Slot 0"},
+            ],
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/install-url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Install CARRIER-A into" in result
+        assert 'name="module_bay_id" value="12"' in result
+        assert 'name="module_type_id" value="34"' in result
+        # Carrier-install posts to install_module, which returns the table partial for HTMX,
+        # so it swaps in place with the closest-row spinner like the other install actions.
+        assert 'hx-post="/install-url/"' in result
+        assert 'hx-target="#module-sync-content"' in result
+        assert 'hx-indicator="closest tr"' in result
+        assert 'hx-disabled-elt="find button"' in result
+
     def test_render_actions_can_replace_renders_replace_button(self):
         """can_replace=True with installed_module_id renders a Replace button."""
         device = MagicMock()
@@ -604,13 +781,68 @@ class TestLibreNMSModuleTable:
             "ent_physical_index": 200,
             "serial": "S1",
         }
-        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/replace-url/"):
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/preview-url/"):
             result = str(table.render_actions(None, record))
 
         assert "Replace" in result
-        assert "module-replace-btn" in result
         assert "mdi-swap-horizontal" in result
-        assert 'data-module-id="55"' in result
+        # The preview fragment carries hx- forms, so it must arrive through an HTMX swap: a
+        # fetch()+innerHTML load leaves them unbound and they fall back to a full page reload.
+        (button,) = [tag for tag in open_tags(result, "button") if tag.get("hx-get")]
+        assert button["hx-get"] == "/preview-url/?module_id=55&ent_index=200&server_key=&selected_device_id=9"
+        assert button["hx-target"] == "#htmx-modal-content"
+        assert button["hx-swap"] == "innerHTML"
+        # A newer click supersedes an older in-flight preview, as the AbortController did.
+        assert button["hx-sync"] == "#htmx-modal-content:replace"
+        assert button["hx-disabled-elt"] == "this"
+
+    # One record per row action that posts through HTMX.
+    _HTMX_ROW_ACTIONS = {
+        "install": {
+            "can_install": True,
+            "module_bay_id": 1,
+            "module_type_id": 2,
+            "ent_physical_index": 32,
+            "inventory_digest": "install-row-digest",
+        },
+        "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
+        "update_serial": {
+            "can_update_serial": True,
+            "installed_module_id": 42,
+            "ent_physical_index": 88,
+            "inventory_digest": "serial-row-digest",
+        },
+        "update_interface": {
+            "can_update_interface_binding": True,
+            "installed_module_id": 42,
+            "ent_physical_index": 77,
+            "librenms_port_id": 56284,
+            "inventory_digest": "interface-row-digest",
+        },
+        "carrier_install": {
+            "status": "No Bay",
+            "carrier_install_options": [
+                {"bay_id": 12, "module_type_id": 34, "module_type_name": "CARRIER-A", "bay_name": "Slot 0"}
+            ],
+        },
+    }
+
+    @pytest.mark.parametrize("record", _HTMX_ROW_ACTIONS.values(), ids=list(_HTMX_ROW_ACTIONS))
+    def test_render_actions_row_form_drops_a_concurrent_module_action(self, record):
+        """Two module actions in flight raced into one container: every row form takes the same lock."""
+        device = MagicMock()
+        device.pk = 12
+        table = self._make_table(device=device)
+
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        forms = [tag for tag in open_tags(result, "form") if tag.get("hx-post")]
+        assert forms
+        for form in forms:
+            assert form["hx-sync"] == "#module-sync-content:drop"
+            # The row spinner and the button lock stay: hx-sync only gates a SECOND action.
+            assert form["hx-disabled-elt"] == "find button"
 
     def test_render_actions_serial_mismatch_shows_both_update_and_replace(self):
         """Serial Mismatch row (can_update_serial + can_replace) shows both buttons."""
@@ -623,6 +855,7 @@ class TestLibreNMSModuleTable:
             "installed_module_id": 66,
             "ent_physical_index": 300,
             "serial": "NEWSERIAL",
+            "inventory_digest": "mismatch-row-digest",
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
@@ -658,9 +891,10 @@ class TestLibreNMSModuleTable:
             "can_install": True,
             "module_bay_id": 1,
             "module_type_id": 2,
-            "serial": "SN",
+            "ent_physical_index": 33,
             "can_update_serial": True,
             "installed_module_id": 99,
+            "inventory_digest": "add-row-digest",
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
@@ -680,12 +914,67 @@ class TestLibreNMSModuleTable:
             "serial": "SN",
             "can_update_serial": True,
             "installed_module_id": 99,
+            "ent_physical_index": 99,
+            "inventory_digest": "change-row-digest",
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
 
         assert "Install" not in result
         assert "Update Serial" in result
+
+    @pytest.mark.django_db
+    def test_render_actions_install_hidden_without_an_inventory_index(self):
+        """InstallModuleView resolves the row by index, so a row with no index has no standard action."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("module-actions-missing-install-index")
+        table = self._make_table(device=device)
+        record = {
+            "can_install": True,
+            "module_bay_id": 5,
+            "module_type_id": 10,
+            "ent_physical_index": "",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/install-url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Install" not in result
+
+    @pytest.mark.django_db
+    def test_render_actions_update_serial_hidden_without_an_inventory_index(self):
+        """UpdateModuleSerialView reads the serial from the cached row, so a row with no index has no action."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("module-actions-missing-serial-index")
+        table = self._make_table(device=device)
+        record = {
+            "can_update_serial": True,
+            "installed_module_id": 99,
+            "ent_physical_index": "",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Update Serial" not in result
+
+    @pytest.mark.django_db
+    def test_render_actions_update_interface_hidden_without_an_inventory_index(self):
+        """The bind reads its metadata from the cached row, so a row with no index has no action."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("module-actions-missing-interface-index")
+        table = self._make_table(device=device, can_change_interface=True)
+        record = {
+            "can_update_interface_binding": True,
+            "installed_module_id": 99,
+            "librenms_port_id": 4501,
+            "ent_physical_index": "",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Update Interface" not in result
 
     def test_render_actions_replace_requires_both_add_and_change(self):
         """Replace button only shown when user has both add and change."""
@@ -961,7 +1250,8 @@ class TestLibreNMSModuleTable:
         assert "model=GLC-T" in result
 
     def test_render_actions_module_type_button_skipped_when_user_lacks_add_moduletype_perm(self):
-        """Without `dcim.add_moduletype`, the Add Module Type CTA must be hidden — clicking
+        """
+        Without `dcim.add_moduletype`, the Add Module Type CTA must be hidden — clicking
         it would surface only a permission error from NetBox's native form."""
         device = MagicMock()
         device.pk = 62
@@ -989,8 +1279,9 @@ class TestRenderIntegrated(TestLibreNMSModuleTable):
         }
         html = str(table.render_status("Integrated", record))
         assert "Integrated in XIOM 2/x1" in html
-        # muted styling
-        assert "text-muted" in html or "bg-light" in html
+        assert "bg-body-secondary" in html
+        assert "text-body" in html
+        assert "bg-light" not in html
         # tooltip explains the dedupe
         assert "Duplicate SNMP entry" in html
 

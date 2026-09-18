@@ -1,0 +1,71 @@
+# Device Import Overview
+
+The Device Import feature allows you to discover and import devices from LibreNMS into NetBox. This streamlines the process of populating NetBox with devices that are already monitored in LibreNMS, while giving you full control over how devices are imported.
+
+
+The import page should be clear and intuitive to use, but this overview provides additional context and details.
+
+## How It Works
+
+The import workflow consists of three main steps:
+
+1. **[Search & Filter](searching_for_devices.md)** - Find devices in LibreNMS using flexible filter criteria
+2. **[Review & Validate](validation_and_configuration.md)** - Validate import readiness and configure missing NetBox objects
+3. **[Import](../configuration/import_settings.md)** - Configure import settings and create devices in NetBox
+
+The plugin validates the required NetBox objects for the selected target type before allowing import.
+
+## Key Features
+
+**Flexible Filtering**
+: Search by location, type, operating system, hostname, system name, or hardware model. Combine filters for precise device selection.
+
+**Smart Validation**
+: Automatic matching for Sites, Device Types, and Platforms based on LibreNMS data. Clear indicators for what's missing.
+
+**Device or VM**
+: Import as physical Devices (requires Site, Device Type, and Role) or Virtual Machines. A new virtual machine can use its matched Site, a selected Cluster, or a selected host Device for placement.
+
+**Virtual Chassis Support**
+: Automatic detection and creation of Virtual Chassis objects for stackable switches.
+
+**Background Processing**
+: Large device sets can be processed using NetBox background jobs with progress tracking and cancellation.
+
+## Accessing the Feature
+
+Navigate to the import interface through the NetBox menu:
+
+**LibreNMS → Import → LibreNMS Import**
+
+This opens the device import page where you can search for and import devices from your LibreNMS instance.
+
+## What Gets Created
+
+When a device is imported, the plugin creates:
+
+**Device or VirtualMachine Object**
+: With all validated attributes (name, site, device type, role, platform, serial, rack, etc.). Note that rack assignment places the device in the rack without setting a specific rack unit (U) position—devices appear in the "Non racked" section and require manual U assignment.
+
+**LibreNMS ID Custom Field**
+: Automatically set to link the NetBox object to the LibreNMS device. This enables all other plugin features (interface sync, cable sync, etc.)
+
+**Virtual Chassis** (if detected)
+: For stackable devices, creates the Virtual Chassis object and assigns member positions based on detected inventory data.
+
+After import, devices appear in NetBox with a comment indicating they were imported by the plugin, including the import timestamp.
+
+## Multi-Server Support
+
+If your NetBox installation is configured with multiple LibreNMS servers, the import page starts on the installation default from Plugin Settings. You can select another configured server for the current import workflow without changing that default.
+
+Changing the server clears the current filters and results. All searches, background jobs, validation actions, and imported devices remain linked to the active server.
+
+## Next Steps
+
+Explore each step of the import workflow:
+
+- [Search for Devices](searching_for_devices.md) - Learn about filters, matching rules, and search options
+- [Validation & Configuration](validation_and_configuration.md) - Understand validation status and resolve issues
+- [Import Settings](../configuration/import_settings.md) - Configure device naming and import options
+- [Background Jobs & Caching](background_jobs_and_caching.md) - Job processing and performance optimization

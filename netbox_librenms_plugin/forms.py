@@ -3,9 +3,20 @@ import logging
 import re
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, ModuleType, Platform, Rack, Site
+from dcim.models import (
+    Device,
+    DeviceRole,
+    DeviceType,
+    Location,
+    Manufacturer,
+    ModuleType,
+    Platform,
+    Rack,
+    Site,
+)
 from django import forms
-from django.db.models import Case, IntegerField, Value, When
+from django.core.exceptions import MultipleObjectsReturned
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
@@ -14,6 +25,7 @@ from netbox.forms import (
     NetBoxModelImportForm,
 )
 from netbox.plugins import get_plugin_config
+from tenancy.models import Tenant
 from utilities.forms.fields import (
     CSVChoiceField,
     CSVModelChoiceField,
@@ -28,10 +40,12 @@ from .models import (
     InterfaceTypeMapping,
     InventoryIgnoreRule,
     LibreNMSSettings,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +54,11 @@ logger = logging.getLogger(__name__)
 def _get_librenms_server_choices():
     """
     Helper function to get server choices from plugin configuration.
+
     Shared between ServerConfigForm and other forms that need server selection.
+
+    Returns:
+        list[tuple[str, str]]: The configured server values and display labels.
     """
     choices = []
 
@@ -64,22 +82,37 @@ def _get_librenms_server_choices():
     return choices
 
 
-def _get_librenms_poller_group_choices():
+def _get_librenms_poller_group_choices(server_key=None):
     """
-    Helper function to get poller group choices from LibreNMS API.
+    Get poller group choices from the LibreNMS server the caller is acting on.
+
     Shared between AddToLibreSNMPV1V2 and AddToLibreSNMPV3 forms (via BaseSNMPForm).
-    Results are cached to avoid repeated API calls on every form instantiation.
+    Results are cached per server key to avoid repeated API calls on every form
+    instantiation.
+
+    Args:
+        server_key (str | None): The server to read poller groups from. None uses the
+            installation default. A key that no longer resolves yields the default
+            choice alone, so a stale selection contacts no server at all.
+
+    Returns:
+        list[tuple[str, str]]: The (value, label) choices for the poller group field.
     """
     from django.core.cache import cache
 
-    from .librenms_api import LibreNMSAPI
+    from .librenms_api import build_librenms_api
 
     choices = [("0", "Default (0)")]
 
+    # Build through the fail-closed factory: a stale or unconfigured key returns None here
+    # instead of raising, and must not fall back to the installation default's groups. The
+    # broad catch keeps the page renderable when the whole LibreNMS config is unusable.
     try:
-        api = LibreNMSAPI()
+        api = build_librenms_api(server_key)
     except Exception:
         logger.exception("Failed to initialize LibreNMSAPI; using default poller group choices")
+        return choices
+    if api is None:
         return choices
 
     cache_key = f"librenms_poller_group_choices_{api.server_key}"
@@ -112,7 +145,8 @@ def _get_librenms_poller_group_choices():
 
 class ServerConfigForm(NetBoxModelForm):
     """
-    Form for selecting the active LibreNMS server from configured servers.
+    Select the active LibreNMS server from the configured servers.
+
     Handles server configuration changes only.
     """
 
@@ -132,8 +166,9 @@ class ServerConfigForm(NetBoxModelForm):
 
 class ImportSettingsForm(NetBoxModelForm):
     """
-    Form for configuring device import settings including naming patterns
-    and virtual chassis member naming.
+    Configure device import settings.
+
+    Set naming patterns and virtual chassis member names.
     """
 
     vc_member_name_pattern = forms.CharField(
@@ -162,12 +197,43 @@ class ImportSettingsForm(NetBoxModelForm):
         help_text="Remove domain suffix from device names during import",
     )
 
+    location_parse_pattern = forms.CharField(
+        label="Location Parse Pattern",
+        max_length=255,
+        required=False,
+        strip=False,  # Preserve separators that may include whitespace
+        widget=forms.TextInput(
+            attrs={
+                "placeholder": "{site} - {rack}",
+            }
+        ),
+        help_text="How to split the LibreNMS location string into NetBox fields. "
+        "Leave blank to match the whole string against site and location.",
+    )
+
+    location_parse_is_regex = forms.BooleanField(
+        label="Use regex",
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+        help_text="Treat the pattern as a raw regular expression with named groups",
+    )
+
+    remember_interface_name_per_platform = forms.BooleanField(
+        label="Remember interface naming per platform",
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+        help_text="Store each user's ifName or ifDescr choice separately for each device platform",
+    )
+
     class Meta:
         model = LibreNMSSettings
         fields = [
             "vc_member_name_pattern",
             "use_sysname_default",
             "strip_domain_default",
+            "location_parse_pattern",
+            "location_parse_is_regex",
+            "remember_interface_name_per_platform",
         ]
 
     def clean_vc_member_name_pattern(self):
@@ -177,6 +243,12 @@ class ImportSettingsForm(NetBoxModelForm):
         The pattern is used as a suffix appended to the master device name.
         Valid placeholders: {position}, {serial}
         At least one is required for uniqueness.
+
+        Returns:
+            str | None: The validated pattern, or the unchanged empty value.
+
+        Raises:
+            forms.ValidationError: If the pattern has an invalid placeholder or format.
         """
         pattern = self.cleaned_data.get("vc_member_name_pattern")
 
@@ -225,11 +297,74 @@ class ImportSettingsForm(NetBoxModelForm):
 
         return pattern
 
+    def clean(self):
+        """Validate the location parse pattern against its placeholder/regex mode."""
+        super().clean()
+        cleaned_data = self.cleaned_data
+        pattern = cleaned_data.get("location_parse_pattern")
+        is_regex = cleaned_data.get("location_parse_is_regex")
+
+        if not pattern:
+            return cleaned_data
+
+        valid_tokens = {"region", "site", "location", "rack", "tenant"}
+
+        if is_regex:
+            try:
+                compiled = re.compile(pattern)
+            except re.error as exc:
+                self.add_error("location_parse_pattern", f"Invalid regular expression: {exc}")
+                return cleaned_data
+            group_names = set(compiled.groupindex.keys())
+            if not group_names:
+                self.add_error(
+                    "location_parse_pattern",
+                    "The regex must define at least one named group, e.g. (?P<site>...).",
+                )
+            invalid = group_names - valid_tokens
+            if invalid:
+                self.add_error(
+                    "location_parse_pattern",
+                    f"Invalid named group(s): {', '.join(sorted(invalid))}. "
+                    f"Valid groups are: {', '.join(sorted(valid_tokens))}.",
+                )
+        else:
+            found = set(re.findall(r"\{(\w+)\}", pattern))
+            invalid = found - valid_tokens
+            if invalid:
+                invalid_list = ", ".join(f"{{{p}}}" for p in sorted(invalid))
+                valid_list = ", ".join(f"{{{t}}}" for t in sorted(valid_tokens))
+                self.add_error(
+                    "location_parse_pattern",
+                    f"Invalid placeholder(s): {invalid_list}. Valid options are: {valid_list}.",
+                )
+            elif not found:
+                self.add_error(
+                    "location_parse_pattern",
+                    "The pattern must include at least one placeholder, e.g. {site}.",
+                )
+            else:
+                # Permit repeated placeholders like "{site}, {location}, {location}".
+                # The parser resolves them to the canonical token name while keeping the
+                # regex valid. We only reject malformed braces, not repeated tokens.
+                leftover = re.sub(r"\{(\w+)\}", "", pattern)
+                if "{" in leftover or "}" in leftover:
+                    valid_list = ", ".join(f"{{{t}}}" for t in sorted(valid_tokens))
+                    self.add_error(
+                        "location_parse_pattern",
+                        "Malformed placeholder: check for an unbalanced or unclosed brace. "
+                        f"Use complete placeholders like {valid_list}.",
+                    )
+
+        return cleaned_data
+
 
 # Keep for backward compatibility if needed elsewhere
 class LibreNMSSettingsForm(ServerConfigForm):
     """
-    Deprecated: Use ServerConfigForm or ImportSettingsForm instead.
+    Provide the deprecated combined settings form.
+
+    Use ServerConfigForm or ImportSettingsForm instead.
     Kept for backward compatibility.
     """
 
@@ -238,8 +373,9 @@ class LibreNMSSettingsForm(ServerConfigForm):
 
 class InterfaceTypeMappingForm(NetBoxModelForm):
     """
-    Form for creating and editing interface type mappings between LibreNMS and NetBox.
-    Allows mapping of LibreNMS interface types and speeds to NetBox interface types.
+    Create and edit interface type mappings between LibreNMS and NetBox.
+
+    Map LibreNMS interface types and speeds to NetBox interface types.
     """
 
     class Meta:
@@ -249,8 +385,9 @@ class InterfaceTypeMappingForm(NetBoxModelForm):
 
 class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
     """
-    Form for bulk importing interface type mappings from CSV/JSON/YAML.
-    Supports importing LibreNMS interface type and speed mappings to NetBox interface types.
+    Import interface type mappings from CSV, JSON, or YAML.
+
+    Import LibreNMS interface type and speed mappings to NetBox interface types.
     """
 
     netbox_type = CSVChoiceField(
@@ -266,8 +403,9 @@ class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
 
 class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     """
-    Form for filtering interface type mappings based on LibreNMS and NetBox attributes.
-    Provides filtering options for LibreNMS type, speed, and NetBox type.
+    Filter interface type mappings by LibreNMS and NetBox attributes.
+
+    Filter by LibreNMS type, speed, and NetBox type.
     """
 
     librenms_type = forms.CharField(required=False, label="LibreNMS Type")
@@ -705,10 +843,213 @@ class PlatformMappingFilterForm(NetBoxModelFilterSetForm):
     model = PlatformMapping
 
 
+class PortStackLagPatternForm(NetBoxModelForm):
+    """Form for creating and editing PortStackLagPattern objects."""
+
+    class Meta:
+        """Meta options."""
+
+        model = PortStackLagPattern
+        fields = ["librenms_os", "lag_name_pattern", "bridge_name_pattern", "sap_name_pattern", "description"]
+
+
+class PortStackLagPatternImportForm(NetBoxModelImportForm):
+    """Form for bulk importing PortStackLagPattern objects from CSV/JSON/YAML."""
+
+    class Meta:
+        """Meta options."""
+
+        model = PortStackLagPattern
+        fields = ["librenms_os", "lag_name_pattern", "bridge_name_pattern", "sap_name_pattern", "description"]
+
+
+class PortStackLagPatternFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering PortStackLagPattern objects."""
+
+    librenms_os = forms.CharField(required=False, label="LibreNMS OS")
+    lag_name_pattern = forms.CharField(required=False, label="LAG Name Pattern")
+    bridge_name_pattern = forms.CharField(required=False, label="Bridge Name Pattern")
+    sap_name_pattern = forms.CharField(required=False, label="SAP Name Pattern")
+    description = forms.CharField(required=False, label="Description")
+
+    model = PortStackLagPattern
+
+
+class LocationMappingForm(NetBoxModelForm):
+    """
+    Form for creating and editing LibreNMS location-value to NetBox-object mappings.
+
+    The target object is stored as a generic foreign key. The form exposes one
+    optional selector per supported NetBox type; the selector matching the chosen
+    ``field_type`` is required and used to populate the generic foreign key.
+    """
+
+    site = DynamicModelChoiceField(queryset=Site.objects.all(), required=False, label="NetBox Site")
+    location = DynamicModelChoiceField(queryset=Location.objects.all(), required=False, label="NetBox Location")
+    rack = DynamicModelChoiceField(queryset=Rack.objects.all(), required=False, label="NetBox Rack")
+    tenant = DynamicModelChoiceField(queryset=Tenant.objects.all(), required=False, label="NetBox Tenant")
+
+    # Render the object selectors immediately after the field_type dropdown so the
+    # (single) visible selector appears directly below it.
+    field_order = [
+        "field_type",
+        "site",
+        "location",
+        "rack",
+        "tenant",
+        "librenms_value",
+        "description",
+    ]
+
+    class Meta:
+        """Meta options for LocationMappingForm."""
+
+        model = LocationMapping
+        fields = ["field_type", "librenms_value", "description"]
+
+    def __init__(self, *args, **kwargs):
+        """Pre-populate the relevant object selector when editing an existing mapping."""
+        super().__init__(*args, **kwargs)
+        obj = getattr(self.instance, "netbox_object", None)
+        field_type = getattr(self.instance, "field_type", None)
+        if obj is not None and field_type in self.fields:
+            self.initial[field_type] = obj.pk
+
+    def clean(self):
+        """Resolve the selected object for the chosen field type and set the generic FK."""
+        super().clean()
+        cleaned_data = self.cleaned_data
+        field_type = cleaned_data.get("field_type")
+        if not field_type:
+            return cleaned_data
+
+        target = cleaned_data.get(field_type)
+        if not target:
+            self.add_error(field_type, f"Select the NetBox {field_type} this value maps to.")
+            return cleaned_data
+
+        self.instance.netbox_object = target
+        return cleaned_data
+
+
+# Target model per LocationMapping.field_type, used to bind the import field's queryset.
+LOCATION_MAPPING_IMPORT_MODELS = {
+    "site": Site,
+    "location": Location,
+    "rack": Rack,
+    "tenant": Tenant,
+}
+
+
+class CaseInsensitiveCSVModelChoiceField(CSVModelChoiceField):
+    """
+    Resolve a CSV value against ``to_field_name`` without case sensitivity.
+
+    Resolution stays on ``self.queryset`` so NetBox's ``restrict_form_fields()``
+    still scopes the lookup to objects the importing user may view.
+    """
+
+    def to_python(self, value):
+        if value in self.empty_values:
+            return None
+        value = str(value).strip()
+        try:
+            return self.queryset.get(**{f"{self.to_field_name}__iexact": value})
+        except self.queryset.model.DoesNotExist:
+            raise forms.ValidationError(
+                self.error_messages["invalid_choice"],
+                code="invalid_choice",
+                params={"value": value},
+            )
+        except MultipleObjectsReturned:
+            raise forms.ValidationError(
+                f'"{value}" is not a unique value for this field; specify parent_site to disambiguate.'
+            )
+
+
+class LocationMappingImportForm(NetBoxModelImportForm):
+    """
+    Form for bulk importing location mappings.
+
+    ``netbox_object`` is the name of the target object. For ``location`` and
+    ``rack`` field types, supply ``parent_site`` to disambiguate names that are
+    not unique across sites.
+    """
+
+    field_type = CSVChoiceField(
+        choices=LocationMapping.FIELD_TYPE_CHOICES,
+        help_text="Type of NetBox object the value maps to (site, location, rack, tenant)",
+    )
+    netbox_object = CaseInsensitiveCSVModelChoiceField(
+        queryset=Site.objects.none(),
+        to_field_name="name",
+        help_text="Name of the target NetBox object",
+    )
+    parent_site = CSVModelChoiceField(
+        queryset=Site.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Parent site name (required for location/rack when the name is not unique)",
+    )
+
+    class Meta:
+        """Meta options for LocationMappingImportForm."""
+
+        model = LocationMapping
+        fields = ["field_type", "librenms_value", "description"]
+
+    def __init__(self, data=None, *args, **kwargs):
+        """Point netbox_object at the model named by field_type, scoped to parent_site."""
+        super().__init__(data, *args, **kwargs)
+        if not data:
+            return
+
+        model = LOCATION_MAPPING_IMPORT_MODELS.get(data.get("field_type"))
+        if model is None:
+            return
+
+        queryset = model.objects.all()
+        parent_site = data.get("parent_site")
+        if parent_site and data.get("field_type") in ("location", "rack"):
+            site_field = self.fields["parent_site"].to_field_name
+            if data.get("field_type") == "rack":
+                queryset = queryset.filter(
+                    Q(**{f"site__{site_field}": parent_site}) | Q(**{f"location__site__{site_field}": parent_site})
+                )
+            else:
+                queryset = queryset.filter(**{f"site__{site_field}": parent_site})
+        self.fields["netbox_object"].queryset = queryset
+
+    def clean(self):
+        """Attach the resolved target object to the instance as a generic foreign key."""
+        super().clean()
+        cleaned_data = self.cleaned_data
+        target = cleaned_data.get("netbox_object")
+        if target is not None:
+            self.instance.netbox_object = target
+        return cleaned_data
+
+
+class LocationMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering location mappings."""
+
+    field_type = forms.ChoiceField(
+        required=False,
+        label="Field Type",
+        choices=[("", "---------")] + list(LocationMapping.FIELD_TYPE_CHOICES),
+    )
+    librenms_value = forms.CharField(required=False, label="LibreNMS Value")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = LocationMapping
+
+
 class BaseSNMPForm(forms.Form):
-    """
-    Base form with fields shared by both SNMPv1/v2c and SNMPv3 LibreNMS device forms.
-    """
+    """Base form with fields shared by both SNMPv1/v2c and SNMPv3 LibreNMS device forms."""
 
     hostname = forms.CharField(
         label="Hostname/IP",
@@ -756,14 +1097,15 @@ class BaseSNMPForm(forms.Form):
         help_text="Skip duplicate device and SNMP reachability checks (hostname must still be unique)",
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, server_key=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
+        self.fields["poller_group"].choices = _get_librenms_poller_group_choices(server_key)
 
 
 class AddToLibreSNMPV1V2(BaseSNMPForm):
     """
-    Form for adding devices to LibreNMS using SNMPv1 or SNMPv2c authentication.
+    Add devices to LibreNMS with SNMPv1 or SNMPv2c authentication.
+
     Collects hostname/IP and SNMP community string information.
     The SNMP version (v1 or v2c) is selected via a toggle button in the template.
     """
@@ -782,7 +1124,8 @@ AddToLIbreSNMPV1V2 = AddToLibreSNMPV1V2
 
 class AddToLibreSNMPV3(BaseSNMPForm):
     """
-    Form for adding devices to LibreNMS using SNMPv3 authentication.
+    Add devices to LibreNMS with SNMPv3 authentication.
+
     Provides comprehensive SNMPv3 configuration options including authentication and encryption settings.
     """
 
@@ -851,9 +1194,7 @@ AddToLIbreSNMPV3 = AddToLibreSNMPV3
 
 
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
-    """
-    Filter form for Device Status view - shows NetBox devices and their LibreNMS status.
-    """
+    """Filter form for Device Status view - shows NetBox devices and their LibreNMS status."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -870,9 +1211,13 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
     model = Device
 
 
+_USE_INSTALLATION_DEFAULT_SERVER = object()
+
+
 class LibreNMSImportFilterForm(forms.Form):
     """
-    Filter form for LibreNMS Import view - shows LibreNMS devices for import.
+    Filter the LibreNMS devices available for import.
+
     Uses a simple Django form instead of NetBox model forms.
     """
 
@@ -958,8 +1303,9 @@ class LibreNMSImportFilterForm(forms.Form):
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, librenms_api=_USE_INSTALLATION_DEFAULT_SERVER, **kwargs):
         """Initialize the form and populate dynamic choices."""
+        self._librenms_api = librenms_api
         # For bound forms, ensure use_background_job defaults to 'on' if not present
         # This handles the case where checkbox is checked by default but not in GET params
         # Only apply this default when no filters are applied (initial page load)
@@ -978,14 +1324,15 @@ class LibreNMSImportFilterForm(forms.Form):
                 "librenms_hardware",
             ]
             has_filters = any(data.get(field) for field in filter_fields)
-
-            non_option_fields = [
-                f for f in filter_fields if data.get(f) not in (None, "", []) and str(data.get(f, "")).strip()
-            ]
-            has_option_only = bool(data) and not bool(non_option_fields) and not has_filters
+            has_non_navigation_data = any(field != "server_key" for field in data)
 
             # Apply default only on initial load (no filters, no job_id, no real submission)
-            if "use_background_job" not in data and not data.get("job_id") and not has_filters and not has_option_only:
+            if (
+                "use_background_job" not in data
+                and not data.get("job_id")
+                and not has_filters
+                and not has_non_navigation_data
+            ):
                 data["use_background_job"] = "on"
             args = (data,) + args[1:]
 
@@ -1020,14 +1367,26 @@ class LibreNMSImportFilterForm(forms.Form):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         try:
-            # Determine server_key cheaply from settings to check cache before instantiating the API
-            try:
-                from netbox_librenms_plugin.models import LibreNMSSettings
+            api = self._librenms_api
+            if api is None:
+                return
+            if api is not _USE_INSTALLATION_DEFAULT_SERVER:
+                _server_key = api.server_key
+            else:
+                # Determine server_key cheaply from settings to check cache before instantiating the API
+                try:
+                    from netbox_librenms_plugin.models import LibreNMSSettings
 
-                _settings = LibreNMSSettings.objects.first()
-                _server_key = (_settings.selected_server if _settings else None) or "default"
-            except Exception:
-                _server_key = "default"
+                    _settings = LibreNMSSettings.objects.first()
+                    selected_server = (_settings.selected_server if _settings else None) or "default"
+                    available_servers = LibreNMSAPI.get_available_servers()
+                    _server_key = (
+                        selected_server
+                        if selected_server in available_servers
+                        else next(iter(available_servers), "default")
+                    )
+                except Exception:
+                    _server_key = "default"
 
             cache_key = get_location_choices_cache_key(_server_key)
             cached_choices = cache.get(cache_key)
@@ -1036,7 +1395,7 @@ class LibreNMSImportFilterForm(forms.Form):
                 return
 
             # Cache miss — instantiate the API client and fetch
-            api = LibreNMSAPI()
+            api = LibreNMSAPI() if api is _USE_INSTALLATION_DEFAULT_SERVER else api
             # Recompute cache_key with the resolved server_key in case it differs from settings
             cache_key = get_location_choices_cache_key(api.server_key)
             # Second cache check: the resolved server_key may differ from the settings key
@@ -1072,9 +1431,7 @@ class LibreNMSImportFilterForm(forms.Form):
 
 
 class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
-    """
-    Form for filtering virtual machine status information in NetBox.
-    """
+    """Form for filtering virtual machine status information in NetBox."""
 
     def __init__(self, *args, **kwargs):
         """Initialize the form and remove the filter_id field if it exists."""
@@ -1092,7 +1449,8 @@ class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
 
 class DeviceImportConfigForm(forms.Form):
     """
-    Form for configuring import of LibreNMS devices with missing prerequisites.
+    Configure imports for LibreNMS devices with missing prerequisites.
+
     Allows user to manually map LibreNMS device data to NetBox objects.
     """
 
@@ -1146,23 +1504,19 @@ class DeviceImportConfigForm(forms.Form):
         label="Sync Cables",
         help_text="Automatically sync cable connections from LibreNMS after import",
     )
-    sync_ips = forms.BooleanField(
-        initial=True,
-        required=False,
-        label="Sync IP Addresses",
-        help_text="Automatically sync IP addresses from LibreNMS after import",
-    )
 
     def __init__(self, *args, **kwargs):
         """
         Initialize form with LibreNMS device data and validation results.
 
-        Accepts additional kwargs:
-        - libre_device: LibreNMS device dictionary
-        - validation: Validation result dictionary
-        - suggested_site: Pre-selected site
-        - suggested_device_type: Pre-selected device type
-        - suggested_role: Pre-selected device role
+        Args:
+            *args (tuple): Positional arguments for the parent form.
+            **kwargs (dict): Keyword arguments for the parent form. Accepts these additional values:
+                libre_device: LibreNMS device dictionary
+                validation: Validation result dictionary
+                suggested_site: Pre-selected site
+                suggested_device_type: Pre-selected device type
+                suggested_role: Pre-selected device role
         """
         # Extract custom kwargs
         libre_device = kwargs.pop("libre_device", {})

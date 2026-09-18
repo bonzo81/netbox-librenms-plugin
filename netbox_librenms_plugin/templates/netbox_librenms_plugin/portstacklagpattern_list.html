@@ -1,0 +1,23 @@
+{% extends 'generic/object_list.html' %}
+
+{% block tabs %}
+    {% include 'netbox_librenms_plugin/inc/_rules_patterns_tabs.html' with rules_tab_active="portstacklagpattern" %}
+    {{ block.super }}
+{% endblock %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Port Stack Patterns</h4>
+        <p>Define operating-system-specific patterns for LAG aggregates, bridge interfaces,
+           and service access points. Interface synchronization uses these patterns to classify
+           LibreNMS port-stack relationships.</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:portstacklagpattern_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

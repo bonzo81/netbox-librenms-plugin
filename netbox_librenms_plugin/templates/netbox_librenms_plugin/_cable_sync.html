@@ -2,11 +2,13 @@
 {% load static %}
 
 <!-- Action Buttons -->
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h2>Cable Sync</h2>
-    <div class="btn-list">
+<div class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar">
+    <div class="btn-list align-items-center">
+        {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=cable_sync.cache_expiry cache_container_id="cable-cache-countdown" cache_countdown_id="cable-countdown-timer" %}
         <form method="post">
             {% csrf_token %}
+            {# Carry the tab's server_key so the refresh rebinds to it (mirrors _module_sync.html). #}
+            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
             {% if has_librenms_id %}
                     {% with model_name=object|meta:"model_name" %}
                         {% if model_name == "device" %}

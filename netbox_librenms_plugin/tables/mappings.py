@@ -7,10 +7,12 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 
@@ -287,6 +289,45 @@ class PlatformMappingTable(NetBoxTable):
         attrs = {"class": "table table-hover table-headings table-striped"}
 
 
+class LocationMappingTable(NetBoxTable):
+    """Table for displaying LocationMapping data."""
+
+    pk = columns.ToggleColumn(attrs={"input": {"name": "select"}})
+    field_type = tables.Column(verbose_name="Field Type")
+    librenms_value = tables.Column(verbose_name="LibreNMS Value", linkify=True)
+    netbox_object = tables.Column(verbose_name="NetBox Object", linkify=True, orderable=False)
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    def render_field_type(self, record):
+        """Render the human-readable field type label."""
+        return record.get_field_type_display()
+
+    class Meta:
+        """Meta options for LocationMappingTable."""
+
+        model = LocationMapping
+        fields = (
+            "pk",
+            "id",
+            "field_type",
+            "librenms_value",
+            "netbox_object",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "pk",
+            "id",
+            "field_type",
+            "librenms_value",
+            "netbox_object",
+            "description",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
 class CarrierAutoInstallRuleTable(NetBoxTable):
     """Table for displaying CarrierAutoInstallRule data."""
 
@@ -323,6 +364,48 @@ class CarrierAutoInstallRuleTable(NetBoxTable):
             "librenms_child_name_pattern",
             "netbox_bay_name_pattern",
             "carrier_module_type",
+            "description",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class PortStackLagPatternTable(NetBoxTable):
+    """Table for displaying PortStackLagPattern data."""
+
+    # Use NetBoxTable's default pk ToggleColumn (input name="pk"). This table is rendered only by
+    # generic NetBox views (ObjectListView, BulkDeleteView) and the plugin's BulkExportYAMLView,
+    # all of which read request.POST.getlist("pk"); the generic list pages don't load the plugin's
+    # sync/import selection JS. Overriding the input name to "select" silently broke select-all,
+    # bulk delete, and "Export Selected (YAML)" (the view always saw zero selected pks).
+    librenms_os = tables.Column(verbose_name="LibreNMS OS", linkify=True)
+    lag_name_pattern = tables.Column(verbose_name="LAG Name Pattern (regex)")
+    bridge_name_pattern = tables.Column(verbose_name="Bridge Name Pattern (regex)")
+    sap_name_pattern = tables.Column(verbose_name="SAP Name Pattern (regex)")
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for PortStackLagPatternTable."""
+
+        model = PortStackLagPattern
+        fields = (
+            "pk",
+            "id",
+            "librenms_os",
+            "lag_name_pattern",
+            "bridge_name_pattern",
+            "sap_name_pattern",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "pk",
+            "id",
+            "librenms_os",
+            "lag_name_pattern",
+            "bridge_name_pattern",
+            "sap_name_pattern",
             "description",
             "actions",
         )

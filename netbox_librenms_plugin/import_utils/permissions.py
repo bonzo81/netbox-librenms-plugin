@@ -3,6 +3,16 @@
 from django.core.exceptions import PermissionDenied
 
 
+def required_import_permissions(device_ids, vm_imports):
+    """Return the model permissions required for a mixed import batch."""
+    permissions = set()
+    if device_ids:
+        permissions.update({"dcim.add_device", "dcim.change_device"})
+    if vm_imports:
+        permissions.add("virtualization.add_virtualmachine")
+    return sorted(permissions)
+
+
 def check_user_permissions(user, permissions):
     """
     Check if user has all required permissions.

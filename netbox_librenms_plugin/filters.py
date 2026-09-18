@@ -1,15 +1,18 @@
 import django_filters
 from dcim.models import Manufacturer
+from django.db.models import Q
 
 from .models import (
     CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 
@@ -120,6 +123,20 @@ class PlatformMappingFilterSet(django_filters.FilterSet):
         fields = ["librenms_os", "description"]
 
 
+class LocationMappingFilterSet(django_filters.FilterSet):
+    """Filter set for LocationMapping model."""
+
+    field_type = django_filters.CharFilter(lookup_expr="iexact")
+    librenms_value = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
+    class Meta:
+        """Meta options for LocationMappingFilterSet."""
+
+        model = LocationMapping
+        fields = ["field_type", "librenms_value", "description"]
+
+
 class CarrierAutoInstallRuleFilterSet(django_filters.FilterSet):
     """Filter set for CarrierAutoInstallRule model."""
 
@@ -143,3 +160,30 @@ class CarrierAutoInstallRuleFilterSet(django_filters.FilterSet):
             "librenms_child_name_pattern",
             "netbox_bay_name_pattern",
         ]
+
+
+class PortStackLagPatternFilterSet(django_filters.FilterSet):
+    """Filter set for PortStackLagPattern model."""
+
+    q = django_filters.CharFilter(method="search")
+    librenms_os = django_filters.CharFilter(lookup_expr="icontains")
+    lag_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    bridge_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    sap_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
+    def search(self, queryset, _name, value):
+        """Search the fields exposed by the pattern list."""
+        return queryset.filter(
+            Q(librenms_os__icontains=value)
+            | Q(lag_name_pattern__icontains=value)
+            | Q(bridge_name_pattern__icontains=value)
+            | Q(sap_name_pattern__icontains=value)
+            | Q(description__icontains=value)
+        )
+
+    class Meta:
+        """Meta options."""
+
+        model = PortStackLagPattern
+        fields = ["librenms_os", "lag_name_pattern", "bridge_name_pattern", "sap_name_pattern", "description"]

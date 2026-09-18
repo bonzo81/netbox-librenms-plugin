@@ -8,6 +8,11 @@
 
 {% block title %}{{ title }}{% endblock %}
 
+{% block head %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'netbox_librenms_plugin/css/librenms_import.css' %}">
+{% endblock %}
+
 {% block javascript %}
 {{ block.super }}
 <script src="{% static 'netbox_librenms_plugin/js/librenms_import.js' %}"></script>
@@ -28,24 +33,30 @@
   {% include 'inc/messages.html' %}
 
   {# LibreNMS Server Information #}
-  {% if librenms_server_info %}
+  {% if server_selection_error %}
+  <div class="alert alert-danger" id="librenms-import-server-error" role="alert">
+    <i class="mdi mdi-alert-circle me-1"></i>{{ server_selection_error }}
+  </div>
+  {% endif %}
+  {% if librenms_server_info or all_server_mappings %}
   <div class="card mb-3">
     <div class="card-body p-2">
       <div class="d-flex justify-content-between align-items-center">
         <div>
           <i class="mdi mdi-server-network text-primary"></i>
           <strong>Active LibreNMS Server:</strong>
-          {% if librenms_server_info.is_legacy %}
+          {% if not librenms_server_info %}
+          None
+          {% elif librenms_server_info.is_legacy %}
           {{ librenms_server_info.url }}
           {% else %}
           {{ librenms_server_info.display_name }} ({{ librenms_server_info.url }})
           {% endif %}
         </div>
-        {% if not librenms_server_info.is_legacy %}
-        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary ms-3">
-          <i class="mdi mdi-cog"></i> Change Server
-        </a>
-        {% endif %}
+        <div class="d-flex align-items-center gap-2">
+          <span class="text-muted small">This selection does not change the installation settings.</span>
+          {% include "netbox_librenms_plugin/inc/_server_selector.html" %}
+        </div>
       </div>
     </div>
   </div>
@@ -101,6 +112,9 @@
             <div class="col-md-8">
               <form method="get" class="form" id="librenms-import-filter-form">
                 <input type="hidden" name="apply_filters" value="1">
+                {% if server_key %}
+                <input type="hidden" name="server_key" value="{{ server_key }}">
+                {% endif %}
                 {% if show_filter_warning %}
                   <div class="alert alert-warning alert-dismissible fade show border-warning" role="alert" style="border-left: 4px solid #ffc107;">
                     <i class="mdi mdi-alert text-warning"></i>
@@ -223,7 +237,7 @@
                   <button type="submit" class="btn btn-primary" id="apply-filters-btn">
                     <i class="mdi mdi-filter"></i> Apply Filters
                   </button>
-                  <a href="{% url 'plugins:netbox_librenms_plugin:librenms_import' %}" class="btn btn-secondary">
+                  <a href="{% url 'plugins:netbox_librenms_plugin:librenms_import' %}{% if server_key %}?server_key={{ server_key|urlencode }}{% endif %}" class="btn btn-secondary">
                     <i class="mdi mdi-close"></i> Clear
                   </a>
                 </div>
@@ -250,24 +264,7 @@
     <div class="collapse show" id="cached-searches-collapse">
       <div class="card-body p-2">
         <div class="d-flex flex-wrap gap-2">
-          {% for search in cached_searches %}
-            <a href="?apply_filters=1{% for key, value in search.filters.items %}&librenms_{{ key }}={{ value|urlencode }}{% endfor %}{% if search.vc_enabled %}&enable_vc_detection=1{% endif %}"
-               class="btn btn-sm btn-outline-secondary"
-               style="text-decoration: none;"
-               title="Click to load this cached search">
-              <i class="mdi mdi-filter-outline"></i>
-              {% with display_data=search.display_filters|default:search.filters %}
-                {% for key, value in display_data.items %}
-                  {% if not forloop.first %} <span class="text-muted">|</span> {% endif %}
-                  {{ value }}
-                {% endfor %}
-              {% endwith %}
-              {% if search.vc_enabled %}
-                <span class="text-muted">| VC</span>
-              {% endif %}
-              <span class="text-muted ms-2">({{ search.device_count }} devices, <span class="cached-search-countdown" data-cache-timestamp="{{ search.cached_at }}" data-cache-timeout="{{ search.cache_timeout }}">{{ search.remaining_seconds }}s</span> left)</span>
-            </a>
-          {% endfor %}
+          {% include "netbox_librenms_plugin/inc/_cached_search_links.html" %}
         </div>
         <small class="text-muted d-block mt-2">
           <i class="mdi mdi-information-outline"></i> Click any cached search to load those results again.
@@ -282,24 +279,6 @@
     {% applied_filters model filter_form request.GET %}
   {% endif %}
 
-  <style>
-    /* Allow dropdown menus to extend beyond table container */
-    .device-import-table-wrapper {
-      overflow-x: auto;
-      overflow-y: visible;
-      /* Add space below table for dropdowns in last rows */
-      padding-bottom: 200px;
-      /* Pull up pagination to remove visual gap */
-      margin-bottom: -200px;
-    }
-
-    /* Ensure card doesn't clip overflowing dropdowns */
-    .device-import-table-wrapper + .pagination {
-      position: relative;
-      z-index: 1;
-    }
-  </style>
-
   {# Results Section #}
   {% if table.page.paginator.count == 0 %}
     <div class="alert alert-warning mb-3">
@@ -311,87 +290,118 @@
         </p>
     </div>
   {% else %}
-    {# Bulk import toolbar #}
-    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-      <div class="d-flex align-items-center gap-2 flex-wrap">
-        <button type="button" class="btn btn-outline-primary" id="select-all-ready">
-                <i class="mdi mdi-checkbox-multiple-marked"></i> Select All Ready
-            </button>
-            <button type="button" class="btn btn-outline-secondary" id="select-none">
-                <i class="mdi mdi-checkbox-multiple-blank-outline"></i> Deselect All
-            </button>
-            <span class="text-muted" id="selection-count">
-                <i class="mdi mdi-information"></i> 0 devices selected
-            </span>
-        </div>
-      <div class="d-flex align-items-center gap-2 flex-wrap">
-        {# Cache expiration info - before Settings section #}
-        {% if filters_submitted and table.rows %}
-          {% if cache_metadata_missing %}
-          <div class="d-flex align-items-center gap-1 text-warning small" title="Cache metadata not found. This may indicate a cache synchronization issue.">
-              <i class="mdi mdi-alert"></i>
-              <span>Cache status: <strong>unavailable</strong></span>
-          </div>
-          <span class="text-muted">|</span>
-          {% elif cache_timestamp and cache_timeout %}
-          <div class="d-flex align-items-center gap-1 text-muted small" id="cache-info-display"
-               data-cache-timestamp="{{ cache_timestamp }}"
-               data-cache-timeout="{{ cache_timeout }}">
-              <i class="mdi mdi-clock-outline"></i>
-              <span>Cache expires in <strong id="cache-expiry-countdown">{{ cache_timeout }}s</strong></span>
-          </div>
-          <span class="text-muted">|</span>
-          {% endif %}
-        {% endif %}
-        {# Import Settings #}
-        <div class="d-flex align-items-center gap-2 border-start ps-2"
-             data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
-            <strong class="small">Settings:</strong>
-            <div class="form-check form-switch mb-0">
-                <span id="use-sysname-toggle">
-                    <input type="hidden" name="use-sysname-toggle" value="off">
-                    <input class="form-check-input" type="checkbox" id="use-sysname-toggle-cb" name="use-sysname-toggle" {% if use_sysname %}checked{% endif %}
-                           data-bs-toggle="tooltip"
-                           title="Use SNMP sysName instead of LibreNMS hostname">
-                </span>
-                <label class="form-check-label small" for="use-sysname-toggle-cb">
-                    Use sysName
-                </label>
-            </div>
-            <div class="form-check form-switch mb-0">
-                <span id="strip-domain-toggle">
-                    <input type="hidden" name="strip-domain-toggle" value="off">
-                    <input class="form-check-input" type="checkbox" id="strip-domain-toggle-cb" name="strip-domain-toggle" {% if strip_domain %}checked{% endif %}
-                           data-bs-toggle="tooltip"
-                           title="Remove domain suffix (e.g., 'switch01.example.com' -> 'switch01'). IP addresses preserved.">
-                </span>
-                <label class="form-check-label small" for="strip-domain-toggle-cb">
-                    Strip domain
-                </label>
-            </div>
-        </div>
-        <button type="button" class="btn btn-success" id="bulk-import-btn" disabled
-          hx-post="{% url 'plugins:netbox_librenms_plugin:bulk_import_confirm' %}"
-          hx-target="#htmx-modal-content"
-          hx-swap="innerHTML"
-          hx-include="#import-selection-form, #use-sysname-toggle, #strip-domain-toggle">
-        <span class="d-inline-flex align-items-center gap-1">
-          <i class="mdi mdi-download"></i>
-          <span>Import Selected (<span id="import-count">0</span>)</span>
-        </span>
-        <span class="spinner-border spinner-border-sm ms-2 htmx-indicator" role="status" aria-hidden="true" style="display: none;"></span>
-        </button>
-      </div>
-    </div>
-  {% endif %}
-
     <form method="post" class="form form-horizontal" id="import-selection-form">
     {% csrf_token %}
     <input type="hidden" name="return_url" value="{% if return_url %}{{ return_url }}{% else %}{{ request.path }}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}{% endif %}" />
+      {% if server_key %}
+      <input type="hidden" name="server_key" value="{{ server_key }}" />
+      {% endif %}
       <input type="hidden" name="enable_vc_detection" value="{{ vc_detection_enabled|yesno:'true,false' }}" />
 
     {# Objects table #}
-    <div class="card">
+    <div class="card" id="device-import-results" data-visible-columns="{{ import_columns|join:' ' }}">
+      <div class="card-header d-flex justify-content-between align-items-center gap-2 flex-wrap">
+        <div>
+          <h2 class="card-title mb-0">Import results</h2>
+          <span class="text-secondary small">{{ table.page.paginator.count }} device{{ table.page.paginator.count|pluralize }} from LibreNMS</span>
+        </div>
+        {% if filters_submitted and table.rows %}
+          {% if cache_metadata_missing %}
+          <div class="d-flex align-items-center gap-1 text-warning small" title="Cache metadata not found. This may indicate a cache synchronization issue.">
+            <i class="mdi mdi-alert"></i>
+            <span>Cache status: <strong>unavailable</strong></span>
+          </div>
+          {% elif cache_timestamp and cache_timeout %}
+          <div class="d-flex align-items-center gap-1 text-secondary small" id="cache-info-display"
+               data-cache-timestamp="{{ cache_timestamp }}" data-cache-timeout="{{ cache_timeout }}">
+            <i class="mdi mdi-clock-outline"></i>
+            <span>Cache expires in <strong id="cache-expiry-countdown">{{ cache_timeout }}s</strong></span>
+          </div>
+          {% endif %}
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 import-toolbar">
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <button type="button" class="btn btn-outline-primary" id="select-all-ready">
+              <i class="mdi mdi-checkbox-multiple-marked"></i> Select ready
+            </button>
+            <button type="button" class="btn btn-outline-secondary" id="select-none">Clear selection</button>
+            <span class="text-secondary small" id="selection-count">0 devices selected</span>
+          </div>
+          <div class="d-flex align-items-center gap-2 flex-wrap"
+               data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
+            <div class="dropdown">
+              <button class="btn btn-outline-secondary dropdown-toggle" type="button"
+                      data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                <i class="mdi mdi-tune-variant"></i> Import options
+                <span class="badge {% if import_options_count %}bg-primary-lt{% else %}bg-secondary-lt{% endif %} ms-1"
+                      id="import-options-count">{{ import_options_count }}</span>
+              </button>
+              <div class="dropdown-menu dropdown-menu-end p-3 import-options-menu">
+                <div class="small fw-bold text-secondary mb-2">NetBox name</div>
+                <div class="form-check form-switch mb-2">
+                  <span id="use-sysname-toggle">
+                    <input type="hidden" name="use-sysname-toggle" value="off">
+                    <input class="form-check-input import-name-option" type="checkbox"
+                           id="use-sysname-toggle-cb" name="use-sysname-toggle"
+                           data-default-checked="true" {% if use_sysname %}checked{% endif %}>
+                  </span>
+                  <label class="form-check-label" for="use-sysname-toggle-cb">Use SNMP sysName</label>
+                </div>
+                <div class="form-check form-switch">
+                  <span id="strip-domain-toggle">
+                    <input type="hidden" name="strip-domain-toggle" value="off">
+                    <input class="form-check-input import-name-option" type="checkbox"
+                           id="strip-domain-toggle-cb" name="strip-domain-toggle"
+                           data-default-checked="false" {% if strip_domain %}checked{% endif %}>
+                  </span>
+                  <label class="form-check-label" for="strip-domain-toggle-cb">Remove domain suffix</label>
+                </div>
+                <hr class="my-2">
+                <button class="btn btn-link btn-sm p-0" type="button" id="reset-import-options">Reset to defaults</button>
+              </div>
+            </div>
+            <span class="badge bg-primary-lt" id="import-name-summary">
+              Name: {% if use_sysname %}sysName{% else %}hostname{% endif %}{% if strip_domain %}, domain removed{% endif %}
+            </span>
+            <div class="dropdown">
+              <button class="btn btn-outline-secondary dropdown-toggle" type="button"
+                      data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                <i class="mdi mdi-view-column-outline"></i> Columns
+                <span class="badge bg-secondary-lt ms-1" id="import-columns-count">{{ import_columns_count }}</span>
+              </button>
+              <div class="dropdown-menu dropdown-menu-end p-3 import-columns-menu">
+                <div class="small fw-bold text-secondary mb-2">Always shown</div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" checked disabled id="column-name-locked">
+                  <label class="form-check-label" for="column-name-locked">NetBox object</label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" checked disabled id="column-workflow-locked">
+                  <label class="form-check-label" for="column-workflow-locked">Required setup and actions</label>
+                </div>
+                <hr class="my-2">
+                <div class="small fw-bold text-secondary mb-2">LibreNMS context</div>
+                <div class="form-check"><input class="form-check-input import-column-toggle" type="checkbox" value="location" id="column-location" {% if "location" in import_columns %}checked{% endif %}><label class="form-check-label" for="column-location">Location</label></div>
+                <div class="form-check"><input class="form-check-input import-column-toggle" type="checkbox" value="hardware" id="column-hardware" {% if "hardware" in import_columns %}checked{% endif %}><label class="form-check-label" for="column-hardware">Hardware</label></div>
+                <div class="form-check"><input class="form-check-input import-column-toggle" type="checkbox" value="hostname" id="column-hostname" {% if "hostname" in import_columns %}checked{% endif %}><label class="form-check-label" for="column-hostname">Hostname</label></div>
+                <div class="form-check"><input class="form-check-input import-column-toggle" type="checkbox" value="sysname" id="column-sysname" {% if "sysname" in import_columns %}checked{% endif %}><label class="form-check-label" for="column-sysname">System name</label></div>
+              </div>
+            </div>
+            <button type="button" class="btn btn-success" id="bulk-import-btn" disabled
+              hx-post="{% url 'plugins:netbox_librenms_plugin:bulk_import_confirm' %}"
+              hx-target="#htmx-modal-content" hx-swap="innerHTML"
+              hx-include="#import-selection-form">
+              <span class="d-inline-flex align-items-center gap-1">
+                <i class="mdi mdi-download"></i>
+                <span>Import selected (<span id="import-count">0</span>)</span>
+              </span>
+              <span class="spinner-border spinner-border-sm ms-2 htmx-indicator" role="status" aria-hidden="true" style="display: none;"></span>
+            </button>
+          </div>
+        </div>
+      </div>
       <div class="htmx-container" id="object_list">
         {% include 'inc/paginator.html' with htmx=True table=table paginator=table.paginator page=table.page %}
         <div class="table-responsive device-import-table-wrapper">
@@ -403,6 +413,7 @@
     {# /Objects table #}
 
   </form>
+  {% endif %}
 
     {# HTMX Modal for import actions #}
   <div class="modal fade" id="htmx-modal" tabindex="-1" aria-labelledby="htmxModalLabel" aria-hidden="true">

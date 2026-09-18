@@ -3,11 +3,17 @@ from urllib.parse import urlencode, urlparse
 
 import django_tables2 as tables
 from django.urls import reverse
-from django.utils.html import escape, format_html, mark_safe
+from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count
+from netbox_librenms_plugin.utils import (
+    get_table_paginate_count,
+    module_inventory_binding_token,
+    netbox_relocates_module_subtree,
+    oob_badge_html,
+    render_vc_member_options,
+)
 
 
 class LibreNMSModuleTable(tables.Table):
@@ -70,6 +76,7 @@ class LibreNMSModuleTable(tables.Table):
         self.device = device
         self.csrf_token = ""
         self.server_key = server_key
+        self.inventory_snapshot_digest = ""
         self.has_write_permission = has_write_permission
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
@@ -81,6 +88,40 @@ class LibreNMSModuleTable(tables.Table):
         self.can_add_module_bay_mapping = can_add_module_bay_mapping
         self.can_add_module_type_mapping = can_add_module_type_mapping
         super().__init__(*args, **kwargs)
+        # Batch-load the installed modules (with module_type + interface templates) referenced by
+        # the rows, so render_actions' VC "Report VC issue" diagnostic doesn't run a per-row
+        # Module.objects.get() + interfacetemplates.all() — an N+1 over the whole module table.
+        # Only VC devices reach that branch, so skip the query otherwise.
+        self._installed_modules_by_id = {}
+        if isinstance(getattr(self.device, "virtual_chassis_id", None), int):
+            data_rows = args[0] if args else kwargs.get("data") or []
+            installed_ids = {
+                row["installed_module_id"]
+                for row in data_rows
+                if isinstance(row, dict) and row.get("installed_module_id")
+            }
+            if installed_ids:
+                from dcim.models import Module
+                from django.db import DatabaseError
+
+                try:
+                    self._installed_modules_by_id = {
+                        m.pk: m
+                        for m in Module.objects.select_related(
+                            "module_type",
+                            "module_type__manufacturer",
+                            "module_bay",
+                            "device",
+                            "device__device_type",
+                            "device__virtual_chassis",
+                        )
+                        .prefetch_related("module_type__interfacetemplates")
+                        .filter(pk__in=installed_ids)
+                    }
+                except (DatabaseError, RuntimeError):
+                    # RuntimeError: pytest "Database access not allowed" in unit-test contexts
+                    # whose self.device is a MagicMock with a real-looking virtual_chassis_id.
+                    self._installed_modules_by_id = {}
         if not (has_write_permission and can_add_module) and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
         self.tab = "modules"
@@ -147,16 +188,20 @@ class LibreNMSModuleTable(tables.Table):
             rendered_name = display_name
 
         depth = record.get("depth", 0)
+        oob_badge = oob_badge_html(record)
         if depth == 0:
-            return rendered_name
+            return format_html("{}{}", rendered_name, oob_badge)
         # Build visual tree prefix based on nesting depth
         padding_px = depth * 20
         prefix = "└─ "
+        # Keep the OOB badge inside the padded container so it stays indented
+        # with the module name on nested rows (was rendering at column 0).
         return format_html(
-            '<span style="padding-left:{}px"><span style="white-space: nowrap;">{}{}</span></span>',
+            '<span style="padding-left:{}px"><span style="white-space: nowrap;">{}{}</span>{}</span>',
             padding_px,
             prefix,
             rendered_name,
+            oob_badge,
         )
 
     def render_model(self, value, record):
@@ -196,6 +241,37 @@ class LibreNMSModuleTable(tables.Table):
         icon = icons.get(value, "mdi-card-outline")
         return format_html('<i class="mdi {} me-1"></i> {}', icon, value)
 
+    @staticmethod
+    def _unmatched_bay_html(record):
+        """
+        Report where this row's serial already sits in NetBox, when bay matching found nothing.
+
+        A failed bay match does not mean the part is absent. The serial may already name an
+        installed module, and saying only "No matching bay" hides that from the operator who
+        then cannot tell a mapping mistake from missing hardware.
+        """
+        if record.get("serial_conflict_ambiguous"):
+            return format_html(
+                '<span class="text-warning">{}</span>',
+                "No matching bay; this serial matches more than one module",
+            )
+        conflict = record.get("serial_conflict_module")
+        if conflict is None:
+            return format_html('<span class="text-danger">{}</span>', "No matching bay")
+        if not record.get("serial_conflict_visible"):
+            # The module holding this serial is outside the operator's scope. Its existence is
+            # what matters here; naming its device or bay would disclose an object they cannot view.
+            return format_html(
+                '<span class="text-warning">{}</span>',
+                "No matching bay; this serial is already installed elsewhere in NetBox",
+            )
+        return format_html(
+            '<span class="text-warning">No matching bay; installed at <a href="{}">{} / {}</a></span>',
+            conflict.get_absolute_url(),
+            conflict.device.name,
+            conflict.module_bay.name,
+        )
+
     def render_module_bay(self, value, record):
         """Render module bay with link if found in NetBox."""
         if record.get("status") == "Integrated":
@@ -204,7 +280,7 @@ class LibreNMSModuleTable(tables.Table):
             # to match the muted status badge and absent actions on these rows.
             rendered_value = "-"
         elif not value or value == "-":
-            rendered_value = format_html('<span class="text-danger">{}</span>', "No matching bay")
+            rendered_value = self._unmatched_bay_html(record)
         elif url := record.get("module_bay_url"):
             rendered_value = format_html('<a href="{}">{}</a>', url, value)
         else:
@@ -227,6 +303,50 @@ class LibreNMSModuleTable(tables.Table):
         return format_html("{}", value)
 
     def render_status(self, value, record):
+        """
+        Render the sync-status badge alongside a hidden in-flight spinner badge.
+
+        The live badge is wrapped so CSS (see ``_module_sync.html``) can swap it
+        for the spinner badge while a row-action POST is in flight. The row forms
+        set ``hx-indicator="closest tr"``, so HTMX marks the row with ``htmx-request``
+        for the duration. The spinner label tracks the row's action: "Updating…" on an
+        installed-module row offering Update Serial / Update Interface, "Installing…"
+        on an install / install-branch / carrier-install row. It stays hidden in every
+        other state, including the inline verify-endpoint cell updates.
+
+        Args:
+            value (str): The sync status to render.
+            record (dict): The table row with the action and status details.
+
+        Returns:
+            SafeString: The live status badge and hidden in-flight spinner badge.
+
+        """
+        # An update action (Update Serial / Update Interface) acts on an already-installed module
+        # and a row never offers it alongside an install-flavoured action, so a row with an update
+        # flag and no install/branch/carrier action shows "Updating…"; everything else "Installing…".
+        in_flight_label = (
+            "Updating"
+            if (
+                record.get("installed_module_id")
+                and (record.get("can_update_serial") or record.get("can_update_interface_binding"))
+                and not record.get("can_install")
+                and not record.get("has_installable_children")
+                and not record.get("carrier_install_options")
+            )
+            else "Installing"
+        )
+        badge = self._status_badge_html(value, record)
+        return format_html(
+            '<span class="lnms-status-live">{}</span>'
+            '<span class="lnms-installing badge bg-primary text-white" role="status" title="{}…">'
+            '<span class="spinner-border spinner-border-sm" aria-hidden="true"></span>{}…</span>',
+            badge,
+            in_flight_label,
+            in_flight_label,
+        )
+
+    def _status_badge_html(self, value, record):
         """Render sync status with badge."""
         # Promote No Bay → Missing Carrier when concrete carrier-install rules
         # produced suggestions for this row (one-click install offered below).
@@ -244,7 +364,7 @@ class LibreNMSModuleTable(tables.Table):
             "Serial Mismatch": "bg-danger text-white",
             "Name Conflict": "bg-warning text-dark",
             "Type Mismatch": "bg-warning text-dark",
-            "Integrated": "bg-light text-muted border",
+            "Integrated": "bg-body-secondary text-body border",
         }
         badge_class = badge_classes.get(value, "bg-secondary text-white")
         warning = record.get("model_warning")
@@ -353,11 +473,24 @@ class LibreNMSModuleTable(tables.Table):
         trigger that opens the Add Bay Template modal pre-filled with the
         LibreNMS-derived suggestion.
 
-        When the viewer can't add bay templates, the badge is hidden so it
-        doesn't act as a dead-end control (the modal would only return a 403
-        for them).  The ``<a href>`` and ``<span>`` fallbacks below are kept
-        for callers that don't have a bound device (e.g. unit tests built via
+        When the viewer cannot add bay templates, the badge is hidden so it
+        does not act as a dead-end control (the modal would only return a 403
+        for them). The ``<a href>`` and ``<span>`` fallbacks below are kept
+        for callers that do not have a bound device (e.g. unit tests built via
         ``object.__new__``) or have no ``target_pk`` / URL available.
+
+        Args:
+            title (str): The badge tooltip text.
+            target_kind (str): The target model kind sent to the modal.
+            target_pk (int | None): The target object's primary key, or ``None`` when it is unavailable.
+            target_label (str): The target label. This function does not use it.
+            suggestion (dict): The LibreNMS-derived bay template fields.
+            fallback_url (str): The URL for the linked fallback, or an empty string when it is unavailable.
+            label (str): The text shown on the badge.
+
+        Returns:
+            SafeString: The HTMX button, empty safe string, linked fallback, or non-interactive fallback markup.
+
         """
         device = getattr(self, "device", None)
         can_add_template = getattr(self, "can_add_module_bay_template", False)
@@ -375,6 +508,7 @@ class LibreNMSModuleTable(tables.Table):
                     "suggested_label": suggestion.get("label", ""),
                     "librenms_name": suggestion.get("librenms_name", ""),
                     "librenms_class": suggestion.get("librenms_class", ""),
+                    "server_key": getattr(self, "server_key", "") or "",
                 }
             )
             return format_html(
@@ -410,7 +544,7 @@ class LibreNMSModuleTable(tables.Table):
             label,
         )
 
-    def render_actions(self, value, record):
+    def render_actions(self, value, record):  # noqa: C901
         """Render install button for matched modules and install branch for parents."""
         if not self.device:
             return ""
@@ -424,86 +558,138 @@ class LibreNMSModuleTable(tables.Table):
 
         buttons = []
 
-        # Single install button (requires add permission)
-        if self.can_add_module and record.get("can_install"):
+        # Single install button (requires add permission). The view resolves the row by index, so a
+        # row without one can only submit a form the view refuses; the carrier action below has no
+        # inventory row of its own and stays indexless.
+        if self.can_add_module and record.get("can_install") and record.get("ent_physical_index"):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "install_module",
+                {
+                    "module_bay_id": record.get("module_bay_id"),
+                    "module_type_id": record.get("module_type_id"),
+                },
+                record.get("ent_physical_index"),
+                record["inventory_digest"],
+            )
             buttons.append(
                 format_html(
-                    '<form method="post" action="{}" style="display:inline">'
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
-                    '<input type="hidden" name="librenms_port_id" value="{}">'
-                    '<input type="hidden" name="librenms_ifname" value="{}">'
-                    '<input type="hidden" name="librenms_ifdescr" value="{}">'
-                    '<input type="hidden" name="inventory_name" value="{}">'
-                    '<input type="hidden" name="inventory_descr" value="{}">'
                     '<input type="hidden" name="module_bay_id" value="{}">'
                     '<input type="hidden" name="module_type_id" value="{}">'
-                    '<input type="hidden" name="serial" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-success" title="Install module in bay">'
                     '<i class="mdi mdi-download"></i> Install'
                     "</button></form>",
+                    url,
                     url,
                     self.csrf_token,
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record.get("ent_physical_index", ""),
-                    record.get("librenms_port_id", ""),
-                    record.get("librenms_ifname") or "",
-                    record.get("librenms_ifdescr") or "",
-                    record.get("name") or "",
-                    record.get("description") or "",
                     record.get("module_bay_id", ""),
                     record.get("module_type_id", ""),
-                    record.get("serial") or "",
+                    inventory_binding,
                 )
             )
 
         # Install branch button for parents with installable children (requires add)
-        if self.can_add_module and record.get("has_installable_children") and record.get("ent_physical_index"):
+        if (
+            self.can_add_module
+            and record.get("has_installable_children")
+            and record.get("ent_physical_index")
+            and self.inventory_snapshot_digest
+        ):
             url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "install_branch",
+                {"parent_index": record.get("ent_physical_index")},
+                record.get("ent_physical_index"),
+                self.inventory_snapshot_digest,
+            )
             buttons.append(
                 format_html(
-                    '<form method="post" action="{}" style="display:inline">'
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="parent_index" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-primary ms-1"'
                     ' title="Install this module and all installable children">'
                     '<i class="mdi mdi-file-tree"></i> Install Branch'
                     "</button></form>",
                     url,
+                    url,
                     self.csrf_token,
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record.get("ent_physical_index", ""),
+                    inventory_binding,
                 )
             )
 
-        # Update serial button for serial mismatch rows (requires change)
-        if self.can_change_module and record.get("can_update_serial") and record.get("installed_module_id"):
+        # Update serial button for serial mismatch rows (requires change). The view resolves the
+        # serial through the cached row, so a row without an index has no usable action.
+        if (
+            self.can_change_module
+            and record.get("can_update_serial")
+            and record.get("installed_module_id")
+            and record.get("ent_physical_index")
+        ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "update_module_serial",
+                {"module_id": record["installed_module_id"]},
+                record.get("ent_physical_index"),
+                record["inventory_digest"],
+            )
             buttons.append(
                 format_html(
-                    '<form method="post" action="{}" style="display:inline">'
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
-                    '<input type="hidden" name="serial" value="{}">'
+                    '<input type="hidden" name="ent_index" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-warning ms-1"'
                     ' title="Update serial in NetBox to match LibreNMS">'
                     '<i class="mdi mdi-sync"></i> Update Serial'
                     "</button></form>",
                     url,
+                    url,
                     self.csrf_token,
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
-                    record.get("serial") or "",
+                    record.get("ent_physical_index") or "",
+                    inventory_binding,
                 )
             )
 
@@ -511,36 +697,43 @@ class LibreNMSModuleTable(tables.Table):
             getattr(self, "can_change_interface", False)
             and record.get("can_update_interface_binding")
             and record.get("installed_module_id")
+            and record.get("ent_physical_index")
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                "update_module_interface",
+                {"module_id": record["installed_module_id"]},
+                record.get("ent_physical_index"),
+                record["inventory_digest"],
+            )
             buttons.append(
                 format_html(
-                    '<form method="post" action="{}" style="display:inline">'
+                    # hx-post: the view answers with the module tab fragment, swapped into
+                    # #module-sync-content; method/action keep it working without JS.
+                    '<form method="post" action="{}" hx-post="{}"'
+                    ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                    ' hx-sync="#module-sync-content:drop"'
+                    ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
-                    '<input type="hidden" name="librenms_port_id" value="{}">'
-                    '<input type="hidden" name="librenms_ifname" value="{}">'
-                    '<input type="hidden" name="librenms_ifdescr" value="{}">'
-                    '<input type="hidden" name="inventory_name" value="{}">'
-                    '<input type="hidden" name="inventory_descr" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-outline-warning ms-1"'
                     ' title="Associate matching NetBox interface with installed module">'
                     '<i class="mdi mdi-link-variant"></i> Update Interface'
                     "</button></form>",
+                    url,
                     url,
                     self.csrf_token,
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
                     record.get("ent_physical_index", ""),
-                    record.get("librenms_port_id", ""),
-                    record.get("librenms_ifname") or "",
-                    record.get("librenms_ifdescr") or "",
-                    record.get("name") or "",
-                    record.get("description") or "",
+                    inventory_binding,
                 )
             )
 
@@ -551,30 +744,40 @@ class LibreNMSModuleTable(tables.Table):
             and self.can_delete_module
             and record.get("can_replace")
             and record.get("installed_module_id")
+            and record.get("ent_physical_index") is not None
+            and record.get("ent_physical_index") != ""
         ):
             preview_url = reverse(
                 "plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": self.device.pk}
             )
+            preview_params = urlencode(
+                {
+                    "module_id": record["installed_module_id"],
+                    "ent_index": record.get("ent_physical_index", ""),
+                    "server_key": self.server_key or "",
+                    "selected_device_id": record.get("selected_device_id") or self.device.pk,
+                }
+            )
             buttons.append(
                 format_html(
-                    '<button type="button" class="btn btn-sm btn-danger ms-1 module-replace-btn"'
-                    ' data-module-id="{}" data-ent-index="{}" data-server-key="{}"'
-                    ' data-selected-device-id="{}"'
-                    ' data-preview-url="{}"'
+                    # hx-get: the preview carries hx- forms, so it must arrive through an HTMX swap to bind.
+                    '<button type="button" class="btn btn-sm btn-danger ms-1"'
+                    ' hx-get="{}?{}"'
+                    ' hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"'
                     ' title="Replace module — opens comparison dialog">'
                     '<i class="mdi mdi-swap-horizontal"></i> Replace'
                     "</button>",
-                    record["installed_module_id"],
-                    record.get("ent_physical_index", ""),
-                    self.server_key or "",
-                    record.get("selected_device_id") or self.device.pk,
                     preview_url,
+                    preview_params,
                 )
             )
 
-        # Move button for can_install rows where a single serial conflict exists (requires change+delete)
+        # Move button for can_install rows where a single serial conflict exists (requires change+delete).
+        # Below NetBox 4.7 a move strands the module's components and nested modules, so it is not offered.
         if (
-            self.can_change_module
+            netbox_relocates_module_subtree()
+            and self.can_change_module
             and self.can_delete_module
             and record.get("can_move_from")
             and record.get("serial_conflict_module")
@@ -613,7 +816,12 @@ class LibreNMSModuleTable(tables.Table):
             for opt in record["carrier_install_options"]:
                 buttons.append(
                     format_html(
-                        '<form method="post" action="{}" style="display:inline">'
+                        # hx-post: install_module answers with the module tab fragment, swapped
+                        # into #module-sync-content; method/action keep it working without JS.
+                        '<form method="post" action="{}" hx-post="{}"'
+                        ' hx-target="#module-sync-content" hx-swap="innerHTML"'
+                        ' hx-sync="#module-sync-content:drop"'
+                        ' hx-indicator="closest tr" hx-disabled-elt="find button" style="display:inline">'
                         '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                         '<input type="hidden" name="server_key" value="{}">'
                         '<input type="hidden" name="selected_device_id" value="{}">'
@@ -624,6 +832,7 @@ class LibreNMSModuleTable(tables.Table):
                         " title=\"Install carrier {} into empty bay '{}'\">"
                         '<i class="mdi mdi-puzzle-plus-outline"></i> Install {} into &#39;{}&#39;'
                         "</button></form>",
+                        install_url,
                         install_url,
                         self.csrf_token,
                         self.server_key,
@@ -720,6 +929,40 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        if (
+            record.get("status") == "No Bay"
+            and not record.get("model_suggestion")
+            and record.get("device_empty_bay_names")
+            and not record.get("depth")
+            and not record.get("no_bay_reason")
+            and record.get("item_class") != "port"
+            and record.get("mapping_source_name")
+            and getattr(self, "can_add_module_bay_mapping", False)
+        ):
+            mapping_url = reverse(
+                "plugins:netbox_librenms_plugin:add_bay_template",
+                kwargs={"pk": record.get("selected_device_id") or self.device.pk},
+            )
+            mapping_params = urlencode(
+                {
+                    "mode": "map_existing",
+                    "librenms_name": record["mapping_source_name"],
+                    "librenms_class": record.get("item_class") or "",
+                    "server_key": self.server_key or "",
+                }
+            )
+            buttons.append(
+                format_html(
+                    '<button type="button" class="btn btn-sm btn-outline-primary ms-1"'
+                    ' hx-get="{}?{}" hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"'
+                    ' title="Choose an existing bay and review the proposed mapping">'
+                    '<i class="mdi mdi-link-variant"></i> Map Existing Bay</button>',
+                    mapping_url,
+                    mapping_params,
+                )
+            )
+
         # "Add mapping" button for No Type rows where we can suggest a mapping.
         # Opens the ModuleTypeMapping create form pre-filled with the LibreNMS
         # model name and a helpful description so the user only needs to pick
@@ -791,26 +1034,12 @@ class LibreNMSModuleTable(tables.Table):
         # `virtual_chassis_id` is an int in production (or None); MagicMock-only tests
         # see a MagicMock here, which the isinstance check correctly skips.
         if record.get("installed_module_id") and isinstance(getattr(self.device, "virtual_chassis_id", None), int):
-            from dcim.models import Module
-            from django.db import DatabaseError
-
             from netbox_librenms_plugin.utils import detect_vc_normalization_noop
 
-            installed_module = None
-            try:
-                installed_module = Module.objects.select_related(
-                    "module_type",
-                    "module_type__manufacturer",
-                    "module_bay",
-                    "device",
-                    "device__device_type",
-                    "device__virtual_chassis",
-                ).get(pk=record["installed_module_id"])
-            except (Module.DoesNotExist, DatabaseError, RuntimeError):
-                # RuntimeError: pytest's "Database access not allowed" in unit-test
-                # contexts that supply self.device as a MagicMock with a real-looking
-                # virtual_chassis_id. Production rows wouldn't reach here.
-                installed_module = None
+            # Served from the __init__ batch prefetch (with interface templates), so this
+            # diagnostic adds no per-row query. A missing id (deleted concurrently, or a
+            # unit-test MagicMock device that skipped the prefetch) yields None → no button.
+            installed_module = self._installed_modules_by_id.get(record["installed_module_id"])
 
             if installed_module is not None and detect_vc_normalization_noop(installed_module.device, installed_module):
                 report_url = reverse(
@@ -874,21 +1103,11 @@ class VCModuleTable(LibreNMSModuleTable):
         selected_device_id = record.get("selected_device_id") or self.device.id
         ent_index = record.get("ent_physical_index", "")
 
-        options = [
-            (
-                f'<option value="{member.id}"'
-                f"{' selected' if str(member.id) == str(selected_device_id) else ''}>"
-                f"{escape(member.name)}"
-                "</option>"
-            )
-            for member in self._vc_members
-        ]
-
         return format_html(
             '<select name="device_selection_{0}" id="device_selection_{0}" '
             'class="form-select vc-member-select" data-module="{0}" data-row-id="{0}">{1}</select>',
             ent_index,
-            mark_safe("".join(options)),
+            render_vc_member_options(self._vc_members, selected_device_id),
         )
 
     def format_module_data(self, record):

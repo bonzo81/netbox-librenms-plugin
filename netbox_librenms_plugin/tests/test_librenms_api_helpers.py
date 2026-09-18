@@ -5,9 +5,9 @@ from unittest.mock import patch
 import pytest
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def mock_librenms_config():
-    """Auto-mock LibreNMS configuration for all API tests."""
+    """Mock LibreNMS configuration for tests that request this fixture."""
     with (
         patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config,
         patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_settings,

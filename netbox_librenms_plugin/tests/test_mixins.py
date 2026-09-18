@@ -205,3 +205,82 @@ class TestCacheMixinKeyGeneration:
         key_with_server = mixin.get_vlan_overrides_key(obj, server_key="prod")
         assert key_with_server == "librenms_vlan_group_overrides_device_7_prod"
         assert key_no_server != key_with_server
+
+
+class TestRedirectWithServerKey:
+    """redirect_with_server_key appends a validated server_key, gated by the open-redirect barrier."""
+
+    def _request(self):
+        from django.test import RequestFactory
+
+        return RequestFactory().get("/")
+
+    def test_appends_server_key_to_safe_url(self):
+        from netbox_librenms_plugin.views.mixins import redirect_with_server_key
+
+        resp = redirect_with_server_key(self._request(), "/sync/1/", "prod")
+        assert resp.url == "/sync/1/?server_key=prod"
+
+    def test_uses_ampersand_when_url_already_has_query(self):
+        from netbox_librenms_plugin.views.mixins import redirect_with_server_key
+
+        resp = redirect_with_server_key(self._request(), "/sync/1/?tab=ports", "prod")
+        assert resp.url == "/sync/1/?tab=ports&server_key=prod"
+
+    def test_blank_or_none_server_key_redirects_to_bare_url(self):
+        from netbox_librenms_plugin.views.mixins import redirect_with_server_key
+
+        for key in (None, ""):
+            resp = redirect_with_server_key(self._request(), "/sync/1/", key)
+            assert resp.url == "/sync/1/"
+
+    def test_server_key_dropped_when_candidate_fails_open_redirect_barrier(self):
+        """A candidate the barrier rejects must drop the server_key and redirect to the bare url (the CodeQL py/url-redirection barrier, now shared in this helper)."""
+        from netbox_librenms_plugin.views.mixins import redirect_with_server_key
+
+        with patch("netbox_librenms_plugin.views.mixins.url_has_allowed_host_and_scheme", return_value=False):
+            resp = redirect_with_server_key(self._request(), "/sync/1/", "prod")
+        assert resp.url == "/sync/1/"
+        assert "server_key" not in resp.url
+
+
+class TestResolveConfiguredServerKey:
+    """resolve_configured_server_key: the shared allowlist re-sourcing a key from trusted config."""
+
+    def test_returns_key_when_it_names_a_configured_server(self):
+        from netbox_librenms_plugin.views.mixins import resolve_configured_server_key
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"siteB": "Site B"},
+        ):
+            assert resolve_configured_server_key("siteB") == "siteB"
+
+    def test_returns_none_for_a_stale_or_tampered_key(self):
+        from netbox_librenms_plugin.views.mixins import resolve_configured_server_key
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"siteB": "Site B"},
+        ):
+            assert resolve_configured_server_key("ghost") is None
+
+    def test_returns_none_for_a_non_string_key(self):
+        """A non-string configured key is rejected before the server allowlist lookup."""
+        from netbox_librenms_plugin.views.mixins import resolve_configured_server_key
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"siteB": "Site B"},
+        ):
+            assert resolve_configured_server_key(["siteB"]) is None
+
+    def test_blank_or_none_short_circuits_before_touching_config(self):
+        from netbox_librenms_plugin.views.mixins import resolve_configured_server_key
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+        ) as servers:
+            for key in (None, ""):
+                assert resolve_configured_server_key(key) is None
+            servers.assert_not_called()

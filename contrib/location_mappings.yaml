@@ -1,0 +1,47 @@
+# Location Mappings — Examples
+#
+# Maps a LibreNMS `location` value (or a token parsed from it) to a specific
+# NetBox organisation object: a Site, Location, Rack, or Tenant.
+#
+# Used when the LibreNMS value does not match the NetBox object's name exactly.
+# Matching is exact (case-insensitive) on `librenms_value`.
+#
+# Import via: LibreNMS → Location Mappings → Import → YAML
+#
+# Fields:
+#   field_type     — one of: site, location, rack, tenant
+#   librenms_value — the value as it appears in LibreNMS (e.g. "NYC")
+#   netbox_object  — the NetBox object's name (must already exist in NetBox)
+#   parent_site    — (optional) restricts location/rack lookups to this site,
+#                    since NetBox scopes locations and racks to a parent site
+#   description    — (optional) free-text notes
+
+# ── Site ──────────────────────────────────────────────────────────────────────
+- field_type: site
+  librenms_value: NYC
+  netbox_object: New York
+  description: LibreNMS site abbreviation to NetBox Site
+
+- field_type: site
+  librenms_value: LDN
+  netbox_object: London
+  description: LibreNMS site abbreviation to NetBox Site
+
+# ── Location ──────────────────────────────────────────────────────────────────
+# Scope to a parent site so the same value can differ per site.
+- field_type: location
+  librenms_value: Hall A
+  netbox_object: Data Hall A
+  parent_site: New York
+
+# ── Rack ──────────────────────────────────────────────────────────────────────
+- field_type: rack
+  librenms_value: R1
+  netbox_object: Rack-001
+  parent_site: New York
+
+# ── Tenant ────────────────────────────────────────────────────────────────────
+- field_type: tenant
+  librenms_value: acme
+  netbox_object: ACME Corp
+  description: LibreNMS tenant code to NetBox Tenant

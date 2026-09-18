@@ -9,19 +9,35 @@ from netbox.views import generic
 from utilities.rqworker import get_workers_for_queue
 
 from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.import_utils import (
-    get_active_cached_searches,
+    get_active_cached_searches_for_servers,
     process_device_filters,
 )
+from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
 from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.server_selection import (
+    build_configured_server_options,
+    parse_configured_server_key,
+)
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import get_user_pref
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.utils import get_user_pref, resolve_import_context_columns
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGenericPermissionMixin
 
 logger = logging.getLogger(__name__)
 
 
-class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
+def _cached_search_option(data, key, fallback):
+    """Return one explicit cached-search boolean without changing user preferences."""
+    values = data.getlist(key)
+    if values == ["1"]:
+        return True
+    if values == ["0"]:
+        return False
+    return fallback
+
+
+class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """Import devices from LibreNMS into NetBox with validation metadata."""
 
     queryset = Device.objects.none()
@@ -56,26 +72,55 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         Returns:
             bool: True if background job should be used, False for synchronous
+
         """
         # Non-superusers cannot poll background-tasks API (requires IsSuperuser)
         if not self.request.user.is_superuser:
             return False
         return self._filter_form_data.get("use_background_job", True)
 
-    def _load_job_results(self, job_id):
+    def _resolve_import_server(self, request):
+        """Bind the requested import server, or return a fail-closed error."""
+        parsed_server = parse_configured_server_key(request.GET)
+        if parsed_server.is_present:
+            requested_key = parsed_server.server_key
+            if requested_key is None:
+                return (
+                    None,
+                    "The requested LibreNMS server is malformed or unavailable. Select a configured LibreNMS server.",
+                )
+            resolved_key = self.rebind_api_for_server(requested_key)
+            if resolved_key is None:
+                return (
+                    None,
+                    f"LibreNMS server '{requested_key}' is not configured or usable. "
+                    "Select a configured LibreNMS server.",
+                )
+            return resolved_key, None
+
+        try:
+            api = self.librenms_api
+        except (KeyError, ValueError):
+            return None, "No usable installation default server is configured. Select a configured LibreNMS server."
+        self._librenms_api = api
+        return api.server_key, None
+
+    def _load_job_results(self, job_id, user):
         """
         Load cached results from a completed background job.
 
         Args:
             job_id: ID of the completed FilterDevicesJob
+            user: User who requested the result page
 
         Returns:
             List[dict]: Validated devices from job cache, or [] if cache expired
+
         """
         from core.models import Job
 
         try:
-            job = Job.objects.get(pk=job_id)
+            job = Job.objects.get(pk=job_id, user=user)
         except Job.DoesNotExist:
             logger.warning(f"Job {job_id} not found")
             return []
@@ -90,7 +135,21 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         job_data = job.data or {}
         device_ids = job_data.get("device_ids", [])
         filters = job_data.get("filters", {})
-        server_key = job_data.get("server_key", "default")
+        parsed_server = parse_configured_server_key(job_data)
+        resolved_server_key = (
+            self.rebind_api_for_server(parsed_server.server_key) if parsed_server.server_key is not None else None
+        )
+        if resolved_server_key is None:
+            self._librenms_api = None
+            self._active_server_key = None
+            self._server_selection_error = (
+                f"The LibreNMS server for job {job_id} is no longer configured or usable. "
+                "Select a configured LibreNMS server and run the search again."
+            )
+            logger.warning("Job %s references unavailable LibreNMS server %r", job_id, job_data.get("server_key"))
+            return []
+        server_key = resolved_server_key
+        self._active_server_key = resolved_server_key
         vc_enabled = job_data.get("vc_detection_enabled", False)
         use_sysname = job_data.get("use_sysname", True)
         strip_domain = job_data.get("strip_domain", False)
@@ -131,8 +190,25 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         return validated_devices
 
-    def get(self, request, *args, **kwargs):  # noqa: D401 - inherited doc
+    def get(self, request, *args, **kwargs):  # noqa: C901, D401
         """Render the import table backed by LibreNMS data."""
+        libre_filter_fields = (
+            "librenms_location",
+            "librenms_type",
+            "librenms_os",
+            "librenms_hostname",
+            "librenms_sysname",
+            "librenms_hardware",
+        )
+        filters_present = any(request.GET.get(field) for field in libre_filter_fields)
+        filters_requested = bool(request.GET.get("apply_filters") or filters_present)
+        job_id = request.GET.get("job_id")
+        if job_id and not filters_requested:
+            self._active_server_key = None
+            self._server_selection_error = None
+            self._librenms_api = None
+        else:
+            self._active_server_key, self._server_selection_error = self._resolve_import_server(request)
         self._filter_warning = None
         self._filter_form_data = {}
         self._libre_filters = {}
@@ -163,30 +239,23 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         if _strip_domain is None:
             _strip_domain = getattr(settings_obj, "strip_domain_default", False) if settings_obj else False
 
+        _use_sysname = _cached_search_option(request.GET, "use_sysname", _use_sysname)
+        _strip_domain = _cached_search_option(request.GET, "strip_domain", _strip_domain)
+
         self._use_sysname = _use_sysname
         self._strip_domain = _strip_domain
         self._settings = settings_obj
 
         # Determine if new filters are being submitted
-        libre_filter_fields = (
-            "librenms_location",
-            "librenms_type",
-            "librenms_os",
-            "librenms_hostname",
-            "librenms_sysname",
-            "librenms_hardware",
-        )
-        filters_present = any(request.GET.get(field) for field in libre_filter_fields)
-        filters_submitted = request.GET.get("apply_filters") or filters_present
+        filters_submitted = filters_requested and not self._server_selection_error
 
         # Check if loading results from completed background job
         # Only load job results if NOT submitting new filters
-        job_id = request.GET.get("job_id")
-        if job_id and not filters_submitted:
+        if job_id and not filters_submitted and request.user.is_superuser:
             try:
                 job_id = int(job_id)
                 logger.info(f"Loading results from job {job_id}")
-                validated_devices = self._load_job_results(job_id)
+                validated_devices = self._load_job_results(job_id, request.user)
                 if validated_devices:
                     self._import_data = validated_devices
                     self._job_results_loaded = True
@@ -194,13 +263,19 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                     self._from_cache = True
                     # Extract filter info from first device's cache or job data
                     # This allows the filter form to show what was searched
-                else:
+                elif not self._server_selection_error:
                     messages.warning(
                         request,
                         "Job results have expired. Please re-apply your filters.",
                     )
             except (ValueError, TypeError):
-                logger.warning(f"Invalid job_id parameter: {request.GET.get('job_id')}")
+                logger.warning("Invalid job_id parameter: %r", request.GET.get("job_id"))
+            if self._active_server_key is None and not self._server_selection_error:
+                self._active_server_key, self._server_selection_error = self._resolve_import_server(request)
+        elif job_id and not filters_submitted:
+            logger.warning("Non-superuser %s requested background job results", request.user)
+            if self._active_server_key is None and not self._server_selection_error:
+                self._active_server_key, self._server_selection_error = self._resolve_import_server(request)
 
         raw_enable_flag = request.GET.get("enable_vc_detection")
         legacy_skip_flag = request.GET.get("skip_vc_detection")
@@ -214,7 +289,11 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         else:
             self._vc_detection_enabled = getattr(self, "_vc_detection_enabled", False)
 
-        filter_form = self.filterset_form(request.GET) if self.filterset_form else None
+        filter_form = (
+            self.filterset_form(request.GET, librenms_api=getattr(self, "_librenms_api", None))
+            if self.filterset_form
+            else None
+        )
         form_valid = False  # Track form validity
 
         if filter_form:
@@ -222,7 +301,6 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
             if form_valid:
                 self._filter_form_data = filter_form.cleaned_data
-                self._vc_detection_enabled = self._filter_form_data.get("enable_vc_detection")
                 self._cache_cleared = self._filter_form_data.get("clear_cache")
             elif filters_submitted:
                 non_field_errors = filter_form.non_field_errors()
@@ -276,6 +354,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                     logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
 
             # Get device count for background job decision
+            preflight_failed = False
             try:
                 device_count = get_device_count_for_filters(
                     api=self.librenms_api,
@@ -286,10 +365,12 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             except Exception as e:
                 logger.error(f"Error getting device count: {e}")
                 device_count = 0
+                preflight_failed = True
 
-            # Decide whether to use background job
-            # Skip background job if validated data is already cached
-            if not validated_cached and self.should_use_background_job():
+            # Decide whether to use background job. A failed preflight means LibreNMS did not
+            # answer, so the job would only repeat the same call and hide the error behind a
+            # polling response; fall through to the synchronous handler that reports it.
+            if not preflight_failed and not validated_cached and self.should_use_background_job():
                 # Check if RQ workers are available
                 if get_workers_for_queue("default") > 0:
                     from netbox_librenms_plugin.jobs import FilterDevicesJob
@@ -336,9 +417,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         filter_warning = self._filter_warning
 
-        # Get active cached searches for this server
-        cached_searches = get_active_cached_searches(self.librenms_api.server_key)
+        cached_searches = get_active_cached_searches_for_servers(LibreNMSAPI.get_available_servers())
 
+        server_key = self._active_server_key
+        import_columns = resolve_import_context_columns(request)
         context = {
             "model": Device,
             "table": table,
@@ -357,9 +439,16 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             "cache_timeout": getattr(self, "_cache_timeout", 300),
             "cache_metadata_missing": getattr(self, "_cache_metadata_missing", False),
             "cached_searches": cached_searches,
-            "librenms_server_info": self.get_server_info(),
+            "librenms_server_info": self.get_server_info() if server_key is not None else None,
+            "server_key": server_key,
+            "server_selection_active_name": LibreNMSAPI.get_available_servers().get(server_key, server_key or ""),
+            "all_server_mappings": build_configured_server_options(server_key),
+            "server_selection_error": self._server_selection_error,
             "can_use_background_jobs": request.user.is_superuser,
             "device_count": device_count,
+            "import_columns": import_columns,
+            "import_columns_count": len(import_columns),
+            "import_options_count": int(not self._use_sysname) + int(self._strip_domain),
         }
         return render(request, self.template_name, context)
 
@@ -377,7 +466,9 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         data = self._import_data
         table = DeviceImportTable(
             data,
-            order_by=request.GET.get("sort"),
+            order_by=request.GET.get("import_sort"),
+            server_key=getattr(self, "_active_server_key", self.active_server_key),
+            user=request.user,
         )
         return table
 
@@ -429,18 +520,22 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         show_disabled = bool(data_source.get("show_disabled"))
         exclude_existing = bool(data_source.get("exclude_existing"))
 
-        validated_devices, from_cache = process_device_filters(
-            api=self.librenms_api,
-            filters=libre_filters,
-            vc_detection_enabled=vc_detection_enabled,
-            clear_cache=clear_cache,
-            show_disabled=show_disabled,
-            exclude_existing=exclude_existing,
-            request=self._request,
-            return_cache_status=True,
-            use_sysname=self._use_sysname,
-            strip_domain=self._strip_domain,
-        )
+        try:
+            validated_devices, from_cache = process_device_filters(
+                api=self.librenms_api,
+                filters=libre_filters,
+                vc_detection_enabled=vc_detection_enabled,
+                clear_cache=clear_cache,
+                show_disabled=show_disabled,
+                exclude_existing=exclude_existing,
+                return_cache_status=True,
+                use_sysname=self._use_sysname,
+                strip_domain=self._strip_domain,
+            )
+        except LibreNMSUnreachable as exc:
+            # Show the reason instead of an empty table, which reads as "nothing matched".
+            messages.error(self._request, f"Could not reach LibreNMS: {exc}")
+            return []
 
         self._from_cache = from_cache
 

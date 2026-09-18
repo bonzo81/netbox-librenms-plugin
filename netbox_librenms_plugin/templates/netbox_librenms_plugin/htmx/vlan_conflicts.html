@@ -1,0 +1,69 @@
+{% load helpers %}
+<div class="modal-header">
+  <h5 class="modal-title">
+    <i class="mdi mdi-alert-outline text-warning me-1"></i>
+    Confirm VLAN changes
+  </h5>
+  {% if full_page %}
+    <a href="{{ cancel_url }}" class="btn-close" aria-label="Close"></a>
+  {% else %}
+    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+  {% endif %}
+</div>
+<form method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=object_type object_id=object.pk %}"
+      {% if not full_page %}
+      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=object_type object_id=object.pk %}"
+      hx-target="#htmx-modal-content"
+      hx-swap="innerHTML"
+      {% endif %}>
+  <div class="modal-body">
+    {% csrf_token %}
+    <input type="hidden" name="server_key" value="{{ server_key }}">
+    <input type="hidden" name="action" value="create_vlans">
+    <input type="hidden" name="confirm_conflicts" value="1">
+
+    {% include 'inc/messages.html' %}
+
+    <p>
+      Any safe selected rows were synchronized. The following rows would rename an existing VLAN.
+      Select the changes to confirm.
+    </p>
+
+    {% for conflict in conflicts %}
+      <div class="border rounded-3 p-3 mb-3">
+        <div class="d-flex align-items-start gap-2">
+          <input class="form-check-input mt-1"
+                 type="checkbox"
+                 name="force_conflict"
+                 value="{{ conflict.vid }}"
+                 id="vlan-conflict-{{ forloop.counter }}">
+          <input type="hidden" name="select" value="{{ conflict.vid }}">
+          <input type="hidden" name="conflict_intent" value="{{ conflict.intent }}">
+          <input type="hidden" name="vlan_group_{{ conflict.vid }}" value="{{ conflict.group_id|default_if_none:'' }}">
+          <label class="flex-grow-1 cursor-pointer" for="vlan-conflict-{{ forloop.counter }}">
+            <div>
+              <strong>VLAN {{ conflict.vid }}</strong>
+              <span class="badge bg-secondary-lt ms-1">{{ conflict.group }}</span>
+            </div>
+            <dl class="row small mb-0 mt-2">
+              <dt class="col-sm-4 text-muted">Current NetBox name</dt>
+              <dd class="col-sm-8">{{ conflict.current_name }}</dd>
+              <dt class="col-sm-4 text-muted">LibreNMS name</dt>
+              <dd class="col-sm-8 mb-0">{{ conflict.proposed_name }}</dd>
+            </dl>
+          </label>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+  <div class="modal-footer">
+    {% if full_page %}
+      <a href="{{ cancel_url }}" class="btn btn-secondary">Cancel</a>
+    {% else %}
+      <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+    {% endif %}
+    <button type="submit" class="btn btn-warning">Apply selected changes</button>
+    <button type="submit" class="btn btn-danger" name="force_all" value="1">Apply all changes</button>
+  </div>
+</form>

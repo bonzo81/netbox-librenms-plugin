@@ -1,5 +1,10 @@
 {% extends 'generic/object_list.html' %}
 
+{% block tabs %}
+    {% include 'netbox_librenms_plugin/inc/_rules_patterns_tabs.html' with rules_tab_active="inventoryignorerule" %}
+    {{ block.super }}
+{% endblock %}
+
 {% block content %}
     <div class="alert alert-info">
         <h4>Inventory Ignore Rules</h4>

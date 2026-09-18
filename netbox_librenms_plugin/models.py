@@ -5,12 +5,31 @@ import re
 import yaml
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import DeviceType, Manufacturer, ModuleType, Platform
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
+from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
+from netbox_librenms_plugin.utils import get_object_site_id, validate_regex_field
+
 logger = logging.getLogger(__name__)
+
+# Characters removed by Python's no-argument str.strip(). PostgreSQL BTRIM removes only ASCII
+# spaces when its second argument is absent, so pass this set explicitly wherever the database
+# must enforce the same normalization as PortStackLagPattern.clean().
+_PYTHON_STRIP_WHITESPACE = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0"
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def _trim_python_whitespace(expression):
+    """Return a PostgreSQL expression with Python ``str.strip()`` semantics."""
+    return models.Func(expression, models.Value(_PYTHON_STRIP_WHITESPACE), function="BTRIM")
 
 
 def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> None:
@@ -69,6 +88,23 @@ class LibreNMSSettings(models.Model):
         "Example: '-M{position}' results in 'switch01-M2'",
     )
 
+    location_parse_pattern = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Pattern describing the structure of the LibreNMS location string. "
+        "Available placeholders: {region}, {site}, {location}, {rack}, {tenant}. "
+        "Literal text between placeholders is treated as a separator. "
+        "Example: '{site} - {rack}' parses 'NYC - R1' into site='NYC', rack='R1'. "
+        "Leave blank to match the whole location string against site and location.",
+    )
+
+    location_parse_is_regex = models.BooleanField(
+        default=False,
+        help_text="Treat the location parse pattern as a raw regular expression with "
+        "named groups (e.g. '(?P<site>[^-]+)-(?P<rack>.+)') instead of placeholders",
+    )
+
     use_sysname_default = models.BooleanField(
         default=True,
         help_text="Use SNMP sysName instead of LibreNMS hostname when importing devices",
@@ -77,6 +113,11 @@ class LibreNMSSettings(models.Model):
     strip_domain_default = models.BooleanField(
         default=False,
         help_text="Remove domain suffix from device names during import",
+    )
+
+    remember_interface_name_per_platform = models.BooleanField(
+        default=False,
+        help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
     )
 
     def save(self, *args, **kwargs):
@@ -364,10 +405,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
             raise ValidationError({"netbox_bay_name": "NetBox bay name must not be empty or whitespace-only."})
         self.netbox_bay_name = netbox_bay_name_stripped
         if self.is_regex:
-            try:
-                pattern = re.compile(self.librenms_name)
-            except re.error as e:
-                raise ValidationError({"librenms_name": f"Invalid regex: {e}"})
+            pattern = validate_regex_field(self.librenms_name, "librenms_name")
             try:
                 _validate_replacement_template(pattern, self.netbox_bay_name)
             except (re.error, IndexError) as e:
@@ -438,18 +476,21 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     SCOPE_MODULE_TYPE = "module_type"
     SCOPE_DEVICE_TYPE = "device_type"
     SCOPE_MODULE_BAY = "module_bay"
+    SCOPE_SERIAL = "serial"
 
     SCOPE_CHOICES = [
         (SCOPE_MODULE_TYPE, "Module Type"),
         (SCOPE_DEVICE_TYPE, "Device Type"),
         (SCOPE_MODULE_BAY, "Module Bay"),
+        (SCOPE_SERIAL, "Serial"),
     ]
 
     scope = models.CharField(
         max_length=50,
         choices=SCOPE_CHOICES,
         db_index=True,
-        help_text="Which matching lookup this rule applies to",
+        help_text="Which lookup this rule applies to. Serial rules rewrite the stored "
+        "serial rather than a matching key.",
     )
     manufacturer = models.ForeignKey(
         Manufacturer,
@@ -487,10 +528,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
             errors["replacement"] = "This field is required."
         if errors:
             raise ValidationError(errors)
-        try:
-            compiled = re.compile(self.match_pattern)
-        except re.error as e:
-            raise ValidationError({"match_pattern": f"Invalid regex: {e}"})
+        compiled = validate_regex_field(self.match_pattern, "match_pattern")
         # Validate the replacement template by running a dummy substitution
         try:
             _validate_replacement_template(compiled, self.replacement)
@@ -553,9 +591,11 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     # --- action ---
     ACTION_SKIP = "skip"
     ACTION_TRANSPARENT = "transparent"
+    ACTION_INCLUDE = "include"
     ACTION_CHOICES = [
         (ACTION_SKIP, "Skip (remove from table)"),
         (ACTION_TRANSPARENT, "Transparent (hide row, promote children to device level)"),
+        (ACTION_INCLUDE, "Include (admit an entPhysicalClass the built-in list omits)"),
     ]
 
     # --- match_type ---
@@ -564,6 +604,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     MATCH_CONTAINS = "contains"
     MATCH_REGEX = "regex"
     MATCH_SERIAL_DEVICE = "serial_matches_device"
+    MATCH_CLASS_IS = "class_is"
 
     MATCH_TYPE_CHOICES = [
         (MATCH_ENDS_WITH, "Ends with (entPhysicalName)"),
@@ -571,6 +612,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         (MATCH_CONTAINS, "Contains (entPhysicalName)"),
         (MATCH_REGEX, "Regex (entPhysicalName)"),
         (MATCH_SERIAL_DEVICE, "Serial matches device (entPhysicalSerialNum = Device.serial)"),
+        (MATCH_CLASS_IS, "Class is (entPhysicalClass)"),
     ]
 
     name = models.CharField(
@@ -621,12 +663,16 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         self.__dict__.pop("_compiled_pattern", None)
         pattern_stripped = self.pattern.strip() if self.pattern else ""
         if self.match_type == self.MATCH_REGEX and pattern_stripped:
-            try:
-                re.compile(pattern_stripped)
-            except re.error as e:
-                raise ValidationError({"pattern": f"Invalid regex: {e}"})
+            validate_regex_field(pattern_stripped, "pattern")
         if self.match_type != self.MATCH_SERIAL_DEVICE and not pattern_stripped:
             raise ValidationError({"pattern": "Pattern is required for name-based match types."})
+        if (self.action == self.ACTION_INCLUDE) != (self.match_type == self.MATCH_CLASS_IS):
+            raise ValidationError(
+                {
+                    "action": "The include action admits an entPhysicalClass, so it pairs only "
+                    "with the class_is match type, and class_is has no other use."
+                }
+            )
         # Normalize stored pattern to the stripped form so matches_name() and
         # clean() always operate on the same string.
         self.pattern = pattern_stripped
@@ -640,6 +686,12 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             return re.compile(self.pattern)
         except re.error:
             return None
+
+    def matches_class(self, phys_class: str) -> bool:
+        """Return True when this rule admits *phys_class* (class_is rules only)."""
+        if self.match_type != self.MATCH_CLASS_IS or not self.pattern:
+            return False
+        return self.pattern.strip().casefold() == (phys_class or "").strip().casefold()
 
     def matches_name(self, name: str) -> bool:
         """Return True if *name* matches this rule's pattern/match_type (name-based rules only)."""
@@ -749,6 +801,180 @@ class PlatformMapping(FullCleanOnSaveMixin, NetBoxModel):
             "netbox_platform": str(self.netbox_platform),
             "description": self.description,
         }
+        return yaml.dump(data, sort_keys=False)
+
+
+# Maps LocationMapping.field_type -> (app_label, model_name) of the target NetBox object.
+LOCATION_MAPPING_TARGETS = {
+    "site": ("dcim", "site"),
+    "location": ("dcim", "location"),
+    "rack": ("dcim", "rack"),
+    "tenant": ("tenancy", "tenant"),
+}
+
+
+class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
+    """Map a parsed LibreNMS location value to a NetBox organisation object.
+
+    The LibreNMS ``location`` field is a single free-text string. Users describe
+    its structure with a parse pattern which yields tokens for
+    region/site/location/rack/tenant. When a token does not match a NetBox
+    object's name exactly, a LocationMapping provides an explicit alias from the
+    LibreNMS value to a specific NetBox object (Site, Location, Rack, or Tenant)
+    via a generic foreign key. Region is a parse token only and has no mapping
+    target, because a device inherits its region from its site.
+
+    Site/Tenant values are globally unique, so a single LibreNMS value maps to
+    exactly one object of that type. Location/Rack are scoped to a parent
+    site in NetBox, so the same value may map to different objects under different
+    sites; resolution disambiguates by the parent site parsed from the same
+    location string.
+    """
+
+    FIELD_TYPE_CHOICES = (
+        ("site", "Site"),
+        ("location", "Location"),
+        ("rack", "Rack"),
+        ("tenant", "Tenant"),
+    )
+
+    field_type = models.CharField(
+        max_length=20,
+        choices=FIELD_TYPE_CHOICES,
+        help_text="Which type of NetBox object the LibreNMS value maps to",
+    )
+    librenms_value = models.CharField(
+        max_length=255,
+        help_text="Value parsed from the LibreNMS location string (e.g. 'NYC', 'East')",
+    )
+    content_type = models.ForeignKey(
+        ContentType,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    object_id = models.PositiveBigIntegerField()
+    netbox_object = GenericForeignKey("content_type", "object_id")
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this mapping",
+    )
+
+    def clean(self):
+        """Normalize the value, verify the target type, and enforce uniqueness for unscoped types."""
+        super().clean()
+        self.librenms_value = (self.librenms_value or "").strip()
+        if not self.librenms_value:
+            raise ValidationError({"librenms_value": "This field may not be blank after normalization."})
+
+        expected = LOCATION_MAPPING_TARGETS.get(self.field_type)
+        if expected is None:
+            raise ValidationError({"field_type": f"Unknown field type '{self.field_type}'."})
+
+        if self.content_type_id:
+            ct = self.content_type
+            if (ct.app_label, ct.model) != expected:
+                raise ValidationError({"content_type": f"Target object must be a {self.get_field_type_display()}."})
+            # A GenericForeignKey has no database constraint, so a stale or invented
+            # object_id (e.g. via the REST API) would otherwise save a dangling mapping.
+            if self.object_id is not None and self.netbox_object is None:
+                raise ValidationError(
+                    {"object_id": f"No {self.get_field_type_display()} with ID {self.object_id} exists."}
+                )
+
+        # site/tenant names are globally unique, so the same LibreNMS value
+        # mapping to two different objects of the same type would be ambiguous.
+        # location/rack are scoped to a parent site, so duplicates are allowed and
+        # disambiguated at resolution time by the parent site.
+        if self.field_type in ("site", "tenant"):
+            qs = LocationMapping.objects.filter(
+                field_type=self.field_type,
+                librenms_value__iexact=self.librenms_value,
+            )
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                raise ValidationError(
+                    {
+                        "librenms_value": (
+                            f"A {self.get_field_type_display()} mapping for '{self.librenms_value}' already exists."
+                        )
+                    }
+                )
+        elif self.field_type in ("location", "rack"):
+            self._validate_no_scoped_collision()
+
+    def _validate_no_scoped_collision(self):
+        """Reject a location/rack alias that already maps to another object in the same site.
+
+        Parent-site scoping only disambiguates duplicates across *different* sites;
+        two aliases resolving within one site leave resolution with no tiebreak.
+        """
+        target = self.netbox_object
+        if target is None:
+            return
+        target_site_id = get_object_site_id(target)
+        if target_site_id is None:
+            return
+
+        qs = LocationMapping.objects.filter(
+            field_type=self.field_type,
+            librenms_value__iexact=self.librenms_value,
+        ).select_related("content_type")
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+
+        for other in qs:
+            other_target = other.netbox_object
+            if other_target is None or other_target == target:
+                continue
+            if get_object_site_id(other_target) == target_site_id:
+                raise ValidationError(
+                    {
+                        "librenms_value": (
+                            f"A {self.get_field_type_display()} mapping for '{self.librenms_value}' "
+                            f"already exists in this site (maps to '{other_target}')."
+                        )
+                    }
+                )
+
+    def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:locationmapping_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for LocationMapping."""
+
+        ordering = ["field_type", "librenms_value"]
+        constraints = [
+            # site/tenant values are globally unique, so a case-insensitive
+            # (field_type, librenms_value) pair must be unique to keep resolution
+            # deterministic. location/rack are scoped to a parent site, so they are
+            # intentionally excluded and may legitimately repeat. The partial index
+            # backing this constraint also serves the unscoped resolution lookups.
+            models.UniqueConstraint(
+                models.F("field_type"),
+                Lower("librenms_value"),
+                condition=Q(field_type__in=["site", "tenant"]),
+                name="uniq_locationmapping_unscoped_ci",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.get_field_type_display()}: {self.librenms_value} -> {self.netbox_object}"
+
+    def to_yaml(self):
+        data = {
+            "field_type": self.field_type,
+            "librenms_value": self.librenms_value,
+            "netbox_object": str(self.netbox_object) if self.netbox_object else "",
+        }
+        # location/rack names are only unique within a site, so the export must carry
+        # the parent site or re-import rejects the record as ambiguous.
+        if self.field_type in ("location", "rack"):
+            parent_site = getattr(self.netbox_object, "site", None)
+            if parent_site is not None:
+                data["parent_site"] = str(parent_site)
+        data["description"] = self.description
         return yaml.dump(data, sort_keys=False)
 
 
@@ -863,10 +1089,7 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
         ):
             if not value:
                 continue
-            try:
-                re.compile(value)
-            except re.error as e:
-                raise ValidationError({field: f"Invalid regex: {e}"})
+            validate_regex_field(value, field)
 
     def get_absolute_url(self):
         return reverse(
@@ -926,3 +1149,268 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)
+
+
+class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    Map a LibreNMS OS name to regexes that classify port-stack interfaces.
+
+    Used as fallback when a port's ifType is not 'ieee8023adLag'.
+    Example: Cisco IOS port-channels have ifType='propVirtual' and need name-based
+    identification via pattern '^Po\\d+$'.
+
+    Also maps that OS to the regex identifying service-access-point names, whose port_stack
+    rows describe a service rather than an interface relationship and must be skipped.
+    Example: Nokia SR OS SAPs are written 'lag-1:10'. That is per-OS because other vendors
+    spell real interfaces with a colon (a Junos breakout channel is 'xe-1/1/3:1').
+
+    Universal rules (hardcoded, vendor-agnostic):
+      - LAG aggregate is normally the 'low' entry in a port_stack pair, but the
+        aggregate side is determined authoritatively by ifType or this pattern, so a
+        pair whose aggregate is on the 'high' side is still mapped member->aggregate.
+      - .N suffix is stripped for name resolution (handles Junos sub-unit pairing).
+    """
+
+    librenms_os = models.CharField(
+        max_length=50,
+        help_text="LibreNMS OS identifier (e.g. 'ios', 'timos', 'junos')",
+    )
+    lag_name_pattern = models.CharField(
+        max_length=200,
+        help_text=(
+            "Regular expression matching LAG aggregate interface names. "
+            "Used as fallback when ifType is not 'ieee8023adLag'. "
+            r"Example: ^Po\d+$"
+        ),
+    )
+    sap_name_pattern = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text=(
+            "Regular expression matching service-access-point names, whose port_stack rows are "
+            "skipped. Leave blank when the OS has no SAP notation. "
+            "Example: ':' for Nokia SR OS (lag-1:10)"
+        ),
+    )
+    bridge_name_pattern = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text=(
+            "Regular expression matching bridge interface names. "
+            "A matching side of a port-stack pair is the bridge for the other side. "
+            r"Example: ^(vmbr|br|bridge)\d+$"
+        ),
+    )
+    description = models.TextField(blank=True)
+
+    @functools.cached_property
+    def _compiled_pattern(self):
+        """Compiled lag_name_pattern regex, or None when it doesn't compile (skipped, not fatal)."""
+        try:
+            return re.compile(self.lag_name_pattern)
+        except re.error:
+            return None
+
+    @functools.cached_property
+    def _compiled_sap_pattern(self):
+        """Compiled sap_name_pattern regex, or None when it is blank or doesn't compile."""
+        if not self.sap_name_pattern:
+            return None
+        try:
+            return re.compile(self.sap_name_pattern)
+        except re.error:
+            return None
+
+    @functools.cached_property
+    def _compiled_bridge_pattern(self):
+        """Return the compiled bridge regex, or None when it is blank or invalid."""
+        if not self.bridge_name_pattern:
+            return None
+        try:
+            return re.compile(self.bridge_name_pattern)
+        except re.error:
+            return None
+
+    @classmethod
+    def _patterns_for_os_queryset(cls, device_os):
+        """
+        Return the stored rows that apply to *device_os*, or None when none can.
+
+        One home for the OS scoping both pattern readers use, so they cannot disagree on which
+        rows apply. ``device_os=None`` loads every stored row (legacy unscoped behaviour); a
+        present-but-blank or non-string OS returns None, because an unknown OS must not
+        re-globalize every vendor's regex.
+
+        Args:
+            device_os (str | None): The LibreNMS OS to scope to, or None for every stored row.
+
+        Returns:
+            QuerySet | None: The rows to read, or None when the OS admits none.
+        """
+        if device_os is None:
+            return cls.objects.all()
+        os_filter = device_os.strip() if isinstance(device_os, str) else ""
+        if not os_filter:
+            return None
+        return cls.objects.annotate(normalized_librenms_os=Lower(_trim_python_whitespace("librenms_os"))).filter(
+            normalized_librenms_os=os_filter.lower()
+        )
+
+    @classmethod
+    def compiled_patterns_for_os(cls, device_os):
+        """
+        Return the compiled lag_name_pattern regexes scoped to *device_os*.
+
+        Single home for the OS-scoping + compile-with-skip used by both the relationship
+        resolver and the lazy port_stack-fetch trigger, so the two can't
+        disagree on which patterns apply. ``device_os=None`` loads every stored pattern (legacy
+        unscoped behaviour); a present-but-blank/non-string OS returns none (an unknown OS must
+        not re-globalize every vendor's regex); otherwise the patterns whose ``librenms_os``
+        matches after the same trim/lower normalization as the database constraint. Patterns
+        that fail to compile are skipped and logged.
+        """
+        queryset = cls._patterns_for_os_queryset(device_os)
+        if queryset is None:
+            return []
+        compiled = []
+        for pattern in queryset:
+            regex = pattern._compiled_pattern
+            if regex is None:
+                logger.warning(
+                    "Skipping invalid LAG name pattern for OS %r: %r",
+                    pattern.librenms_os,
+                    pattern.lag_name_pattern,
+                )
+                continue
+            compiled.append(regex)
+        return compiled
+
+    @classmethod
+    def compiled_sap_patterns_for_os(cls, device_os):
+        """
+        Return the compiled sap_name_pattern regexes scoped to *device_os*.
+
+        Same compile-with-skip as :meth:`compiled_patterns_for_os`, over the other pattern this
+        model stores. Rows with a blank sap_name_pattern contribute nothing, so an OS with no SAP
+        notation simply has no rule. The scoping differs on one point: an OS this model cannot
+        resolve falls back to every stored rule rather than none (see the body).
+
+        Args:
+            device_os (str | None): The LibreNMS OS to scope to. None, blank or unusable applies
+                every stored rule.
+
+        Returns:
+            list: The compiled regexes that apply to this OS.
+        """
+        queryset = cls._patterns_for_os_queryset(device_os)
+        # "No row for this OS" is not the same answer as "this OS has a row saying it has no SAP
+        # notation". Junos is seeded with a blank pattern, so its breakout names keep their
+        # relationships; an OS nobody registered is simply unknown, and a Nokia device reporting
+        # an unseeded OS string would otherwise write its service access points into NetBox as
+        # LAG members.
+        if queryset is None or not queryset.exists():
+            # An unknown OS applies EVERY stored SAP rule rather than none, deliberately the
+            # opposite of compiled_patterns_for_os. The two pattern kinds fail in opposite
+            # directions: an unmatched LAG regex INVENTS a relationship, an unmatched SAP regex
+            # SUPPRESSES one. Over-skipping loses relationships the user can see are missing;
+            # under-skipping writes a service access point into NetBox as a LAG member. This also
+            # keeps the unconditional colon skip this replaced, for a device whose OS is unknown.
+            queryset = cls.objects.all()
+        compiled = []
+        for pattern in queryset:
+            regex = pattern._compiled_sap_pattern
+            if regex is None:
+                if pattern.sap_name_pattern:
+                    logger.warning(
+                        "Skipping invalid SAP name pattern for OS %r: %r",
+                        pattern.librenms_os,
+                        pattern.sap_name_pattern,
+                    )
+                continue
+            compiled.append(regex)
+        return compiled
+
+    @classmethod
+    def compiled_bridge_patterns_for_os(cls, device_os):
+        """Return the compiled bridge-name regexes scoped to the LibreNMS OS."""
+        queryset = cls._patterns_for_os_queryset(device_os)
+        if queryset is None:
+            return []
+        compiled = []
+        for pattern in queryset:
+            regex = pattern._compiled_bridge_pattern
+            if regex is None:
+                if pattern.bridge_name_pattern:
+                    logger.warning(
+                        "Skipping invalid bridge name pattern for OS %r: %r",
+                        pattern.librenms_os,
+                        pattern.bridge_name_pattern,
+                    )
+                continue
+            compiled.append(regex)
+        return compiled
+
+    def clean(self):
+        """Normalize the OS name and validate each stored regex."""
+        super().clean()
+        # Invalidate the cached compiled pattern so it recompiles from the edited value.
+        self.__dict__.pop("_compiled_pattern", None)
+        os_name = (self.librenms_os or "").strip().lower()
+        if not os_name:
+            raise ValidationError({"librenms_os": "OS name must not be blank."})
+        self.librenms_os = os_name
+        lag_pattern = (self.lag_name_pattern or "").strip()
+        if not lag_pattern:
+            raise ValidationError({"lag_name_pattern": "Pattern must not be blank."})
+        self.lag_name_pattern = lag_pattern
+        # ReDoS note (low severity, accepted): see validate_regex_field, which documents
+        # the admin-supplied-pattern risk and centralizes the compile/validation path.
+        validate_regex_field(self.lag_name_pattern, "lag_name_pattern")
+        self.__dict__.pop("_compiled_sap_pattern", None)
+        # Blank is a valid answer here: most operating systems have no SAP notation.
+        self.sap_name_pattern = (self.sap_name_pattern or "").strip()
+        if self.sap_name_pattern:
+            validate_regex_field(self.sap_name_pattern, "sap_name_pattern")
+        self.__dict__.pop("_compiled_bridge_pattern", None)
+        self.bridge_name_pattern = (self.bridge_name_pattern or "").strip()
+        if self.bridge_name_pattern:
+            validate_regex_field(self.bridge_name_pattern, "bridge_name_pattern")
+
+    def get_absolute_url(self):
+        """Return URL for this pattern's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:portstacklagpattern_detail", args=[self.pk])
+
+    def to_yaml(self):
+        data = {
+            "librenms_os": self.librenms_os,
+            "lag_name_pattern": self.lag_name_pattern,
+            "sap_name_pattern": self.sap_name_pattern,
+            "bridge_name_pattern": self.bridge_name_pattern,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+    class Meta:
+        """Meta options for PortStackLagPattern."""
+
+        ordering = ["librenms_os"]
+        verbose_name = "Port Stack Pattern"
+        verbose_name_plural = "Port Stack Patterns"
+        constraints = [
+            # Enforce the same trimmed, case-insensitive key that the OS-scoped pattern lookup
+            # reads. A plain unique=True is case-sensitive, so at the DB level "ios" and "IOS"
+            # could coexist and both apply to one device, making the per-OS fallback ambiguous.
+            # clean() already normalizes with .strip().lower() on every save. BTRIM with Python's
+            # full whitespace set makes the database enforce the same canonical form for paths
+            # that skip full_clean, such as bulk_create, raw SQL, or loaddata. Lower() alone would
+            # let " ios " coexist with "ios".
+            models.UniqueConstraint(
+                Lower(_trim_python_whitespace("librenms_os")),
+                name="unique_portstacklagpattern_librenms_os_ci",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.librenms_os} -> {self.lag_name_pattern}"

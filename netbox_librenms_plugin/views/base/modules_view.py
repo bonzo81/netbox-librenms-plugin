@@ -3,20 +3,29 @@ import re
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
+    cache_remaining_ttl,
+    coerce_librenms_id,
     get_librenms_device_id,
+    get_librenms_oob,
     get_librenms_sync_device,
     get_module_template_interface_names,
+    is_valid_ports_payload,
+    module_inventory_binding_token,
+    module_inventory_row_digest,
+    module_inventory_snapshot_digest,
     normalize_librenms_port_id,
+    normalize_serial,
 )
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,7 +61,66 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
 
 
-def _check_ignore_rules(
+def _normalize_librenms_text(value) -> str:
+    """Coerce a LibreNMS text value to a trimmed string without changing placeholder semantics."""
+    return normalize_serial(value)
+
+
+def _clean_librenms_value(value) -> str:
+    """
+    Return a LibreNMS model/serial/type value trimmed, with placeholders blanked.
+
+    Coerces through ``normalize_serial`` because all-digit values arrive as JSON
+    numbers, which a bare ``.strip()`` would crash on (and ``or ""`` would drop 0).
+
+    Args:
+        value: The raw value as returned by LibreNMS.
+
+    Returns:
+        The cleaned string, or "" for a missing/placeholder value.
+
+    """
+    text = _normalize_librenms_text(value)
+    return "" if text.lower() in _PLACEHOLDER_VALUES else text
+
+
+def _inventory_item_offsettable(item: dict) -> bool:
+    """
+    Return True if an inventory item's index fields support offset arithmetic.
+
+    Both fields must be non-negative integers or absent. The parent can also use zero for
+    the root. RFC 2737 defines entPhysicalIndex as 1..2147483647, so a negative value is
+    out of spec, and admitting one would let the OOB offset land on a main index.
+
+    Args:
+        item (dict): The inventory item to check.
+
+    Returns:
+        bool: True if both index fields support offset arithmetic.
+
+    """
+    idx = item.get("entPhysicalIndex")
+    parent = item.get("entPhysicalContainedIn")
+    idx_ok = idx is None or (isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0)
+    parent_ok = parent is None or (isinstance(parent, int) and not isinstance(parent, bool) and parent >= 0)
+    return idx_ok and parent_ok
+
+
+def _class_is_included(item: dict, rules: list) -> bool:
+    """
+    Return True when an include rule admits this item's entPhysicalClass.
+
+    INVENTORY_CLASSES lists the classes the sync table understands. A vendor that reports
+    real hardware under another class (Juniper returns Routing Engines as "other") would
+    otherwise be dropped before any matching runs, so an operator can admit the class with
+    a rule rather than waiting for the built-in list to grow.
+    """
+    # LibreNMS sends JSON, so a numeric class arrives as an int and matches_class() strips.
+    phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
+    return any(rule.action == rule.ACTION_INCLUDE and rule.matches_class(phys_class) for rule in rules)
+
+
+def _check_ignore_rules(  # noqa: C901
     item: dict,
     parent_item: dict | None,
     rules: list,
@@ -63,9 +131,9 @@ def _check_ignore_rules(
     Return the matched rule action or ``None`` if no rule matches.
 
     Return values:
-        ``None``          — no rule matched; process the item normally.
-        ``"skip"``        — drop the item from the sync table.
-        ``"transparent"`` — hide the item's row but promote its ENTITY-MIB
+        ``None``: no rule matched; process the item normally.
+        ``"skip"``: drop the item from the sync table.
+        ``"transparent"``: hide the item's row but promote its ENTITY-MIB
                             children to device-level bay matching (used for
                             embedded RPs on fixed-chassis routers).
 
@@ -74,15 +142,15 @@ def _check_ignore_rules(
     **serial_matches_device**
         Matches when the item's ``entPhysicalSerialNum`` equals *device_serial*
         (the NetBox ``Device.serial`` value) **and** the item sits at chassis
-        level — i.e. has no parent (top-level entity) or its direct parent has
-        ``entPhysicalClass="chassis"``.  No name pattern is used.
+        level. It must have no parent (top-level entity), or its direct parent
+        must have ``entPhysicalClass="chassis"``.  No name pattern is used.
         ``require_serial_match_parent`` is ignored for this type.
 
         The chassis-level requirement prevents the rule from misfiring on
         chassis-based devices whose line cards happen to share a serial with
         the device record (e.g. Cisco ASR-9904 with ``Device.serial`` set to
-        the linecard's serial — without the guard, the linecard becomes
-        transparent and its sub-ports collapse to chassis-level bay matching).
+        the linecard's serial). Without the guard, the linecard becomes
+        transparent and its sub-ports collapse to chassis-level bay matching.
 
     **Name-based types** (ends_with / starts_with / contains / regex):
         Matches on ``entPhysicalName``.  When ``require_serial_match_parent``
@@ -91,15 +159,24 @@ def _check_ignore_rules(
         up from the direct parent).
 
         Ancestor walking handles cases like Cisco IOS-XR where an IDPROM entry
-        is not a direct child of the module it represents — e.g.
+        is not a direct child of the module it represents. For example,
         ``0/RP0/CPU0-Base Board IDPROM`` is a child of ``0/RP0/CPU0-Mother Board``
         (empty serial), but its serial matches the grandparent ``0/RP0/CPU0``.
-        Traversal stops at the first non-empty serial encountered to avoid false
-        positives deeper in the tree.
+        Traversal stops at the first non-empty serial encountered. This
+        prevents false positives deeper in the tree.
+
+    Args:
+        item (dict): The inventory item to check.
+        parent_item (dict | None): The item's direct parent, if it has one.
+        rules (list): The ignore rules to evaluate.
+        index_map (dict | None): Inventory items keyed by physical index.
+        device_serial (str): The NetBox device serial.
+
+    Returns:
+        str | None: The matched rule action, or None if no rule matches.
+
     """
-    item_serial = (item.get("entPhysicalSerialNum") or "").strip()
-    if item_serial.lower() in _PLACEHOLDER_VALUES:
-        item_serial = ""
+    item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
     if device_serial.lower() in _PLACEHOLDER_VALUES:
         device_serial = ""
     name = (item.get("entPhysicalName") or "").strip()
@@ -137,9 +214,7 @@ def _check_ignore_rules(
                 if current_idx in visited:
                     break
                 visited.add(current_idx)
-            ancestor_serial = (current.get("entPhysicalSerialNum") or "").strip()
-            if ancestor_serial.lower() in _PLACEHOLDER_VALUES:
-                ancestor_serial = ""
+            ancestor_serial = _clean_librenms_value(current.get("entPhysicalSerialNum"))
             if ancestor_serial:
                 if ancestor_serial == item_serial:
                     return rule.action
@@ -153,9 +228,10 @@ def _check_ignore_rules(
     return None
 
 
-class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
-    Base view for synchronizing module/inventory data from LibreNMS.
+    Synchronize module and inventory data from LibreNMS.
+
     Fetches inventory, matches against NetBox module bays and module types,
     and renders a comparison table.
     """
@@ -165,28 +241,56 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def get_object(self, pk):
         """Retrieve the object (Device)."""
-        return get_object_or_404(self.model, pk=pk)
+        return self.restrict_object_or_404(self.model, pk=pk)
 
     def get_table(self, data, obj):
-        """Returns the table class. Subclasses should override."""
+        """Return the table class. Subclasses should override."""
         raise NotImplementedError("Subclasses must implement get_table()")
 
-    def _get_sync_device(self, obj):
-        """Resolve the LibreNMS sync device for cache reads/writes in VC contexts."""
-        sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
+    def _get_sync_device(self, obj, server_key=None):
+        """
+        Resolve the LibreNMS sync device for cache reads/writes in VC contexts.
+
+        Scoped to the POST-resolved server when provided (fallback: session server)
+        so a VC member synced from a non-default server resolves the right sync
+        device.
+
+        Args:
+            obj: The NetBox device (or VC member) being synced.
+            server_key: The LibreNMS server key; falls back to the session server
+                when None.
+
+        Returns:
+            The resolved sync device, or *obj* itself for non-VC devices.
+
+        """
+        server_key = server_key or self.librenms_api.server_key
+        sync_device = get_librenms_sync_device(obj, server_key=server_key)
         return sync_device or obj
 
     @staticmethod
     def _normalize_serial(value):
         """Normalize serial values for reliable cross-source comparison."""
-        serial = (value or "").strip()
-        if serial.lower() in _PLACEHOLDER_VALUES:
-            return ""
-        return serial
+        return _clean_librenms_value(value)
 
     def _get_interface_port_id(self, interface):
-        """Resolve an interface's stored LibreNMS port_id without discovery fallback."""
-        return normalize_librenms_port_id(self.librenms_api.get_stored_librenms_id(interface))
+        """
+        Resolve an interface's stored LibreNMS port_id (no discovery), scoped to the active server.
+
+        The verify path (SingleModuleVerifyView) sets ``_active_server_key`` but leaves the API
+        bound to the default client, so read the interface's per-server port_id under the active
+        key, not ``self.librenms_api.server_key``. This matches the server that the row's
+        interface match (``_attach_interface_match``) resolves against.
+
+        Args:
+            interface (Interface): The NetBox interface to inspect.
+
+        Returns:
+            int | None: The normalized LibreNMS port ID, or None if no valid ID is stored.
+
+        """
+        server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
+        return normalize_librenms_port_id(self.librenms_api.get_stored_librenms_id(interface, server_key=server_key))
 
     def _count_adoptable_template_interfaces(self, module):
         """Count standalone interfaces that match an installed module's interface templates."""
@@ -194,6 +298,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         device = getattr(module, "device", None)
         if device is None:
+            return 0
+
+        # Short-circuit before the (per-row) interface-name prediction: if the device has no
+        # module-less interfaces, nothing can be adopted, so the count is 0 regardless. The
+        # existence is cached per device on this render so it costs one query, not one per row —
+        # a fully-adopted device then skips the prediction signal entirely.
+        # Named to avoid shadowing the module-level Django ``cache`` import: this is a per-render
+        # in-memory memo of "device has module-less interfaces", not the Django cache.
+        standalone_exists = self.__dict__.setdefault("_standalone_iface_exists", {})
+        if device.pk not in standalone_exists:
+            standalone_exists[device.pk] = device.interfaces.filter(module__isnull=True).exists()
+        if not standalone_exists[device.pk]:
             return 0
 
         template_names = get_module_template_interface_names(device, module)
@@ -208,6 +324,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         Returns:
             tuple: (Device, source) where source is a short reason string.
+
         """
         if not vc_members:
             return obj, "default"
@@ -247,9 +364,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Name/model hint fallback: common "<position>/..." prefixes.
         hints = [
-            (item.get("entPhysicalName") or "").strip(),
-            (item.get("entPhysicalDescr") or "").strip(),
-            (item.get("entPhysicalModelName") or "").strip(),
+            _normalize_librenms_text(item.get("entPhysicalName")),
+            _normalize_librenms_text(item.get("entPhysicalDescr")),
+            _normalize_librenms_text(item.get("entPhysicalModelName")),
         ]
         for hint in hints:
             if not hint:
@@ -267,106 +384,324 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return obj, "default"
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         """Fetch inventory from LibreNMS, cache it, and render the module sync table."""
         obj = self.get_object(pk)
-        sync_device = self._get_sync_device(obj)
-
-        self.librenms_id = self.librenms_api.get_librenms_id(sync_device)
-        if not self.librenms_id:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key))
-            messages.error(request, "Device not found in LibreNMS.")
-            return render(
+        # Rebind the API to the POSTed server BEFORE resolving the sync device / librenms_id
+        # so the inventory fetch + cache scope all target the same server in a multi-server
+        # tab refresh. Resolve before _get_sync_device so VC resolution uses the same key.
+        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            # rebind_api_for_server() returned None to avoid building a missing/misconfigured
+            # default client; reading the lazy `librenms_api` property here would reconstruct it
+            # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
+            active_server_key = self.active_server_key
+            # render_sync_partial injects the donor-mode flags, resolved under the session/active
+            # key — NOT the POSTed key, which failed to rebind and would miss the marker and
+            # re-enable a donor's sync controls.
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "module_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": self.librenms_api.server_key,
-                    },
-                    "has_write_permission": self.has_write_permission(),
-                },
+                obj,
+                active_server_key,
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None}},
+            )
+        sync_device = self._get_sync_device(obj, server_key=server_key)
+
+        # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/negative/garbage):
+        # get_librenms_id's device-id cache path returns its value verbatim, so a stray True would
+        # otherwise int() to 1 and fetch a stranger's inventory. Mirrors the cables/IP views.
+        self.librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
+        if self.librenms_id is None:
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
+            messages.error(
+                request,
+                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
+            )
+            return self.render_sync_partial(
+                request,
+                obj,
+                server_key,
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
 
+        # get_device_inventory validates the container, not the index types. A non-int index
+        # would crash the OOB offset.
+        if success and not all(_inventory_item_offsettable(item) for item in inventory_data):
+            success, inventory_data = (
+                False,
+                "inventory payload has a negative or non-integer entPhysicalIndex or entPhysicalContainedIn",
+            )
+
+        # Treat transport errors, invalid containers, and invalid index types as fetch failures.
         if not success:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key))
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
             messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "module_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": self.librenms_api.server_key,
-                    },
-                    "has_write_permission": self.has_write_permission(),
-                },
+                obj,
+                server_key,
+                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
+
+        for item in inventory_data:
+            item["_source"] = "main"
 
         # Fetch ports once and reuse in subsequent enrichment steps.
         ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
         ports_error = None
-        if not ports_success or not isinstance(ports_data, dict):
+        # A success flag is not enough: a dict whose "ports" is missing/None or carries
+        # non-dict entries makes _enrich_inventory_port_identity()/_merge_transceiver_data()
+        # silently no-op, leaving port-id enrichment incomplete. Treat that as a fetch
+        # failure so the snapshot below is NOT cached as complete (and the user is warned),
+        # instead of silently serving a degraded module list until TTL/manual refresh.
+        ports_payload_ok = ports_success and is_valid_ports_payload(ports_data)
+        if not ports_payload_ok:
             ports_error = str(ports_data) if ports_data else "unknown error"
             ports_data = {}
 
-        # Fetch transceiver data and merge with inventory
+        # Merge main-device transceiver data BEFORE computing the OOB offset so
+        # that synthetic transceiver rows (whose entity_physical_index values come
+        # from the transceiver API and may exceed the ENTITY-MIB high-water mark)
+        # are counted in main_max_idx.  Vendors like Nokia expose SFPs in the
+        # transceiver API with indices that are absent from ENTITY-MIB; without
+        # this reordering those high indices could fall inside the OOB namespace.
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
+        for item in inventory_data:
+            item.setdefault("_source", "main")
         # Enrich port rows with stable LibreNMS port_id using ports data so
         # interface matching works even when transceiver metadata is absent.
         self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
 
-        # Cache the merged inventory data, namespaced by server and librenms_id to detect remapping
-        cache.set(
-            self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key),
-            {"inventory": inventory_data, "librenms_id": self.librenms_id},
-            timeout=self.librenms_api.cache_timeout,
-        )
+        # If an OOB controller is linked, fetch its inventory and merge.
+        # Offset OOB entPhysicalIndex values by a dynamic amount to prevent
+        # collisions with the main device's real entPhysicalIndex values.
+        # RFC 2737 does not cap entPhysicalIndex, so a static 1_000_000 offset
+        # is not safe for high-density chassis. Instead we compute an offset
+        # that is always above the main device's highest observed index,
+        # including any synthetic transceiver rows added above.
+        oob = get_librenms_oob(sync_device, server_key=server_key)
+        # Coerce to a positive int (or None) like interfaces_view.py:212 / cables_view.py — a
+        # bool/negative/non-numeric stored OOB id must not be treated as valid and fired at
+        # get_device_inventory(). It also normalizes the value cached as the OOB fingerprint
+        # below so get_context_data()'s comparison is int-vs-int (see the read side).
+        oob_id = coerce_librenms_id(oob.get("id")) if isinstance(oob, dict) else None
+        oob_failed = False
+        if oob and oob_id is None:
+            # An OOB controller IS linked but its stored id is corrupt (non-numeric / bool /
+            # zero / negative — e.g. after a manual custom-field edit). A bare falsy check
+            # would conflate this with "no OOB linked": the controller's inventory rows would
+            # silently vanish, the host-only snapshot would be cached as complete, and every
+            # cached render would keep omitting them with no banner — while the Interfaces and
+            # Cables tabs fail closed with an explicit warning for the very same state. Take
+            # the same partial-outcome path as a fetch failure.
+            oob_failed = True
+            logger.warning(
+                "Invalid OOB controller id for device %s: %r",
+                self.librenms_id,
+                oob.get("id"),
+            )
+        elif oob_id:
+            oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
+            # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
+            # entPhysicalIndex/entPhysicalContainedIn: a numeric string would crash the offset
+            # loop below (TypeError on "5" + offset), so fail closed to a host-only snapshot.
+            if oob_success and all(_inventory_item_offsettable(item) for item in oob_inventory):
+                main_max_idx = max(
+                    (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
+                    default=0,
+                )
+                # Round up to the next 1000-boundary for a clean namespace. Both ranges are
+                # non-negative, so the offset clears every main index.
+                _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
+                for item in oob_inventory:
+                    item["_source"] = "oob"
+                    if (idx := item.get("entPhysicalIndex")) is not None:
+                        item["entPhysicalIndex"] = idx + _OOB_OFFSET
+                    if (parent := item.get("entPhysicalContainedIn")) not in (None, 0):
+                        item["entPhysicalContainedIn"] = parent + _OOB_OFFSET
+                inventory_data = inventory_data + oob_inventory
+            else:
+                oob_failed = True
+                logger.warning(
+                    "OOB inventory fetch failed for device %s (OOB id %s): %s",
+                    self.librenms_id,
+                    oob_id,
+                    oob_inventory,
+                )
 
-        context = self._build_context(request, obj, inventory_data)
+        # Cache the merged inventory, fingerprinted by main + OOB librenms_id so a
+        # re-link to a different controller invalidates the stale merged inventory.
+        # Skip caching on any partial fetch — an OOB failure (main-only snapshot), a
+        # transceiver-enrichment failure (synthetic transceiver rows dropped), or a ports
+        # failure (port-id enrichment missing, so interface matching is degraded).
+        # Persisting any of these would let get_context_data() accept the incomplete
+        # snapshot as complete (it only fingerprints librenms_id/oob_librenms_id), silently
+        # serving a degraded module list and hiding the warning until TTL/manual refresh.
+        if oob_failed or txr_error or ports_error:
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+        else:
+            cache.set(
+                self.get_cache_key(sync_device, "inventory", server_key=server_key),
+                {"inventory": inventory_data, "librenms_id": self.librenms_id, "oob_librenms_id": oob_id},
+                timeout=self.librenms_api.cache_timeout,
+            )
+
+        refresh_incomplete = bool(oob_failed or txr_error or ports_error)
+        context = (
+            {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
+            if refresh_incomplete
+            else self._build_context(request, obj, inventory_data, server_key=server_key, sync_device=sync_device)
+        )
         if ports_error:
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(
                 request,
-                "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
-                " See server logs for details.",
+                "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
+                " loaded. Refresh Modules to try again. See server logs for details.",
             )
         if txr_error:
             logger.warning("Transceiver fetch failed for device %s: %s", self.librenms_id, txr_error)
-            messages.warning(request, "Inventory refreshed, but transceiver fetch failed; see server logs for details.")
-        elif not ports_error:
-            messages.success(request, "Inventory data refreshed successfully.")
-        return render(
+            messages.warning(
+                request,
+                "Inventory refresh was incomplete: transceiver fetch failed, so no module rows were loaded."
+                " Refresh Modules to try again. See server logs for details.",
+            )
+        if oob_failed:
+            # Keep the toast generic — the device/OOB ids are already in the logger.warning
+            # above (line ~418); surfacing internal LibreNMS ids in the UI is needless leakage
+            # and inconsistent with the ports/transceiver toasts.
+            messages.warning(
+                request,
+                "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
+                " were loaded. Refresh Modules to try again. See server logs for details.",
+            )
+        if not refresh_incomplete:
+            if SyncCacheConsistency(obj).mark_refresh_outcome(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            ):
+                messages.success(request, "Inventory data refreshed successfully.")
+            else:
+                messages.error(
+                    request,
+                    "Inventory data could not be cached. The rows shown come from this refresh only "
+                    "and will not survive a reload. Refresh again before syncing; see server logs for details.",
+                )
+        else:
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
+        return self.render_sync_partial(
             request,
-            self.partial_template_name,
-            {"module_sync": context, "has_write_permission": self.has_write_permission()},
+            obj,
+            server_key,
+            {"module_sync": context},
         )
 
-    def get_context_data(self, request, obj):
-        """Get context from cache (used by the main sync view on initial page load)."""
-        sync_device = self._get_sync_device(obj)
-        cache_key = self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key)
+    def get_context_data(self, request, obj, server_key=None):
+        """Get context from cache (used on initial page load and by the module actions' in-place re-render)."""
+        # Scope the cache read + OOB-fingerprint comparison to the active server from the request
+        # (GET query), matching the server post() rebinds to and caches under. Without this the
+        # GET render keys on the lazy default server_key, so a non-default-server tab cache-misses
+        # (empty module table despite a successful refresh) and the OOB-invalidation guard no-ops.
+        # The shared helper falls back to the session/default server when the query is blank, so
+        # single-server and default-server renders are unchanged.
+        scoped_server, unresolved = self.resolve_get_render_server_key(request, server_key)
+        if unresolved:
+            # The query named a server that no longer resolves (deleted/misconfigured). Render an
+            # empty table scoped to that key instead of silently falling back to the default
+            # server's cached inventory and attributing it to the requested server.
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+        # No buildable client (missing/misconfigured default and no ?server_key rebind): there is no
+        # valid server scope, so degrade to the empty panel with server_key=None — mirrors the
+        # sibling tabs' _render_server_key() None fallback (develop hardening) instead of the
+        # "default" placeholder resolve_get_render_server_key falls back to.
+        if self._render_server_key() is None:
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": None}
+        # Scope the VC sync-device resolution to the RESOLVED server explicitly, rather than
+        # relying on resolve_get_render_server_key having rebound self.librenms_api as a side
+        # effect — otherwise a future ordering/rebind change would silently key VC resolution on
+        # the default server while the cache read (below) uses scoped_server.
+        sync_device = self._get_sync_device(obj, server_key=scoped_server)
+        cache_key = self.get_cache_key(sync_device, "inventory", server_key=scoped_server)
         cached_payload = cache.get(cache_key)
         if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+        # post() fails closed on malformed inventory before caching, but a stale pre-fix cache
+        # entry (e.g. {"inventory": [None]}) can still reach _build_context() and crash on
+        # item.get(...). Mirror the list-of-dicts guard on the read path too.
+        cached_inventory = cached_payload.get("inventory")
+        if not isinstance(cached_inventory, list) or any(not isinstance(item, dict) for item in cached_inventory):
+            cache.delete(cache_key)
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
-        current_librenms_id = self.librenms_api.get_librenms_id(sync_device)
-        if cached_payload.get("librenms_id") != current_librenms_id:
+        # Coerce like post() does: a raw compare both accepts a poisoned bool (True == 1 in
+        # Python, serving a snapshot post() would fail closed on) and rejects a string-backed
+        # id ("10" != 10, emptying the table until a manual refresh). None (unlinked or
+        # uncoercible) never matches — post() can't cache without a valid id.
+        if getattr(self, "cache_only", False):
+            current_librenms_id = coerce_librenms_id(
+                self.librenms_api.get_stored_librenms_id(sync_device, server_key=scoped_server)
+            )
+        else:
+            current_librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
+            if lookup_error is not None:
+                messages.error(request, self.scoped_lookup_message(lookup_error))
+        if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
-        return self._build_context(request, obj, cached_payload["inventory"])
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+        # Same for the linked OOB controller: a re-link (or unlink) to a different
+        # controller must drop merged inventory built for the old one. Symmetric on
+        # None so had-OOB→none and none→has-OOB both invalidate.
+        current_oob = get_librenms_oob(sync_device, server_key=scoped_server)
+        # Coerce both sides of the fingerprint so a stored string id ("5") and an int id (5) of
+        # the same value compare equal — otherwise the merged inventory is wrongly treated as
+        # stale on every GET and the module table renders empty until a manual refresh. The write
+        # side (post()) now caches the coerced value, so this matches it.
+        current_oob_id = coerce_librenms_id(current_oob.get("id")) if isinstance(current_oob, dict) else None
+        # A linked-but-corrupt OOB id must not collapse to the no-OOB fingerprint: post()
+        # takes the partial-outcome path (never caches) for this state, so the GET compare
+        # can't quietly serve a prior no-OOB snapshot while an OOB controller is linked.
+        if current_oob and current_oob_id is None:
+            cache.delete(cache_key)
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+        if cached_payload.get("oob_librenms_id") != current_oob_id:
+            cache.delete(cache_key)
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+        # Pass the resolved server explicitly (like post() does) so _active_server_key keys on it
+        # rather than falling back to self.librenms_api.server_key — the same rebind-side-effect
+        # avoidance the sync_device resolution above documents.
+        return self._build_context(
+            request, obj, cached_payload["inventory"], server_key=scoped_server, sync_device=sync_device
+        )
 
-    def _build_context(self, request, obj, inventory_data):
+    def _build_context(self, request, obj, inventory_data, server_key=None, sync_device=None):
         """Build context with matched inventory items and table."""
+        # Scope cache reads + per-row interface binding to the POST-resolved server when
+        # provided (fallback: session server). Stored on self so _build_member_contexts
+        # (reached via the row builders) uses the same key without threading it through
+        # every intermediate signature.
+        self._active_server_key = server_key or self.librenms_api.server_key
+        inventory_snapshot_digest = module_inventory_snapshot_digest(inventory_data)
         # Build a lookup of all inventory items by index for parent resolution
         # Skip items with missing entPhysicalIndex to avoid KeyError on malformed data.
         index_map = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
@@ -401,7 +736,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # _match_module_bay and resolve_module_type loops.
         self._norm_rules_bay = preload_normalization_rules("module_bay")
         self._norm_rules_type = preload_normalization_rules("module_type", manufacturer=manufacturer)
-
+        self._norm_rules_serial = preload_normalization_rules("serial", manufacturer=manufacturer)
         # Pre-compute ignore rule results once to avoid calling _check_ignore_rules
         # twice per item (once in _find_transparent_indices, once in _collect_top_items).
         ignore_cache = {
@@ -435,19 +770,28 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             module_types,
             manufacturer=manufacturer,
         )
+        for row in table_data:
+            inventory_item = index_map.get(row.get("ent_physical_index"))
+            if inventory_item is not None:
+                row["inventory_digest"] = module_inventory_row_digest(inventory_item)
 
         # Sort top-level groups by status, keeping children after their parent
-        table_data = self._sort_with_hierarchy(table_data)
+        table_data = self._group_children_under_parents(table_data)
 
         # Bulk-detect serial conflicts for rows that can be replaced/installed
-        self._detect_serial_conflicts(table_data)
+        self._detect_serial_conflicts(table_data, index_map, obj=obj)
 
         table = self.get_table(table_data, obj)
+        table.server_key = self._active_server_key
+        table.inventory_snapshot_digest = inventory_snapshot_digest
+        table.attrs["data-selection-snapshot"] = inventory_snapshot_digest
         table.configure(request)
 
-        sync_device = self._get_sync_device(obj)
-        cache_ttl = getattr(cache, "ttl", lambda k: None)(
-            self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key)
+        # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
+        # _get_sync_device() VC-members query per request; falls back to resolving here.
+        sync_device = sync_device or self._get_sync_device(obj, server_key=self._active_server_key)
+        cache_ttl = cache_remaining_ttl(
+            cache, self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key)
         )
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
@@ -457,7 +801,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "table": table,
             "object": obj,
             "cache_expiry": cache_expiry,
-            "server_key": self.librenms_api.server_key,
+            "server_key": self._active_server_key,
+            "install_selected_inventory_binding": module_inventory_binding_token(
+                obj.pk,
+                self._active_server_key,
+                "install_selected",
+                {},
+                None,
+                inventory_snapshot_digest,
+            ),
         }
 
     @staticmethod
@@ -473,12 +825,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return transparent_indices
 
     @staticmethod
-    def _collect_top_items(inventory_data, index_map, ignore_rules, device_serial, transparent_indices, ignore_cache):
+    def _collect_top_items(inventory_data, index_map, ignore_rules, device_serial, transparent_indices, ignore_cache):  # noqa: C901
         """
         Collect top-level inventory items for the sync table.
 
         Includes synthetic transceiver items. Excludes items that have any
         ancestor with an INVENTORY_CLASSES class (they appear as sub-components).
+
+        Args:
+            inventory_data (list): The inventory items to inspect.
+            index_map (dict): Inventory items keyed by physical index.
+            ignore_rules (list): The ignore rules to evaluate for uncached items.
+            device_serial (str): The NetBox device serial.
+            transparent_indices (set): Physical indices for transparent parents.
+            ignore_cache (dict): Cached ignore actions keyed by physical index.
+
+        Returns:
+            list: The top-level inventory items for the sync table.
+
         """
         top_items = []
         for item in inventory_data:
@@ -506,9 +870,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     continue
                 top_items.append(item)
                 continue
-            phys_class = item.get("entPhysicalClass")
+            phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
+            admitted_by_rule = False
             if phys_class not in INVENTORY_CLASSES:
-                continue
+                if not _class_is_included(item, ignore_rules):
+                    continue
+                admitted_by_rule = True
             idx = item.get("entPhysicalIndex")
             action = (
                 ignore_cache.get(idx)
@@ -528,7 +895,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if action == "transparent":
                 continue
             # Skip items with generic model names (not real hardware), regardless of class.
-            model = (item.get("entPhysicalModelName") or "").strip().lower()
+            model = _normalize_librenms_text(item.get("entPhysicalModelName")).lower()
             if model in _GENERIC_CONTAINER_MODELS:
                 continue
             # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
@@ -542,9 +909,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 if current_idx in transparent_indices:
                     current_idx = ancestor.get("entPhysicalContainedIn", 0)
                     continue
-                anc_class = ancestor.get("entPhysicalClass")
-                if anc_class in INVENTORY_CLASSES:
-                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
+                anc_class = _normalize_librenms_text(ancestor.get("entPhysicalClass"))
+                # A rule-admitted ancestor reaches the table as a row of its own, so it parents
+                # its children exactly like a built-in class. Ignoring it here let a standard
+                # child reach top level while _get_sub_components() also rendered it below.
+                if anc_class in INVENTORY_CLASSES or _class_is_included(ancestor, ignore_rules):
+                    anc_model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
                     if anc_model in _GENERIC_CONTAINER_MODELS:
                         current_idx = ancestor.get("entPhysicalContainedIn", 0)
                         continue
@@ -553,12 +923,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 current_idx = ancestor.get("entPhysicalContainedIn", 0)
             if is_descendant:
                 continue
+            # Mark only rows that reach the table at top level. A Cisco converter is class
+            # "other" too, but it hangs under a container and keeps its own name.
+            if admitted_by_rule:
+                item = {**item, "_class_included": True}
             top_items.append(item)
         return top_items
 
     @staticmethod
     def _compute_all_bays(device_bays: dict, module_scoped_bays: dict) -> dict:
-        """Build a deterministic flat bay lookup from module-scoped and device bays.
+        """
+        Build a deterministic flat bay lookup from module-scoped and device bays.
 
         Module IDs are sorted so the first-match-wins behaviour is stable across
         runs (lower PK wins on collision).  Device-level bays are merged last so
@@ -566,6 +941,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         Logs a DEBUG message when the same bay name appears in more than one
         module scope.
+
+        Args:
+            device_bays (dict): Device-level bays keyed by name.
+            module_scoped_bays (dict): Bay lookups keyed by module ID.
+
+        Returns:
+            dict: A flat bay lookup with device-level bays taking precedence.
+
         """
         module_bay_flat: dict = {}
         collision_names: set = set()
@@ -672,7 +1055,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
                 "interfaces_by_port_id": interfaces_by_port_id,
                 "interfaces_by_name": interfaces_by_name,
-                "server_key": self.librenms_api.server_key,
+                "server_key": getattr(self, "_active_server_key", None) or self.librenms_api.server_key,
             }
         return member_contexts
 
@@ -709,16 +1092,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return interfaces_by_port_id, interfaces_by_name
 
-    def _get_interfaces_by_port_id(self, member):
-        """Build an index of device interfaces keyed by LibreNMS port_id."""
-        interface_map, _ = self._build_interface_indexes(member)
-        return interface_map
-
-    def _get_interfaces_by_name(self, member):
-        """Build an index of device interfaces keyed by unique interface names."""
-        _, interface_map = self._build_interface_indexes(member)
-        return interface_map
-
     @staticmethod
     def _build_interface_match_candidates(row):
         """Return ordered candidate interface labels from a row."""
@@ -729,14 +1102,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             row.get("name"),
             row.get("description"),
         ]:
-            label = (value or "").strip()
+            label = _normalize_librenms_text(value)
             if label and label not in candidates:
                 candidates.append(label)
         return candidates
 
     @staticmethod
-    def _attach_interface_match(row, target_context):
+    def _attach_interface_match(row, target_context):  # noqa: C901
         """Attach matched NetBox interface metadata to a table row when available."""
+        # OOB controller inventory rows are merged into the same list, but only
+        # the main device's interfaces are indexed in target_context. Matching an
+        # OOB row by name would bind it to an unrelated main-device interface, so
+        # skip interface matching entirely for OOB-sourced rows.
+        if row.get("_source") == "oob":
+            return
         try:
             port_id = int(row.get("librenms_port_id") or 0)
         except (TypeError, ValueError):
@@ -799,7 +1178,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         row["can_update_interface_binding"] = True
 
-    def _append_rows_for_item_context(
+    def _append_rows_for_item_context(  # noqa: C901
         self,
         table_data,
         item,
@@ -824,6 +1203,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # manufacturer. Set per-item-context so VC members resolve correctly.
         sel_dt = getattr(selected_device, "device_type", None)
         sel_mfr = getattr(sel_dt, "manufacturer", None)
+        self._current_manufacturer = sel_mfr
         self._current_manufacturer_id = getattr(sel_mfr, "id", None)
         self._current_manufacturer_name = getattr(sel_mfr, "name", None)
         # Top-level items match against the full bay set: device-level bays plus
@@ -841,6 +1221,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             depth=0,
             manufacturer=manufacturer,
             sibling_counts=target_context["sibling_counts"],
+            normalized_serial=self._normalized_item_serial(item, manufacturer),
         )
         row["selected_device_id"] = selected_device.id
         row["selected_device_name"] = selected_device.name
@@ -853,37 +1234,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Flag device type as incomplete when a top-level item has no bay and
         # no mapping suggestion — the device type is likely missing bay templates
         # for that class of component (fan tray, PSU, etc.).
+        # _build_row already ran the same pure _suggest_bay_mapping(item, all_bays,
+        # scope_preserved=False) and only omits model_suggestion when it returned nothing, so
+        # there is no second suggestion to recover here.
         if row.get("status") == "No Bay" and "model_suggestion" not in row:
-            # Before flagging device-type as incomplete, check whether any
-            # bay among the carriers already installed at device level (i.e.
-            # module-scoped child bays) would yield a mapping suggestion.
-            # This handles the common "user installed a carrier card whose
-            # children are letter-named (Slot A → CPM A) and now needs a
-            # ModuleBayMapping" follow-up flow.
-            fallback_suggestion = self._suggest_bay_mapping(item, target_context["all_bays"], scope_preserved=False)
-            if fallback_suggestion:
-                # Pre-fill the suggestion with this device's manufacturer so
-                # the new ModuleBayMapping is auto-scoped to the vendor — the
-                # user can clear it in the form to make it global.
-                if self._current_manufacturer_id:
-                    fallback_suggestion.setdefault("manufacturer", self._current_manufacturer_id)
-                    if self._current_manufacturer_name:
-                        fallback_suggestion.setdefault("manufacturer_name", self._current_manufacturer_name)
-                row["model_suggestion"] = fallback_suggestion
-                # Refresh the warning so the tooltip text reflects the new
-                # suggestion instead of the previous "no candidate" message.
-                row["model_warning"] = self._build_no_bay_warning(item, target_context["all_bays"], fallback_suggestion)
-                # Drop the carrier-install hint badge: a concrete mapping
-                # suggestion is more actionable than "Possible Carrier?".
-                row.pop("holder_hint_present", None)
-            else:
-                device_type = getattr(selected_device, "device_type", None)
-                if device_type:
-                    row["device_type_incomplete"] = True
-                    row["device_type_incomplete_url"] = device_type.get_absolute_url()
-                    row["device_type_incomplete_name"] = str(device_type)
-                    row["device_type_incomplete_target_pk"] = device_type.pk
-                    row["device_type_incomplete_suggestion"] = self._derive_bay_template_suggestion(item)
+            device_type = getattr(selected_device, "device_type", None)
+            if device_type:
+                row["device_type_incomplete"] = True
+                row["device_type_incomplete_url"] = device_type.get_absolute_url()
+                row["device_type_incomplete_name"] = str(device_type)
+                row["device_type_incomplete_target_pk"] = device_type.pk
+                row["device_type_incomplete_suggestion"] = self._derive_bay_template_suggestion(item)
 
         # Determine child bay scope based on parent match state
         parent_module_id = None
@@ -953,6 +1314,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 scope_uninstalled=scope_uninstalled,
                 scope_preserved=scope_preserved,
                 scope_empty_installed_bays=scope_empty_installed_bays,
+                normalized_serial=self._normalized_item_serial(sub_item, manufacturer),
             )
             sub_row["selected_device_id"] = selected_device.id
             sub_row["selected_device_name"] = selected_device.name
@@ -1030,7 +1392,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     child_item
                 )
 
-    def _merge_transceiver_data(self, inventory_data, ports_data=None):
+    def _merge_transceiver_data(self, inventory_data, ports_data=None):  # noqa: C901
         """
         Merge transceiver API data with entity inventory.
 
@@ -1046,20 +1408,32 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Returns:
             (inventory_data, error_message) — error_message is None on success
             or a string when the transceiver API call failed.
+
         """
         success, transceivers = self.librenms_api.get_device_transceivers(self.librenms_id)
         if not success:
             return inventory_data, str(transceivers) if transceivers else "unknown error"
+        # get_device_transceivers only reports success for a list of dicts, so the payload shape
+        # is already settled here (see its Returns contract).
         if not transceivers:
             return inventory_data, None
 
+        # LibreNMS may return SNMP entity indices as ints on one endpoint and numeric strings on
+        # another (e.g. ENTITY-MIB "300" vs the transceiver API's 300). Coerce both sides to int
+        # so a matching ENTITY row is found instead of caching a duplicate synthetic transceiver.
+        # Local helper to avoid shadowing/duplicating the module-level _try_int the feature stack
+        # adds with the same semantics.
+        def _coerce_idx(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         # Build lookup of existing inventory items by index and serial
-        inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
-        inv_serials = {
-            s
-            for item in inventory_data
-            if (s := (item.get("entPhysicalSerialNum") or "").strip()) and s.lower() not in _PLACEHOLDER_VALUES
+        inv_by_index = {
+            idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
+        inv_serials = {s for item in inventory_data if (s := _clean_librenms_value(item.get("entPhysicalSerialNum")))}
 
         # Build port_id → interface label lookup for better synthetic item naming
         port_name_map = self._build_port_name_map(transceivers, ports_data=ports_data)
@@ -1067,8 +1441,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Types that are containers, not real transceiver modules
 
         for txr in transceivers:
-            ent_idx = txr.get("entity_physical_index")
-            if not ent_idx:
+            ent_idx = _coerce_idx(txr.get("entity_physical_index"))
+            if ent_idx is None or ent_idx <= 0:
                 continue
 
             port_id = txr.get("port_id")
@@ -1080,15 +1454,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ifname = (port_meta.get("ifName") or "").strip() or None
             ifdescr = (port_meta.get("ifDescr") or "").strip() or None
 
-            model = (txr.get("model") or "").strip()
-            if model.lower() in _PLACEHOLDER_VALUES:
-                model = ""
-            serial = (txr.get("serial") or "").strip()
-            if serial.lower() in _PLACEHOLDER_VALUES:
-                serial = ""
-            txr_type = (txr.get("type") or "").strip()
-            if txr_type.lower() in _PLACEHOLDER_VALUES:
-                txr_type = ""
+            model = _clean_librenms_value(txr.get("model"))
+            serial = _clean_librenms_value(txr.get("serial"))
+            txr_type = _clean_librenms_value(txr.get("type"))
 
             # Skip containers and entries with no useful data
             if txr_type in _SKIP_TRANSCEIVER_TYPES and not model and not serial:
@@ -1100,13 +1468,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if ent_idx in inv_by_index:
                 # Supplement existing inventory item if model/serial is missing or a placeholder
                 existing = inv_by_index[ent_idx]
-                existing_model = (existing.get("entPhysicalModelName") or "").strip()
-                if (
-                    existing_model.lower() in _PLACEHOLDER_VALUES or existing_model.lower() == "builtin"
-                ) and display_model:
+                existing_model = _clean_librenms_value(existing.get("entPhysicalModelName"))
+                if (not existing_model or existing_model.lower() == "builtin") and display_model:
                     existing["entPhysicalModelName"] = display_model
-                existing_serial = (existing.get("entPhysicalSerialNum") or "").strip()
-                if (existing_serial.lower() in _PLACEHOLDER_VALUES or existing_serial.lower() == "builtin") and serial:
+                existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
+                if (not existing_serial or existing_serial.lower() == "builtin") and serial:
                     existing["entPhysicalSerialNum"] = serial
                     inv_serials.add(serial)
                 if port_id:
@@ -1161,15 +1527,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     @staticmethod
     def _nest_synthetic_transceivers(inventory_data):
-        """Set ``entPhysicalContainedIn`` on synthetic transceiver items by
-        matching path-prefix in their name against an existing item's name.
+        """
+        Set ``entPhysicalContainedIn`` on synthetic transceiver items by matching path prefixes.
 
-        Generic, vendor-agnostic: only relies on the convention that ports
-        are named like ``a/b/c`` and their parent module is named in a way
-        that ends with the path prefix (e.g. ``MDA 1/1`` for ``1/1/c1``,
-        ``XIOM 2/x1`` for ``2/x1/1/c2`` if the MDA is missing). Items
-        already nested by ENTITY-MIB (``entPhysicalContainedIn != 0``) and
-        non-synthetic items are left untouched.
+        The match compares a path prefix in each transceiver name against an existing item's name.
+        This vendor-agnostic match only relies on the convention that ports are named like
+        ``a/b/c`` and their parent module is named in a way that ends with the path prefix
+        (e.g. ``MDA 1/1`` for ``1/1/c1``, or ``XIOM 2/x1`` for ``2/x1/1/c2``
+        if the MDA is missing). Items already nested by ENTITY-MIB
+        (``entPhysicalContainedIn != 0``) and non-synthetic items are left untouched.
+
+        Args:
+            inventory_data (list): The inventory items to update.
+
         """
         # Build name → index lookup once
         name_to_index = {}
@@ -1199,7 +1569,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     it["entPhysicalContainedIn"] = parent_idx
                     break
 
-    def _enrich_inventory_port_identity(self, inventory_data, ports_data=None):
+    def _enrich_inventory_port_identity(self, inventory_data, ports_data=None):  # noqa: C901
         """Backfill `_librenms_port_id` / labels for port-class inventory rows from LibreNMS ports data."""
         if ports_data is None:
             success, ports_data = self.librenms_api.get_ports(self.librenms_id)
@@ -1243,7 +1613,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             label_to_port_id.pop(label, None)
 
         for item in inventory_data:
-            if (item.get("entPhysicalClass") or "").strip().lower() != "port":
+            if _normalize_librenms_text(item.get("entPhysicalClass")).lower() != "port":
                 continue
 
             port_id = item.get("_librenms_port_id")
@@ -1253,16 +1623,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 port_id = None
 
             if port_id is None or port_id <= 0:
-                candidates = []
-                for value in [
-                    item.get("_librenms_ifname"),
-                    item.get("_librenms_ifdescr"),
-                    item.get("entPhysicalName"),
-                    item.get("entPhysicalDescr"),
-                ]:
-                    label = (value or "").strip()
-                    if label and label not in candidates:
-                        candidates.append(label)
+                candidates = BaseModuleTableView._interface_name_candidates(item)
 
                 matched_ids = [label_to_port_id[label] for label in candidates if label in label_to_port_id]
                 matched_ids = sorted(set(matched_ids))
@@ -1286,6 +1647,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Fetches port data from LibreNMS to resolve port IDs to interface labels,
         enabling better bay matching for synthetic transceiver items (e.g.,
         Nokia 1/1/c1 instead of opaque port IDs).
+
+        Args:
+            transceivers (list): The transceiver records to map.
+            ports_data (dict | None): Optional pre-fetched LibreNMS port data.
+
+        Returns:
+            dict: Interface labels keyed by normalized port ID.
+
         """
         port_ids = {txr.get("port_id") for txr in transceivers if txr.get("port_id")}
         if not port_ids:
@@ -1341,17 +1710,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             item.get("entPhysicalName"),
             item.get("entPhysicalDescr"),
         ]:
-            label = (value or "").strip()
+            label = _normalize_librenms_text(value)
             if label and label not in candidates:
                 candidates.append(label)
         return candidates
 
     @staticmethod
     def _extract_interface_port_indices(item):
-        """Extract candidate numeric port indices from interface-style labels.
+        """
+        Extract candidate numeric port indices from interface-style labels.
 
         The first candidate is the preferred bay/port index. Additional
         candidates are fallbacks for vendor-specific naming schemes.
+
+        Args:
+            item (dict): The inventory item that contains interface labels.
+
+        Returns:
+            list: Candidate numeric port indices in preferred order.
+
         """
         indices = []
         for label in BaseModuleTableView._interface_name_candidates(item):
@@ -1376,12 +1753,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     @staticmethod
     def _extract_interface_numeric_coordinates(label):
-        """Extract slash-delimited numeric coordinates from interface labels.
+        """
+        Extract slash-delimited numeric coordinates from interface labels.
 
         Examples:
         - TenGigabitEthernet1/1/1 -> [1, 1, 1]
         - GigabitEthernet5/0/24 -> [5, 0, 24]
         - xe-2/1/0 -> [2, 1, 0]
+
+        Args:
+            label (str): The interface label to parse.
+
+        Returns:
+            list: The numeric coordinates, or an empty list for an invalid label.
+
         """
         if not label or "/" not in label:
             return []
@@ -1446,7 +1831,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """
         Find descendant items with a model name (real hardware, not empty containers).
 
-        Returns list of (depth, item) tuples.
+        Args:
+            parent_idx (int): The physical index where the search starts.
+            children_by_parent (dict): Child items keyed by parent physical index.
+            index_map (dict): Inventory items keyed by physical index.
+            ignore_rules (list): The ignore rules to apply.
+            device_serial (str): The NetBox device serial.
+
+        Returns:
+            list[tuple[int, dict]]: The descendant items paired with their depths.
+
         """
         results = []
         self._collect_descendants(
@@ -1502,7 +1896,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     device_serial=device_serial,
                 )
                 continue
-            model = (child.get("entPhysicalModelName") or "").strip().lower()
+            model = _normalize_librenms_text(child.get("entPhysicalModelName")).lower()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))
                 # Continue looking for deeper components (e.g., SFPs inside converters)
@@ -1529,18 +1923,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     device_serial=device_serial,
                 )
 
-    def _sort_with_hierarchy(self, table_data):
-        """Sort table keeping children grouped under their parent."""
-        status_order = {
-            "Installed": 0,
-            "Serial Mismatch": 1,
-            "Type Mismatch": 2,
-            "Matched": 3,
-            "No Type": 4,
-            "No Bay": 5,
-            "Unmatched": 6,
-        }
+    def _group_children_under_parents(self, table_data):
+        """
+        Keep every child row directly under its own top-level row, in inventory order.
 
+        The order is the LibreNMS inventory order the rows arrive in. Rows were once ordered
+        by status, which moved a row up the table the moment an install changed its status.
+        """
         # Group into top-level items with their children
         groups = []
         current_group = None
@@ -1550,9 +1939,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 groups.append(current_group)
             elif current_group is not None:
                 current_group["children"].append(row)
-
-        # Sort groups by parent status
-        groups.sort(key=lambda g: status_order.get(g["parent"]["status"], 99))
 
         # Flatten back
         result = []
@@ -1569,12 +1955,27 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             tuple: (device_bays, module_bays) where:
                 - device_bays: {name: bay} for device-level bays (module=None)
                 - module_bays: {module_id: {name: bay}} for bays created by installed modules
+
         """
         from dcim.models import ModuleBay
 
-        bays = ModuleBay.objects.filter(device=obj).select_related(
-            "installed_module__module_type",
-            "module__module_bay",
+        # Prefetch the installed module's device/type/platform: the per-row interface-name
+        # prediction (get_module_template_interface_names → naming-plugin rule lookup) reads
+        # installed_module.device.device_type/platform, which is otherwise an N+1 per
+        # installed-module row (all resolving to the same page device).
+        bays = (
+            ModuleBay.objects.filter(device=obj)
+            .select_related(
+                "installed_module__module_type",
+                "installed_module__device__device_type",
+                "installed_module__device__platform",
+                "module__module_bay",
+            )
+            .prefetch_related(
+                # adoptable-interface count instantiates the installed module's interface templates
+                # (get_module_template_interface_names); prefetch them so it isn't one query per row.
+                "installed_module__module_type__interfacetemplates",
+            )
         )
         device_bays = {}
         module_scoped_bays = {}
@@ -1618,7 +2019,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return list(qs)
 
     def _apply_carrier_install_rules(self, row, item, selected_device):
-        """Attach carrier_install_options to a No Bay row when configured rules match.
+        """
+        Attach carrier_install_options to a No Bay row when configured rules match.
 
         Rules match when:
           * device_type_pattern (if set) fullmatches the selected device's
@@ -1632,8 +2034,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Each matching (rule, empty bay) pair becomes one suggestion. Also
         attaches ``device_empty_bay_names`` on No Bay rows so the table can
         pre-fill an "Add Carrier Rule" link.
+
+        Args:
+            row (dict): The table row to update.
+            item (dict): The LibreNMS inventory item for the row.
+            selected_device (Device): The selected NetBox device.
+
         """
         if row.get("status") != "No Bay":
+            return
+        # OOB controller rows are stamped read-only in _build_row; never offer carrier
+        # install options on them either (this runs after _build_row, so the central
+        # stamp doesn't cover it).
+        if row.get("_source") == "oob":
             return
         device_bays = getattr(self, "_current_device_bays", None) or {}
         if not device_bays:
@@ -1650,7 +2063,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return
         device_type = getattr(selected_device, "device_type", None)
         device_type_model = getattr(device_type, "model", "") or ""
-        item_class = (item.get("entPhysicalClass") or "").strip().lower() if item else ""
+        item_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower() if item else ""
         item_name = (item.get("entPhysicalName") or "").strip() if item else ""
 
         options = []
@@ -1689,6 +2102,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         Skips ancestors with an empty entPhysicalName and continues upward until a
         non-empty name is found or the chain is exhausted.
+
+        Args:
+            item (dict): The inventory item whose ancestors to inspect.
+            index_map (dict): Inventory items keyed by physical index.
+
+        Returns:
+            str | None: The nearest non-empty ancestor name, or None if no name is found.
+
         """
         contained_in = item.get("entPhysicalContainedIn", 0)
         visited: set = set()
@@ -1707,10 +2128,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     @staticmethod
     def _build_bay_candidate_names(item, index_map, include_normalized=False, norm_rules_bay=None):
-        """Build deduplicated candidate names for bay matching.
+        """
+        Build deduplicated candidate names for bay matching.
 
         Candidate order is stable: nearest parent container name first, then
         interface/item label variants. Optionally appends normalized variants.
+
+        Args:
+            item (dict): The inventory item to describe.
+            index_map (dict): Inventory items keyed by physical index.
+            include_normalized (bool): Whether to append normalized name variants.
+            norm_rules_bay (list | None): Preloaded module bay normalization rules.
+
+        Returns:
+            list[str]: Candidate names in matching order.
+
         """
         parent_name = BaseModuleTableView._find_parent_container_name_static(item, index_map)
         candidate_names = [parent_name] if parent_name else []
@@ -1733,10 +2165,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _match_module_bay(self, item, index_map, module_bays):
         """
         Try to match an inventory item to a NetBox ModuleBay.
+
         Checks ModuleBayMapping table first (exact then regex), then falls back
         to exact parent name match, then positional matching.
+
+        Args:
+            item (dict): The inventory item to match.
+            index_map (dict): Inventory items keyed by physical index.
+            module_bays (dict): Available NetBox module bays keyed by name.
+
+        Returns:
+            ModuleBay | None: The matched module bay, or None if no bay matches.
+
         """
-        phys_class = (item.get("entPhysicalClass") or "").strip()
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         manufacturer_id = getattr(self, "_current_manufacturer_id", None)
 
         norm_rules_bay = getattr(self, "_norm_rules_bay", None)
@@ -1794,13 +2236,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     @staticmethod
     def _fpc_slot_matches(candidate_name, bay):
         """
-        Validate that a regex-matched bay's parent slot position is consistent with
-        a positional descriptor like 'Model @ FPC/pic/port'.
+        Validate a regex-matched bay against a positional FPC descriptor.
 
         Returns True if the descriptor has no FPC reference, or if the bay's parent
         module slot position matches the FPC number in the descriptor. Prevents
         orphaned top-level items (e.g. QSFP @ 1/1/1 when FPC1 is not installed)
         from incorrectly matching bays belonging to a different FPC's module.
+
+        Args:
+            candidate_name (str): The positional descriptor to validate.
+            bay (ModuleBay): The regex-matched NetBox module bay.
+
+        Returns:
+            bool: True if the descriptor and bay slot are consistent.
+
         """
         match = re.search(r"@\s+(\d+)/", candidate_name)
         if not match:
@@ -1815,17 +2264,27 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         parent_bay = getattr(module, "module_bay", None)
         if not parent_bay:
             return True
-        try:
-            return int(parent_bay.position) == expected_fpc
-        except (TypeError, ValueError):
-            return False
+        # A Juniper bay position is "fpc/pic" and the descriptor names the FPC only, so read
+        # the first component. Every component must be numeric: a leading digit alone also
+        # starts "0/RP0", "0/FT0" and "2/x1", where it is a chassis index and not an FPC.
+        parts = str(parent_bay.position).split("/")
+        return all(part.isdigit() for part in parts) and int(parts[0]) == expected_fpc
 
     @staticmethod
     def _filter_mappings_by_manufacturer(mappings, manufacturer_id):
         """
-        Order mappings by manufacturer scoping priority:
-        device-manufacturer match first, then vendor-agnostic (NULL), skip
-        mappings scoped to a different manufacturer.
+        Order mappings by manufacturer scoping priority.
+
+        Put device-manufacturer matches first, then vendor-agnostic (NULL) mappings.
+        Skip mappings that are scoped to a different manufacturer.
+
+        Args:
+            mappings (list): The mappings to filter and order.
+            manufacturer_id (int | None): The selected device manufacturer ID.
+
+        Returns:
+            list: Matching manufacturer-scoped mappings followed by global mappings.
+
         """
         scoped = []
         global_ = []
@@ -1847,7 +2306,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         and skips mappings scoped to a different manufacturer.
         Iterates the underlying dict scopes (supports both plain dicts and legacy
         ChainMap instances) so the returned bay is validated via _fpc_slot_matches.
-        Returns the matched module bay or None.
+
+        Args:
+            name (str): The candidate name to match.
+            phys_class (str): The item's physical class.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            exact_mappings (list): The exact ModuleBayMapping entries to check.
+            manufacturer_id (int | None): The selected device manufacturer ID.
+
+        Returns:
+            ModuleBay | None: The matched module bay, or None if no mapping resolves.
+
         """
         maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
         scoped_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(exact_mappings, manufacturer_id)
@@ -1881,7 +2350,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         precedence over vendor-agnostic ones; mappings scoped to a different
         manufacturer are skipped.
 
-        Returns matched module bay or None.
+        Args:
+            name (str): The candidate name to match.
+            phys_class (str): The item's physical class.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            regex_mappings (list): The regex ModuleBayMapping entries to check.
+            manufacturer_id (int | None): The selected device manufacturer ID.
+
+        Returns:
+            ModuleBay | None: The matched module bay, or None if no mapping resolves.
+
         """
         scoped_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(regex_mappings, manufacturer_id)
         # Filter preloaded list by class (exact class match, then empty-class fallback)
@@ -1916,13 +2394,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return None
 
     @staticmethod
-    def _match_bay_by_position(item, index_map, module_bays):
+    def _match_bay_by_position(item, index_map, module_bays):  # noqa: C901
         """
         Match bay by item's positional order among container siblings.
 
         When an item is inside a container (no model), walk up to find the
         nearest ancestor with a real hardware model, count which container slot
         the item occupies, and match to the bay by number (e.g., SFP 1, SFP 2).
+
+        Args:
+            item (dict): The inventory item to match.
+            index_map (dict): Inventory items keyed by physical index.
+            module_bays (dict): Available NetBox module bays keyed by name.
+
+        Returns:
+            ModuleBay | None: The position-matched module bay, or None if no bay matches.
+
         """
         # Walk up through containers with placeholder/empty models to find the
         # parent with a real hardware model.  Use a visited set to detect cycles.
@@ -1939,7 +2426,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         while current_idx and current_idx in index_map and current_idx not in visited:
             visited.add(current_idx)
             ancestor = index_map[current_idx]
-            model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
+            model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 # Found the parent with a real model; container_idx is the intermediate container
                 break
@@ -1962,7 +2449,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 i
                 for i in index_map.values()
                 if i.get("entPhysicalContainedIn") == parent_with_model_idx
-                and i.get("entPhysicalClass") not in _NON_HARDWARE_CLASSES
+                and _normalize_librenms_text(i.get("entPhysicalClass")) not in _NON_HARDWARE_CLASSES
             ],
             key=lambda x: (
                 int(x.get("entPhysicalParentRelPos") or 0)
@@ -1985,7 +2472,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # hardware class.  When NetBox lacks bays named for the item's class
         # (e.g. no "Fan Tray N" / "PSU N" defined on the device type), we
         # surface "No Bay" and let the user fix the model rather than guess.
-        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower()
         if phys_class == "fan":
             patterns = [f"Fan Tray {slot_num}", f"Fan {slot_num}", f"FT {slot_num}", f"FT{slot_num}"]
         elif phys_class == "powersupply":
@@ -2048,7 +2535,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return matches[0]
         return None
 
-    def _build_row(
+    def _normalized_item_serial(self, item, manufacturer=None):
+        """
+        Return the item's serial under the rules of the device the row actually targets.
+
+        A virtual-chassis row can resolve to a member whose manufacturer differs from the page
+        device's, and serial rules are manufacturer-scoped, so the target's manufacturer decides.
+        """
+        from netbox_librenms_plugin.utils import normalize_inventory_serial
+
+        target_manufacturer = getattr(self, "_current_manufacturer", None) or manufacturer
+        return normalize_inventory_serial(
+            item.get("entPhysicalSerialNum"),
+            manufacturer=target_manufacturer,
+            preloaded_rules=getattr(self, "_norm_rules_serial", None),
+        )
+
+    def _build_row(  # noqa: C901
         self,
         item,
         index_map,
@@ -2060,12 +2563,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         scope_uninstalled=False,
         scope_preserved=False,
         scope_empty_installed_bays=False,
+        normalized_serial=None,
     ):
-        """Build a single table row from a LibreNMS inventory item.
+        """
+        Build a single table row from a LibreNMS inventory item.
 
         ``scope_uninstalled`` (caller-provided) indicates the empty bay scope
         is empty because some ancestor's bay matched but has no installed
-        module — the user can fix the row by installing the ancestor first
+        module. The user can fix the row by installing the ancestor first
         (which materialises the bay templates) rather than by editing the
         device/module-type templates.
 
@@ -2079,17 +2584,73 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         the nearest installed module ancestor's type has no bay templates
         defined.  Propagates through intermediate unmatched containers so
         deeply-nested items (e.g. SFPs nested under a transceiver carrier)
-        still show "No Bay on Parent" rather than plain "No Bay"."""
+        still show "No Bay on Parent" rather than plain "No Bay".
+
+        Args:
+            item (dict): The LibreNMS inventory item to render.
+            index_map (dict): Inventory items keyed by physical index.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            module_types (dict): Available NetBox module types keyed for matching.
+            depth (int): The row's depth in the inventory hierarchy.
+            manufacturer (Manufacturer | None): The selected device manufacturer.
+            sibling_counts (dict | None): Sibling bay counts used for name-conflict checks.
+            scope_uninstalled (bool): Whether an ancestor matched an empty module bay.
+            scope_preserved (bool): Whether the bay scope came from an unmatched ancestor.
+            scope_empty_installed_bays (bool): Whether the installed parent type has
+                no bay templates.
+            normalized_serial: Optional serial that was normalized for the selected device.
+
+        Returns:
+            dict: The table row for the inventory item.
+
+        """
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
             resolve_module_type,
         )
 
-        model_name = (item.get("entPhysicalModelName", "") or "").strip()
-        serial = (item.get("entPhysicalSerialNum", "") or "").strip()
-        phys_class = item.get("entPhysicalClass", "")
+        model_name = _normalize_librenms_text(item.get("entPhysicalModelName"))
+        raw_serial = item.get("entPhysicalSerialNum") if normalized_serial is None else normalized_serial
+        serial = _clean_librenms_value(raw_serial)
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         name = item.get("entPhysicalName", "") or "-"
-        description = item.get("entPhysicalDescr", "") or ""
+        description = _normalize_librenms_text(item.get("entPhysicalDescr"))
+        # A class admitted by rule is hardware the vendor files outside the usual classes, and
+        # it tends to carry the model in entPhysicalName: a Juniper MX304 names both Routing
+        # Engines "JNP304-RE-S". The description holds the label that separates them.
+        if item.get("_class_included"):
+            name = description or name
+
+        # OOB-controller modules come from a *separate* device. Comparing them against this
+        # host's bays/types/installed modules is meaningless, and the host matching below could
+        # render an OOB row as "Matched"/"Installed" whenever labels happened to line up — a
+        # false-positive comparison. Short-circuit *before* any host bay/type/status resolution
+        # (and before the integrated-child check below — an OOB controller can itself expose
+        # integrated-child duplicates, which would otherwise steal the row into the "Integrated"
+        # path and drop its OOB status). Emit a read-only informational row with neutral
+        # bay/type/status. (A late post-match scrub can't undo a status the matching computed.)
+        if item.get("_source") == "oob":
+            return {
+                "name": name,
+                "model": model_name or "-",
+                "serial": serial or "-",
+                "description": description,
+                "item_class": phys_class,
+                "module_bay": "-",
+                "module_type": "-",
+                "status": "OOB",
+                "can_install": False,
+                "module_bay_id": None,
+                "module_type_id": None,
+                "depth": depth,
+                "ent_physical_index": item.get("entPhysicalIndex"),
+                "has_installable_children": False,
+                "librenms_port_id": item.get("_librenms_port_id"),
+                "librenms_ifname": item.get("_librenms_ifname"),
+                "librenms_ifdescr": item.get("_librenms_ifdescr"),
+                "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
+                "_source": "oob",
+            }
 
         # Detect "integrated child" SNMP duplicates (e.g. Nokia XIOM with a
         # fixed integrated MDA exposed as two ENTITY-MIB rows sharing the
@@ -2116,18 +2677,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "has_installable_children": False,
                 "integrated_in_name": ancestor_name,
                 "integrated_in_index": integrating_ancestor.get("entPhysicalIndex"),
+                "_source": item.get("_source", "main"),
             }
 
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
-        # Match to NetBox module type (direct lookup, normalization fallback, then Generic fallback)
+        # Match to NetBox module type (direct lookup, normalization fallback, then Generic fallback).
+        # Type mappings are manufacturer-scoped, so a virtual-chassis row resolves against the
+        # member it targets rather than the page device.
+        row_manufacturer = getattr(self, "_current_manufacturer", None) or manufacturer
         norm_rules_type = getattr(self, "_norm_rules_type", None)
         generic_module_types = getattr(self, "_generic_module_types", None)
         matched_type = resolve_module_type(
             model_name,
             module_types,
-            manufacturer=manufacturer,
+            manufacturer=row_manufacturer,
             norm_rules=norm_rules_type,
             generic_fallback=generic_module_types,
         )
@@ -2161,6 +2726,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "librenms_ifname": item.get("_librenms_ifname"),
             "librenms_ifdescr": item.get("_librenms_ifdescr"),
             "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
+            "_source": item.get("_source", "main"),
         }
         if name_conflict_reason:
             row["name_conflict_reason"] = name_conflict_reason
@@ -2168,6 +2734,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Surface NetBox-model gaps that produced No Bay / No Type so the user
         # can fix the model rather than wonder why nothing matched.
         if status == "No Bay":
+            candidates = self._build_bay_candidate_names(item, index_map)
+            row["mapping_source_name"] = name if name in candidates else next(iter(candidates), "")
             suggestion = self._suggest_bay_mapping(item, module_bays, scope_preserved=scope_preserved)
             holder_hint = None
             if suggestion is None:
@@ -2210,7 +2778,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         elif status == "No Type":
             ambiguities = getattr(self, "_module_type_ambiguities", None)
             ambiguity_candidates = self._find_ambiguity_candidates(
-                model_name, ambiguities, manufacturer=manufacturer, norm_rules=norm_rules_type
+                model_name, ambiguities, manufacturer=row_manufacturer, norm_rules=norm_rules_type
             )
             row["model_warning"] = self._build_no_type_warning(item, ambiguity_candidates=ambiguity_candidates)
             if ambiguity_candidates:
@@ -2269,6 +2837,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if name_conflict_reason:
             row["status"] = "Name Conflict"
 
+        # Note: OOB-controller rows never reach here — they short-circuit to a neutral
+        # read-only row before any host bay/type/status matching (see the _source == "oob"
+        # block above), so no host-side action flags or model-editing payloads are ever set.
+
         return row
 
     @staticmethod
@@ -2305,10 +2877,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     @staticmethod
     def _derive_bay_template_suggestion(item):
         """
-        Derive a sensible pre-fill for the Add Bay Template modal from a
-        LibreNMS inventory item dict.
-
-        Returns a dict with keys ``name``, ``position`` and ``label``.
+        Derive Add Bay Template values from a LibreNMS inventory item.
 
         - ``name``: the LibreNMS item name as-is (the user can edit before
           submit).  Falls back to a class-derived placeholder when the name
@@ -2317,10 +2886,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
           present (e.g. "Slot 1" -> "1", "CMA-A" -> "A").
         - ``label``: the LibreNMS description (entPhysicalDescr) trimmed,
           which is usually a richer human-readable label than the bay name.
+
+        Args:
+            item (dict): The LibreNMS inventory item to describe.
+
+        Returns:
+            dict: Suggested values with ``name``, ``position``, and ``label`` keys.
+
         """
         raw_name = (item.get("entPhysicalName") or "").strip()
-        descr = (item.get("entPhysicalDescr") or "").strip()
-        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+        descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower()
 
         position = ""
         if raw_name:
@@ -2348,7 +2924,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # matching is exact + case-sensitive dict lookup, so without a
             # mapping the row would still show "No Bay" after the bay is added.
             "librenms_name": (item.get("entPhysicalName") or "").strip(),
-            "librenms_class": (item.get("entPhysicalClass") or "").strip(),
+            "librenms_class": _normalize_librenms_text(item.get("entPhysicalClass")),
         }
 
     @staticmethod
@@ -2361,8 +2937,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         holder_hint=None,
     ):
         """
-        Hint the user toward the missing piece of the NetBox model when bay
-        matching produces "No Bay".
+        Explain how to complete the NetBox model when bay matching produces "No Bay".
 
         Distinguishes:
           - empty scope due to an uninstalled ancestor -> install the ancestor
@@ -2377,8 +2952,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         When a `suggestion` dict is provided (from `_suggest_bay_mapping`),
         appends the proposed regex/target so the user sees a concrete fix
         alongside the diagnosis.
+
+        Args:
+            item (dict): The unmatched LibreNMS inventory item.
+            module_bays (dict): The module bays available in the current scope.
+            suggestion (dict | None): An optional proposed ModuleBayMapping.
+            scope_uninstalled (bool): Whether an ancestor matched an empty module bay.
+            scope_empty_installed_bays (bool): Whether the installed parent type has
+                no bay templates.
+            holder_hint (str | None): An optional holder or carrier installation hint.
+
+        Returns:
+            str: The warning that describes how to resolve the missing bay.
+
         """
-        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+        phys_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower()
         class_hints = {
             "fan": "Fan Tray N or Fan N",
             "powersupply": "Power Supply N, PSU N, or PEM N",
@@ -2440,7 +3028,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Some chassis (e.g. Nokia 7750 SR-s with CMA controller carriers, mezzanine
         carriers, line-card cassettes) expose a holder module bay at the chassis
         level. Until the holder ModuleType is installed in that bay, NetBox does
-        not expose the holder's nested child bays — so LibreNMS-reported children
+        not expose the holder's nested child bays. LibreNMS-reported children
         (CPMs, MDAs, mezzanines) appear with no matching bay.
 
         Triggers only when:
@@ -2449,10 +3037,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             (scope_uninstalled / scope_empty_installed_bays);
           * the device has at least one EMPTY device-level bay.
 
-        The hint is informational only — it lists the empty bay names so the
+        The hint is informational only. It lists the empty bay names so the
         user can recognise the pattern and install the appropriate holder
         ModuleType themselves. Doing so will expose nested child bays which
         will then match LibreNMS-reported children automatically.
+
+        Args:
+            item (dict): The unmatched LibreNMS inventory item.
+            phys_class (str): The item's physical class.
+            device_bays (dict | None): Device-level module bays keyed by name.
+            scope_uninstalled (bool): Whether an ancestor matched an empty module bay.
+            scope_empty_installed_bays (bool): Whether the installed parent type has
+                no bay templates.
+
+        Returns:
+            str | None: The holder installation hint, or None when the pattern does not apply.
+
         """
         if scope_uninstalled or scope_empty_installed_bays:
             return None
@@ -2494,7 +3094,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     @staticmethod
     def _suggest_bay_mapping(item, module_bays, scope_preserved=False):
-        """
+        r"""
         Suggest a ModuleBayMapping that would resolve a No Bay row.
 
         Heuristic: when the item's name ends with a number and a bay in scope
@@ -2535,7 +3135,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         item_trail = m.group(0)
         item_prefix = item_name[: m.start()]
         trail_is_digits = item_trail.isdigit()
-        item_class = (item.get("entPhysicalClass") or "").strip()
+        item_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         # Description-based fallback: when the item description encodes a
         # class+slot hint like "MIC: ... @ 0/0/*" (Juniper), try mapping to a
         # bay named "<CLASS> <slot>" even when the LibreNMS name is just a
@@ -2623,17 +3223,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     @staticmethod
     def _suggest_bay_mapping_from_descr(item, module_bays, item_name, item_class):
-        """
-        Derive a ModuleBayMapping suggestion from the item's description when
-        the description encodes a class+slot hint like ``"MIC: ... @ 0/0/*"``
-        (Juniper) — useful when the LibreNMS name is just a model number with
+        r"""
+        Derive a ModuleBayMapping suggestion from the item's description.
+
+        The description must encode a class+slot hint like ``"MIC: ... @ 0/0/*"``
+        (Juniper). This is useful when the LibreNMS name is just a model number with
         no positional info that the name-based heuristic could latch onto.
 
-        Returns the suggestion dict (with a regex matching the description and
-        a target bay name like ``"MIC \\1"``) or None when the description
-        doesn't fit the pattern or the implied bay isn't present in scope.
+        Args:
+            item (dict): The LibreNMS inventory item to inspect.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            item_name (str): The item's display name.
+            item_class (str): The item's physical class.
+
+        Returns:
+            dict | None: A suggestion with a description regex and a target bay name such as
+                ``"MIC \\1"``, or None when the description does not fit the pattern or the implied
+                bay is not present in scope.
+
         """
-        descr = (item.get("entPhysicalDescr") or "").strip()
+        descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
         if not descr or not module_bays:
             return None
         dm = re.match(r"^([A-Z][A-Za-z0-9_]{0,15}):\s+.*@\s*(\d+)(?:/|\s|$)", descr)
@@ -2662,10 +3271,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     @staticmethod
     def _suggest_bay_mapping_from_descr_trail(item, candidate_names, item_name, item_class):
-        """
-        Last-chance heuristic: derive a ModuleBayMapping suggestion by applying
-        the trailing-number/letter pattern to ``entPhysicalDescr`` instead of
-        ``entPhysicalName``.
+        r"""
+        Derive a final ModuleBayMapping suggestion from ``entPhysicalDescr``.
 
         Useful for vendors that report the model string in entPhysicalName
         and the human-readable position in entPhysicalDescr (e.g. Juniper
@@ -2680,11 +3287,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         name-based pass) so transceivers don't propose chassis line-card
         bays as targets, fans don't propose Slot N, etc.
 
-        Returns the suggestion dict, or None when no plausible mapping
-        can be derived (no descr, no trailing token, descr same as name,
-        or no bay shares the trailing token).
+        Args:
+            item (dict): The LibreNMS inventory item to inspect.
+            candidate_names (list): Class-filtered bay names to consider.
+            item_name (str): The item's display name.
+            item_class (str): The item's physical class.
+
+        Returns:
+            dict | None: The suggestion, or None when no plausible mapping can be derived because
+                there is no description, no trailing token, the description equals the name, or no
+                bay shares the trailing token.
+
         """
-        descr = (item.get("entPhysicalDescr") or "").strip()
+        descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
         if not descr or not candidate_names:
             return None
         # Skip when descr is identical to the name we already tried — the
@@ -2737,15 +3352,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         create form arrives pre-filled for the user.  The user still needs to
         select or create the matching NetBox ModuleType.
 
-        Returns None when the model name is blank — no meaningful mapping can
-        be created without at least a model name to key on.
+        Args:
+            item (dict): The LibreNMS inventory item to describe.
+            matched_bay (ModuleBay | None): The matched NetBox module bay.
+
+        Returns:
+            dict | None: The pre-filled mapping values, or None when the model name is blank.
+                No meaningful mapping can be created without at least a model name to key on.
+
         """
-        model = (item.get("entPhysicalModelName") or "").strip()
+        model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
             return None
 
         parts = [f"Auto-suggested: maps LibreNMS model '{model}'"]
-        phys_descr = (item.get("entPhysicalDescr") or "").strip()
+        phys_descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
         if phys_descr:
             parts.append(f"described as '{phys_descr}'")
         if matched_bay:
@@ -2768,18 +3389,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         ModuleType in one click instead of opening the form blank.
 
         Pre-filled fields (all derived from the LibreNMS ENTITY-MIB row):
-          * ``manufacturer``  — PK of the device's manufacturer (when known)
-          * ``model``         — entPhysicalModelName (truncated to 100 chars)
-          * ``part_number``   — entPhysicalModelName (truncated to 50 chars)
-          * ``description``   — entPhysicalDescr (truncated to 200 chars)
-          * ``comments``      — full entPhysicalDescr when it had to be
-                                truncated for ``description``
+          * ``manufacturer``: PK of the device's manufacturer (when known)
+          * ``model``: entPhysicalModelName (truncated to 100 chars)
+          * ``part_number``: entPhysicalModelName (truncated to 50 chars)
+          * ``description``: entPhysicalDescr (truncated to 200 chars)
+          * ``comments``: full entPhysicalDescr when it had to be truncated for
+            ``description``
 
-        Returns None when no model name was reported — without a model name
-        there's nothing meaningful to pre-fill and the row can't be made
-        installable by adding a type either.
+        Args:
+            item (dict): The LibreNMS inventory item to describe.
+            manufacturer (Manufacturer | None): The selected device manufacturer.
+
+        Returns:
+            dict | None: The pre-filled ModuleType values, or None when no model name was reported.
+                Without a model name, there is nothing meaningful to pre-fill, and adding a type
+                cannot make the row installable.
+
         """
-        model = (item.get("entPhysicalModelName") or "").strip()
+        model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
             return None
 
@@ -2790,7 +3417,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if manufacturer is not None:
             suggestion["manufacturer"] = manufacturer.pk
 
-        phys_descr = (item.get("entPhysicalDescr") or "").strip()
+        phys_descr = _normalize_librenms_text(item.get("entPhysicalDescr"))
         if phys_descr:
             suggestion["description"] = phys_descr[:200]
             if len(phys_descr) > 200:
@@ -2800,15 +3427,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     @staticmethod
     def _build_no_type_warning(item, ambiguity_candidates=None):
-        """Hint when LibreNMS reports a model that NetBox doesn't define.
+        """
+        Hint when LibreNMS reports a model that NetBox doesn't define.
 
         When ``ambiguity_candidates`` is a non-empty list of ModuleType
         instances, the warning explains that NetBox has *multiple* types
         sharing the same model/part_number string, so the plugin refuses to
         guess.  The message names each conflicting ``manufacturer / model``
         pair so the user can resolve the data issue in NetBox itself.
+
+        Args:
+            item (dict): The LibreNMS inventory item to describe.
+            ambiguity_candidates (list | None): Conflicting NetBox ModuleType instances.
+
+        Returns:
+            str: The warning for the missing or ambiguous module type.
+
         """
-        model = (item.get("entPhysicalModelName") or "").strip()
+        model = _normalize_librenms_text(item.get("entPhysicalModelName"))
         if not model:
             return "LibreNMS did not report a model name for this item; cannot match to a NetBox ModuleType."
         if ambiguity_candidates:
@@ -2836,6 +3472,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Nokia ``3HE18883AARB01`` whose normalized key ``3HE18883AA`` is
         ambiguous is still detected).  Returns an empty list when there is
         no collision (or when *ambiguities* is falsy).
+
+        Args:
+            model_name (str): The raw LibreNMS model name.
+            ambiguities (dict | None): ModuleType collisions keyed by model string.
+            manufacturer (Manufacturer | None): The selected device manufacturer.
+            norm_rules (list | None): Preloaded module type normalization rules.
+
+        Returns:
+            list: The colliding ModuleType instances, or an empty list when no collision exists.
+
         """
         from netbox_librenms_plugin.utils import apply_normalization_rules
 
@@ -2853,11 +3499,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     @staticmethod
     def _find_integrating_ancestor(item, index_map):
         """
-        Detect the "integrated child" SNMP pattern (e.g. Nokia XIOM hosting a
-        single fixed MDA).
+        Detect the integrated-child SNMP pattern.
 
-        Some vendors expose the same physical card as two ENTITY-MIB rows —
-        a parent module and a child module — that share both
+        Some vendors expose the same physical card as two ENTITY-MIB rows:
+        a parent module and a child module. These rows share both
         ``entPhysicalSerialNum`` and ``entPhysicalModelName``.  Returns the
         ancestor item that matches *item*'s serial+model (so the caller can
         present the row as ``Integrated in <parent>`` instead of trying to
@@ -2869,14 +3514,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         module-class entry (we don't dedupe chassis / PSU / fan rows
         because shared serials there usually indicate a real vendor data
         bug we want to surface).
+
+        Args:
+            item (dict): The inventory item to inspect.
+            index_map (dict): Inventory items keyed by physical index.
+
+        Returns:
+            dict | None: The ancestor with the same serial and model, or None if no
+                such ancestor exists.
+
         """
-        item_class = (item.get("entPhysicalClass") or "").strip()
+        item_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         if item_class not in INVENTORY_CLASSES or item_class in {"container", "powerSupply", "fan"}:
             return None
-        item_serial = (item.get("entPhysicalSerialNum") or "").strip()
-        if not item_serial or item_serial.lower() in _PLACEHOLDER_VALUES:
+        item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+        if not item_serial:
             return None
-        item_model = (item.get("entPhysicalModelName") or "").strip().lower()
+        item_model = _clean_librenms_value(item.get("entPhysicalModelName")).lower()
         if not item_model or item_model in _PLACEHOLDER_VALUES:
             return None
 
@@ -2887,52 +3541,127 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ancestor = index_map.get(current_idx)
             if ancestor is None:
                 return None
-            anc_class = (ancestor.get("entPhysicalClass") or "").strip()
+            anc_class = _normalize_librenms_text(ancestor.get("entPhysicalClass"))
             # Stop at chassis — never dedupe against the chassis itself.
             if anc_class == "chassis":
                 return None
             if anc_class in INVENTORY_CLASSES and anc_class not in {"container", "powerSupply", "fan"}:
-                anc_serial = (ancestor.get("entPhysicalSerialNum") or "").strip()
-                anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
-                if (
-                    anc_serial
-                    and anc_serial.lower() not in _PLACEHOLDER_VALUES
-                    and anc_serial == item_serial
-                    and anc_model
-                    and anc_model == item_model
-                ):
+                anc_serial = _clean_librenms_value(ancestor.get("entPhysicalSerialNum"))
+                anc_model = _clean_librenms_value(ancestor.get("entPhysicalModelName")).lower()
+                if anc_serial and anc_serial == item_serial and anc_model and anc_model == item_model:
                     return ancestor
             current_idx = ancestor.get("entPhysicalContainedIn", 0)
         return None
 
-    def _detect_serial_conflicts(self, table_data):
+    @staticmethod
+    def _shares_serial_with_ancestor(row, index_map):
         """
-        Bulk-check whether LibreNMS serials for replaceable or installable rows already exist elsewhere in NetBox.
+        Return True when this row repeats a serial one of its own inventory ancestors reports.
 
-        For each row with can_replace or can_install, checks whether the LibreNMS serial (the value we want to
-        write) is already assigned to a *different* module.  When a conflict is found the row
-        gets two extra keys:
+        A fan tray and its fans, or a PSU and its sensors, routinely report one serial. Those rows
+        describe parts of the same physical unit, so a match between them is not evidence that the
+        unit is installed twice.
+        """
+        if not index_map:
+            return False
+        item = index_map.get(row.get("ent_physical_index"))
+        if item is None:
+            return False
+        # Compare raw inventory serials on both sides. The row's own serial is normalized, so a
+        # rule that strips a vendor marker ("S/N ") would otherwise never match a parent's raw value.
+        serial = _clean_librenms_value(item.get("entPhysicalSerialNum")).strip().lower()
+        if not serial:
+            return False
+        seen = set()
+        while item is not None:
+            parent_index = item.get("entPhysicalContainedIn")
+            if parent_index is None or parent_index in seen:
+                return False
+            seen.add(parent_index)
+            item = index_map.get(parent_index)
+            if item is None:
+                return False
+            if _clean_librenms_value(item.get("entPhysicalSerialNum")).strip().lower() == serial:
+                return True
+        return False
 
-          serial_conflict_module  – the conflicting Module object (with device/module_bay loaded)
-          can_move_from           – True (convenience flag for templates/tests)
+    def _identity_candidate_rows(self, table_data, index_map):
+        """
+        Group rows that carry usable serial evidence by serial.
+
+        Eligibility is a property of the row's own data, never of what bay matching enabled.
+        Rows with no usable serial, read-only rows, and rows repeating an ancestor's serial
+        carry no evidence about a separate physical part.
+        """
+        serial_rows: dict = {}
+        for row in table_data:
+            if row.get("_source") == "oob" or row.get("status") == "Integrated":
+                continue
+            serial = row.get("serial", "")
+            if not serial or serial.lower() in _PLACEHOLDER_VALUES:
+                continue
+            if self._shares_serial_with_ancestor(row, index_map):
+                continue
+            serial_rows.setdefault(serial, []).append(row)
+        return serial_rows
+
+    @staticmethod
+    def _identity_scope_device_ids(obj):
+        """
+        Return the device ids an install on this page would target.
+
+        Only a match on one of these contradicts an install here. The write guard is device
+        scoped for the same reason: a vendor may reuse one serial across unrelated devices.
+        """
+        if obj is None:
+            return set()
+        scope = {obj.pk}
+        chassis = getattr(obj, "virtual_chassis", None)
+        if chassis is not None:
+            scope.update(chassis.members.values_list("pk", flat=True))
+        return scope
+
+    def _detect_serial_conflicts(self, table_data, index_map=None, obj=None):
+        """
+        Bulk-check whether a row's LibreNMS serial already names a Module in NetBox.
+
+        Eligibility is a property of the row's own data, not of what bay matching enabled. Gating
+        this on ``can_replace``/``can_install`` meant the rows where bay matching FAILED — the ones
+        that most need to say "this is already installed over there" — were the ones skipped.
+
+        When a single conflict is found the row gets:
+
+          serial_conflict_module: the conflicting Module object (with device/module_bay loaded)
+          can_move_from: True (convenience flag for templates/tests)
+
+        and ``can_install`` is cleared: a part NetBox already holds must not also be offered as a
+        fresh install. More than one match sets ``serial_conflict_ambiguous`` and picks nothing.
+
+        Args:
+            table_data (list): The table rows to check and update.
+            index_map (dict | None): Inventory items by entPhysicalIndex, for ancestry checks.
+            obj: The page device whose install scope limits relevant conflicts.
+
         """
         from dcim.models import Module
 
-        # Map serial → list of rows that may be affected
-        serial_rows: dict = {}
-        for row in table_data:
-            if not row.get("can_replace") and not row.get("can_install"):
-                continue
-            serial = row.get("serial", "")
-            if serial and serial.lower() not in _PLACEHOLDER_VALUES:
-                serial_rows.setdefault(serial, []).append(row)
-
+        serial_rows = self._identity_candidate_rows(table_data, index_map)
         if not serial_rows:
             return
 
+        # Existence is read unrestricted: a module the operator cannot see still occupies the
+        # serial. Which of them may be NAMED is decided separately, below.
         conflicts = Module.objects.filter(serial__in=serial_rows.keys()).select_related(
             "module_type", "module_bay", "device"
         )
+        # Fail closed when there is no request to scope against: name nothing rather than risk
+        # disclosing a module the operator cannot see.
+        visible_conflict_pks = set()
+        if getattr(self, "request", None) is not None:
+            visible_conflict_pks = set(
+                self.restricted_queryset(Module).filter(serial__in=serial_rows.keys()).values_list("pk", flat=True)
+            )
+        scope_device_ids = self._identity_scope_device_ids(obj)
 
         # Group conflict modules by serial
         conflicts_by_serial: dict = {}
@@ -2946,7 +3675,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 # Exclude the module already in the current bay
                 candidates = [m for m in modules if not (installed_id and m.pk == installed_id)]
                 if len(candidates) == 1:
-                    row["serial_conflict_module"] = candidates[0]
+                    conflict = candidates[0]
+                    row["serial_conflict_module"] = conflict
+                    row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
                     row["can_move_from"] = True
+                    # Evidence revokes the offer only where the write path would also refuse it.
+                    if conflict.device_id in scope_device_ids:
+                        row["can_install"] = False
                 elif len(candidates) > 1:
                     row["serial_conflict_ambiguous"] = True
+                    if any(c.device_id in scope_device_ids for c in candidates):
+                        row["can_install"] = False

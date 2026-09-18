@@ -1,0 +1,352 @@
+# Custom opengrep ruleset encoding this project's coding guidelines. These run ON TOP OF
+# CodeRabbit's default opengrep packs: the file is intentionally NOT named opengrep.yml / semgrep.yml
+# at the repo root, so CodeRabbit does NOT treat it as its config (which would replace its default
+# ruleset). A CI step running opengrep ALSO makes CodeRabbit skip its own opengrep analysis, so
+# there is deliberately no such step: the local pre-push hook enforces these rules, and
+# CodeRabbit runs opengrep itself on the pull request.
+#
+# Rule-test fixtures live in .opengrep/tests/; run them with scripts/opengrep-test.sh.
+#
+# The scan needs --taint-intrafile: taint must cross into a module-private helper, which is where a
+# per-function analysis loses the serial-match branch.
+rules:
+  - id: import-disclosure
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This message names a NetBox object that no restrict() call filtered. The import preview
+      searches NetBox without a permission scope on purpose: a duplicate the viewer cannot see is
+      still a real conflict that must block the import. Identity is therefore withheld at display
+      time by import_utils/disclosure.py, which can only do that if the identity travels as
+      structured data. A name or pk baked into a warnings/issues string escapes that gate.
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe:
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      references:
+        - "netbox_librenms_plugin/import_utils/disclosure.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    mode: taint
+    pattern-sources:
+      # an unscoped manager chain
+      - pattern: $M.objects
+      # helpers that resolve a NetBox object with no permission scope applied
+      - pattern: resolve_device_by_host_ip(...)
+      - pattern: find_devices_by_serial(...)
+      - pattern: find_by_librenms_id(...)
+      - pattern: get_librenms_sync_device(...)
+      # a match an unrestricted search already bound into the validation dict
+      - pattern: $V["existing_device"]
+    pattern-sanitizers:
+      # Only ViewerScope may convert an unrestricted match into displayable identity. Bind the
+      # sanitizer to its requesting user and the two disclosure actions. A restrict() call for a
+      # different user, action, or code path does not authorize the current response.
+      - patterns:
+          - pattern-inside: |
+              class ViewerScope:
+                ...
+          - pattern: $MODEL.objects.restrict(self._user, "view")
+        exact: true
+      - patterns:
+          - pattern-inside: |
+              class ViewerScope:
+                ...
+          - pattern: $MODEL.objects.restrict(self._user, "change")
+        exact: true
+      # Aggregates are exempted to keep real code workable, not because they provably erase
+      # identity: a contrived len(range(owner.pk)) still carries the pk. sum() is NOT exempt,
+      # because sum([owner.pk]) preserves it by accident rather than by contrivance.
+      - pattern: $X.count()
+        exact: true
+      - pattern: $X.exists()
+        exact: true
+      - pattern: len(...)
+        exact: true
+      - pattern: all(...)
+        exact: true
+      - pattern: any(...)
+        exact: true
+      # This exact rendering may carry a visible match's LibreNMS linkage ID. Trust the value
+      # transformation, not `_describe_link_note` as a callable name that another binding can use.
+      - patterns:
+          - pattern-inside: |
+              def _describe_link_note(existing_link):
+                ...
+          - pattern: 'f"currently linked to LibreNMS device #{$ID}"'
+        exact: true
+    pattern-sinks:
+      # the validation dict's message lists
+      - pattern: $R["warnings"].append($MSG)
+      - pattern: $R["issues"].append($MSG)
+      - pattern: $R["warnings"].extend($MSG)
+      - pattern: $R["issues"].extend($MSG)
+      # whole-list assignment, not just append/extend
+      - patterns:
+          - pattern: $R["warnings"] = $MSG
+          - focus-metavariable: $MSG
+      - patterns:
+          - pattern: $R["issues"] = $MSG
+          - focus-metavariable: $MSG
+      # a local list alias appended to directly, before the function hands it back
+      - patterns:
+          - pattern: $L.append($MSG)
+          - metavariable-regex:
+              metavariable: $L
+              regex: ^(.*_)?(warnings|issues)$
+      # a local list of any name handed back under a warnings/issues key
+      - patterns:
+          - pattern-either:
+              - pattern: '{..., "warnings": $MSG, ...}'
+              - pattern: '{..., "issues": $MSG, ...}'
+          - focus-metavariable: $MSG
+      # the merge-candidate prose. host_named=/oob_named= carry pk and name as STRUCTURED data on
+      # purpose: that is the sanctioned channel the display gate can withhold, so focus on the
+      # message alone or the rule flags the very shape the fix prescribes.
+      - patterns:
+          - pattern: apply_merge_candidates(..., warning=$MSG, ...)
+          - focus-metavariable: $MSG
+  - id: import-disclosure-sanitizer-shadow
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This binding shadows a disclosure-scoping API name. Rename it so an unrestricted lookup
+      cannot impersonate a disclosure sanitizer or obscure a taint flow.
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe:
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern: |
+              def $SANITIZER(...):
+                ...
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: |
+              async def $SANITIZER(...):
+                ...
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: $SANITIZER = $VALUE
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: $RECEIVER.$SANITIZER = $VALUE
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: "$SANITIZER: $TYPE = $VALUE"
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: "$RECEIVER.$SANITIZER: $TYPE = $VALUE"
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: ($SANITIZER := $VALUE)
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: |
+              def $FUNCTION(..., $SANITIZER, ...):
+                ...
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - patterns:
+          - pattern: |
+              async def $FUNCTION(..., $SANITIZER, ...):
+                ...
+          - metavariable-regex:
+              metavariable: $SANITIZER
+              regex: ^(restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)$
+      - pattern-regex: >-
+          \blambda\b[^\n:]*\b(?:restrict|restricted_queryset|restrict_object_or_404|_describe_link_note)\b[^\n:]*:
+  - id: no-requests-outside-http-client
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This call uses an imported requests HTTP API outside librenms_api.py. The package
+      routes all HTTP through that shared client. This check covers selected requests calls
+      with an import binding in this file; it does not track clients passed between functions.
+    metadata:
+      category: security
+    paths:
+      include: ["**/netbox_librenms_plugin/**"]
+      exclude: ["**/netbox_librenms_plugin/librenms_api.py", "**/tests/**"]
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  import $REQUESTS
+                  ...
+              - metavariable-regex:
+                  metavariable: $REQUESTS
+                  regex: ^requests$
+              - pattern: $REQUESTS.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  import requests as $REQUESTS
+                  ...
+              - pattern: $REQUESTS.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests import $METHOD
+                  ...
+              - pattern: $METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests import $METHOD as $CALL
+                  ...
+              - pattern: $CALL(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests.api import $METHOD
+                  ...
+              - pattern: $METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  import requests.sessions
+                  ...
+              - pattern: requests.sessions.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  import requests.sessions as $SESSIONS
+                  ...
+              - pattern: $SESSIONS.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests import sessions
+                  ...
+              - pattern: sessions.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests import sessions as $SESSIONS
+                  ...
+              - pattern: $SESSIONS.$METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests.sessions import $METHOD
+                  ...
+              - pattern: $METHOD(...)
+          - patterns:
+              - pattern-inside: |
+                  from requests.sessions import $METHOD as $CALL
+                  ...
+              - pattern: $CALL(...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(get|head|options|post|put|patch|delete|request|Session|session)$
+  - id: url-numeric-pk-converter
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This path() route uses <str:pk> or <pk>. By package convention, name numeric primary
+      keys pk and use <int:pk>. This check covers literal routes and local string constants;
+      it does not infer identifier types or inspect dynamically built routes.
+    metadata:
+      category: security
+    patterns:
+      - pattern-either:
+          - pattern: path($ROUTE, ...)
+          - pattern: django.urls.path($ROUTE, ...)
+          - pattern: path(..., route=$ROUTE, ...)
+          - pattern: django.urls.path(..., route=$ROUTE, ...)
+      - metavariable-comparison:
+          metavariable: $ROUTE
+          comparison: re.match(".*<(str:)?pk>", $ROUTE)
+  - id: no-django-testcase-in-tests
+    languages: [python]
+    severity: WARNING
+    message: >-
+      This check detects direct Django TestCase imports or inheritance, not dynamic bases.
+      Use a plain pytest class and mark database tests with pytest.mark.django_db.
+    metadata:
+      category: maintainability
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    pattern-either:
+      - pattern: from django.test import TestCase
+      - pattern: from django.test.testcases import TestCase
+      - pattern: |
+          class $CLASS(..., django.test.TestCase, ...):
+            ...
+      - pattern: |
+          class $CLASS(..., django.test.testcases.TestCase, ...):
+            ...
+  - id: no-unittest-assertions
+    languages: [python]
+    severity: WARNING
+    message: >-
+      This test calls a self method with a unittest assertion API name. Use assert,
+      pytest.raises, pytest.warns or caplog as appropriate. This name check does not resolve
+      the method implementation; custom helpers with other names are allowed.
+    metadata:
+      category: maintainability
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern: self.$ASSERT(...)
+      - metavariable-regex:
+          metavariable: $ASSERT
+          regex: >-
+            (?x)^assert(?:
+              AlmostEqual|CountEqual|DictEqual|Equal|False|
+              Greater|GreaterEqual|In|Is|IsInstance|
+              IsNone|IsNot|IsNotNone|Less|LessEqual|
+              ListEqual|Logs|MultiLineEqual|NoLogs|NotAlmostEqual|
+              NotEqual|NotIn|NotIsInstance|NotRegex|Raises|
+              RaisesRegex|Regex|SequenceEqual|SetEqual|True|
+              TupleEqual|Warns|WarnsRegex|Equals|NotEquals|
+              AlmostEquals|NotAlmostEquals|RegexpMatches|NotRegexpMatches|RaisesRegexp|
+              StartsWith|NotStartsWith|EndsWith|NotEndsWith|HasAttr|
+              NotHasAttr|IsSubclass|NotIsSubclass
+            )$
+  - id: no-selected-fuzzy-apis
+    languages: [python]
+    severity: WARNING
+    message: >-
+      This call uses a selected API for approximate selection: difflib close matches or similarity
+      ratios, or a fuzzywuzzy/rapidfuzz fuzz scorer. Use exact lookups for sites, platforms,
+      device types and roles. This check detects selected APIs, not the exact-only invariant.
+      It follows direct constructors and propagated local bindings; intervening method calls
+      can hide a matcher. It cannot identify custom similarity functions or dynamic scorers.
+    metadata:
+      category: correctness
+    options:
+      symbolic_propagation: true
+    pattern-either:
+      - pattern: difflib.get_close_matches(...)
+      - patterns:
+          - pattern: difflib.SequenceMatcher(...).$RATIO(...)
+          - metavariable-regex:
+              metavariable: $RATIO
+              regex: ^(ratio|quick_ratio|real_quick_ratio)$
+      - patterns:
+          - pattern-either:
+              - pattern: fuzzywuzzy.fuzz.$SCORER(...)
+              - pattern: rapidfuzz.fuzz.$SCORER(...)
+          - metavariable-regex:
+              metavariable: $SCORER
+              regex: >-
+                (?x)^(ratio|partial_ratio|partial_ratio_alignment|token_sort_ratio|token_set_ratio|
+                partial_token_sort_ratio|partial_token_set_ratio|token_ratio|partial_token_ratio|
+                WRatio|QRatio|UWRatio|UQRatio)$

@@ -331,7 +331,7 @@
         if (!savePrefUrl) {
             return;
         }
-        fetch(savePrefUrl, {
+        return fetch(savePrefUrl, {
             method: 'POST',
             credentials: 'same-origin',
             headers: {
@@ -339,20 +339,95 @@
                 'X-CSRFToken': csrfToken
             },
             body: JSON.stringify({ key: key, value: value })
+        }).then(function (response) {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
         }).catch(function (err) {
             console.debug('savePref: fetch failed:', err.message);
         });
     }
 
     /**
-     * Initialize toggle listeners for use-sysname and strip-domain preferences.
-     * Persists toggle state to user preferences on change.
+     * Update names and the compact settings summary without refetching the result set.
      */
-    function initializeTogglePrefs() {
+    function updateImportNameDisplay() {
         const sysname = document.getElementById('use-sysname-toggle-cb');
         const strip = document.getElementById('strip-domain-toggle-cb');
-        if (sysname) sysname.addEventListener('change', function () { savePref('use_sysname', this.checked); });
-        if (strip) strip.addEventListener('change', function () { savePref('strip_domain', this.checked); });
+        const summary = document.getElementById('import-name-summary');
+        const countBadge = document.getElementById('import-options-count');
+        if (!sysname || !strip) return;
+
+        const sourceKey = sysname.checked ? 'sysname' : 'hostname';
+        const sourceLabel = sysname.checked ? 'sysName' : 'hostname';
+        document.querySelectorAll('[data-import-name]').forEach((nameElement) => {
+            const row = nameElement.closest('tr');
+            const variants = JSON.parse(nameElement.dataset.importNameVariants);
+            const variantKey = `${sourceKey}_${strip.checked ? 'stripped' : 'full'}`;
+            const variant = variants[variantKey];
+            nameElement.textContent = variant.name;
+            const sourceElement = row?.querySelector('[data-import-name-source]');
+            if (sourceElement) {
+                sourceElement.textContent = `From ${variant.source}${strip.checked ? ', domain removed' : ''}`;
+            }
+        });
+
+        if (summary) {
+            summary.textContent = `Name: ${sourceLabel}${strip.checked ? ', domain removed' : ''}`;
+        }
+        if (countBadge) {
+            const changedCount = Number(!sysname.checked) + Number(strip.checked);
+            countBadge.textContent = String(changedCount);
+            countBadge.classList.toggle('bg-secondary-lt', changedCount === 0);
+            countBadge.classList.toggle('bg-primary-lt', changedCount > 0);
+        }
+    }
+
+    /**
+     * Initialize naming and column preferences for the focused import table.
+     */
+    function initializeImportPreferences() {
+        const sysname = document.getElementById('use-sysname-toggle-cb');
+        const strip = document.getElementById('strip-domain-toggle-cb');
+        const reset = document.getElementById('reset-import-options');
+        const results = document.getElementById('device-import-results');
+        const columnToggles = Array.from(document.querySelectorAll('.import-column-toggle'));
+
+        const updateColumns = (persist) => {
+            if (!results) return;
+            const visibleColumns = columnToggles.filter((toggle) => toggle.checked).map((toggle) => toggle.value);
+            results.dataset.visibleColumns = visibleColumns.join(' ');
+            const countBadge = document.getElementById('import-columns-count');
+            if (countBadge) countBadge.textContent = String(visibleColumns.length);
+            if (persist) savePref('import_columns', visibleColumns);
+        };
+
+        if (sysname) {
+            sysname.addEventListener('change', function () {
+                savePref('use_sysname', this.checked);
+                updateImportNameDisplay();
+            });
+        }
+        if (strip) {
+            strip.addEventListener('change', function () {
+                savePref('strip_domain', this.checked);
+                updateImportNameDisplay();
+            });
+        }
+        reset?.addEventListener('click', () => {
+            if (sysname && !sysname.checked) {
+                sysname.checked = true;
+                savePref('use_sysname', true);
+            }
+            if (strip && strip.checked) {
+                strip.checked = false;
+                savePref('strip_domain', false);
+            }
+            updateImportNameDisplay();
+        });
+        columnToggles.forEach((toggle) => toggle.addEventListener('change', () => updateColumns(true)));
+        updateColumns(false);
+        updateImportNameDisplay();
     }
 
     // ============================================
@@ -425,6 +500,10 @@
         const messageEl = document.getElementById('filter-progress-message');
         const cancelBtn = document.getElementById('cancel-filter-btn');
         const filterModal = document.getElementById('filter-processing-modal');
+        const activeServerKey = new URLSearchParams(originalFilters).get('server_key');
+        const activeServerUrl = activeServerKey
+            ? `${baseUrl}?server_key=${encodeURIComponent(activeServerKey)}`
+            : baseUrl;
 
         // Get CSRF token from cookie or form (needed for cancel and status sync)
         let csrfToken = getCookie('csrftoken');
@@ -537,7 +616,7 @@
                                             }
 
                                             setTimeout(() => {
-                                                window.location.href = baseUrl;
+                                                window.location.href = activeServerUrl;
                                             }, JOB_CANCEL_REDIRECT_MS);
                                         } else {
                                             throw new Error(`Sync failed: ${syncRes.status}`);
@@ -555,7 +634,7 @@
                                     }
 
                                     setTimeout(() => {
-                                        window.location.href = baseUrl;
+                                        window.location.href = activeServerUrl;
                                     }, JOB_CANCEL_ERROR_REDIRECT_MS);
                                 });
                         } else {
@@ -584,7 +663,7 @@
                                 hideModal(filterModal);
                             }
 
-                            setTimeout(() => window.location.href = baseUrl, 1000);
+                            setTimeout(() => window.location.href = activeServerUrl, 1000);
                         }
                     })
                     .catch(err => {
@@ -677,7 +756,7 @@
                             hideModal(filterModal);
                         }
 
-                        setTimeout(() => window.location.href = baseUrl, 100);
+                        setTimeout(() => window.location.href = activeServerUrl, 100);
                     } else if (statusValue === 'failed') {
                         pollingStopped = true;
                         if (filterModal) {
@@ -688,7 +767,7 @@
                         if (errorMsg) {
                             alert('Error: ' + errorMsg);
                         }
-                        setTimeout(() => window.location.href = baseUrl, 100);
+                        setTimeout(() => window.location.href = activeServerUrl, 100);
                     } else if (statusValue === 'errored') {
                         pollingStopped = true;
                         if (filterModal) {
@@ -697,7 +776,7 @@
 
                         const errorMsg = data.data?.error || 'Job encountered an error. Please try again.';
                         alert('Error: ' + errorMsg);
-                        setTimeout(() => window.location.href = baseUrl, 100);
+                        setTimeout(() => window.location.href = activeServerUrl, 100);
                     } else if (statusValue === 'queued' || statusValue === 'started' || statusValue === 'deferred' || statusValue === 'scheduled') {
                         // Continue polling (job still in progress)
                         setTimeout(poll, POLL_INTERVAL_MS);
@@ -1085,6 +1164,7 @@
             if (event.detail.target.tagName === 'TR') {
                 updateSelectionDisplay();
             }
+            updateImportNameDisplay();
 
             if (event.detail.target.id === 'import-results-modal-content') {
                 const failedCount = event.detail.target.querySelector('[data-failed-count]');
@@ -1203,12 +1283,91 @@
                 // the outer HTMX modal. Buttons inside nested modals (e.g. the
                 // Promote-to-host modal rendered inside #htmx-modal-content)
                 // must be left for Bootstrap's own dismiss handler so they
-                // close the inner modal, not the outer one.
+                // close the inner modal, not the outer one. We also avoid
+                // preventDefault here so form submit buttons that happen to
+                // carry data-bs-dismiss="modal" in nested modals still submit.
                 const nearestModal = dismissTrigger.closest('.modal');
                 if (nearestModal === modalElement) {
                     event.preventDefault();
                     hideModal(modalElement, fallbackBackdropRef);
+                } else if (
+                    nearestModal &&
+                    !(typeof bootstrap !== 'undefined' && bootstrap.Modal) &&
+                    !(typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal)
+                ) {
+                    // No-Bootstrap fallback: Bootstrap's own dismiss handler isn't available to
+                    // close the nested modal, so the user would otherwise be stuck inside it.
+                    // Manually hide just the nested modal (not the outer HTMX modal).
+                    // Only suppress default for INERT dismiss controls: a dismiss button that also
+                    // submits a form or triggers an hx-* request must still execute that action, so
+                    // don't preventDefault for those (we still close the nested modal below).
+                    const isActionControl =
+                        // Check the EXPLICIT type attribute, not the computed .type: a <button>
+                        // in a <form> without a type attribute computes .type === 'submit', which
+                        // would misclassify a plain Cancel button as an action control and let it
+                        // natively submit the form.
+                        dismissTrigger.getAttribute('type') === 'submit' ||
+                        ['hx-post', 'hx-get', 'hx-put', 'hx-delete', 'hx-patch'].some((attr) =>
+                            dismissTrigger.hasAttribute(attr)
+                        );
+                    if (!isActionControl) {
+                        event.preventDefault();
+                    }
+                    nearestModal.classList.remove('show');
+                    nearestModal.style.display = 'none';
+                    nearestModal.setAttribute('aria-hidden', 'true');
+                    nearestModal.removeAttribute('aria-modal');
                 }
+            }
+        });
+
+        // Refresh the validation modal in place (used after promote / OOB
+        // attach actions that mutate device link state but should leave the
+        // user inside the modal so they can see the new state). Also closes
+        // any nested modals (e.g. the Promote-to-host pick modal) before
+        // re-fetching so the user sees the refreshed validation directly.
+        document.body.addEventListener('validationRefresh', function (event) {
+            // Close any nested Bootstrap modals currently open inside the
+            // outer validation modal content. Use the same detection order as
+            // the rest of the plugin: bare `bootstrap` global first (preferred),
+            // then `window.bootstrap` as fallback, then plain DOM toggling.
+            document.querySelectorAll('#htmx-modal-content .modal.show').forEach(function (nested) {
+                try {
+                    // Prefer Bootstrap: it tracks stacked modals and leaves the
+                    // outer HTMX modal's backdrop/body state intact. Only fall
+                    // back to a minimal DOM hide — never hideModal()/_hideManual,
+                    // which strips body.modal-open and the (shared, outer) backdrop
+                    // and would break the still-open outer modal.
+                    if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+                        bootstrap.Modal.getOrCreateInstance(nested).hide();
+                    } else if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal) {
+                        window.bootstrap.Modal.getOrCreateInstance(nested).hide();
+                    } else {
+                        nested.classList.remove('show');
+                        nested.style.display = 'none';
+                        nested.setAttribute('aria-hidden', 'true');
+                        nested.removeAttribute('aria-modal');
+                    }
+                } catch (err) {
+                    // Swallow - we still want to refresh the validation panel.
+                }
+            });
+
+            const deviceId = event.detail && (event.detail.deviceId || event.detail.device_id);
+            if (!deviceId) {
+                return;
+            }
+            const btn = document.querySelector(
+                'tr#device-row-' + deviceId + ' button[hx-get*="/validation/' + deviceId + '/"]'
+            );
+            if (btn) {
+                // htmx registers a delegated click handler on document, so a
+                // synthetic MouseEvent click on the row's "View details"
+                // button re-triggers the validation GET and swaps the new
+                // content into #htmx-modal-content. We cannot call
+                // `htmx.trigger()` directly because NetBox does not expose
+                // the htmx global to user scripts.
+                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
             }
         });
 
@@ -1222,6 +1381,37 @@
         // Handle Escape key to close modal
         document.addEventListener('keydown', function (event) {
             if (event.key === 'Escape') {
+                // A nested dialog (e.g. the promote-to-host modal rendered inside
+                // #htmx-modal-content) owns Escape while it is open — let Bootstrap close
+                // the topmost child, don't tear down the whole validation modal underneath it.
+                // Also gate on where the Escape originated: Bootstrap may strip `.show` from the
+                // nested modal before this listener runs (the `.modal.show` query would then miss
+                // and wrongly close the outer modal), but the event's origin is unaffected by that
+                // timing — so a keypress inside a nested modal still suppresses the outer close.
+                // event.target can be the Document (keydown with nothing focused), which has no
+                // .closest() — guard with instanceof Element so this never throws a TypeError.
+                const eventStartedInNestedModal =
+                    event.target instanceof Element && event.target.closest('#htmx-modal-content .modal');
+                const openNestedModal = document.querySelector('#htmx-modal-content .modal.show');
+                if (eventStartedInNestedModal || openNestedModal) {
+                    // Normally Bootstrap's own listener closes the topmost nested modal. In the
+                    // manual fallback path (Bootstrap unavailable) there is no such listener, so
+                    // Escape would be a no-op while a child modal is open — close it manually.
+                    const hasBootstrapModal =
+                        (typeof bootstrap !== 'undefined' && bootstrap.Modal) ||
+                        (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal);
+                    if (!hasBootstrapModal) {
+                        const nestedToHide = openNestedModal || eventStartedInNestedModal;
+                        if (nestedToHide) {
+                            event.preventDefault();
+                            nestedToHide.classList.remove('show');
+                            nestedToHide.style.display = 'none';
+                            nestedToHide.setAttribute('aria-hidden', 'true');
+                            nestedToHide.removeAttribute('aria-modal');
+                        }
+                    }
+                    return;
+                }
                 if (modalElement?.classList.contains('show')) {
                     hideModal(modalElement, fallbackBackdropRef);
                 }
@@ -1422,7 +1612,7 @@
         initializeFilterForm();
         initializeBulkImport();
         initializeHTMXHandlers();
-        initializeTogglePrefs();
+        initializeImportPreferences();
         initializeCachedSearchCountdowns();
         initializeCacheExpirationMonitor();
     }

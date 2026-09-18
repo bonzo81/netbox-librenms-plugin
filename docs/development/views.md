@@ -11,7 +11,7 @@ Views are organized by resource type (e.g., devices, mappings, VMs) in the `view
 
 **Base views:**
 
-  - The `base/` subdirectory contains abstract base views (e.g., `BaseLibreNMSSyncView`, `BaseInterfaceTableView`, `BaseCableTableView`, `BaseIPAddressTableView`, `BaseVLANTableView`) that encapsulate shared logic for related resources.
+  - The `base/` subdirectory contains abstract base views (e.g., `BaseLibreNMSSyncView`, `BaseInterfaceTableView`, `BaseCableTableView`, `BaseIPAddressTableView`, `BaseVLANTableView`, `BaseModuleTableView`) that encapsulate shared logic for related resources.
 
 **Mixins:**
 
@@ -19,18 +19,17 @@ Views are organized by resource type (e.g., devices, mappings, VMs) in the `view
 
 ### Inheritance Patterns
 
-- Most resource-specific views inherit from a base view in `base/` and one or more mixins.
+- Most sync-table views inherit from a base view in `base/` and one or more mixins.
 - Base views themselves often inherit from NetBox or Django generic views (e.g., `generic.ObjectListView`, `django.views.View`).
 - This allows resource-specific views to override or extend only the methods they need, while inheriting default behaviors from base classes and mixins.
 
 #### Example: Device Sync View
 
 ```python
-from .base.librenms_sync_view import BaseLibreNMSSyncView
-from .mixins import LibreNMSAPIMixin
+from ..base.librenms_sync_view import BaseLibreNMSSyncView
 
 class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
-    # Inherits API access and sync logic from base/mixins
+  # Inherits API access and sync logic from the base view
     # Only device-specific logic needs to be implemented here
     ...
 ```
@@ -38,8 +37,7 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
 #### Example: Interface Table View
 
 ```python
-from .base.interfaces_view import BaseInterfaceTableView
-from .mixins import CacheMixin, LibreNMSAPIMixin
+from ..base.interfaces_view import BaseInterfaceTableView
 
 class DeviceInterfaceTableView(BaseInterfaceTableView):
     model = Device
@@ -50,7 +48,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 #### Example: VLAN Table View
 
 ```python
-from .base.vlan_table_view import BaseVLANTableView
+from ..base.vlan_table_view import BaseVLANTableView
 
 class DeviceVLANTableView(BaseVLANTableView):
     model = Device
@@ -65,7 +63,7 @@ class DeviceVLANTableView(BaseVLANTableView):
 
 - To add a new view for a resource, inherit from the relevant base view and mixins, then override or extend methods as needed.
 - Use the base views as templates for structure and required methods.
-- Register new views in `urls.py` and add templates if needed.
+- Register model detail tabs with `register_model_view`; add standalone plugin endpoints to `urls.py`, and add templates if needed.
 
 ### Tips
 

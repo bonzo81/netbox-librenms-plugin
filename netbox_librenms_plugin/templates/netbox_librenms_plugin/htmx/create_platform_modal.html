@@ -42,7 +42,7 @@
         </div>
         <p>This will:</p>
         <ol>
-            <li>Create a new Platform with the name below (defaults to the LibreNMS OS name)</li>
+            <li>Create a Platform with the name below (defaults to the LibreNMS OS name), or reuse the existing one if a platform with that name already exists — its details are left unchanged</li>
             {% if device_pk %}<li>Assign it to this device</li>{% endif %}
             <li>Optionally add a platform mapping so future syncs match correctly</li>
         </ol>

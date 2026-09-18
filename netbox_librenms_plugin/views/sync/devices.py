@@ -1,7 +1,7 @@
 from dcim.models import Device
 from django.contrib import messages
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.utils.html import escape
 from django.views import View
 from virtualization.models import VirtualMachine
@@ -12,6 +12,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
 )
+from netbox_librenms_plugin.views.sync.device_fields import _device_sync_redirect
 
 
 class AddDeviceToLibreNMSView(
@@ -44,18 +45,15 @@ class AddDeviceToLibreNMSView(
         a client error, not a missing-resource error).
         """
         if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=object_id)
+            return self.restrict_object_or_404(VirtualMachine, "change", pk=object_id)
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, "change", pk=object_id)
         return None
 
     def post(self, request, object_id):
         """Add a device to LibreNMS using the submitted SNMP form."""
-        # Resolve the target object first so we can apply object-level perms
-        # against the correct model (Device vs VirtualMachine).
         object_type = request.POST.get("object_type")
-        self.object = self.get_object(object_id, object_type=object_type)
-        if self.object is None:
+        if object_type not in ("device", "virtualmachine"):
             # Match the convention used in views/sync/device_fields.py — return
             # 400 (Bad Request) with an escaped echo of the offending value
             # rather than raising 404, which would mislead clients into
@@ -65,21 +63,26 @@ class AddDeviceToLibreNMSView(
                 status=400,
             )
 
-        # Plugin write perm + NetBox change perm on the resolved model. The
-        # mapping is set per-request because object_type can be either
-        # device or virtualmachine; static class-level declaration cannot
-        # express that branch.
+        # Gate before the change-scoped lookup so a missing grant produces the
+        # named permission error instead of a bare 404.
         target_model = VirtualMachine if object_type == "virtualmachine" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
         if error := self.require_all_permissions("POST"):
             return error
+
+        self.object = self.get_object(object_id, object_type=object_type)
+
+        server_key = self.rebind_api_for_posted_server(request.POST)
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return redirect(self.object.get_absolute_url())
 
         form_class = self.get_form_class()
 
         snmp_version = request.POST.get("v1v2-snmp_version") or request.POST.get("v3-snmp_version")
         prefix = "v1v2" if snmp_version in ("v1", "v2c") else "v3"
 
-        form = form_class(request.POST, prefix=prefix)
+        form = form_class(request.POST, prefix=prefix, server_key=server_key)
         if form.is_valid():
             # Inject snmp_version from toggle into cleaned_data for v1/v2c forms
             if snmp_version in ("v1", "v2c"):
@@ -140,17 +143,39 @@ class AddDeviceToLibreNMSView(
         return redirect(self.object.get_absolute_url())
 
 
-class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
+class UpdateDeviceLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update the LibreNMS site/location based on the NetBox site."""
+
+    # The device is only read here (the write lands in LibreNMS), but it is read by raw URL pk —
+    # so gate on the object view permission and resolve through the restricted queryset, or a
+    # constrained grant could push any device's site to LibreNMS.
+    required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request, pk):
         """Sync the device location to LibreNMS from the NetBox site."""
-        # Check write permission before updating location in LibreNMS
-        if error := self.require_write_permission():
+        # Check plugin write permission AND the object view permission before touching the device.
+        if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+        device = self.restrict_object_or_404(Device, pk=pk)
+
+        # Rebind the API client to the POSTed server before resolving the per-server
+        # librenms_id and writing the location, so a multi-server user acting on a
+        # non-default tab isn't routed through the globally selected server (writing
+        # the location to the wrong LibreNMS instance). Mirrors UpdateDeviceNameView.
+        server_key = self.rebind_api_for_posted_server(request.POST)
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return _device_sync_redirect(request, pk, server_key)
+
+        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
+        if lookup_error is not None:
+            messages.error(request, self.scoped_lookup_message(lookup_error))
+            return _device_sync_redirect(request, pk, server_key)
+
+        if not self.librenms_id:
+            messages.error(request, "Device not found in LibreNMS")
+            return _device_sync_redirect(request, pk, server_key)
 
         if device.site:
             librenms_api = self.librenms_api
@@ -170,4 +195,4 @@ class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         else:
             messages.warning(request, "Device has no associated site in NetBox")
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return _device_sync_redirect(request, pk, server_key)

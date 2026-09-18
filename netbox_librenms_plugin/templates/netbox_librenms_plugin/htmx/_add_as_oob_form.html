@@ -1,0 +1,16 @@
+{% comment %}
+Add-as-OOB action form, shared by the serial-match and primary_ip-match panes of
+device_validation_details.html so the two can't drift (same rationale as
+_existing_librenms_link_status.html). Expects the panes' rendering context:
+validation (existing_device), libre_device (device_id) and server_key.
+{% endcomment %}
+<form hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
+      hx-swap="none">
+  {% csrf_token %}
+  <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+  {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+  {% include "netbox_librenms_plugin/htmx/_oob_interface_select.html" %}
+  <button type="submit" class="btn btn-sm btn-primary">
+    <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
+  </button>
+</form>
