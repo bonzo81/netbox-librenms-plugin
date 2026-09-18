@@ -3427,8 +3427,13 @@ class TestSyncInterfacesViewPost:
         finally:
             cache.delete(cache_key)
 
-    def test_sync_selected_interfaces_skips_oob_rows(self):
-        """OOB-controller rows are merged into the host list only for context and are never routed to a real device."""
+    def test_sync_selected_interfaces_syncs_oob_rows_but_not_a_shared_lom(self):
+        """An OOB controller is a second LibreNMS device but the same device in NetBox.
+
+        Its ports are modelled as interfaces on the host. The exception is a shared LOM, where one
+        physical port is reported on both sides: syncing both rows would model it twice, so that
+        row is skipped and the skip is reported.
+        """
         from types import SimpleNamespace
 
         from dcim.models import Device, Interface
@@ -3471,7 +3476,99 @@ class TestSyncInterfacesViewPost:
             cache.delete(cache_key)
 
         assert response.status_code == 302
-        assert not Interface.objects.filter(device=device).exists()
+        assert Interface.objects.filter(device=device, name="eth0").exists(), (
+            "the OOB controller's port must be modellable as an interface on the host device"
+        )
+
+    def test_a_synced_oob_interface_shows_as_matched(self):
+        """Once synced, the OOB row must stop reading as "not in NetBox".
+
+        Resolution is by the stable port_id, never by name, so it can only ever bind to the
+        interface that actually stores that port id.
+        """
+        from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+        from netbox_librenms_plugin.interface_relationships import (
+            RelationshipResolutionContext,
+            build_interface_index,
+            resolve_relationship_row,
+        )
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        device = make_device("oob-matched-host")
+        iface = make_interface(device, "iDRAC-NIC")
+        set_librenms_device_id(iface, 9401, "default")
+        iface.save()
+
+        # The real index the view builds, so resolution runs against real lookup structures.
+        index = build_interface_index(device, "default")
+        port = {"port_id": 9401, "ifName": "iDRAC-NIC", "_source": OOB_INVENTORY_SOURCE}
+        context = RelationshipResolutionContext(
+            obj=device,
+            server_key="default",
+            catalog_index=index,
+            display_index=index,
+            related_index=index,
+            source_index=index,
+            actionable_owner_ids={device.pk},
+            changeable_interface_ids={iface.pk},
+            can_write=True,
+        )
+
+        resolved = resolve_relationship_row(context, port, device, "ifName", {9401}, set(), {})
+
+        assert resolved == iface, "the OOB row owns this interface by port_id"
+        assert port["exists_in_netbox"] is True
+        assert port["name_fallback_allowed"] is False, "an OOB row must never match by name"
+
+    def test_a_shared_lom_row_is_skipped_and_reported(self):
+        """One physical port reported on both sides must not become two NetBox interfaces."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("oob-shared-lom")
+        user = make_user_with_perms(
+            "oob-shared-lom",
+            [("view", Device), ("add", Interface), ("change", Interface)],
+        )
+        request = _make_request(
+            post_data={
+                "select": ["98"],
+                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
+            },
+            user=user,
+        )
+        view = SyncInterfacesView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "ifName": "lom0",
+                        "port_id": 98,
+                        "ifAdminStatus": "up",
+                        "_source": "oob",
+                        "_dedup_conflict": True,
+                    }
+                ]
+            },
+        )
+
+        try:
+            response = _post(view, request, object_type="device", object_id=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert not Interface.objects.filter(device=device, name="lom0").exists()
+        assert any("shared LOM" in text for text in message_texts(request, "warning")), (
+            "a skipped shared-LOM row must say why, not vanish"
+        )
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from types import SimpleNamespace
@@ -3660,6 +3757,39 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         return view
 
     @pytest.mark.django_db
+    @pytest.mark.django_db
+    def test_an_oob_controller_port_syncs_onto_the_host_device(self):
+        """A server and its BMC are two LibreNMS devices but ONE device in NetBox.
+
+        The OOB controller's ports have to be modellable as interfaces on the host device, the
+        same way the iDRAC interface that carries the OOB IP already is. port_id is a LibreNMS
+        global primary key, so an OOB row can never collide with a host row on identity.
+        """
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+
+        view = self._make_view(_make_request())
+        dev = make_device("oob-sync-host")
+        oob_port = {
+            "ifName": "iDRAC-NIC",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 1000000000,
+            "ifAlias": "BMC dedicated",
+            "ifMtu": 1500,
+            "port_id": 9301,
+            "ifAdminStatus": "up",
+            "_source": OOB_INVENTORY_SOURCE,
+        }
+        view._selected_port_ids = {9301}
+        view._auto_selected_port_ids = set()
+        view._auto_selected_target_ids = {}
+
+        view.sync_selected_interfaces(dev, [oob_port], ["vlans"], "ifName")
+
+        iface = Interface.objects.get(device=dev, name="iDRAC-NIC")
+        assert iface.description == "BMC dedicated"
+
     def test_device_interface_created(self):
         """End-to-end: sync_interface creates a real Interface on a real Device and persists the synced attributes (the real get_or_create + update_interface_attributes + save run)."""
         from dcim.models import Interface

@@ -819,9 +819,10 @@ class BaseInterfaceTableView(
                 port["sync_target_resolvable"] = (
                     chassis_member.pk in actionable_owner_ids and port_id in unique_host_port_ids
                 )
-                # A bound interface is now always a genuine host match (OOB rows resolved to None
-                # above), so it correctly counts toward the matched set used for netbox-only detection
-                # without an OOB row ever hiding a same-named host interface.
+                # A bound interface is always resolved by the stable port_id -- for an OOB row
+                # too, which can own an interface on this device. It therefore counts toward the
+                # matched set used for netbox-only detection, and because no binding comes from a
+                # name lookup, an OOB row can never hide a same-named host interface.
                 if netbox_interface is not None:
                     matched_interface_ids.add(netbox_interface.id)
 

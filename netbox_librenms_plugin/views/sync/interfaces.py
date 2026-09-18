@@ -910,12 +910,18 @@ class SyncInterfacesView(
                 self._prepare_vlan_lookup_maps(vlan_scope_devices)
             try:
                 for port in ports_data:
-                    # OOB-controller rows are merged into the host's interface list only for context
-                    # (shared-LOM detection) and are never routed to a real target device by
-                    # sync_interface(). They must not sync onto the host — and skipping them prevents
-                    # a main/OOB interface-name collision (both "eth0") from double-processing one
-                    # selection and overwriting the host interface with the OOB row's port_id/attrs.
-                    if port.get("_source") == OOB_INVENTORY_SOURCE:
+                    # An OOB controller is a second device in LibreNMS but the SAME device in
+                    # NetBox, so its ports are modelled as interfaces here. port_id is a LibreNMS
+                    # global primary key, so an OOB row can never resolve onto a host row's
+                    # interface by id; a name clash is caught by _resolve_device_interface and
+                    # recorded as a skipped conflict rather than overwriting the host interface.
+                    # A shared LOM is the exception: one physical port reported on both sides, so
+                    # syncing both rows would model it twice.
+                    if port.get("_source") == OOB_INVENTORY_SOURCE and port.get("_dedup_conflict"):
+                        self._record_skipped_conflict(
+                            port.get(interface_name_field),
+                            "shared LOM already synced from the host side",
+                        )
                         continue
                     port_id = normalize_librenms_port_id(port.get("port_id"))
 
