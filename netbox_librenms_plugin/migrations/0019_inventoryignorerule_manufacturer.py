@@ -31,19 +31,42 @@ def scope_include_rule_to_juniper(apps, schema_editor):
     """
     db_alias = schema_editor.connection.alias
     Manufacturer = apps.get_model("dcim", "Manufacturer")
+    InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
 
-    juniper = Manufacturer.objects.using(db_alias).filter(slug__in=JUNIPER_SLUGS).order_by("pk").first()
-    if juniper is None:
+    juniper_manufacturers = list(Manufacturer.objects.using(db_alias).filter(slug__in=JUNIPER_SLUGS).order_by("pk"))
+    if not juniper_manufacturers:
         # Nothing to scope to. Leave the rule as it is rather than disable it: a NetBox that gains
         # its first Juniper device later would otherwise hide the Routing Engines again, with
         # nothing to point at. The field is on the form, so an operator can scope it by hand.
         return
-    _seeded_include_rules(apps, db_alias).filter(manufacturer__isnull=True).update(manufacturer=juniper)
+
+    # Both Juniper slugs can exist in one NetBox. A rule scoped to one of them does not apply to
+    # devices of the other, so give every matching manufacturer its own copy of the rule.
+    seeded = _seeded_include_rules(apps, db_alias)
+    for manufacturer in juniper_manufacturers:
+        if seeded.filter(manufacturer=manufacturer).exists():
+            continue
+        unscoped = seeded.filter(manufacturer__isnull=True).order_by("pk").first()
+        if unscoped is None:
+            InventoryIgnoreRule.objects.using(db_alias).create(**_INCLUDE_RULE.DEFAULT_RULE, manufacturer=manufacturer)
+        else:
+            seeded.filter(pk=unscoped.pk).update(manufacturer=manufacturer)
 
 
 def unscope_include_rule(apps, schema_editor):
     """Return the seeded rule to its vendor-agnostic state before the field is dropped."""
-    _seeded_include_rules(apps, schema_editor.connection.alias).update(manufacturer=None)
+    db_alias = schema_editor.connection.alias
+    Manufacturer = apps.get_model("dcim", "Manufacturer")
+    seeded = _seeded_include_rules(apps, db_alias)
+
+    survivor = seeded.order_by("pk").first()
+    if survivor is None:
+        return
+    # Drop the per-manufacturer copies the forward migration cloned, then unscope the one that
+    # remains, which is the single vendor-agnostic rule 0017 seeded.
+    juniper_ids = list(Manufacturer.objects.using(db_alias).filter(slug__in=JUNIPER_SLUGS).values_list("pk", flat=True))
+    seeded.filter(manufacturer_id__in=juniper_ids).exclude(pk=survivor.pk).delete()
+    seeded.filter(pk=survivor.pk).update(manufacturer=None)
 
 
 class Migration(migrations.Migration):

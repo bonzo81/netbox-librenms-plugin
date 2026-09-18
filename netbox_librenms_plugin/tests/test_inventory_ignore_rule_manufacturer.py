@@ -147,6 +147,30 @@ class TestSeededRuleScoping:
         rule = InventoryIgnoreRule.objects.get(name=include.DEFAULT_RULE["name"])
         assert rule.manufacturer == juniper
 
+    def test_every_matching_juniper_manufacturer_is_scoped(self):
+        """Both Juniper slugs are supported, so a NetBox holding both must scope each one.
+
+        Scoping only the lowest-PK match leaves the other manufacturer's devices without the
+        include rule, which drops their Routing Engines from the modules tab.
+        """
+        import importlib
+
+        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
+        from netbox_librenms_plugin.views.base.modules_view import _class_is_included
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        include = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+        juniper = _manufacturer("Juniper", "juniper")
+        juniper_networks = _manufacturer("Juniper Networks", "juniper-networks")
+        InventoryIgnoreRule.objects.filter(name=include.DEFAULT_RULE["name"]).update(manufacturer=None)
+
+        self._run_migration_scoping()
+
+        item = {"entPhysicalClass": "other", "entPhysicalName": "RE0"}
+        assert _class_is_included(item, get_enabled_ignore_rules(juniper)) is True
+        assert _class_is_included(item, get_enabled_ignore_rules(juniper_networks)) is True
+
     def test_the_seeded_rule_is_left_enabled_when_juniper_is_absent(self):
         """
         With nothing to scope to, the rule keeps working.
