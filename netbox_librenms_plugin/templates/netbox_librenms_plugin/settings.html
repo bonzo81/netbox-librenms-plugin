@@ -14,6 +14,11 @@
                 <i class="ti ti-download me-1"></i> Import Settings
             </button>
         </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="cable-sync-settings-tab" data-bs-toggle="tab" data-bs-target="#cable-sync-settings" type="button" role="tab" aria-controls="cable-sync-settings" aria-selected="false">
+                <i class="ti ti-plug me-1"></i> Cable Sync
+            </button>
+        </li>
     </ul>
 {% endblock tabs %}
 
@@ -351,6 +356,95 @@
                 </div>
             </form>
         </div>
+
+        <!-- Cable Sync Settings Tab -->
+        <div class="tab-pane fade" id="cable-sync-settings" role="tabpanel" aria-labelledby="cable-sync-settings-tab">
+            <form action="" method="post" class="form" enctype="multipart/form-data">
+                {% csrf_token %}
+                <input type="hidden" name="form_type" value="cable_sync_settings">
+
+                <div class="row justify-content-start">
+                    <div class="col-lg-6">
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <h3 class="card-title">
+                                    <i class="ti ti-plug me-2"></i>
+                                    Cable Provenance
+                                </h3>
+                            </div>
+                            <div class="card-body">
+                                {% if cable_sync_form.non_field_errors %}
+                                    <div class="alert alert-danger" role="alert">
+                                        {{ cable_sync_form.non_field_errors }}
+                                    </div>
+                                {% endif %}
+                                <p class="text-muted mb-3">
+                                    Every cable the cable sync creates is stamped with a provenance tag, color and
+                                    description. The tag records plugin provenance and identifies adopted
+                                    connections. Every destructive replacement still requires confirmation.
+                                    Renaming or recoloring the tag updates the same managed Tag, so existing tagged
+                                    cables show the new tag. Cable color and description changes apply to cables
+                                    created from then on.
+                                </p>
+
+                                {# Render ONLY the cable-sync fields — NetBoxModelForm also adds tags/ #}
+                                {# changelog fields this plain settings model doesn't support (same #}
+                                {# convention as the other tabs, which render their fields explicitly). #}
+                                {% with field=cable_sync_form.cable_sync_tag %}
+                                    <div class="form-group mb-3">
+                                        <label for="{{ field.id_for_label }}" class="form-label">{{ field.label }}</label>
+                                        {{ field }}
+                                        {% if field.errors %}
+                                            <div class="invalid-feedback d-block">{{ field.errors }}</div>
+                                        {% endif %}
+                                        {% if field.help_text %}
+                                            <small class="form-text text-muted d-block">{{ field.help_text }}</small>
+                                        {% endif %}
+                                    </div>
+                                {% endwith %}
+                                {% with field=cable_sync_form.cable_sync_tag_color %}
+                                    <div class="form-group mb-3">
+                                        <label for="{{ field.id_for_label }}" class="form-label">{{ field.label }}</label>
+                                        {{ field }}
+                                        {% if field.errors %}
+                                            <div class="invalid-feedback d-block">{{ field.errors }}</div>
+                                        {% endif %}
+                                        {% if field.help_text %}
+                                            <small class="form-text text-muted d-block">{{ field.help_text }}</small>
+                                        {% endif %}
+                                    </div>
+                                {% endwith %}
+                                {% with field=cable_sync_form.cable_sync_description %}
+                                    <div class="form-group mb-3">
+                                        <label for="{{ field.id_for_label }}" class="form-label">{{ field.label }}</label>
+                                        {{ field }}
+                                        {% if field.errors %}
+                                            <div class="invalid-feedback d-block">{{ field.errors }}</div>
+                                        {% endif %}
+                                        {% if field.help_text %}
+                                            <small class="form-text text-muted d-block">{{ field.help_text }}</small>
+                                        {% endif %}
+                                    </div>
+                                {% endwith %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Save Button -->
+                <div class="row justify-content-start">
+                    <div class="col-lg-6">
+                        <div class="text-end">
+                            <button type="submit" id="save-cable-sync-btn" class="btn btn-primary"
+                                    data-force-enabled="{% if cable_sync_form.errors %}true{% else %}false{% endif %}"
+                                    {% if not cable_sync_form.errors %}disabled{% endif %}>
+                                <i class="ti ti-check me-1"></i> Save Cable Sync Settings
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
     </div>
 
 <!-- Spacing -->
@@ -363,22 +457,28 @@ document.addEventListener('DOMContentLoaded', function() {
     const tabContent = document.querySelector('.tab-content');
     const activeTab = tabContent ? tabContent.dataset.activeTab : '';
 
-    if (activeTab === 'import_settings') {
-        const importTab = document.getElementById('import-settings-tab');
-        const importPane = document.getElementById('import-settings');
+    // Map each form_type to its tab/pane ids so a validation error re-opens the right tab
+    const tabByFormType = {
+        'import_settings': ['import-settings-tab', 'import-settings'],
+        'cable_sync_settings': ['cable-sync-settings-tab', 'cable-sync-settings'],
+    };
+    if (tabByFormType[activeTab]) {
+        const [tabId, paneId] = tabByFormType[activeTab];
+        const targetTab = document.getElementById(tabId);
+        const targetPane = document.getElementById(paneId);
         const configTab = document.getElementById('config-tab');
         const configPane = document.getElementById('config');
 
-        if (importTab && importPane && configTab && configPane) {
-            // Deactivate config tab
+        if (targetTab && targetPane && configTab && configPane) {
+            // Deactivate config tab (the default active one)
             configTab.classList.remove('active');
             configTab.setAttribute('aria-selected', 'false');
             configPane.classList.remove('show', 'active');
 
-            // Activate import settings tab
-            importTab.classList.add('active');
-            importTab.setAttribute('aria-selected', 'true');
-            importPane.classList.add('show', 'active');
+            // Activate the tab whose form failed validation
+            targetTab.classList.add('active');
+            targetTab.setAttribute('aria-selected', 'true');
+            targetPane.classList.add('show', 'active');
         }
     }
 
@@ -432,9 +532,31 @@ document.addEventListener('DOMContentLoaded', function() {
     if (locationRegexCheckbox) locationRegexCheckbox.addEventListener('change', updateImportSaveButton);
     if (rememberInterfaceNameCheckbox) rememberInterfaceNameCheckbox.addEventListener('change', updateImportSaveButton);
 
+    // Cable-sync form: same enable-on-change pattern
+    const cableSyncFields = ['id_cable_sync_tag', 'id_cable_sync_tag_color', 'id_cable_sync_description']
+        .map(id => document.getElementById(id))
+        .filter(Boolean);
+    const saveCableSyncBtn = document.getElementById('save-cable-sync-btn');
+    const initialCableSyncValues = cableSyncFields.map(f => f.value);
+
+    function updateCableSyncSaveButton() {
+        if (!saveCableSyncBtn) return;
+        const hasChanges = saveCableSyncBtn.dataset.forceEnabled === 'true'
+            || cableSyncFields.some((f, i) => f.value !== initialCableSyncValues[i]);
+        saveCableSyncBtn.disabled = !hasChanges;
+        saveCableSyncBtn.classList.toggle('btn-primary', hasChanges);
+        saveCableSyncBtn.classList.toggle('btn-secondary', !hasChanges);
+    }
+
+    cableSyncFields.forEach(f => {
+        f.addEventListener('input', updateCableSyncSaveButton);
+        f.addEventListener('change', updateCableSyncSaveButton);
+    });
+
     // Initialize button states
     updateServerSaveButton();
     updateImportSaveButton();
+    updateCableSyncSaveButton();
 });
 </script>
 {% endblock %}

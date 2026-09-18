@@ -1,0 +1,622 @@
+"""PostgreSQL concurrency coverage for cable overwrite decisions."""
+
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
+from time import monotonic, sleep
+from types import SimpleNamespace
+
+import pytest
+from django.apps import apps
+
+from netbox_librenms_plugin.tests.conftest import (
+    cable_together,
+    make_device,
+    make_interface,
+    make_serial_device,
+    make_virtual_chassis,
+)
+
+pytestmark = pytest.mark.django_db(
+    transaction=True,
+    available_apps=[app.name for app in apps.get_app_configs()],
+)
+
+
+def _wait_until_blocked(pid, future, seconds=5):
+    """Block until the worker backend waits on a database lock."""
+    from django.db import connection
+
+    deadline = monotonic() + seconds
+    last_state = None
+    while monotonic() < deadline:
+        if future.done():
+            raise AssertionError(f"settings worker {pid} completed early with status {future.result()}")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state, wait_event_type, wait_event, query FROM pg_stat_activity WHERE pid = %s",
+                [pid],
+            )
+            row = cursor.fetchone()
+        last_state = row
+        if row and row[1] == "Lock":
+            return
+        sleep(0.01)
+    raise AssertionError(f"settings worker {pid} did not wait for a database lock: {last_state!r}")
+
+
+@pytest.fixture(autouse=True)
+def restore_librenms_id_custom_field():
+    """
+    Recreate migration-seeded custom-field state after each transaction flush.
+
+    conftest owns this contract. The local copy mutated the alias set in place through a
+    ``getattr(..., set())`` default, so it did nothing at all until the attribute existed.
+    """
+    from netbox_librenms_plugin.tests.conftest import _restore_librenms_custom_field
+
+    _restore_librenms_custom_field()
+
+
+def test_current_cable_lock_blocks_replacement_after_confirmation():
+    from dcim.models import Cable
+    from django.db import OperationalError, close_old_connections, transaction
+
+    from netbox_librenms_plugin.tests.test_cable_overwrite import _sync_view
+
+    _device, (csp,), _ = make_serial_device("lock-cable-local", csp_names=["ttyS1"])
+    _current_remote, _, (current_cp,) = make_serial_device("lock-cable-current", cp_names=["console"])
+    _target_remote, _, (target_cp,) = make_serial_device("lock-cable-target", cp_names=["console"])
+    cable = cable_together(csp, current_cp)
+    sync = _sync_view()
+
+    def replace_current_cable():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                from django.db import connection
+
+                with connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout = '500ms'")
+                Cable.objects.get(pk=cable.pk).delete()
+        finally:
+            close_old_connections()
+
+    with transaction.atomic():
+        locked_terms = sync._lock_cable_terminations(csp, target_cp)
+        assert locked_terms is not None
+        locked = sync._lock_current_cables(*locked_terms)
+        assert set(locked) == {cable.pk}
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(replace_current_cable)
+            with pytest.raises(OperationalError):
+                future.result(timeout=5)
+
+    assert Cable.objects.filter(pk=cable.pk).exists()
+
+
+def test_cable_sync_locks_device_owners_before_terminations():
+    """Cable and relationship writers must acquire shared owner locks in one order."""
+    from django.contrib.auth import get_user_model
+    from django.db import connection, transaction
+    from django.test import RequestFactory
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    _local_device, (csp,), _ = make_serial_device("cable-lock-order-local", csp_names=["ttyS1"])
+    _remote_device, _, (cp,) = make_serial_device("cable-lock-order-remote", cp_names=["console"])
+    sync = object.__new__(SyncCablesView)
+    sync.request = RequestFactory().post("/")
+    sync.request.user = get_user_model().objects.create_superuser("cable-lock-order-user", "", "pw")
+
+    with transaction.atomic(), CaptureQueriesContext(connection) as captured:
+        assert sync._lock_cable_terminations(csp, cp) is not None
+
+    locking_sql = [query["sql"] for query in captured.captured_queries if "FOR UPDATE" in query["sql"]]
+    device_lock = next(index for index, sql in enumerate(locking_sql) if 'FROM "dcim_device"' in sql)
+    termination_locks = [
+        index
+        for index, sql in enumerate(locking_sql)
+        if 'FROM "dcim_consoleserverport"' in sql or 'FROM "dcim_consoleport"' in sql
+    ]
+    assert termination_locks
+    assert device_lock < min(termination_locks)
+
+
+def test_remote_termination_owner_change_invalidates_the_confirmed_target():
+    """A stable termination PK must not authorize a cable to its new owner Device."""
+    from dcim.models import ConsolePort
+
+    from netbox_librenms_plugin.tests.test_cable_overwrite import _sync_view
+
+    local_device, (csp,), _ = make_serial_device("cable-owner-drift-local", csp_names=["ttyS1"])
+    expected_remote, _, (cp,) = make_serial_device("cable-owner-drift-expected", cp_names=["console"])
+    moved_remote, _, _ = make_serial_device("cable-owner-drift-current")
+    stale_cp = ConsolePort.objects.get(pk=cp.pk)
+    ConsolePort.objects.filter(pk=cp.pk).update(device=moved_remote)
+
+    sync = _sync_view()
+    sync._initial_device = local_device
+    row_id = f"serial:{csp.pk}"
+    result = sync._apply_cable_action(
+        csp,
+        stale_cp,
+        {
+            "row_id": row_id,
+            "netbox_remote_interface_id": cp.pk,
+            "netbox_remote_device_id": expected_remote.pk,
+        },
+        csp.name,
+        False,
+    )
+
+    assert result["status"] == "stale"
+    csp.refresh_from_db()
+    cp.refresh_from_db()
+    assert csp.cable_id is None
+    assert cp.cable_id is None
+
+
+def test_local_termination_owner_change_invalidates_the_selected_member():
+    """A same-chassis move must not replace the exact selected local owner."""
+    from dcim.models import ConsoleServerPort
+
+    from netbox_librenms_plugin.tests.test_cable_overwrite import _sync_view
+
+    expected_local, (csp,), _ = make_serial_device("cable-local-drift-expected", csp_names=["ttyS1"])
+    moved_local, _, _ = make_serial_device("cable-local-drift-current")
+    make_virtual_chassis("cable-local-drift-vc", expected_local, moved_local)
+    _remote, _, (cp,) = make_serial_device("cable-local-drift-remote", cp_names=["console"])
+    stale_csp = ConsoleServerPort.objects.get(pk=csp.pk)
+    ConsoleServerPort.objects.filter(pk=csp.pk).update(device=moved_local)
+
+    sync = _sync_view()
+    sync._initial_device = expected_local
+    row_id = f"serial:{csp.pk}"
+    result = sync._apply_cable_action(
+        stale_csp,
+        cp,
+        {
+            "row_id": row_id,
+            "device_id": expected_local.pk,
+            "netbox_remote_interface_id": cp.pk,
+            "netbox_remote_device_id": cp.device_id,
+        },
+        csp.name,
+        False,
+    )
+
+    assert result["status"] == "stale"
+    csp.refresh_from_db()
+    cp.refresh_from_db()
+    assert csp.cable_id is None
+    assert cp.cable_id is None
+
+
+def test_termination_change_scope_is_rechecked_after_row_lock():
+    from core.models import ObjectType
+    from dcim.models import ConsolePort, ConsoleServerPort, Device
+    from django.contrib.auth import get_user_model
+    from django.db import close_old_connections, connection, transaction
+    from users.models import ObjectPermission
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    _local, (csp,), _ = make_serial_device("lock-scope-local", csp_names=["ttyS1"])
+    csp.description = "managed"
+    csp.save(update_fields=["description"])
+    _remote, _, (cp,) = make_serial_device("lock-scope-remote", cp_names=["console"])
+    user = get_user_model().objects.create_user("lock-scope-user")
+    scoped_csp = ObjectPermission.objects.create(
+        name="lock-scope-csp",
+        actions=["change"],
+        constraints={"description": "managed"},
+    )
+    scoped_csp.object_types.add(ObjectType.objects.get_for_model(ConsoleServerPort))
+    scoped_csp.users.add(user)
+    console_ports = ObjectPermission.objects.create(name="lock-scope-cp", actions=["change"])
+    console_ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))
+    console_ports.users.add(user)
+    # Owners are locked before terminations, and that lock is gated on Device view scope, so the
+    # worker never reaches the termination row without this grant.
+    device_view = ObjectPermission.objects.create(name="lock-scope-device", actions=["view"])
+    device_view.object_types.add(ObjectType.objects.get_for_model(Device))
+    device_view.users.add(user)
+    user = get_user_model().objects.get(pk=user.pk)
+
+    sync = object.__new__(SyncCablesView)
+    sync.request = SimpleNamespace(user=user)
+    backend_pids = Queue()
+
+    def lock_terminations():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                connection.ensure_connection()
+                backend_pids.put(connection.connection.info.backend_pid)
+                return sync._lock_cable_terminations(csp, cp)
+        finally:
+            close_old_connections()
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with transaction.atomic():
+            ConsoleServerPort.objects.select_for_update().get(pk=csp.pk)
+            future = executor.submit(lock_terminations)
+            worker_pid = backend_pids.get(timeout=5)
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
+                        [worker_pid],
+                    )
+                    row = cursor.fetchone()
+                if row and row[0] == "Lock":
+                    break
+                sleep(0.01)
+            else:
+                raise AssertionError("worker did not wait for the termination row lock")
+            ConsoleServerPort.objects.filter(pk=csp.pk).update(description="restricted")
+
+        assert future.result(timeout=5) is None
+    finally:
+        executor.shutdown(wait=True)
+
+
+def test_termination_owner_device_is_locked_with_permission_scope():
+    """The owner cannot leave a relation-constrained grant before the cable write."""
+    from core.models import ObjectType
+    from dcim.models import ConsolePort, ConsoleServerPort, Device, Site
+    from django.contrib.auth import get_user_model
+    from django.db import OperationalError, close_old_connections, connection, transaction
+    from users.models import ObjectPermission
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    in_scope = Site.objects.create(name="cable-owner-site-a", slug="cable-owner-site-a")
+    out_of_scope = Site.objects.create(name="cable-owner-site-b", slug="cable-owner-site-b")
+    local_device, (csp,), _ = make_serial_device("cable-owner-local", csp_names=["ttyS1"])
+    local_device.site = in_scope
+    local_device.save(update_fields=["site"])
+    _remote, _, (cp,) = make_serial_device("cable-owner-remote", cp_names=["console"])
+
+    user = get_user_model().objects.create_user("cable-owner-scope-user")
+    scoped_csp = ObjectPermission.objects.create(
+        name="cable-owner-csp",
+        actions=["change"],
+        constraints={"device__site_id": in_scope.pk},
+    )
+    scoped_csp.object_types.add(ObjectType.objects.get_for_model(ConsoleServerPort))
+    scoped_csp.users.add(user)
+    console_ports = ObjectPermission.objects.create(name="cable-owner-cp", actions=["change"])
+    console_ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))
+    console_ports.users.add(user)
+    device_view = ObjectPermission.objects.create(name="cable-owner-device-view", actions=["view"])
+    device_view.object_types.add(ObjectType.objects.get_for_model(Device))
+    device_view.users.add(user)
+    user = get_user_model().objects.get(pk=user.pk)
+
+    sync = object.__new__(SyncCablesView)
+    sync.request = SimpleNamespace(user=user)
+    locked = Queue()
+    release = Queue()
+
+    def hold_sync_scope():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                result = sync._lock_cable_terminations(csp, cp)
+                locked.put(result)
+                release.get(timeout=5)
+        finally:
+            close_old_connections()
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(hold_sync_scope)
+        assert locked.get(timeout=5) is not None
+        with pytest.raises(OperationalError), transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout = '500ms'")
+            Device.objects.filter(pk=local_device.pk).update(site=out_of_scope)
+        release.put(True)
+        future.result(timeout=5)
+    finally:
+        if release.empty():
+            release.put(True)
+        executor.shutdown(wait=True)
+
+
+def test_locked_local_owner_must_still_belong_to_the_page_virtual_chassis():
+    """A stale pre-lock member check must not authorize a former VC member."""
+    from django.contrib.auth import get_user_model
+    from django.db import transaction
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    page = make_device("cable-vc-scope-page")
+    member = make_device("cable-vc-scope-member")
+    make_virtual_chassis("cable-vc-scope", page, member)
+    local = make_interface(member, "Ethernet1")
+    remote = make_interface(make_device("cable-vc-scope-remote"), "Ethernet9")
+    user = get_user_model().objects.create_superuser("cable-vc-scope-user", "", "pw")
+    sync = object.__new__(SyncCablesView)
+    sync.request = SimpleNamespace(user=user)
+    sync._initial_device = page
+
+    member.virtual_chassis = None
+    member.vc_position = None
+    member.save(update_fields=["virtual_chassis", "vc_position"])
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote)
+
+    assert locked is None
+
+
+def _lock_view(username, *, initial_device=None, origin_device=None, cache_device=None):
+    """A sync view carrying the page/origin/cache devices the lock re-checks after locking."""
+    from django.contrib.auth import get_user_model
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    sync = object.__new__(SyncCablesView)
+    sync.request = SimpleNamespace(user=get_user_model().objects.create_superuser(username, "", "pw"))
+    if initial_device is not None:
+        sync._initial_device = initial_device
+    if origin_device is not None:
+        sync._origin_device = origin_device
+    if cache_device is not None:
+        sync._cache_device = cache_device
+    return sync
+
+
+def test_a_local_owner_that_no_longer_matches_the_confirmed_one_is_stale():
+    """The confirmation named an owner; a row that moved devices must not be cabled under it."""
+    from django.db import transaction
+
+    local = make_interface(make_device("cable-expect-local"), "Ethernet1")
+    remote = make_interface(make_device("cable-expect-remote"), "Ethernet9")
+    sync = _lock_view("cable-expect-local-user")
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote, expected_local_owner_id=local.device_id + 10_000)
+
+    assert locked is None
+    assert sync._termination_lock_failure == "stale"
+
+
+def test_a_remote_owner_that_no_longer_matches_the_confirmed_one_is_stale():
+    from django.db import transaction
+
+    local = make_interface(make_device("cable-expect2-local"), "Ethernet1")
+    remote = make_interface(make_device("cable-expect2-remote"), "Ethernet9")
+    sync = _lock_view("cable-expect2-user")
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(remote, local, expected_remote_owner_id=local.device_id + 10_000)
+
+    assert locked is None
+    assert sync._termination_lock_failure == "stale"
+
+
+def test_an_origin_device_outside_the_page_chassis_is_stale():
+    """The row's origin must still be the page device or one of its chassis members."""
+    from django.db import transaction
+
+    page = make_device("cable-origin-page")
+    stranger = make_device("cable-origin-stranger")
+    local = make_interface(page, "Ethernet1")
+    remote = make_interface(make_device("cable-origin-remote"), "Ethernet9")
+    sync = _lock_view("cable-origin-user", initial_device=page, origin_device=stranger)
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote)
+
+    assert locked is None
+    assert sync._termination_lock_failure == "stale"
+
+
+def test_an_origin_device_in_the_page_chassis_is_accepted():
+    """The guard must admit a genuine sibling member, not just reject everything."""
+    from django.db import transaction
+
+    page = make_device("cable-origin-ok-page")
+    sibling = make_device("cable-origin-ok-sibling")
+    make_virtual_chassis("cable-origin-ok-vc", page, sibling)
+    local = make_interface(page, "Ethernet1")
+    remote = make_interface(make_device("cable-origin-ok-remote"), "Ethernet9")
+    sync = _lock_view("cable-origin-ok-user", initial_device=page, origin_device=sibling)
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote)
+
+    assert locked is not None
+
+
+def test_a_cache_device_outside_the_page_chassis_is_stale():
+    """The snapshot the row came from must belong to the page device or its chassis."""
+    from django.db import transaction
+
+    page = make_device("cable-cache-page")
+    stranger = make_device("cable-cache-stranger")
+    local = make_interface(page, "Ethernet1")
+    remote = make_interface(make_device("cable-cache-remote"), "Ethernet9")
+    sync = _lock_view("cable-cache-user", initial_device=page, cache_device=stranger)
+
+    with transaction.atomic():
+        locked = sync._lock_cable_terminations(local, remote)
+
+    assert locked is None
+    assert sync._termination_lock_failure == "stale"
+
+
+def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together():
+    """A stale settings form must rename the Tag selected by the current locked row."""
+    from django.contrib.auth import get_user_model
+    from django.db import close_old_connections, connection, transaction
+
+    from netbox_librenms_plugin.forms import CableSyncSettingsForm
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+    settings, _ = LibreNMSSettings.objects.get_or_create()
+    tag = get_librenms_cable_tag(sync_settings=settings)
+    users = [get_user_model().objects.create_superuser(f"concurrent-tag-{index}", "", "pw") for index in range(2)]
+    worker_pids = Queue()
+    first_has_settings_lock = Queue()
+    release_first = Queue()
+
+    forms = []
+    for user, name in zip(users, ("managed-first", "managed-second"), strict=True):
+        form = CableSyncSettingsForm(
+            {
+                "cable_sync_tag": name,
+                "cable_sync_tag_color": "009688",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=LibreNMSSettings.objects.get(pk=settings.pk),
+            user=user,
+        )
+        assert form.is_valid(), form.errors
+        forms.append(form)
+
+    def rename_tag(form, *, pause_after_settings_lock=False):
+        close_old_connections()
+        try:
+            connection.ensure_connection()
+            worker_pids.put(connection.connection.info.backend_pid)
+
+            def pause_first_worker(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                normalized_sql = sql.lower()
+                if (
+                    pause_after_settings_lock
+                    and "netbox_librenms_plugin_librenmssettings" in normalized_sql
+                    and "for update" in normalized_sql
+                ):
+                    first_has_settings_lock.put(True)
+                    release_first.get(timeout=5)
+                return result
+
+            with connection.execute_wrapper(pause_first_worker):
+                form.save()
+            return True
+        finally:
+            close_old_connections()
+
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        with transaction.atomic():
+            LibreNMSSettings.objects.select_for_update().get(pk=settings.pk)
+            first = executor.submit(rename_tag, forms[0], pause_after_settings_lock=True)
+            first_pid = worker_pids.get(timeout=5)
+            _wait_until_blocked(first_pid, first)
+
+        assert first_has_settings_lock.get(timeout=5) is True
+        second = executor.submit(rename_tag, forms[1])
+        second_pid = worker_pids.get(timeout=5)
+        _wait_until_blocked(second_pid, second)
+        release_first.put(True)
+        assert first.result(timeout=10) is True
+        assert second.result(timeout=10) is True
+    finally:
+        if release_first.empty():
+            release_first.put(True)
+        executor.shutdown(wait=True)
+
+    settings.refresh_from_db()
+    tag.refresh_from_db()
+    assert settings.cable_sync_tag == "managed-second"
+    assert tag.name == settings.cable_sync_tag
+
+
+def test_settings_rename_reports_a_tag_name_taken_after_validation():
+    """A target tag name created while the rename waits for its lock must re-render, not 500."""
+    from django.contrib.auth import get_user_model
+    from django.db import close_old_connections, connection, transaction
+    from django.test import Client
+    from django.urls import reverse
+    from extras.models import Tag
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+    settings_row, _ = LibreNMSSettings.objects.get_or_create()
+    tag = get_librenms_cable_tag(sync_settings=settings_row)
+    user = get_user_model().objects.create_superuser("cable-tag-grab", "", "pw")
+    worker_pids = Queue()
+
+    # Log in before the lock is taken: the session row must be committed and out of the timed window.
+    client = Client()
+    client.force_login(user)
+
+    def post_rename():
+        close_old_connections()
+        try:
+            connection.ensure_connection()
+            worker_pids.put(connection.connection.info.backend_pid)
+            return client.post(
+                reverse("plugins:netbox_librenms_plugin:settings"),
+                {
+                    "form_type": "cable_sync_settings",
+                    "cable_sync_tag": "grabbed-name",
+                    "cable_sync_tag_color": "009688",
+                    "cable_sync_description": "Managed cable",
+                },
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with transaction.atomic():
+            LibreNMSSettings.objects.select_for_update().get(pk=settings_row.pk)
+            future = executor.submit(post_rename)
+            worker_pid = worker_pids.get(timeout=5)
+            # The form validated before it reached this lock, so the create below is the race.
+            # A whole request runs before the lock, so allow more than the direct-save tests do.
+            _wait_until_blocked(worker_pid, future, seconds=30)
+            Tag.objects.create(name="grabbed-name", slug="grabbed-name-unrelated")
+        response = future.result(timeout=10)
+
+    assert response.status_code == 200
+    assert "A different tag already uses this name." in response.content.decode()
+    settings_row.refresh_from_db()
+    tag.refresh_from_db()
+    assert settings_row.cable_sync_tag == tag.name
+    assert Tag.objects.filter(name="grabbed-name").count() == 1
+
+
+def test_provenance_tag_creation_survives_a_concurrent_slug_grab():
+    """A slug taken between the free-slug search and the create must not surface an IntegrityError."""
+    from django.db import close_old_connections, connection
+    from extras.models import Tag
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+    settings_row, _ = LibreNMSSettings.objects.get_or_create()
+    Tag.objects.filter(slug__startswith="librenms").delete()
+    raced = []
+
+    def grab_slug():
+        close_old_connections()
+        try:
+            Tag.objects.create(name="unrelated-slug-grab", slug="librenms")
+        finally:
+            close_old_connections()
+
+    def race_on_tag_insert(execute, sql, params, many, context):
+        if not raced and 'INSERT INTO "extras_tag"' in sql:
+            raced.append(sql)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(grab_slug).result(timeout=5)
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(race_on_tag_insert):
+        tag = get_librenms_cable_tag(sync_settings=settings_row)
+
+    assert raced, "the provenance tag insert never ran, so the race was not exercised"
+    assert tag.name == settings_row.cable_sync_tag
+    assert tag.slug == "librenms-2"

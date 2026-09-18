@@ -1117,6 +1117,132 @@ class TestInterfaceVlans:
         assert "vlan-edit-btn" not in html
         assert "vlan-group-hidden" not in html
 
+    def test_the_tooltip_names_the_group_of_each_vlan_and_flags_the_missing_ones(self):
+        """The title attribute is the only place the per-VLAN group resolution is shown."""
+        from html import unescape
+
+        from ipam.models import VLANGroup
+
+        group = VLANGroup.objects.create(name="vlan-tooltip-group", slug="vlan-tooltip-group")
+        table = _interface_table(make_device("vlan-tooltip-device"))
+        record = _port(
+            untagged_vlan=100,
+            tagged_vlans=[200],
+            missing_vlans=[200],
+            vlan_group_map={100: {"group_id": str(group.pk), "group_name": group.name}},
+            vlan_groups=[group],
+        )
+
+        html = unescape(str(table.render_vlans(None, record)))
+
+        assert f"VLAN 100(U) \u2192 {group.name}" in html
+        assert "VLAN 200(T) \u2192 \u26a0 Not in NetBox" in html
+
+    def test_a_vlan_with_no_group_entry_falls_back_to_global_in_the_tooltip(self):
+        from html import unescape
+
+        table = _interface_table(make_device("vlan-global-device"))
+        record = _port(untagged_vlan=100, vlan_group_map={})
+
+        html = unescape(str(table.render_vlans(None, record)))
+
+        assert "VLAN 100(U) \u2192 Global" in html
+
+    def test_the_modal_payload_carries_one_entry_per_vlan_with_its_css_and_group(self):
+        """data-vlans drives the edit modal, so every field it reads must survive."""
+        import json
+        from html import unescape
+
+        from ipam.models import VLANGroup
+
+        group = VLANGroup.objects.create(name="vlan-modal-group", slug="vlan-modal-group")
+        table = _interface_table(make_device("vlan-modal-device"))
+        record = _port(
+            untagged_vlan=100,
+            tagged_vlans=[200],
+            missing_vlans=[200],
+            vlan_group_map={100: {"group_id": str(group.pk), "group_name": group.name}},
+            vlan_groups=[group],
+        )
+
+        html = str(table.render_vlans(None, record))
+        payload = json.loads(unescape(html.split("data-vlans='")[1].split("'")[0]))
+
+        assert [entry["vid"] for entry in payload] == [100, 200]
+        assert [entry["type"] for entry in payload] == ["U", "T"]
+        assert payload[0]["group_name"] == group.name
+        assert payload[0]["group_id"] == str(group.pk)
+        assert payload[0]["missing"] is False
+        # A missing VLAN is labelled in the modal, not silently shown as Global.
+        assert payload[1]["group_name"] == "Not in NetBox"
+        assert payload[1]["missing"] is True
+
+    def test_the_modal_css_matches_the_inline_css_for_the_same_vlan(self):
+        """The inline summary and the modal derive the class separately; they must agree."""
+        import json
+        import re
+        from html import unescape
+
+        table = _interface_table(make_device("vlan-csspair-device"))
+        record = _port(exists_in_netbox=False, untagged_vlan=100, tagged_vlans=[200])
+
+        html = str(table.render_vlans(None, record))
+        payload = json.loads(unescape(html.split("data-vlans='")[1].split("'")[0]))
+        inline = dict(re.findall(r'<span class="([^"]+)">(\d+)\(', html))
+
+        by_vid = {str(entry["vid"]): entry["css"] for entry in payload}
+        assert by_vid, "the modal payload must carry a css class per VLAN"
+        for css, vid in inline.items():
+            assert by_vid[vid] == css, f"VLAN {vid} renders {css} inline but {by_vid[vid]} in the modal"
+
+    def test_the_group_dropdown_offers_the_global_option_first(self):
+        import json
+        from html import unescape
+
+        from ipam.models import VLANGroup
+
+        group = VLANGroup.objects.create(name="vlan-options-group", slug="vlan-options-group")
+        table = _interface_table(make_device("vlan-options-device"))
+        record = _port(untagged_vlan=100, vlan_groups=[group])
+
+        html = str(table.render_vlans(None, record))
+        options = json.loads(unescape(html.split("data-vlan-groups='")[1].split("'")[0]))
+
+        assert options[0] == {"id": "", "name": "-- No Group (Global) --", "scope": ""}
+        assert {"id": str(group.pk), "name": group.name, "scope": ""} in options
+
+    def test_the_edit_button_targets_the_row_selected_device_when_one_is_chosen(self):
+        """A VC member override must not submit VLAN edits against the page device."""
+        page = make_device("vlan-device-page")
+        member = make_device("vlan-device-member")
+        table = _interface_table(page)
+        record = _port(untagged_vlan=100, selected_object_id=member.pk)
+
+        html = str(table.render_vlans(None, record))
+
+        assert f'data-device-id="{member.pk}"' in html
+
+    def test_the_edit_button_falls_back_to_the_page_device(self):
+        page = make_device("vlan-device-fallback")
+        table = _interface_table(page)
+        record = _port(untagged_vlan=100)
+
+        html = str(table.render_vlans(None, record))
+
+        assert f'data-device-id="{page.pk}"' in html
+
+    def test_missing_port_id_does_not_render_literal_none_form_keys(self):
+        table = _interface_table(make_device("vlan-missing-port-id"))
+        record = _port(
+            port_id=None,
+            untagged_vlan=100,
+        )
+
+        html = str(table.render_vlans(None, record))
+
+        assert "vlan_group_None_100" not in html
+        assert "vlan_group__100" in html
+
 
 @pytest.mark.django_db
 class TestInterfaceRelationships:
@@ -1259,6 +1385,16 @@ class TestInterfaceFormatting:
 
         assert table.page.paginator.per_page == 1
 
+    def test_null_port_id_row_attr_stays_empty(self):
+        table = _interface_table(make_device("row-attr-empty-port-id"))
+
+        assert table.row_attrs["data-port-id"](_port(port_id=None)) == ""
+
+    def test_real_port_id_row_attr_is_preserved(self):
+        table = _interface_table(make_device("row-attr-real-port-id"))
+
+        assert table.row_attrs["data-port-id"](_port(port_id=42)) == "42"
+
 
 @pytest.mark.django_db
 class TestVirtualChassisInterfaceTable:
@@ -1334,6 +1470,17 @@ class TestVirtualChassisInterfaceTable:
         assert 'name="select" value="11"' in selections[1]
         assert 'name="device_selection_10"' in dropdowns[0]
         assert 'name="device_selection_11"' in dropdowns[1]
+
+    def test_missing_port_id_does_not_render_literal_none_dropdown_key(self):
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+
+        first, _second = self._members("vc-missing-port-id")
+        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+
+        html = str(table.render_device_selection(None, _port(port_id=None)))
+
+        assert "device_selection_None" not in html
+        assert 'name="device_selection_"' in html
 
     def test_member_names_are_escaped_in_dropdown_options(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable

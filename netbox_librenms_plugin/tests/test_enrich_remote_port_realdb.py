@@ -1,4 +1,5 @@
-"""Real-DB coverage for BaseCableTableView.enrich_remote_port librenms_id lookup.
+"""
+Real-DB coverage for BaseCableTableView.enrich_remote_port librenms_id lookup.
 
 Issue #113 (CodeRabbit): the mock-based enrich_remote_port tests in test_coverage_base_views2.py
 use a reported remote_port equal to the interface name, so they still pass if the librenms_id
@@ -105,6 +106,65 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
 
 
 @pytest.mark.django_db
+class TestVCCableTableSerialOwnership:
+    """
+    A serial row names the ConsoleServerPort's own device, which may not be a VC member.
+
+    The sync view compares the submitted device against the port's device and rejects a
+    mismatch, so substituting a member turns the row into a click that always fails.
+    """
+
+    @staticmethod
+    def _table_with_outside_owner():
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
+
+        member = _make_device("vc-serial-member", "s1")
+        vc = VirtualChassis.objects.create(name="vc-serial")
+        member.virtual_chassis = vc
+        member.vc_position = 1
+        member.save()
+        outsider = _make_device("vc-serial-outsider", "s2")  # deliberately NOT in the chassis
+
+        rows = assign_cable_row_ids(
+            [
+                {
+                    "local_port": "ttyS1",
+                    "local_port_id": "serial:1",
+                    "device_id": outsider.pk,
+                    "_source": "serial",
+                    "remote_port": "",
+                    "remote_device": "",
+                    "cable_status": "",
+                    "can_create_cable": True,
+                }
+            ]
+        )
+        return VCCableTable(rows, device=member), rows[0], outsider, member
+
+    def test_the_hidden_field_keeps_the_ports_own_device(self):
+        """Substituting a member here submits an ID the sync view will reject."""
+        table, row, outsider, member = self._table_with_outside_owner()
+
+        # Precondition: the owner really is outside the member set, so a fallback would differ.
+        assert outsider.pk != member.pk
+        markup = str(table.render_device_selection(row["row_id"], row))
+
+        assert f'<input type="hidden" name="device_selection_{row["row_id"]}" value="{outsider.pk}">' in markup
+        assert f'value="{member.pk}">' not in markup.split("<input", 1)[1]
+
+    def test_a_row_owned_outside_the_chassis_cannot_be_selected(self):
+        """
+        The checkbox column is sequenced before device_selection, so the flag must be set
+        while the table is built, not while a column renders."""
+        _table, row, _outsider, _member = self._table_with_outside_owner()
+
+        assert row["can_create_cable"] is False
+
+
+@pytest.mark.django_db
 class TestVCCableTableMemberQueryCount:
     """VCCableTable must fetch the VC member set once (in __init__), not per row: render_device_selection previously ran members.all() plus a members.get (via get_virtual_chassis_member) for every cable row."""
 
@@ -114,6 +174,7 @@ class TestVCCableTableMemberQueryCount:
 
         from dcim.models import VirtualChassis
         from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
 
         m1 = _make_device("vc-cable-m1", "c1")
         vc = VirtualChassis.objects.create(name="vc-cables")
@@ -130,11 +191,13 @@ class TestVCCableTableMemberQueryCount:
             for i in range(1, 6)  # 5 rows
         ]
         # Build the table OUTSIDE the capture so the one-time member fetch isn't counted.
+        # The view assigns row identities before the table renders; do the same here.
+        rows = assign_cable_row_ids(rows)
         table = VCCableTable(rows, device=m1)
 
         with CaptureQueriesContext(connection) as ctx:
             for row in rows:
-                table.render_device_selection(row["local_port_id"], row)
+                table.render_device_selection(row["row_id"], row)
 
         member_queries = [q for q in ctx.captured_queries if "dcim_device" in q["sql"].lower()]
         # Every row renders from the cached member set → no per-row member queries.

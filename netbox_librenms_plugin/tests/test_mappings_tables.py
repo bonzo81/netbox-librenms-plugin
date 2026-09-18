@@ -44,6 +44,49 @@ def test_port_stack_lag_pattern_searches_all_exposed_fields(query, expected_os):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "expected_sensor_type"),
+    [
+        ("serial-type-token", "serial-type-token"),
+        ("ConsolePatternToken", "serial-pattern-type"),
+        ("serial description token", "serial-description-type"),
+    ],
+)
+def test_serial_sensor_type_pattern_searches_all_exposed_fields(query, expected_sensor_type):
+    """The list search filters sensor type, port pattern, and description through its q field."""
+    from netbox_librenms_plugin.filters import SerialSensorTypePatternFilterSet
+    from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+    SerialSensorTypePattern.objects.bulk_create(
+        [
+            SerialSensorTypePattern(
+                sensor_type="serial-type-token",
+                port_name_pattern="type{N}",
+                description="Sensor type field match",
+            ),
+            SerialSensorTypePattern(
+                sensor_type="serial-pattern-type",
+                port_name_pattern="ConsolePatternToken{N}",
+                description="Port pattern field match",
+            ),
+            SerialSensorTypePattern(
+                sensor_type="serial-description-type",
+                port_name_pattern="description{N}",
+                description="Serial description token",
+            ),
+        ]
+    )
+
+    filterset = SerialSensorTypePatternFilterSet(
+        {"q": query},
+        queryset=SerialSensorTypePattern.objects.all(),
+    )
+
+    assert filterset.is_valid(), filterset.errors
+    assert list(filterset.qs.values_list("sensor_type", flat=True)) == [expected_sensor_type]
+
+
+@pytest.mark.django_db
 class TestPortStackLagPatternTableSelection:
     """PortStackLagPatternTable's selection column must submit name='pk'."""
 
@@ -113,3 +156,41 @@ class TestPortStackLagPatternBulkExportContract:
         response = PortStackLagPatternBulkExportYAMLView.as_view()(request)
 
         assert response.status_code == 400
+
+
+@pytest.mark.django_db
+class TestSerialSensorTypePatternBulkExportScope:
+    """Serial sensor mapping exports must keep the user's object constraints."""
+
+    def test_export_omits_a_selected_row_outside_the_view_grant(self):
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        visible = SerialSensorTypePattern.objects.create(
+            sensor_type="visibleSerialState",
+            port_name_pattern="tty{N}",
+        )
+        hidden = SerialSensorTypePattern.objects.create(
+            sensor_type="hiddenSerialState",
+            port_name_pattern="line{N}",
+        )
+        user = make_user_with_perms(
+            "serial-pattern-export-scope",
+            [("view", SerialSensorTypePattern)],
+            constraints={"pk": visible.pk},
+        )
+        client = Client()
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:serialsensortypepattern_bulk_export_yaml"),
+            {"pk": [visible.pk, hidden.pk]},
+        )
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert visible.sensor_type in content
+        assert hidden.sensor_type not in content

@@ -1,0 +1,381 @@
+"""The plugin Settings page: the cable-sync provenance tab (DB/UI-managed, not PLUGINS_CONFIG)."""
+
+import pytest
+from django.urls import reverse
+
+from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_device, make_superuser
+
+
+@pytest.mark.django_db
+class TestCableSyncSettingsTab:
+    """End-to-end through the real view: render, persist, and validate the cable-sync form."""
+
+    def _url(self):
+        return reverse("plugins:netbox_librenms_plugin:settings")
+
+    def test_settings_page_renders_the_cable_sync_form(self, client):
+        client.force_login(make_superuser())
+        response = client.get(self._url())
+        assert response.status_code == 200
+        html = response.content.decode()
+        for field_id in ("id_cable_sync_tag", "id_cable_sync_tag_color", "id_cable_sync_description"):
+            assert field_id in html, f"settings page is missing the {field_id} input"
+        assert 'value="cable_sync_settings"' in html  # the tab's form_type dispatch value
+        # NetBoxModelForm auto-adds tags/changelog fields; this plain settings model supports
+        # neither, so the template must render ONLY the cable-sync fields (uniform plugin
+        # no-tags convention — a rendered tags picker would crash on save).
+        assert "id_tags" not in html, "the settings page must not render the NetBoxModelForm tags field"
+
+    def test_post_persists_cable_sync_settings(self, client):
+        client.force_login(make_superuser())
+        response = client.post(
+            self._url(),
+            {
+                "form_type": "cable_sync_settings",
+                "cable_sync_tag": "custom-prov",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Stamped by custom sync",
+            },
+        )
+        assert response.status_code == 302
+        row = LibreNMSSettings.objects.get(pk=1)
+        assert row.cable_sync_tag == "custom-prov"
+        assert row.cable_sync_tag_color == "ff5722"
+        assert row.cable_sync_description == "Stamped by custom sync"
+
+    def test_renaming_provenance_tag_preserves_existing_cable_identity(self, client):
+        """A settings rename must update the managed Tag instead of abandoning old cables."""
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.utils import cable_has_librenms_tag, get_librenms_cable_tag
+
+        client.force_login(make_superuser())
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        tag = get_librenms_cable_tag(sync_settings=settings)
+        original_tag_pk = tag.pk
+        local, (csp,), _ = make_serial_device("settings-rename-local", csp_names=["ttyS1"])
+        _remote, _, (cp,) = make_serial_device("settings-rename-remote", cp_names=["console"])
+        cable = cable_together(csp, cp)
+        cable.tags.add(tag)
+
+        response = client.post(
+            self._url(),
+            {
+                "form_type": "cable_sync_settings",
+                "cable_sync_tag": "managed-cables",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+        )
+
+        assert response.status_code == 302
+        renamed = Tag.objects.get(pk=original_tag_pk)
+        assert renamed.name == "managed-cables"
+        assert renamed.color == "ff5722"
+        cable.refresh_from_db()
+        assert cable_has_librenms_tag(cable) is True
+
+    def test_tag_rename_requires_permission_for_the_existing_tag(self, client):
+        """Plugin settings access must not authorize a global Tag mutation."""
+        import re
+
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        tag = get_librenms_cable_tag(sync_settings=settings)
+        settings_state = (
+            settings.cable_sync_tag,
+            settings.cable_sync_tag_color,
+            settings.cable_sync_description,
+        )
+        tag_state = (tag.name, tag.color)
+        user = make_user_with_perms("settings-no-tag-change", [])
+        client.force_login(user)
+
+        response = client.post(
+            self._url(),
+            {
+                "form_type": "cable_sync_settings",
+                "cable_sync_tag": "renamed-without-tag-permission",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+        )
+
+        assert response.status_code == 200
+        form = response.context["cable_sync_form"]
+        refusal = "You do not have permission to change the cable provenance tag."
+        assert list(form.non_field_errors()) == [refusal]
+        html = response.content.decode()
+        assert refusal in html
+        save_button_match = re.search(r'<button[^>]*id="save-cable-sync-btn"[^>]*>', html)
+        assert save_button_match is not None
+        save_button = save_button_match.group()
+        assert 'data-force-enabled="true"' in save_button
+        assert " disabled" not in save_button
+        assert form["cable_sync_tag"].value() == "renamed-without-tag-permission"
+        assert form["cable_sync_tag_color"].value() == "ff5722"
+        assert form["cable_sync_description"].value() == "Managed cable"
+        settings.refresh_from_db()
+        tag.refresh_from_db()
+        assert (
+            settings.cable_sync_tag,
+            settings.cable_sync_tag_color,
+            settings.cable_sync_description,
+        ) == settings_state
+        assert (tag.name, tag.color) == tag_state
+        assert Tag.objects.count() == 1
+
+    def test_existing_target_tag_cannot_be_recolored_without_tag_permission(self, client):
+        """A missing old Tag must not make an unrelated target Tag writable."""
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "missing-old-provenance"
+        settings.save(update_fields=["cable_sync_tag"])
+        target = Tag.objects.create(name="shared-provenance", slug="shared-provenance", color="00aa00")
+        settings_state = (
+            settings.cable_sync_tag,
+            settings.cable_sync_tag_color,
+            settings.cable_sync_description,
+        )
+        target_state = (target.name, target.color)
+        user = make_user_with_perms("settings-target-tag-no-change", [])
+        client.force_login(user)
+
+        response = client.post(
+            self._url(),
+            {
+                "form_type": "cable_sync_settings",
+                "cable_sync_tag": target.name,
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+        )
+
+        assert response.status_code == 200
+        form = response.context["cable_sync_form"]
+        refusal = "A different tag already uses this name."
+        assert list(form["cable_sync_tag"].errors) == [refusal]
+        assert refusal in response.content.decode()
+        assert form["cable_sync_tag"].value() == "shared-provenance"
+        assert form["cable_sync_tag_color"].value() == "ff5722"
+        assert form["cable_sync_description"].value() == "Managed cable"
+        settings.refresh_from_db()
+        target.refresh_from_db()
+        assert (
+            settings.cable_sync_tag,
+            settings.cable_sync_tag_color,
+            settings.cable_sync_description,
+        ) == settings_state
+        assert (target.name, target.color) == target_state
+        assert Tag.objects.count() == 1
+
+    def test_a_tag_that_claims_the_name_after_clean_is_not_adopted(self):
+        """clean() runs before save() re-locks, so save() must re-check the collision itself."""
+        from django import forms as django_forms
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.forms import CableSyncSettingsForm
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "old-provenance"
+        settings.save(update_fields=["cable_sync_tag"])
+        Tag.objects.create(name="old-provenance", slug="old-provenance", color="00aa00")
+
+        form = CableSyncSettingsForm(
+            data={
+                "cable_sync_tag": "renamed-provenance",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=settings,
+            user=make_superuser("settings-toctou-user"),
+        )
+        # clean_cable_sync_tag sees no clash: the old tag is the only row holding either name.
+        assert form.is_valid(), form.errors
+
+        # The window the finding names: between clean() and save() the old provenance tag is
+        # deleted and an unrelated tag takes the target name.
+        Tag.objects.filter(name="old-provenance").delete()
+        intruder = Tag.objects.create(name="renamed-provenance", slug="renamed-provenance", color="0000ff")
+
+        with pytest.raises(django_forms.ValidationError) as excinfo:
+            form.save()
+
+        assert "A different tag already uses this name." in str(excinfo.value)
+        settings.refresh_from_db()
+        intruder.refresh_from_db()
+        assert settings.cable_sync_tag == "old-provenance"
+        assert (intruder.name, intruder.color) == ("renamed-provenance", "0000ff")
+
+    def test_missing_managed_tag_is_reserved_before_settings_change(self):
+        """A settings row must not name a provenance Tag that the plugin does not own."""
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.forms import CableSyncSettingsForm
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "missing-managed-provenance"
+        settings.save(update_fields=["cable_sync_tag"])
+        Tag.objects.filter(name=settings.cable_sync_tag).delete()
+        form = CableSyncSettingsForm(
+            data={
+                "cable_sync_tag": "reserved-managed-provenance",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=settings,
+            user=make_superuser("settings-reserve-tag-user"),
+        )
+        assert form.is_valid(), form.errors
+
+        saved = form.save()
+
+        tag = Tag.objects.get(name=saved.cable_sync_tag)
+        assert tag.color == saved.cable_sync_tag_color
+
+    def test_missing_managed_tag_creation_requires_tag_permission(self):
+        """Plugin settings permission must not authorize creation of a global Tag."""
+        from django.core.exceptions import PermissionDenied
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.forms import CableSyncSettingsForm
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "missing-managed-tag-without-permission"
+        settings.save(update_fields=["cable_sync_tag"])
+        form = CableSyncSettingsForm(
+            data={
+                "cable_sync_tag": "forbidden-managed-tag",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=settings,
+            user=make_user_with_perms("settings-no-tag-add", []),
+        )
+        assert form.is_valid(), form.errors
+
+        with pytest.raises(PermissionDenied, match="permission to create the cable provenance tag"):
+            form.save()
+
+        settings.refresh_from_db()
+        assert settings.cable_sync_tag == "missing-managed-tag-without-permission"
+        assert not Tag.objects.filter(name="forbidden-managed-tag").exists()
+
+    def test_blank_tag_name_is_rejected_and_nothing_persists(self, client):
+        """A blank provenance tag would slugify to '' and break the ownership get_or_create — the form must reject it (whitespace-only strips to '' → required-field error) and the stored settings must keep their previous value."""
+        client.force_login(make_superuser())
+        response = client.post(
+            self._url(),
+            {
+                "form_type": "cable_sync_settings",
+                "cable_sync_tag": "   ",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "whatever",
+            },
+        )
+        # Validation failure re-renders the page (no redirect) with the error attached.
+        assert response.status_code == 200
+        assert "This field is required." in response.content.decode()
+        row = LibreNMSSettings.objects.get(pk=1)
+        assert row.cable_sync_tag == "librenms"  # untouched default
+
+    def test_punctuation_only_tag_is_rejected_before_cable_sync(self, client):
+        """The settings form must reject a tag name that cannot produce a valid slug."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        client.force_login(make_superuser())
+        response = client.post(
+            self._url(),
+            {
+                "form_type": "cable_sync_settings",
+                "cable_sync_tag": "!!!",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+        )
+
+        assert response.status_code == 200
+        assert "must contain letters or numbers" in response.content.decode()
+        assert LibreNMSSettings.objects.get(pk=1).cable_sync_tag == "librenms"
+
+        local, (csp,), _ = make_serial_device("settings-tag-local", csp_names=["ttyS1"])
+        remote, _, (cp,) = make_serial_device("settings-tag-remote", cp_names=["console"])
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        row = {
+            "local_port": csp.name,
+            "local_port_id": f"serial:{csp.pk}",
+            "_source": "serial",
+            "device_id": local.pk,
+            "remote_device": remote.name,
+            "sensor_id": csp.pk,
+            "sensor_index_int": 1,
+            "is_configured": True,
+        }
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
+        cache.set(cache_key, {"links": [row]}, timeout=300)
+
+        row_id = row["local_port_id"]
+        try:
+            synced = client.post(
+                reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+                {
+                    "select": row_id,
+                    "server_key": server_key,
+                    # The endpoints the table renders into the row, confirmed on submit.
+                    f"expected_local_id_{row_id}": csp.pk,
+                    f"expected_local_device_id_{row_id}": local.pk,
+                    f"expected_remote_id_{row_id}": cp.pk,
+                    f"expected_remote_device_id_{row_id}": remote.pk,
+                },
+            )
+        finally:
+            cache.delete(cache_key)
+
+        assert synced.status_code == 302
+        csp.refresh_from_db()
+        cp.refresh_from_db()
+        assert csp.cable_id == cp.cable_id
+        assert set(csp.cable.tags.values_list("slug", flat=True)) == {"librenms"}
+
+    def test_a_read_path_reports_no_tag_instead_of_raising_on_a_malformed_setting(self):
+        """
+        LibreNMSSettings.save() does not full_clean(), so a bad tag name can reach the database.
+
+        The Cables tab render asks for the tag with create=False. Deriving the slug before that
+        guard turned a provenance lookup into a ValidationError on a read-only page.
+        """
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "!!!"
+        settings.save(update_fields=["cable_sync_tag"])
+
+        assert get_librenms_cable_tag(sync_settings=settings, create=False) is None
+
+    def test_direct_settings_write_cannot_create_an_empty_tag_slug(self):
+        """Tag creation must reject a malformed setting written outside the form."""
+        from django.core.exceptions import ValidationError
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "!!!"
+        settings.save(update_fields=["cable_sync_tag"])
+
+        with pytest.raises(ValidationError, match="letters or numbers"):
+            get_librenms_cable_tag(sync_settings=settings)
+
+        assert Tag.objects.count() == 0

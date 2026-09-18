@@ -5,11 +5,12 @@ Most DB interactions are mocked via MagicMock, but some tests are DB-backed
 (``@pytest.mark.django_db``) where exercising the real ORM is clearer than mocking it.
 """
 
+import itertools
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm, persist_test_server_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -54,6 +55,14 @@ def _make_request(post_data=None, get_data=None, user=None):
     return request
 
 
+_cov_device_counter = itertools.count(1)
+
+
+def _cov_device():
+    """A REAL page Device: get_librenms_sync_device and the scoped querysets both walk it."""
+    return make_device(f"sync-cov-{next(_cov_device_counter)}")
+
+
 def _denied_response():
     resp = MagicMock()
     resp.status_code = 403
@@ -92,7 +101,7 @@ class TestSyncCablesViewCacheMiss:
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -124,7 +133,7 @@ class TestSyncCablesViewNoSelection:
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -162,12 +171,19 @@ class TestSyncCablesViewSuccessPath:
         dev_remote = make_device("cable-remote")
         remote = make_interface(dev_remote, "Gi0/2")
 
-        view.request = _make_request(post_data={"select": ["port1"], "device_selection_port1": str(dev_local.pk)})
+        view.request = _make_request(
+            post_data={
+                "select": ["port1"],
+                "device_selection_port1": str(dev_local.pk),
+                **_expected_fields("port1", local=local, remote=remote),
+            }
+        )
         link_data = {
             "local_port_id": "port1",
             "local_port": "Gi0/1",
             "netbox_local_interface_id": local.pk,
             "netbox_remote_interface_id": remote.pk,
+            "netbox_remote_device_id": dev_remote.pk,
         }
 
         with (
@@ -224,7 +240,8 @@ class TestSyncCablesViewSuccessPath:
         )
 
         selected = view.get_selected_interfaces(request, page_device)
-        assert selected == [{"device_id": str(unrelated_device.pk), "local_port_id": "port1"}]
+        assert selected[0]["device_id"] == str(unrelated_device.pk)
+        assert selected[0]["row_id"] == "port1"
         view._initial_device = page_device
         assert view._selected_device_is_in_page_context(unrelated_device.pk) is False
 
@@ -282,6 +299,73 @@ class TestSyncCablesViewSuccessPath:
         assert Cable.objects.count() == 0
         assert any("Gi0/1" in text for text in message_texts(request, "error"))
 
+    def test_interface_cable_gets_provenance_enrichment(self):
+        """A real Interface cable POST stamps provenance and the remote tenant."""
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+        from dcim.models import Cable
+        from extras.models import Tag
+        from tenancy.models import Tenant
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        dev_local = make_device("cable-enrich-local")
+        local = make_interface(dev_local, "Gi0/1")
+        dev_remote = make_device("cable-enrich-remote")
+        dev_remote.tenant = Tenant.objects.create(name="Enrich Tenant", slug="enrich-tenant")
+        dev_remote.save()
+        remote = make_interface(dev_remote, "Gi0/2")
+        server_key = next(iter(LibreNMSAPI.get_available_servers()))
+        row = {
+            "_source": "main",
+            "local_port_id": 10,
+            "local_port": "Gi0/1",
+            "remote_device": dev_remote.name,
+            "remote_port": remote.name,
+            "remote_port_id": 20,
+        }
+        cache_key = object.__new__(SyncCablesView).get_cache_key(dev_local, "links", server_key)
+        cache.set(
+            cache_key,
+            {"links": [row], "snapshot_token": "interface-provenance"},
+            timeout=300,
+        )
+        _seeded_cache_keys.add(cache_key)
+        user = get_user_model().objects.create_superuser("cable-enrich-user", "", "pw")
+        client = Client()
+        client.force_login(user)
+        Tag.objects.create(name="Unrelated tag", slug="librenms")
+        persist_test_server_mapping(dev_local, server_key)
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[dev_local.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+        record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[dev_local.pk]),
+            {
+                "sync_one": record["row_id"],
+                "server_key": server_key,
+                f"expected_local_id_{record['row_id']}": local.pk,
+                f"expected_local_device_id_{record['row_id']}": dev_local.pk,
+                f"expected_remote_id_{record['row_id']}": remote.pk,
+                f"expected_remote_device_id_{record['row_id']}": dev_remote.pk,
+            },
+        )
+
+        assert response.status_code == 302
+        local.refresh_from_db()
+        cable = Cable.objects.get(pk=local.cable_id)
+        assert get_librenms_cable_tag(create=False).pk in set(cable.tags.values_list("pk", flat=True))
+        assert cable.color == "009688"
+        assert cable.description == f"Synced from LibreNMS ({server_key})"
+        assert cable.tenant == dev_remote.tenant  # remote side's tenant wins
+
 
 class TestSyncCablesViewSkipsOOBRows:
     def test_oob_sourced_link_is_never_cabled(self):
@@ -334,6 +418,18 @@ class TestSyncCablesViewSkipsOOBRows:
         mock_msgs.success.assert_not_called()
 
 
+def _expected_fields(row_id, *, local=None, remote=None):
+    """Build hidden endpoint fields so sync rejects selections whose endpoints changed after rendering."""
+    data = {}
+    if local is not None:
+        data[f"expected_local_id_{row_id}"] = str(local.pk)
+        data[f"expected_local_device_id_{row_id}"] = str(local.device_id)
+    if remote is not None:
+        data[f"expected_remote_id_{row_id}"] = str(remote.pk)
+        data[f"expected_remote_device_id_{row_id}"] = str(remote.device_id)
+    return data
+
+
 def _cables_view(request, device, links):
     """The real SyncCablesView with the LibreNMS link snapshot seeded into the real cache."""
     from django.core.cache import cache
@@ -351,13 +447,19 @@ def _cables_view(request, device, links):
 class TestSyncCablesViewDuplicateCable:
     def test_duplicate_cable_shows_warning(self):
         from netbox_librenms_plugin.tests.conftest import cable_together
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
 
         dev = make_device("cable-dup-local")
         remote = make_device("cable-dup-remote")
         local_iface = make_interface(dev, "Gi0/1")
         remote_iface = make_interface(remote, "Gi0/2")
-        cable_together(local_iface, remote_iface)  # already connected
-        req = _make_request(post_data={"select": ["port1"]})
+        cable = cable_together(local_iface, remote_iface)  # already connected
+        # Plugin-owned, so the desired connection is a true noop; an untagged twin classifies as
+        # tag_only and never reaches the duplicate warning.
+        cable.tags.add(get_librenms_cable_tag())
+        req = _make_request(
+            post_data={"select": ["port1"], **_expected_fields("port1", local=local_iface, remote=remote_iface)}
+        )
         view = _cables_view(
             req,
             dev,
@@ -367,6 +469,7 @@ class TestSyncCablesViewDuplicateCable:
                     "local_port": "Gi0/1",
                     "netbox_local_interface_id": local_iface.pk,
                     "netbox_remote_interface_id": remote_iface.pk,
+                    "netbox_remote_device_id": remote_iface.device_id,
                 }
             ],
         )
@@ -383,7 +486,13 @@ class TestSyncCablesViewMissingRemote:
         dev = make_device("cable-missing-local")
         local_iface = make_interface(dev, "Gi0/1")
         gone_pk = missing_pk(Interface)
-        req = _make_request(post_data={"select": ["port1"]})
+        req = _make_request(
+            post_data={
+                "select": ["port1"],
+                **_expected_fields("port1", local=local_iface),
+                "expected_remote_id_port1": str(gone_pk),
+            }
+        )
         view = _cables_view(
             req,
             dev,
@@ -403,15 +512,29 @@ class TestSyncCablesViewMissingRemote:
 
     def test_a_remote_interface_outside_the_grant_is_reported_missing(self):
         """The remote id comes from the cached LibreNMS row; a constrained grant must not cable it."""
-        from dcim.models import Cable, Device, Interface
+        from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
 
         dev = make_device("cable-scoped-local")
         remote = make_device("cable-scoped-remote")
         local_iface = make_interface(dev, "Gi0/1")
         remote_iface = make_interface(remote, "Gi0/2")
-        user = make_user_with_perms("cable-scoped", [("view", Device), ("add", Cable), ("change", Cable)])
+        # The POST gate also covers the console-port terminations of a serial link; grant those
+        # unconstrained so the only thing narrowing this sync is the Interface constraint.
+        user = make_user_with_perms(
+            "cable-scoped",
+            [
+                ("view", Device),
+                ("add", Cable),
+                ("change", Cable),
+                ("change", ConsoleServerPort),
+                ("change", ConsolePort),
+            ],
+        )
         user = grant(user, "change", Interface, constraints={"device__name": "cable-scoped-local"})
-        req = _make_request(post_data={"select": ["port1"]}, user=user)
+        req = _make_request(
+            post_data={"select": ["port1"], **_expected_fields("port1", local=local_iface, remote=remote_iface)},
+            user=user,
+        )
         view = _cables_view(
             req,
             dev,
@@ -421,6 +544,7 @@ class TestSyncCablesViewMissingRemote:
                     "local_port": "Gi0/1",
                     "netbox_local_interface_id": local_iface.pk,
                     "netbox_remote_interface_id": remote_iface.pk,
+                    "netbox_remote_device_id": remote_iface.device_id,
                 }
             ],
         )
@@ -469,7 +593,7 @@ class TestSyncCablesViewMissingLinkData:
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -501,7 +625,7 @@ class TestSyncCablesViewInvalidLinkData:
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
         # Missing netbox_local_interface_id
         link_data = {"local_port_id": "port1", "local_port": "Gi0/1", "netbox_remote_interface_id": 20}
 
@@ -535,16 +659,43 @@ class TestSyncCablesViewHelpers:
         assert result is None
 
     def test_get_selected_interfaces_builds_list(self):
+        """Each selection carries the snapshot row identity plus the endpoints the page rendered."""
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = object.__new__(SyncCablesView)
-        req = _make_request(post_data={"select": ["port1", "port2"], "device_selection_port1": "5"})
+        req = _make_request(
+            post_data={
+                "select": ["port1", "port2"],
+                "device_selection_port1": "5",
+                "expected_local_id_port1": "11",
+                "expected_local_device_id_port1": "12",
+                "expected_remote_id_port1": "13",
+                "expected_remote_device_id_port1": "14",
+                "expected_cable_intent_port1": "intent-token",
+            }
+        )
         result = view.get_selected_interfaces(req, MagicMock(id=1))
         assert len(result) == 2
-        assert result[0]["local_port_id"] == "port1"
+        assert result[0]["row_id"] == "port1"
         assert result[0]["device_id"] == "5"
-        # port2 defaults to initial_device.id
+        assert result[0]["expected_local_id"] == 11
+        assert result[0]["expected_local_device_id"] == 12
+        assert result[0]["expected_remote_id"] == 13
+        assert result[0]["expected_remote_device_id"] == 14
+        assert result[0]["expected_cable_intent"] == "intent-token"
+        # port2 defaults to initial_device.id and carries no rendered endpoints
         assert result[1]["device_id"] == 1
+        assert result[1]["expected_local_id"] is None
+
+    def test_sync_one_selects_exactly_that_row(self):
+        """A per-row Sync button posts sync_one, which must win over any checked boxes."""
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        device = _cov_device()
+        view = SyncCablesView()
+        req = _make_request(post_data={"select": ["port1", "port2"], "sync_one": "port2"})
+        result = view.get_selected_interfaces(req, device)
+        assert [row["row_id"] for row in result] == ["port2"]
 
     def test_validate_prerequisites_false_on_no_cache(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -610,52 +761,139 @@ class TestSyncCablesViewHelpers:
     def test_get_cached_links_data_no_data(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
+        device = _cov_device()
+        request = _make_request()
         view = object.__new__(SyncCablesView)
+        view.setup(request, pk=device.pk)
         view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
-            patch.object(
-                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-            ),
+        with patch.object(
+            type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
         ):
-            mock_cache.get.return_value = None
-            result = view.get_cached_links_data(_make_request(), MagicMock())
+            result = view.get_cached_links_data(request, device)
         assert result is None
 
-    def test_get_cached_links_data_returns_links(self):
+    def test_get_cached_links_data_returns_enriched_rows(self):
+        """Verify that cached source rows receive identities and current NetBox enrichment when read."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import cable_together
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        view = object.__new__(SyncCablesView)
+        device = _cov_device()
+        remote_device = make_device("sync-cached-links-remote")
+        local_interface = make_interface(device, "Gi0/1")
+        remote_interface = make_interface(remote_device, "Gi0/2")
+        cable = cable_together(local_interface, remote_interface)
+        request = _make_request()
+        view = SyncCablesView()
+        view.setup(request, pk=device.pk)
         view._post_server_key = "default"
-        view.get_cache_key = MagicMock(return_value="k")
+        cache_key = view.get_cache_key(device, "links", "default")
+        _seeded_cache_keys.add(cache_key)
+        cache.set(
+            cache_key,
+            {
+                "links": [
+                    {
+                        "local_port_id": "p",
+                        "local_port": local_interface.name,
+                        "remote_device": remote_device.name,
+                        "remote_port": remote_interface.name,
+                    }
+                ]
+            },
+            timeout=300,
+        )
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
-            patch.object(
-                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
-            ),
-        ):
-            mock_cache.get.return_value = {"links": [{"local_port_id": "p"}]}
-            result = view.get_cached_links_data(_make_request(), MagicMock())
-        assert result == [{"local_port_id": "p"}]
+        result = view.get_cached_links_data(request, device)
 
-    def test_check_existing_cable(self):
-        from netbox_librenms_plugin.tests.conftest import cable_together
+        assert [row["row_id"] for row in result] == ["p"]
+        assert result[0]["netbox_local_interface_id"] == local_interface.pk
+        assert result[0]["netbox_remote_interface_id"] == remote_interface.pk
+        assert result[0]["cable_status"] == "Cable Found"
+        assert result[0]["cable_url"].endswith(f"/{cable.pk}/")
 
-        dev = make_device("cable-check")
-        remote = make_device("cable-check-remote")
-        local = make_interface(dev, "Gi0/1")
-        far = make_interface(remote, "Gi0/2")
-        free = make_interface(remote, "Gi0/3")
-        view = make_view(_sync_cables_view_class())
+    def test_cached_links_delegation_cannot_mutate_the_caller_request(self):
+        """The delegated table view gets its own request, so its edits stay out of this handler's."""
+        from django.core.cache import cache
 
-        assert view.check_existing_cable(local, free) is False
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        cable_together(local, far)
+        device = _cov_device()
+        local_interface = make_interface(device, "Gi0/9")
+        request = _make_request()
+        view = SyncCablesView()
+        view.setup(request, pk=device.pk)
+        view._post_server_key = "default"
+        cache_key = view.get_cache_key(device, "links", "default")
+        _seeded_cache_keys.add(cache_key)
+        cache.set(
+            cache_key,
+            {"links": [{"local_port_id": "p", "local_port": local_interface.name}]},
+            timeout=300,
+        )
 
-        assert view.check_existing_cable(local, free) is True
+        seen = {}
+        real_enrich = DeviceCableTableView.enrich_links_data
+
+        def enrich_and_scribble(self, *args, **kwargs):
+            seen["child_request"] = self.request
+            # A child that writes on its request must not reach the caller's copy.
+            self.request.cable_delegation_marker = "child"
+            seen["child_get"] = self.request.GET
+            seen["child_post"] = self.request.POST
+            # A child that tries to REWRITE the shared query state must be refused outright.
+            for querydict in (self.request.GET, self.request.POST):
+                try:
+                    querydict["injected"] = "child"
+                except Exception as exc:  # noqa: BLE001 - the type is the assertion below
+                    seen.setdefault("refusals", []).append(type(exc).__name__)
+            return real_enrich(self, *args, **kwargs)
+
+        with patch.object(DeviceCableTableView, "enrich_links_data", enrich_and_scribble):
+            view.get_cached_links_data(request, device)
+
+        assert seen["child_request"] is not request
+        assert not hasattr(request, "cable_delegation_marker")
+        # Sharing is only safe because a request QueryDict is immutable, so neither write landed.
+        assert seen.get("refusals") == ["AttributeError", "AttributeError"], seen.get("refusals")
+        assert "injected" not in request.GET
+        assert "injected" not in request.POST
+        # copy.copy() is shallow, so the child can still reach the caller's own QueryDict
+        # (GET here; POST is loaded lazily, so which object it gets depends on access order).
+        assert seen["child_get"] is request.GET
+
+    def test_duplicate_cached_row_identities_report_the_real_cause(self):
+        """Duplicate row identities must not be reported as an expired cache."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        device = _cov_device()
+        request = _make_request()
+        view = SyncCablesView()
+        view.setup(request, pk=device.pk)
+        view._post_server_key = "default"
+        cache_key = view.get_cache_key(device, "links", "default")
+        _seeded_cache_keys.add(cache_key)
+        duplicate = {
+            "local_port_id": "duplicate",
+            "local_port": "Gi0/1",
+            "remote_device": "remote-device",
+            "remote_port": "Gi0/2",
+        }
+        cache.set(cache_key, {"links": [duplicate, duplicate]}, timeout=300)
+
+        cached_links = view.get_cached_links_data(request, device)
+
+        assert cached_links == []
+        assert view.validate_prerequisites(cached_links, [{"row_id": "duplicate"}]) is False
+        assert message_texts(request, "error") == [
+            "Cable sync cannot continue because multiple cached cable rows have the same identity. "
+            "Resolve the duplicate LibreNMS link data before syncing."
+        ]
 
     def test_missing_local_interface_is_invalid_not_missing_remote(self):
         """A stale local interface ID must not be reported as missing remote data."""
@@ -676,37 +914,6 @@ class TestSyncCablesViewHelpers:
         )
 
         assert result == {"status": "invalid", "interface": "Gi0/1"}
-
-
-def _sync_cables_view_class():
-    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-    return SyncCablesView
-
-
-class TestSyncCablesViewProcessInterfaceSyncException:
-    """Lines 147-149: outer except Exception handler in process_interface_sync."""
-
-    def test_process_single_interface_exception_caught(self):
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        view = object.__new__(SyncCablesView)
-        view.request = _make_request()
-
-        interface = {"local_port_id": "port1"}
-        cached_links = []
-
-        mock_transaction = MagicMock()
-        # Make __exit__ NOT suppress exceptions (return False)
-        mock_transaction.atomic.return_value.__exit__.return_value = False
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.transaction", mock_transaction),
-            patch.object(view, "process_single_interface", side_effect=RuntimeError("test error")),
-        ):
-            results = view.process_interface_sync([interface], cached_links)
-
-        assert "port1" in results["invalid"]
 
 
 def _add_device_view(request, *, add_result=(True, "Device added")):
@@ -891,13 +1098,7 @@ class TestAddDeviceToLibreNMSViewV3:
 
 class TestAddDeviceToLibreNMSViewUnknownVersion:
     def test_unknown_snmp_version_shows_error(self):
-        """
-        A version string that is neither v1/v2c nor v3 is refused before reaching LibreNMS.
-
-        ``snmp_version`` on the v3 form is a plain CharField whose ``initial`` does not constrain a
-        BOUND form, so a posted "v99" survives validation, reaches form_valid as the version, and
-        must hit the guard rather than be sent on.
-        """
+        """Verify that the view rejects an unknown value from the bound v3 field before calling LibreNMS."""
         dev = make_device("addsnmp-badversion")
         req = _make_request(
             post_data={
@@ -1167,7 +1368,7 @@ class TestSyncIPAddressesViewUnknownServerKey:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
         mock_api = MagicMock(server_key="default")
 
         with (
@@ -1204,7 +1405,7 @@ class TestSyncIPAddressesViewCacheMiss:
         view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
         mock_api = MagicMock(server_key="default")
 
         with (
@@ -1235,7 +1436,7 @@ class TestSyncIPAddressesViewNoSelection:
         view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
         mock_api = MagicMock(server_key="default")
 
         with (
@@ -2091,7 +2292,7 @@ class TestSyncVLANsViewInvalidAction:
         view._post_server_key = "default"
         mock_api = MagicMock(server_key="default")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -2120,7 +2321,7 @@ class TestSyncVLANsViewNoSelection:
         view.get_cache_key = MagicMock(return_value="k")
         mock_api = MagicMock(server_key="default")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -2151,7 +2352,7 @@ class TestSyncVLANsViewCacheMiss:
         view.get_cache_key = MagicMock(return_value="k")
         mock_api = MagicMock(server_key="default")
 
-        mock_device = MagicMock(pk=1)
+        mock_device = _cov_device()
 
         with (
             patch(
@@ -2458,12 +2659,7 @@ class TestSyncVLANsViewWithGroup:
         assert any("several VLANs" in text for text in message_texts(req, "error"))
 
     def test_invalid_vid_string_skipped(self):
-        """
-        A non-numeric selection is skipped, and the rest of the batch still syncs.
-
-        The batch carries a valid VID after the bad one so a `break` in place of the
-        `continue` would be caught — a single-item batch cannot tell them apart.
-        """
+        """Verify that an invalid VID is skipped and a later valid batch item still syncs."""
         from ipam.models import VLAN
 
         dev = make_device("vlan-badvid")
@@ -2615,12 +2811,7 @@ class TestSyncVLANsViewGroupedUpdateSkip:
 
 
 def _make_site(name, *, latitude=None, longitude=None):
-    """
-    A real Site, optionally with coordinates.
-
-    Re-read from the DB so the coordinate fields come back as the Decimals the view actually
-    formats in production, not the Python floats that were passed in.
-    """
+    """Create and reload a real Site so coordinate fields use the Decimal values seen in production."""
     from dcim.models import Site
     from django.utils.text import slugify
 

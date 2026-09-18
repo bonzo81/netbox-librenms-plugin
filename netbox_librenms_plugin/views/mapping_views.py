@@ -14,6 +14,7 @@ from netbox_librenms_plugin.filters import (
     NormalizationRuleFilterSet,
     PlatformMappingFilterSet,
     PortStackLagPatternFilterSet,
+    SerialSensorTypePatternFilterSet,
 )
 from netbox_librenms_plugin.forms import (
     CarrierAutoInstallRuleFilterForm,
@@ -46,6 +47,9 @@ from netbox_librenms_plugin.forms import (
     PortStackLagPatternFilterForm,
     PortStackLagPatternForm,
     PortStackLagPatternImportForm,
+    SerialSensorTypePatternFilterForm,
+    SerialSensorTypePatternForm,
+    SerialSensorTypePatternImportForm,
 )
 from netbox_librenms_plugin.models import (
     CarrierAutoInstallRule,
@@ -58,6 +62,7 @@ from netbox_librenms_plugin.models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 from netbox_librenms_plugin.tables.mappings import (
     CarrierAutoInstallRuleTable,
@@ -70,6 +75,7 @@ from netbox_librenms_plugin.tables.mappings import (
     NormalizationRuleTable,
     PlatformMappingTable,
     PortStackLagPatternTable,
+    SerialSensorTypePatternTable,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSGenericPermissionMixin,
@@ -80,9 +86,7 @@ from netbox_librenms_plugin.views.mixins import (
 
 
 class InterfaceTypeMappingListView(LibreNMSGenericPermissionMixin, generic.ObjectListView):
-    """
-    Provides a view for listing all `InterfaceTypeMapping` objects.
-    """
+    """Provides a view for listing all `InterfaceTypeMapping` objects."""
 
     queryset = InterfaceTypeMapping.objects.all()
     table = InterfaceTypeMappingTable
@@ -92,9 +96,7 @@ class InterfaceTypeMappingListView(LibreNMSGenericPermissionMixin, generic.Objec
 
 
 class InterfaceTypeMappingCreateView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
-    """
-    Provides a view for creating a new `InterfaceTypeMapping` object.
-    """
+    """Provides a view for creating a new `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
     form = InterfaceTypeMappingForm
@@ -103,7 +105,8 @@ class InterfaceTypeMappingCreateView(LibreNMSGenericWritePermissionMixin, generi
 @register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
 class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
     """
-    Provides a view for bulk importing `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
+    Import `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
+
     Supports three import methods: direct import, file upload, and data file.
     """
 
@@ -112,43 +115,33 @@ class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, ge
 
 
 class InterfaceTypeMappingView(LibreNMSGenericPermissionMixin, generic.ObjectView):
-    """
-    Provides a view for displaying details of a specific `InterfaceTypeMapping` object.
-    """
+    """Provides a view for displaying details of a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
 
 
 class InterfaceTypeMappingEditView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
-    """
-    Provides a view for editing a specific `InterfaceTypeMapping` object.
-    """
+    """Provides a view for editing a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
     form = InterfaceTypeMappingForm
 
 
 class InterfaceTypeMappingDeleteView(LibreNMSGenericWritePermissionMixin, generic.ObjectDeleteView):
-    """
-    Provides a view for deleting a specific `InterfaceTypeMapping` object.
-    """
+    """Provides a view for deleting a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
 
 
 class InterfaceTypeMappingBulkDeleteView(LibreNMSGenericWritePermissionMixin, generic.BulkDeleteView):
-    """
-    Provides a view for deleting multiple `InterfaceTypeMapping` objects.
-    """
+    """Provides a view for deleting multiple `InterfaceTypeMapping` objects."""
 
     queryset = InterfaceTypeMapping.objects.all()
     table = InterfaceTypeMappingTable
 
 
 class InterfaceTypeMappingChangeLogView(LibreNMSGenericPermissionMixin, generic.ObjectChangeLogView):
-    """
-    Provides a view for displaying the change log of a specific `InterfaceTypeMapping` object.
-    """
+    """Provides a view for displaying the change log of a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
 
@@ -475,7 +468,7 @@ class BulkExportYAMLView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             int_pks = [int(pk) for pk in pks]
         except (ValueError, TypeError):
             return HttpResponseBadRequest("Invalid pk value.")
-        objects = self.queryset.model.objects.restrict(request.user, "view").filter(pk__in=int_pks).order_by("pk")
+        objects = self.queryset.restrict(request.user, "view").filter(pk__in=int_pks).order_by("pk")
         if not objects:
             return HttpResponseBadRequest("No matching objects found.")
         yaml_parts = [obj.to_yaml() for obj in objects]
@@ -765,3 +758,64 @@ class PortStackLagPatternChangeLogView(LibreNMSGenericPermissionMixin, generic.O
 
 class PortStackLagPatternBulkExportYAMLView(BulkExportYAMLView):
     queryset = PortStackLagPattern.objects.all()
+
+
+class SerialSensorTypePatternListView(LibreNMSGenericPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all SerialSensorTypePattern objects."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    table = SerialSensorTypePatternTable
+    filterset = SerialSensorTypePatternFilterSet
+    filterset_form = SerialSensorTypePatternFilterForm
+    template_name = "netbox_librenms_plugin/serialsensortypepattern_list.html"
+
+
+class SerialSensorTypePatternCreateView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    form = SerialSensorTypePatternForm
+
+
+@register_model_view(SerialSensorTypePattern, "bulk_import", path="import", detail=False)
+class SerialSensorTypePatternBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing SerialSensorTypePattern objects from CSV/JSON/YAML."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    model_form = SerialSensorTypePatternImportForm
+
+
+class SerialSensorTypePatternView(LibreNMSGenericPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying a SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+
+
+class SerialSensorTypePatternEditView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    form = SerialSensorTypePatternForm
+
+
+class SerialSensorTypePatternDeleteView(LibreNMSGenericWritePermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+
+
+class SerialSensorTypePatternBulkDeleteView(LibreNMSGenericWritePermissionMixin, generic.BulkDeleteView):
+    """Provides a view for bulk deleting SerialSensorTypePattern objects."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+    table = SerialSensorTypePatternTable
+
+
+class SerialSensorTypePatternChangeLogView(LibreNMSGenericPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the changelog of a SerialSensorTypePattern object."""
+
+    queryset = SerialSensorTypePattern.objects.all()
+
+
+class SerialSensorTypePatternBulkExportYAMLView(BulkExportYAMLView):
+    queryset = SerialSensorTypePattern.objects.all()

@@ -347,10 +347,11 @@ class TestBulkImportConfirmView:
         # fetch_device_with_cache reads/writes the real Django cache; isolate tests so a
         # device cached by one doesn't satisfy another's lookup.
         from django.core.cache import cache
+        from netbox_librenms_plugin.tests.conftest import clear_test_cache
 
-        cache.clear()
+        clear_test_cache(cache)
         yield
-        cache.clear()
+        clear_test_cache(cache)
 
     @staticmethod
     def _make_view(settings, server, server_key):

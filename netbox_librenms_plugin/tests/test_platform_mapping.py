@@ -330,12 +330,7 @@ class TestFindMatchingPlatformWithMapping:
 
     @staticmethod
     def _duplicate_mappings(librenms_os, platform):
-        """Insert case-variant mappings for one OS string.
-
-        ``PlatformMapping.clean()`` lowercases ``librenms_os`` and the column is unique, so
-        ordinary saves cannot produce this. bulk_create bypasses full_clean, standing in for
-        rows that predate the normalisation — the only way the ambiguity guard is reachable.
-        """
+        """Insert case-variant mappings with bulk_create because normal saves cannot reach the ambiguity guard."""
         from netbox_librenms_plugin.models import PlatformMapping
 
         PlatformMapping.objects.bulk_create(
@@ -440,96 +435,68 @@ class TestFindMatchingPlatformWithMapping:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestBulkExportYAMLView:
-    """BulkExportYAMLView returns YAML for selected PKs."""
+    """BulkExportYAMLView exports the selected rows the requesting user may view."""
 
-    def _make_request(self, pk_list):
-        request = MagicMock()
-        request.POST = MagicMock()
-        request.POST.getlist = MagicMock(return_value=pk_list)
-        return request
+    def _mappings(self):
+        from dcim.models import DeviceType, Manufacturer
 
-    def test_returns_yaml_content_type(self):
-        """Response has content-type text/yaml."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping
 
+        manufacturer, _ = Manufacturer.objects.get_or_create(name="ExportMfr", slug="export-mfr")
+        first_type = DeviceType.objects.create(manufacturer=manufacturer, model="ISR 4321", slug="isr-4321")
+        second_type = DeviceType.objects.create(manufacturer=manufacturer, model="ISR 4331", slug="isr-4331")
+        return (
+            DeviceTypeMapping.objects.create(librenms_hardware="cisco 4321", netbox_device_type=first_type),
+            DeviceTypeMapping.objects.create(librenms_hardware="cisco 4331", netbox_device_type=second_type),
+        )
+
+    def _post(self, pk_list, *, user=None):
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
         from netbox_librenms_plugin.views.mapping_views import DeviceTypeMappingBulkExportYAMLView
 
-        view = DeviceTypeMappingBulkExportYAMLView.__new__(DeviceTypeMappingBulkExportYAMLView)
-        request = self._make_request(["1", "2"])
-
-        mock_mapping = MagicMock()
-        mock_mapping.to_yaml.return_value = "librenms_hardware: Cisco 4321\n"
-
-        mock_qs = MagicMock()
-        restricted_qs = MagicMock()
-        restricted_qs.filter.return_value.order_by.return_value = [mock_mapping, mock_mapping]
-        mock_qs.model.objects.restrict.return_value = restricted_qs
-        view.queryset = mock_qs
-
-        with patch.object(view, "require_object_permissions", return_value=None):
-            response = view.post(request)
-
-        assert "text/yaml" in response.get("Content-Type", "")
-        mock_qs.model.objects.restrict.assert_called_once_with(request.user, "view")
-        restricted_qs.filter.assert_called_once_with(pk__in=[1, 2])
+        request = make_request("post", {"pk": pk_list}, user=user) if user else make_request("post", {"pk": pk_list})
+        return post(DeviceTypeMappingBulkExportYAMLView(), request)
 
     def test_returns_yaml_for_selected_pks(self):
-        """Response body contains YAML from selected objects."""
-        from netbox_librenms_plugin.views.mapping_views import DeviceTypeMappingBulkExportYAMLView
+        first, second = self._mappings()
 
-        view = DeviceTypeMappingBulkExportYAMLView.__new__(DeviceTypeMappingBulkExportYAMLView)
-        request = self._make_request(["1"])
-
-        mock_mapping = MagicMock()
-        mock_mapping.to_yaml.return_value = "librenms_hardware: Cisco 4321\n"
-
-        mock_qs = MagicMock()
-        restricted_qs = MagicMock()
-        restricted_qs.filter.return_value.order_by.return_value = [mock_mapping]
-        mock_qs.model.objects.restrict.return_value = restricted_qs
-        view.queryset = mock_qs
-
-        with patch.object(view, "require_object_permissions", return_value=None):
-            response = view.post(request)
+        response = self._post([str(first.pk), str(second.pk)])
 
         content = response.content.decode()
-        assert "Cisco 4321" in content
-        mock_qs.model.objects.restrict.assert_called_once_with(request.user, "view")
-        restricted_qs.filter.assert_called_once_with(pk__in=[1])
+        assert "text/yaml" in response.get("Content-Type", "")
+        assert "cisco 4321" in content
+        assert "cisco 4331" in content
 
     def test_filters_by_selected_pks(self):
-        """View filters the user-restricted queryset by the selected PKs from POST data."""
-        from netbox_librenms_plugin.views.mapping_views import DeviceTypeMappingBulkExportYAMLView
+        first, second = self._mappings()
 
-        view = DeviceTypeMappingBulkExportYAMLView.__new__(DeviceTypeMappingBulkExportYAMLView)
-        request = self._make_request(["3", "7"])
+        content = self._post([str(first.pk)]).content.decode()
 
-        mock_qs = MagicMock()
-        restricted_qs = MagicMock()
-        mock_qs.model.objects.restrict.return_value = restricted_qs
-        view.queryset = mock_qs
+        assert "cisco 4321" in content
+        assert "cisco 4331" not in content
 
-        with patch.object(view, "require_object_permissions", return_value=None):
-            view.post(request)
+    def test_export_is_scoped_to_the_rows_the_user_may_view(self):
+        """A constrained view grant must not export a row outside it."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        mock_qs.model.objects.restrict.assert_called_once_with(request.user, "view")
-        mock_qs.filter.assert_not_called()
-        restricted_qs.filter.assert_called_once_with(pk__in=[3, 7])
-        restricted_qs.filter.return_value.order_by.assert_called_once_with("pk")
+        first, second = self._mappings()
+        user = make_user_with_perms(
+            "export-scoped",
+            [("view", DeviceTypeMapping)],
+            constraints={"pk": first.pk},
+        )
 
-    def test_returns_200_with_empty_selection(self):
-        """Response is 400 when no PKs are selected."""
-        from netbox_librenms_plugin.views.mapping_views import DeviceTypeMappingBulkExportYAMLView
+        response = self._post([str(first.pk), str(second.pk)], user=user)
 
-        view = DeviceTypeMappingBulkExportYAMLView.__new__(DeviceTypeMappingBulkExportYAMLView)
-        request = self._make_request([])
+        content = response.content.decode()
+        assert "cisco 4321" in content
+        assert "cisco 4331" not in content
 
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value.order_by.return_value = []
-        view.queryset = mock_qs
-
-        with patch.object(view, "require_object_permissions", return_value=None):
-            response = view.post(request)
+    def test_returns_400_with_empty_selection(self):
+        response = self._post([])
 
         assert response.status_code == 400
 

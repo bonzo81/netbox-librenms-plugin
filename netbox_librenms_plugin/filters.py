@@ -13,6 +13,7 @@ from .models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 
 
@@ -187,3 +188,24 @@ class PortStackLagPatternFilterSet(django_filters.FilterSet):
 
         model = PortStackLagPattern
         fields = ["librenms_os", "lag_name_pattern", "bridge_name_pattern", "sap_name_pattern", "description"]
+
+
+class SerialSensorTypePatternFilterSet(django_filters.FilterSet):
+    """Filter set for SerialSensorTypePattern model."""
+
+    q = django_filters.CharFilter(method="search")
+    sensor_type = django_filters.CharFilter(lookup_expr="icontains")
+    port_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
+    def search(self, queryset, _name, value):
+        """Search the fields exposed by the pattern list."""
+        return queryset.filter(
+            Q(sensor_type__icontains=value) | Q(port_name_pattern__icontains=value) | Q(description__icontains=value)
+        )
+
+    class Meta:
+        """Meta options."""
+
+        model = SerialSensorTypePattern
+        fields = ["sensor_type", "port_name_pattern", "description"]

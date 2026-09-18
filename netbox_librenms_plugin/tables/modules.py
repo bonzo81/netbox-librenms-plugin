@@ -69,6 +69,7 @@ class LibreNMSModuleTable(tables.Table):
         can_add_module_type=False,
         can_add_carrier_rule=False,
         can_add_module_bay_mapping=False,
+        can_map_existing_bay=False,
         can_add_module_type_mapping=False,
         **kwargs,
     ):
@@ -86,6 +87,7 @@ class LibreNMSModuleTable(tables.Table):
         self.can_add_module_type = can_add_module_type
         self.can_add_carrier_rule = can_add_carrier_rule
         self.can_add_module_bay_mapping = can_add_module_bay_mapping
+        self.can_map_existing_bay = can_map_existing_bay
         self.can_add_module_type_mapping = can_add_module_type_mapping
         super().__init__(*args, **kwargs)
         # Batch-load the installed modules (with module_type + interface templates) referenced by
@@ -937,7 +939,7 @@ class LibreNMSModuleTable(tables.Table):
             and not record.get("no_bay_reason")
             and record.get("item_class") != "port"
             and record.get("mapping_source_name")
-            and getattr(self, "can_add_module_bay_mapping", False)
+            and getattr(self, "can_map_existing_bay", False)
         ):
             mapping_url = reverse(
                 "plugins:netbox_librenms_plugin:add_bay_template",

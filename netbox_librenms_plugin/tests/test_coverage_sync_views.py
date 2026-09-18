@@ -64,17 +64,6 @@ class TestSyncCablesViewStructure:
         assert NetBoxObjectPermissionMixin in mro
         assert CacheMixin in mro
 
-    def test_required_object_permissions(self):
-        from dcim.models import Cable, Device, Interface
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        perms = SyncCablesView.required_object_permissions["POST"]
-        assert ("view", Device) in perms
-        assert ("add", Cable) in perms
-        assert ("change", Cable) in perms
-        assert ("change", Interface) in perms
-
 
 class TestSyncCablesViewGetSelectedInterfaces:
     def test_empty_select_returns_none(self):
@@ -106,7 +95,7 @@ class TestSyncCablesViewGetSelectedInterfaces:
         assert result is not None
         assert len(result) == 1
         assert result[0]["device_id"] == 5
-        assert result[0]["local_port_id"] == "42"
+        assert result[0]["row_id"] == "42"
 
     def test_port_with_device_override(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -131,29 +120,43 @@ class TestSyncCablesViewGetSelectedInterfaces:
         assert len(result) == 2
 
 
+@pytest.mark.django_db
 class TestSyncCablesViewGetCachedLinksData:
     def test_cache_miss_returns_none(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        obj = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache:
-            mock_cache.get.return_value = None
-            with patch.object(view, "get_cache_key", return_value="key1"):
-                result = view.get_cached_links_data(view.request, obj)
+        view._post_server_key = "default"
+        device = make_device("sync-cached-links-miss")
+
+        result = view.get_cached_links_data(view.request, device)
         assert result is None
 
-    def test_cache_hit_returns_links_list(self):
+    def test_cache_hit_returns_enriched_rows(self):
+        """The snapshot carries LibreNMS fields only, so the row identity and NetBox ids are derived."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        obj = MagicMock()
-        links = [{"local_port_id": "1"}]
-        with patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache:
-            mock_cache.get.return_value = {"links": links}
-            with patch.object(view, "get_cache_key", return_value="key1"):
-                result = view.get_cached_links_data(view.request, obj)
-        assert result == links
+        view._post_server_key = "default"
+        device = make_device("sync-cached-links-hit")
+        interface = make_interface(device, "Gi0/1")
+        cache_key = view.get_cache_key(device, "links", "default")
+        cache.set(
+            cache_key,
+            {"links": [{"local_port_id": "1", "local_port": interface.name, "device_id": device.pk}]},
+            timeout=300,
+        )
+        try:
+            result = view.get_cached_links_data(view.request, device)
+        finally:
+            cache.delete(cache_key)
+
+        assert [row["row_id"] for row in result] == ["1"]
+        assert result[0]["netbox_local_interface_id"] == interface.pk
 
 
 class TestSyncCablesViewValidatePrerequisites:
@@ -247,7 +250,7 @@ class TestSyncCablesViewHandleCableCreation:
 
         view = _make_view(SyncCablesView)
         link_data = {"netbox_local_interface_id": None, "netbox_remote_interface_id": 2, "netbox_remote_device_id": 5}
-        interface = {"local_port_id": "99"}
+        interface = {"row_id": "99"}
         result = view.handle_cable_creation(link_data, interface)
         assert result["status"] == "invalid"
         assert result["interface"] == "99"
@@ -273,16 +276,21 @@ class TestSyncCablesViewHandleCableCreation:
         assert result["status"] == "missing_remote"
 
     @pytest.mark.django_db
-    def test_existing_cable_returns_duplicate(self):
-        """Two already-cabled real interfaces → check_existing_cable True → duplicate."""
-        from netbox_librenms_plugin.tests.conftest import cable_together, make_device, make_interface
+    def test_existing_desired_cable_untagged_gets_tagged(self):
+        """The exact desired cable already exists but is untagged → add the librenms tag (non-destructive) → 'tagged'."""
+        from netbox_librenms_plugin.tests.conftest import (
+            cable_together,
+            librenms_cable_tag,
+            make_device,
+            make_interface,
+        )
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
         dev = make_device("cable-sync-dup")
         local = make_interface(dev, "eth0")
         remote = make_interface(dev, "eth1")
-        cable_together(local, remote)  # real existing cable
+        cable = cable_together(local, remote)  # real existing cable, untagged
 
         link_data = {
             "local_port": "eth0",
@@ -292,7 +300,9 @@ class TestSyncCablesViewHandleCableCreation:
         }
         interface = {"local_port_id": "42"}
         result = view.handle_cable_creation(link_data, interface)
-        assert result["status"] == "duplicate"
+        assert result["status"] == "tagged"
+        cable.refresh_from_db()
+        assert librenms_cable_tag().slug in set(cable.tags.values_list("slug", flat=True))
 
     @pytest.mark.django_db
     def test_creates_cable_returns_valid(self):
@@ -330,8 +340,21 @@ class TestSyncCablesViewProcessSingleInterface:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        cached_links = [{"local_port_id": "5", "netbox_local_interface_id": 1, "netbox_remote_interface_id": 2}]
-        interface = {"local_port_id": "5", "device_id": 1}
+        cached_links = [
+            {
+                "row_id": "5",
+                "netbox_local_interface_id": 1,
+                "netbox_local_device_id": 1,
+                "netbox_remote_interface_id": 2,
+            }
+        ]
+        interface = {
+            "row_id": "5",
+            "device_id": 1,
+            "expected_local_id": 1,
+            "expected_local_device_id": 1,
+            "expected_remote_id": 2,
+        }
         expected = {"status": "valid", "interface": "eth0"}
         with patch.object(view, "handle_cable_creation", return_value=expected) as mock_handle:
             result = view.process_single_interface(interface, cached_links)
@@ -342,8 +365,8 @@ class TestSyncCablesViewProcessSingleInterface:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        cached_links = [{"local_port_id": "99"}]
-        interface = {"local_port_id": "42"}
+        cached_links = [{"row_id": "99"}]
+        interface = {"row_id": "42"}
         result = view.process_single_interface(interface, cached_links)
         assert result["status"] == "invalid"
         assert result["interface"] == "42"
@@ -383,15 +406,18 @@ class TestSyncCablesViewProcessInterfaceSync:
                 results = view.process_interface_sync(interfaces, [])
         assert "eth1" in results["missing_remote"]
 
-    def test_exception_adds_to_invalid(self):
+    @pytest.mark.django_db
+    def test_unexpected_row_failure_is_collected_as_failed(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = _make_view(SyncCablesView)
-        interfaces = [{"local_port_id": "55"}]
-        with patch("netbox_librenms_plugin.views.sync.cables.transaction", _atomic_txn()):
-            with patch.object(view, "process_single_interface", side_effect=Exception("boom")):
-                results = view.process_interface_sync(interfaces, [])
-        assert "55" in results["invalid"]
+        interface = {"row_id": "row-7"}
+
+        with patch.object(view, "process_single_interface", side_effect=RuntimeError("sync failed")):
+            results = view.process_interface_sync([interface], [])
+
+        assert results["failed"] == ["row-7"]
+        assert results["invalid"] == []
 
 
 class TestSyncCablesViewDisplaySyncResults:

@@ -4,7 +4,7 @@ import json
 from unittest.mock import patch
 
 import pytest
-from dcim.models import Module, ModuleBay, ModuleBayTemplate, ModuleType
+from dcim.models import Cable, Module, ModuleBay, ModuleBayTemplate, ModuleType
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -1100,6 +1100,58 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
 
 
 @pytest.mark.django_db
+def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
+    client,
+    settings,
+    django_capture_on_commit_callbacks,
+):
+    """A committed cable must clear comparisons that depend on current topology."""
+    _configure_servers(settings)
+    device = make_device("cache-cable-writer", librenms_cf={"primary": {"id": 63}})
+    remote_device = make_device("cache-cable-remote", librenms_cf={"primary": {"id": 64}})
+    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
+    set_librenms_device_id(local, 7201, "primary")
+    set_librenms_device_id(remote, 7202, "primary")
+    local.save(update_fields=["custom_field_data"])
+    remote.save(update_fields=["custom_field_data"])
+    links_payload = {
+        "links": [
+            {
+                "local_port_id": 7201,
+                "local_port": local.name,
+                "remote_port_id": 7202,
+                "remote_port": remote.name,
+                "remote_device": remote_device.name,
+                "remote_device_id": 64,
+            }
+        ]
+    }
+    _seed_snapshot("links", device, "primary", links_payload)
+    _seed_snapshot("inventory", device, "primary")
+
+    client.force_login(make_superuser("cache-cable-writer-user"))
+    url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", kwargs={"pk": device.pk})
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
+            url,
+            {
+                "server_key": "primary",
+                "select": "7201",
+                "expected_local_id_7201": local.pk,
+                "expected_local_device_id_7201": device.pk,
+                "expected_remote_id_7201": remote.pk,
+                "expected_remote_device_id_7201": remote_device.pk,
+            },
+        )
+
+    assert response.status_code == 302
+    assert Cable.objects.filter(terminations__termination_id=local.pk).exists()
+    assert cache.get(_cache_key("links", device, "primary")) == links_payload
+    assert cache.get(_cache_key("inventory", device, "primary")) is None
+
+
+@pytest.mark.django_db
 def test_module_install_invalidates_other_tabs_after_creating_a_module(
     client,
     settings,
@@ -1771,6 +1823,64 @@ def test_htmx_module_cache_miss_replaces_active_tab_with_warning(client, setting
     assert b"No cached inventory data" in response.content
     assert b"Refresh Modules" in response.content
     assert b'name="select"' not in response.content
+
+
+@pytest.mark.django_db
+def test_partial_cable_refresh_keeps_rows_from_available_sources(client, settings):
+    """An OOB fetch failure must retain actionable host rows in the cached snapshot."""
+    _configure_servers(settings)
+    device = make_device(
+        "cache-cable-partial",
+        librenms_cf={"primary": {"id": 647, "oob": {"id": 649, "type": "oob"}}},
+    )
+    remote_device = make_device("cache-cable-partial-remote", librenms_cf={"primary": {"id": 648}})
+    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
+    set_librenms_device_id(local, 7471, "primary")
+    set_librenms_device_id(remote, 7472, "primary")
+    local.save(update_fields=["custom_field_data"])
+    remote.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser("cache-cable-partial-user"))
+
+    def librenms_response(url, **_kwargs):
+        if url.endswith("/api/v0/devices/647/links"):
+            return _json_response(
+                url,
+                {
+                    "status": "ok",
+                    "links": [
+                        {
+                            "local_port_id": 7471,
+                            "local_port": local.name,
+                            "remote_port_id": 7472,
+                            "remote_port": remote.name,
+                            "remote_hostname": remote_device.name,
+                            "remote_device_id": 648,
+                        }
+                    ],
+                },
+            )
+        if url.endswith("/api/v0/devices/647/ports"):
+            return _json_response(
+                url,
+                {"status": "ok", "ports": [{"port_id": 7471, "ifName": local.name, "ifDescr": local.name}]},
+            )
+        if url.endswith("/api/v0/devices/649/links"):
+            return _json_response(url, {"message": "Unavailable"}, status=503)
+        raise AssertionError(f"Unexpected LibreNMS request: {url}")
+
+    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    assert b"OOB controller links fetch failed" in response.content
+    assert b"Cable data is incomplete" in response.content
+    assert b"Sync Selected Cables" in response.content
+    assert b'name="select"' in response.content
+    cached = cache.get(_cache_key("links", device, "primary"))
+    assert cached["incomplete_sources"] == ["OOB"]
+    assert cached["links"][0]["local_port_id"] == 7471
 
 
 @pytest.mark.django_db

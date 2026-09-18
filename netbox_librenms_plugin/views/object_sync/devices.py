@@ -258,8 +258,10 @@ class SingleInterfaceVerifyView(
             )
 
             if port_data:
-                vlan_groups = self.get_vlan_groups_for_device(selected_device)
-                vlan_lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+                # Scope the IPAM reads to the caller: the gate above only checked view_device, and
+                # the response serializes VLAN ids plus each group's id, name and scope.
+                vlan_groups = self.get_vlan_groups_for_device(selected_device, user=request.user)
+                vlan_lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=request.user)
                 vlan_group_overrides = cache.get(self.get_vlan_overrides_key(primary_device, server_key)) or {}
                 # Set before the selection call: it validates overrides against this row's groups.
                 port_data["vlan_groups"] = vlan_groups
@@ -543,6 +545,18 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         Render the VLANs cell HTML with correct color coding.
 
         Reuses the same color logic as LibreNMSInterfaceTable.render_vlans().
+
+        Args:
+            untagged (int | None): The untagged VLAN ID.
+            tagged (list[int]): The tagged VLAN IDs.
+            missing_vlans (list[int]): The VLAN IDs that do not exist in NetBox.
+            exists_in_netbox (bool): Whether the interface exists in NetBox.
+            netbox_untagged_vid (int | None): The interface's NetBox untagged VLAN ID.
+            netbox_tagged_vids (set[int]): The interface's NetBox tagged VLAN IDs.
+
+        Returns:
+            str: The rendered VLAN cell HTML.
+
         """
         from django.utils.safestring import mark_safe
 
@@ -693,7 +707,10 @@ class DeviceCableTableView(BaseCableTableView):
     def get_table(self, data, obj):
         """Return the appropriate cable table, selecting VC variant if needed."""
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            return VCCableTable(data, device=obj)
+            allowed_vc_member_ids = set(
+                self._viewable_queryset(Device).filter(virtual_chassis=obj.virtual_chassis).values_list("pk", flat=True)
+            )
+            return VCCableTable(data, device=obj, allowed_vc_member_ids=allowed_vc_member_ids)
         return LibreNMSCableTable(data, device=obj)
 
 
@@ -736,6 +753,12 @@ class DeviceModuleTableView(BaseModuleTableView):
             ),
             can_add_module_bay_mapping=(
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+            ),
+            can_map_existing_bay=(
+                has_write_permission
+                and user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+                and user.has_perm("dcim.view_device")
+                and user.has_perm("dcim.view_modulebay")
             ),
             can_add_module_type_mapping=(
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_moduletypemapping")

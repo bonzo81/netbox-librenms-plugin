@@ -6,7 +6,7 @@ other modules.  The F401 suppressions prevent linters from flagging
 them as unused within this file.
 """
 
-from .base.cables_view import BaseCableTableView, SingleCableVerifyView  # noqa: F401
+from .base.cables_view import BaseCableTableView, CableRemotePickerView, SingleCableVerifyView  # noqa: F401
 from .base.interfaces_view import BaseInterfaceTableView  # noqa: F401
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView  # noqa: F401
 from .base.librenms_sync_view import BaseLibreNMSSyncView  # noqa: F401
@@ -123,6 +123,15 @@ from .mapping_views import (  # noqa: F401
     PortStackLagPatternEditView,
     PortStackLagPatternListView,
     PortStackLagPatternView,
+    SerialSensorTypePatternBulkDeleteView,
+    SerialSensorTypePatternBulkExportYAMLView,
+    SerialSensorTypePatternBulkImportView,
+    SerialSensorTypePatternChangeLogView,
+    SerialSensorTypePatternCreateView,
+    SerialSensorTypePatternDeleteView,
+    SerialSensorTypePatternEditView,
+    SerialSensorTypePatternListView,
+    SerialSensorTypePatternView,
 )
 from .object_sync import (  # noqa: F401
     DeviceCableTableView,

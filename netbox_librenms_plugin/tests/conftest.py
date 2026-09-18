@@ -33,6 +33,22 @@ def clear_test_cache(cache_backend):
         cache_backend.clear()
 
 
+def configured_server_key():
+    """Return the first real LibreNMS server key from the active test settings."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    return next(iter(LibreNMSAPI.get_available_servers()))
+
+
+def persist_test_server_mapping(obj, server_key):
+    """Persist the server mapping required by a real sync-page request."""
+    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+
+    if get_librenms_device_id(obj, server_key, auto_save=False) is None:
+        set_librenms_device_id(obj, obj.pk, server_key)
+        obj.save(update_fields=["custom_field_data"])
+
+
 def _isolated_cache_config(caches_config):
     """Return the worker cache config with a unique per-test namespace."""
     isolated = deepcopy(caches_config)
@@ -79,15 +95,18 @@ def _seeded_model_rows():
     """Yield ``(model, lookup_field, value_field, rows)`` for every data-migration seed."""
     import importlib
 
-    from netbox_librenms_plugin.models import PortStackLagPattern
+    from netbox_librenms_plugin.models import PortStackLagPattern, SerialSensorTypePattern
 
-    # The migration module name starts with a digit, so import syntax cannot reach it.
+    # The migration module names start with a digit, so import syntax cannot reach them.
     lag = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern")
+    serial = importlib.import_module("netbox_librenms_plugin.migrations.0017_serialsensortypepattern")
     yield PortStackLagPattern, "librenms_os", "lag_name_pattern", lag.INITIAL_LAG_PATTERNS
+    yield SerialSensorTypePattern, "sensor_type", "port_name_pattern", serial.INITIAL_SERIAL_SENSOR_TYPES
 
 
 def _seeded_sap_rows():
-    """Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
+    """
+    Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
 
     Kept apart from :func:`_seeded_model_rows` because migration 0016 sets a second field on rows
     0013 already created, so these rows are applied with ``update()`` rather than
@@ -102,7 +121,8 @@ def _seeded_sap_rows():
 
 
 def _seeded_rule_rows():
-    """Yield ``(model, lookup, defaults)`` for every rule row the data migrations seed.
+    """
+    Yield ``(model, lookup, defaults)`` for every rule row the data migrations seed.
 
     Kept apart from :func:`_seeded_model_rows` because these rows are identified by a
     composite lookup rather than one field. The values are read from the migrations so the
@@ -210,7 +230,7 @@ def restore_seeded_state(*, force):
 
 @pytest.fixture(autouse=True)
 def _restore_migration_seeded_rows(request):
-    """Restore data-migration seeds before tests after a transactional test flushes them."""
+    """Reseed data migrations before a test, so a transactional flush cannot empty LAG or serial recognition."""
     # Gate on the marker, not on request.fixturenames: pytest-django pulls "db" in dynamically
     # from its own autouse fixture, so it is still absent from the closure at this point.
     global _transactional_seed_restore_required
@@ -338,6 +358,29 @@ def make_serial_device(name, *, csp_names=(), cp_names=()):
     return dev, csps, cps
 
 
+def make_serial_row(csp, label, obj, *, sensor_index_int=1, **extra):
+    """Build a raw serial cache row, using distinct sensor indexes to preserve production link ordering."""
+    row = {
+        "_source": "serial",
+        "device_id": obj.id,
+        "local_port": csp.name,
+        "local_port_id": f"serial:{csp.pk}",
+        "sensor_id": csp.pk,
+        "sensor_index_int": sensor_index_int,
+        "is_configured": True,
+        "remote_device": label,
+    }
+    row.update(extra)
+    return row
+
+
+def librenms_cable_tag():
+    """The plugin's provenance cable tag (created on first use)."""
+    from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+    return get_librenms_cable_tag()
+
+
 def make_virtual_chassis(name, *devices):
     """Create a VirtualChassis and enroll *devices* as members (vc_position by order)."""
     from dcim.models import VirtualChassis
@@ -357,6 +400,24 @@ def cable_together(term_a, term_b):
     cable = Cable(a_terminations=[term_a], b_terminations=[term_b])
     cable.save()
     return cable
+
+
+def make_patch_panel(name):
+    """Create a one-position patch panel with pass-through wiring for the active NetBox version."""
+    from dcim.models import FrontPort, RearPort
+
+    panel = make_device(name)
+    rp = RearPort.objects.create(device=panel, name="R1", type="8p8c", positions=1)
+    try:
+        from dcim.models import PortMapping
+    except ImportError:  # NetBox < 4.5: FrontPort carries the rear-port FK directly
+        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", rear_port=rp, rear_port_position=1)
+    else:
+        fp = FrontPort.objects.create(device=panel, name="F1", type="8p8c", positions=1)
+        PortMapping.objects.create(
+            device=panel, front_port=fp, rear_port=rp, front_port_position=1, rear_port_position=1
+        )
+    return panel, fp, rp
 
 
 def make_interface(device, name, *, iface_type="other"):

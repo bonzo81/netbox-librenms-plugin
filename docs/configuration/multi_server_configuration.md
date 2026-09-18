@@ -110,6 +110,8 @@ Each server configuration supports the following options:
 
 The `_preferred_server` key is reserved for object metadata. Do not use it as a configured server key. `LibreNMSSyncConfig` rejects a configuration that uses this key during plugin startup.
 
+Cable-sync provenance (tag, color, and description) applies to all servers. It is not a `PLUGINS_CONFIG` option. Manage it in the UI on the plugin **Settings → Cable Sync** tab. The [Cable Sync Guide](../device_sync/cable_sync.md) describes these settings. Serial console sensor types are also not a plugin setting. Manage them as database rows under the Rules & Patterns tables.
+
 ## Migration from Single to Multi-Server
 
 1. Add the `servers` configuration block to your `configuration.py`

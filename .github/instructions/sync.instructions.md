@@ -21,7 +21,8 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
    - VMs skip cables and VLANs (return `None`).
 
 3. **Sync action views** (`views/sync/`) — POST-only views that create/update/delete NetBox objects:
-   - Follow a consistent pattern: check permissions → read selected rows from POST → load cached data → apply changes in `transaction.atomic()` → redirect to sync tab.
+   - Follow a consistent pattern: check permissions → read selected rows from POST → load cached data → apply changes in `transaction.atomic()` → return the action's HTMX response, or redirect to the sync tab for a non-HTMX request.
+   - Cable sync returns `_cable_sync_content.html` for HTMX so the response matches `#cable-sync-content`. Other actions can use `HX-Redirect` when they require full navigation.
 
 ## Data Pipeline (Base Views)
 Every base table view follows: **fetch → cache → compare → render**.
@@ -43,7 +44,7 @@ class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # 2. Read selected items from request.POST.getlist("select")
         # 3. Load cached data from cache.get(self.get_cache_key(obj, "..."))
         # 4. Apply changes inside transaction.atomic()
-        # 5. Redirect to sync tab with ?tab=<resource>
+        # 5. Return the action's HTMX response, or redirect to ?tab=<resource>
 ```
 
 ## Table Conventions (`tables/*.py`)
@@ -67,6 +68,8 @@ class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
   - VLAN modals: `openVlanDetailModal()`, `verifyVlanInGroup()`, `verifyVlanSyncGroup()` — per-interface VLAN detail editing.
   - Bulk operations: `initializeBulkEditApply()`, `deleteSelectedInterfaces()`.
   - Table filtering: `initializeTableFilters()`, `filterTable()` — client-side row filtering.
-  - URL/tab state: `initializeTabs()`, `getDeviceIdFromUrl()`, `setInterfaceNameFieldFromURL()`.
+  - URL/tab state: `activeSyncTab()`, `getDeviceIdFromUrl()`, `setInterfaceNameFieldFromURL()`.
+    Tab activation is server-rendered: the swapped container carries `data-active-tab`, and
+    `activeSyncTab()` reads it. There is no client-side tab initializer.
   - Cache countdowns: `initializeCountdown()`, `initializeCountdowns()`.
 - CSRF token extracted via `document.querySelector('[name=csrfmiddlewaretoken]').value`.

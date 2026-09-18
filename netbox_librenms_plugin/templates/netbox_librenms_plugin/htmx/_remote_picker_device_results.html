@@ -1,0 +1,18 @@
+{% comment %}
+Device search results for the remote-end picker. Each hit loads its port list into
+#remote-picker-ports. Context: devices, q, ports_url (base; device_id appended per hit).
+{% endcomment %}
+{% for device in devices %}
+  {# rounded-2 (an !important utility) overrides the list-group first/last-child radius rules #}
+  {# so the active highlight is uniformly rounded on every item, not just the edges. #}
+  <button type="button" class="list-group-item list-group-item-action py-1 rounded-2 remote-picker-device"
+          hx-get="{{ ports_url }}&device_id={{ device.pk }}"
+          hx-target="#remote-picker-ports" hx-swap="innerHTML">
+    {{ device.name }}
+    {% if device.site %}<span class="text-muted small ms-1">({{ device.site }})</span>{% endif %}
+  </button>
+{% empty %}
+  {% if q %}
+    <div class="list-group-item rounded-2 text-muted small py-1">No devices match “{{ q }}”.</div>
+  {% endif %}
+{% endfor %}

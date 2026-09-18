@@ -186,12 +186,7 @@ def _rename_intent(vlan, device, proposed_name):
 
 @pytest.mark.django_db
 def test_grouped_vlan_row_is_locked_before_the_rename():
-    """
-    A confirmed grouped VLAN row must be locked before its disclosed rename.
-
-    Asserted on the emitted SQL rather than on a patched manager: a mock records whichever call
-    the code happens to make, so it stays green while the row is read unlocked.
-    """
+    """Verify SQL locks a grouped VLAN before its confirmed rename."""
     from django.db import transaction
     from django.test.utils import CaptureQueriesContext
     from ipam.models import VLAN, VLANGroup
@@ -250,12 +245,7 @@ def test_grouped_vlan_name_collision_is_rejected_without_a_database_error():
 
 
 class _ScopedVLANReadGate:
-    """
-    Hold the sync between its scoped VLAN read and whatever it does next.
-
-    Both the locked and the unlocked path run this pk read, so the gate stops the sync at the same
-    point either way and neither can win the race by accident.
-    """
+    """Pause sync after the scoped VLAN read so locked and unlocked paths race from the same point."""
 
     def __init__(self, read_done, resume):
         self.read_done = read_done
@@ -282,13 +272,8 @@ class _ScopedVLANReadGate:
     # This is required when another installed plugin has M2M tables outside the default flush list.
     available_apps=[app.name for app in apps.get_app_configs()],
 )
-def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
-    """
-    A grouped VLAN deleted between the scope check and the save must be skipped.
-
-    Without the re-lock the sync renames a row it read unlocked, and ``save(update_fields=...)``
-    raises "did not affect any rows" once that row is gone — a 500 for the operator.
-    """
+def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed(request):
+    """Verify deleting a grouped VLAN after the scope check skips it instead of raising a failed-update error."""
     from ipam.models import VLAN, VLANGroup
 
     device = make_device("vlan-relock-delete")
@@ -299,11 +284,30 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
         [("view", type(device)), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)],
     )
 
+    with connection.cursor() as cursor:
+        cursor.execute("SHOW lock_timeout")
+        original_lock_timeout = cursor.fetchone()[0]
+        cursor.execute("SELECT set_config('lock_timeout', %s, false)", ["137ms"])
+        cursor.execute("SHOW lock_timeout")
+        initial_lock_timeout = cursor.fetchone()[0]
+
+    def restore_original_lock_timeout():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('lock_timeout', %s, false)", [original_lock_timeout])
+
+    request.addfinalizer(restore_original_lock_timeout)
+
     read_done, resume = Event(), Event()
 
     def sync_as_caller():
         close_old_connections()
         try:
+            # Bound both racing connections, as the sibling concurrency tests do. The test assumes
+            # the gate fires on the scope-check read, before the re-lock; if that order changes the
+            # main-thread delete blocks on the row lock and resume.set() can never run.
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '5s'")
+                cursor.execute("SET statement_timeout = '10s'")
             thread_user = get_user_model().objects.get(pk=user.pk)
             with connection.execute_wrapper(_ScopedVLANReadGate(read_done, resume)):
                 return _drive_grouped_sync(device, thread_user, group, vid=42, librenms_name="librenms-name")
@@ -319,8 +323,15 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed():
             VLAN.objects.filter(pk=vlan.pk).delete()
         finally:
             resume.set()
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('lock_timeout', %s, false)", [initial_lock_timeout])
         recorded = syncing.result(timeout=20)
 
+    with connection.cursor() as cursor:
+        cursor.execute("SHOW lock_timeout")
+        final_lock_timeout = cursor.fetchone()[0]
+
+    assert final_lock_timeout == initial_lock_timeout
     joined = " || ".join(text for _level, text in recorded)
     assert "concurrent VLAN change" in joined, joined
     assert not any(level == "success" for level, _text in recorded), joined

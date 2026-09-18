@@ -10,6 +10,7 @@ import netaddr
 from dcim.models import Device, Interface
 from django.core import signing
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.db import IntegrityError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -122,6 +123,99 @@ def module_inventory_binding_matches(
         ent_index,
         inventory_digest,
     )
+
+
+_CABLE_ROW_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def cable_snapshot_token(cached_payload) -> str:
+    """Return the stable generation token for one cached cable snapshot."""
+    if isinstance(cached_payload, dict) and cached_payload.get("snapshot_token"):
+        return str(cached_payload["snapshot_token"])
+    serialized = json.dumps(
+        cached_payload.get("links", []) if isinstance(cached_payload, dict) else [],
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def assign_cable_row_ids(links):
+    """Return copied cable rows with one stable action identity per snapshot row."""
+    if not is_list_of_dicts(links):
+        return None
+
+    local_id_counts = {}
+    for link in links:
+        local_id = str(link.get("local_port_id", ""))
+        local_id_counts[local_id] = local_id_counts.get(local_id, 0) + 1
+
+    result = []
+    seen = set()
+    for link in links:
+        copied = dict(link)
+        local_id = str(copied.get("local_port_id", ""))
+        if local_id_counts.get(local_id) == 1 and _CABLE_ROW_ID_RE.fullmatch(local_id):
+            row_id = local_id
+        else:
+            source = str(copied.get("_source") or "main")
+            link_id = coerce_librenms_id(copied.get("link_id"))
+            if link_id is not None:
+                row_id = f"{source}:link:{link_id}"
+            else:
+                identity = [
+                    source,
+                    copied.get("local_port_id"),
+                    copied.get("protocol"),
+                    copied.get("remote_device_id"),
+                    copied.get("remote_port_id"),
+                    copied.get("remote_device"),
+                    copied.get("remote_port"),
+                    copied.get("sensor_id"),
+                ]
+                digest = hashlib.sha256(json.dumps(identity, separators=(",", ":"), default=str).encode()).hexdigest()
+                row_id = f"{source}:row:{digest[:32]}"
+        if row_id in seen:
+            return None
+        seen.add(row_id)
+        copied["row_id"] = row_id
+        result.append(copied)
+    return result
+
+
+def cable_manual_pick_cache_key(snapshot_key, snapshot_token, user_id, row_id) -> str:
+    """Return the user- and row-scoped cache key for one unsaved remote pick."""
+    row_digest = hashlib.sha256(str(row_id).encode()).hexdigest()
+    return f"{snapshot_key}:manual-remote:{snapshot_token}:{user_id}:{row_digest}"
+
+
+def apply_cable_manual_picks(cache_backend, snapshot_key, cached_payload, user_id, links):
+    """Copy *links* and overlay only the current user's manual remote picks."""
+    snapshot_token = cable_snapshot_token(cached_payload)
+    links = assign_cable_row_ids(links)
+    if links is None:
+        return [], False
+    pick_keys = {
+        link["row_id"]: cable_manual_pick_cache_key(snapshot_key, snapshot_token, user_id, link["row_id"])
+        for link in links
+    }
+    picks = cache_backend.get_many(pick_keys.values())
+    result = []
+    applied = False
+    for link in links:
+        copied = dict(link)
+        pick = picks.get(pick_keys[copied["row_id"]])
+        if isinstance(pick, dict) and coerce_librenms_id(pick.get("manual_remote_id")):
+            copied.update(
+                {
+                    "manual_remote_id": pick["manual_remote_id"],
+                    "manual_remote": True,
+                }
+            )
+            applied = True
+        result.append(copied)
+    return result, applied
 
 
 def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None = None) -> None:
@@ -493,6 +587,363 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict, dict]:
     sub_interfaces = _normalize_edges(sub_interfaces_raw)
     bridge_members = _normalize_edges(bridge_members_raw)
     return lag_members, sub_interfaces, bridge_members
+
+
+def get_cable_sync_settings(*, lock=False):
+    """
+    Return the settings row driving the cable-sync provenance stamp (tag name/color, description).
+
+    These settings are DB/UI-managed (plugin Settings → Cable Sync), not PLUGINS_CONFIG. Operators
+    can change their preferences without a NetBox restart. This split matches the
+    SerialSensorTypePattern rows. The function falls back to an UNSAVED instance (pure field
+    defaults) when no row exists yet, so read paths never write.
+
+    Args:
+        lock (bool): Whether to lock the settings row and create it when it does not exist.
+
+    Returns:
+        LibreNMSSettings: The saved settings row, or an unsaved instance with field defaults.
+
+    """
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    if lock:
+        settings, _created = LibreNMSSettings.objects.select_for_update().get_or_create(pk=1)
+        return settings
+    return LibreNMSSettings.objects.first() or LibreNMSSettings()
+
+
+def normalize_cable_tag_slug(name):
+    """Return the tag slug, or reject a name that cannot produce one."""
+    from django.utils.text import slugify
+
+    slug = slugify(name)
+    if not slug:
+        raise ValidationError("The tag name must contain letters or numbers.")
+    return slug
+
+
+def _free_cable_tag_slug(slug):
+    """Return the first tag slug derived from *slug* that no Tag currently uses."""
+    from extras.models import Tag
+
+    max_length = Tag._meta.get_field("slug").max_length
+    candidate = slug[:max_length]
+    suffix = 2
+    while Tag.objects.filter(slug=candidate).exists():
+        suffix_text = f"-{suffix}"
+        candidate = f"{slug[: max_length - len(suffix_text)]}{suffix_text}"
+        suffix += 1
+    return candidate
+
+
+def _create_cable_tag(name, slug, color):
+    """Create (or adopt) the provenance tag, letting a taken slug surface."""
+    from extras.models import Tag
+
+    tag, _ = Tag.objects.get_or_create(name=name, defaults={"slug": _free_cable_tag_slug(slug), "color": color})
+    return tag
+
+
+def get_librenms_cable_tag(*, create=True, sync_settings=None):
+    """
+    Return (creating on first use) the Tag stamped on cables the LibreNMS cable sync creates.
+
+    The tag name and color come from the settings row (see :func:`get_cable_sync_settings`).
+    Its purpose is provenance: it marks cables that the plugin created or adopted. Destructive
+    replacement still requires explicit confirmation for every cable. Mirrors the
+    ``get_or_create(..., defaults=...)`` idiom used to bootstrap the ``librenms_id`` custom field.
+
+    Returns:
+        extras.models.Tag: The (existing or newly created) provenance tag.
+
+    """
+    from extras.models import Tag
+
+    sync_settings = sync_settings or get_cable_sync_settings()
+    name = sync_settings.cable_sync_tag
+    if tag := Tag.objects.filter(name=name).first():
+        return tag
+    if not create:
+        return None
+
+    # Derive the slug only once a create is actually required: normalize_cable_tag_slug() raises
+    # for a name that slugifies to nothing, and LibreNMSSettings.save() does not full_clean(), so a
+    # direct ORM or API write can store one. Read paths such as the Cables tab render call this with
+    # create=False and must report "no provenance tag" rather than raise.
+    slug = normalize_cable_tag_slug(name)
+    color = sync_settings.cable_sync_tag_color
+    try:
+        return _create_cable_tag(name, slug, color)
+    except IntegrityError:
+        # get_or_create only re-reads by name, so a concurrent insert that took the candidate slug
+        # reaches here instead. Adopt the tag that name now points at, else search for a free slug once more.
+        if tag := Tag.objects.filter(name=name).first():
+            return tag
+        return _create_cable_tag(name, slug, color)
+
+
+def _cable_tag_ids(cable) -> set:
+    """Return the set of tag primary keys currently on *cable*."""
+    prefetched = getattr(cable, "_prefetched_objects_cache", {}).get("tags")
+    if prefetched is not None:
+        return {tag.pk for tag in prefetched}
+    return set(cable.tags.values_list("pk", flat=True))
+
+
+_PROVENANCE_TAG_UNSET = object()
+
+
+def cable_has_librenms_tag(cable, provenance_tag=_PROVENANCE_TAG_UNSET) -> bool:
+    """Return True when *cable* carries the librenms provenance tag (possibly among others)."""
+    if provenance_tag is _PROVENANCE_TAG_UNSET:
+        provenance_tag = get_librenms_cable_tag(create=False)
+    return provenance_tag is not None and provenance_tag.pk in _cable_tag_ids(cable)
+
+
+def cable_is_point_to_point(cable) -> bool:
+    """Return whether *cable* has exactly one termination on each end."""
+    prefetched = getattr(cable, "_prefetched_objects_cache", {}).get("terminations")
+    if prefetched is not None:
+        end_counts = {"A": 0, "B": 0}
+        for termination in prefetched:
+            if termination.cable_end in end_counts:
+                end_counts[termination.cable_end] += 1
+        return end_counts == {"A": 1, "B": 1}
+    return len(cable.a_terminations) == 1 and len(cable.b_terminations) == 1
+
+
+def classify_cable_action(local_term, remote_term, provenance_tag=_PROVENANCE_TAG_UNSET) -> dict:
+    """
+    Decide what syncing a cable between *local_term* and *remote_term* should do.
+
+    The returned ``action`` is one of:
+
+    - ``"create"``          -- neither endpoint is cabled; make a fresh (enriched) cable.
+    - ``"noop"``            -- the desired cable already exists and already carries the librenms
+      tag; nothing to do.
+    - ``"tag_only"``        -- the desired cable already exists but is untagged; add the librenms
+      tag (non-destructive, always allowed without force).
+    - ``"needs_force"``     -- a different cable occupies an endpoint; require explicit
+      confirmation of the exact current cable IDs before deletion.
+    - ``"unsupported"``     -- an endpoint uses a multi-termination cable, which one row cannot
+      safely replace or adopt.
+
+    A cable "already connecting" the two ends means both terminate the SAME single NetBox cable; a
+    multi-segment remodel (through patch panels) does NOT — its first segment lands on a panel port,
+    so it correctly falls into the re-point branch and is protected.
+
+    Args:
+        local_term: The near-side termination (ConsoleServerPort / Interface).
+        remote_term: The far-side termination (ConsolePort / Interface).
+        provenance_tag: Optional tag used to identify cables managed by this plugin.
+
+    Returns:
+        dict: ``{"action": str, "to_remove": [Cable, ...], "cable": Cable | None}`` where
+            ``to_remove`` lists the cables an overwrite would delete and ``cable`` is the existing
+            desired-connection cable (for the noop / tag_only cases), else ``None``.
+
+    """
+    local_cable = local_term.cable
+    remote_cable = remote_term.cable
+
+    if local_cable is None and remote_cable is None:
+        return {"action": "create", "to_remove": [], "cable": None}
+
+    occupying_cables = {cable for cable in (local_cable, remote_cable) if cable is not None}
+    if any(not cable_is_point_to_point(cable) for cable in occupying_cables):
+        return {"action": "unsupported", "to_remove": [], "cable": None}
+
+    # The exact desired connection already exists: both ends terminate the SAME single cable.
+    if local_cable is not None and local_cable == remote_cable:
+        if cable_has_librenms_tag(local_cable, provenance_tag):
+            return {"action": "noop", "to_remove": [], "cable": local_cable}
+        return {"action": "tag_only", "to_remove": [], "cable": local_cable}
+
+    # A different cable occupies at least one endpoint -> a re-point. Every occupying cable must be
+    # removed first (NetBox forbids a second cable on an already-terminated endpoint).
+    to_remove = []
+    for cable in (local_cable, remote_cable):
+        if cable is not None and cable not in to_remove:
+            to_remove.append(cable)
+    return {"action": "needs_force", "to_remove": to_remove, "cable": None}
+
+
+def cable_far_terminations(cable, near_termination) -> list:
+    """
+    Return the terminations on the opposite side of *cable* from *near_termination*.
+
+    The direct far end of one physical cable — NOT the traced path end (see
+    :func:`cable_path_reaches` for that). Used to tell whether an existing cable already lands
+    on the LibreNMS-desired endpoint.
+
+    Args:
+        cable: The NetBox ``Cable`` to inspect.
+        near_termination: The termination whose opposite side is wanted.
+
+    Returns:
+        list: The other side's terminations (``b_terminations`` when *near_termination* is on
+            the A side, else ``a_terminations``).
+
+    """
+    # Serial table enrichment prefetches the generic CableTermination rows and their concrete
+    # objects for the whole page. Use that cache when present. The a_terminations/b_terminations
+    # properties otherwise issue one concrete-object query per cable.
+    prefetched = getattr(cable, "_prefetched_objects_cache", {}).get("terminations")
+    if prefetched is not None:
+        near_end = next(
+            (termination.cable_end for termination in prefetched if termination.termination == near_termination),
+            None,
+        )
+        if near_end is not None:
+            far_end = "B" if near_end == "A" else "A"
+            return [termination.termination for termination in prefetched if termination.cable_end == far_end]
+
+    a_terminations = list(cable.a_terminations)
+    if near_termination in a_terminations:
+        return list(cable.b_terminations)
+    return a_terminations
+
+
+def cable_path_reaches(
+    termination,
+    remote_termination=None,
+    remote_device=None,
+    path=None,
+    remote_termination_type=None,
+) -> bool:
+    """
+    Return True when *termination*'s traced cable path ends at the given remote.
+
+    Follows patch-panel front/rear pass-throughs via ``termination.trace()``, so a remodeled
+    multi-segment path still counts as "reaching" its end device — the basis for treating a
+    remodel as a better model of the same link rather than a mismatch to re-sync.
+
+    Args:
+        termination: The near-side termination (Interface / ConsoleServerPort) to trace from.
+        remote_termination: Match when the path ends at exactly this termination.
+        remote_device: Match when the path ends at ANY port on this device — the serial case,
+            where the LibreNMS label only identifies the device, not the port.
+        path: An already-computed ``termination.trace()`` result to reuse (avoids re-tracing).
+        remote_termination_type: When set, a device match must also use this termination type.
+
+    Returns:
+        bool: True when the traced path's far end matches either criterion.
+
+    """
+    if path is None:
+        path = termination.trace()
+    if not path:
+        return False
+    for far_termination in path[-1][2] or []:
+        if remote_termination is not None and far_termination == remote_termination:
+            return True
+        if (
+            remote_device is not None
+            and getattr(far_termination, "device_id", None) == remote_device.pk
+            and (remote_termination_type is None or isinstance(far_termination, remote_termination_type))
+        ):
+            return True
+    return False
+
+
+def _object_is_visible(obj, user, cache=None) -> bool:
+    """
+    Return whether *user* may view one concrete NetBox object.
+
+    Fails closed without a user: the production caller always supplies the request's user, so a
+    missing one means the caller could not establish an identity, not that everything is public.
+
+    Args:
+        obj (models.Model): The NetBox object whose visibility is checked.
+        user (object | None): The user the labels are rendered for.
+        cache (dict | None): Optional dict memoising the answer per object for one render, so a
+            long trace does not repeat the same restricted lookup at every hop.
+
+    Returns:
+        bool: Whether the user may view the object.
+
+    """
+    if user is None:
+        return False
+    if not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False):
+        return True
+    model = type(obj)
+    key = (model._meta.label_lower, obj.pk)
+    if cache is not None and key in cache:
+        return cache[key]
+    permission = f"{model._meta.app_label}.view_{model._meta.model_name}"
+    if not user.has_perm(permission):
+        visible = False
+    else:
+        visible = model.objects.restrict(user, "view").filter(pk=obj.pk).exists()
+    if cache is not None:
+        cache[key] = visible
+    return visible
+
+
+def _termination_label(terminations, user=None, cache=None) -> str:
+    """Render a trace node's terminations as ``Device: Port`` (comma-joined), or a dash if empty."""
+    labels = []
+    for term in terminations or []:
+        device = getattr(term, "device", None)
+        if not _object_is_visible(term, user, cache) or (
+            device is not None and not _object_is_visible(device, user, cache)
+        ):
+            labels.append("Restricted")
+            continue
+        device_name = getattr(device, "name", None)
+        labels.append(f"{device_name}: {term}" if device_name else str(term))
+    return ", ".join(labels) if labels else "—"
+
+
+def _cable_label(segment_cable, user=None, cache=None) -> Optional[str]:
+    """Render a trace segment's cable (or list of cables) as ``#pk``; None for a passthrough gap."""
+    if segment_cable is None:
+        return None
+    if isinstance(segment_cable, (list, tuple)):
+        joined = ", ".join(
+            f"#{c.pk}" if _object_is_visible(c, user, cache) else "Restricted" for c in segment_cable if c is not None
+        )
+        return joined or None
+    return f"#{segment_cable.pk}" if _object_is_visible(segment_cable, user, cache) else "Restricted"
+
+
+def render_cable_trace(cable, user=None) -> list:
+    """
+    Return *cable*'s full end-to-end physical path as an ordered list of hop dicts.
+
+    Uses NetBox's ``termination.trace()`` (which follows patch-panel front/rear pass-throughs all
+    the way to the end device). It starts from the first cable termination that supports tracing.
+    The overwrite-confirm modal then shows every segment that a forced overwrite would affect.
+
+    Args:
+        cable: The NetBox ``Cable`` whose end-to-end path is rendered.
+        user: Optional user whose object scope controls labels in the rendered trace.
+
+    Returns:
+        list[dict]: One ``{"near": str, "cable": str | None, "far": str}`` entry per traced
+            segment, in order from the trace origin (labels read ``Device: Port``). Empty when no
+            cable termination supports tracing.
+
+    """
+    terminations = [*cable.a_terminations, *cable.b_terminations]
+    origin = next((termination for termination in terminations if callable(getattr(termination, "trace", None))), None)
+    if origin is None:
+        return []
+    hops = []
+    visibility_cache = {}
+    for near, segment_cable, far in origin.trace():
+        hops.append(
+            {
+                "near": _termination_label(near, user, visibility_cache),
+                "cable": _cable_label(segment_cable, user, visibility_cache),
+                "far": _termination_label(far, user, visibility_cache),
+            }
+        )
+    return hops
 
 
 def get_virtual_chassis_member(
@@ -2510,7 +2961,15 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
 
     """
     server_key = require_server_key(server_key)
-    cf_value = obj.cf.get("librenms_id")
+    # Read the stored JSON directly. NetBox's ``obj.cf`` accessor resolves custom-field
+    # definitions through ContentType on first access for every model instance, which turns
+    # bulk interface resolution into two extra queries per row. This helper reads one known
+    # stored field and already owns its normalization/default semantics, so the raw mapping is
+    # the authoritative and query-free source here.
+    custom_field_data = getattr(obj, "custom_field_data", None)
+    cf_value = (
+        custom_field_data.get("librenms_id") if isinstance(custom_field_data, dict) else obj.cf.get("librenms_id")
+    )
     if cf_value is None:
         return None
     if isinstance(cf_value, int) and not isinstance(cf_value, bool):
@@ -2776,6 +3235,23 @@ def build_librenms_id_qs(server_key, value):
     host_q |= Q(custom_field_data__librenms_id__regex=numeric_pattern)
     oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
     return host_q, oob_q
+
+
+def resolve_interface_on_device(device, server_key, port_id, name_candidates):
+    """Resolve one Interface by stable LibreNMS ID, then by name, on one Device."""
+    interfaces = device.interfaces.all()
+    normalized_port_id = coerce_librenms_id(port_id)
+    if normalized_port_id is not None:
+        host_q, _oob_q = build_librenms_id_qs(server_key, normalized_port_id)
+        matches = list(interfaces.filter(host_q).order_by("pk")[:2])
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+
+    names = {name for name in name_candidates if isinstance(name, str) and name}
+    if not names:
+        return None
+    matches = list(interfaces.filter(name__in=names).order_by("pk")[:2])
+    return matches[0] if len(matches) == 1 else None
 
 
 def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, select_for_update: bool = False):
