@@ -447,6 +447,38 @@ class TestVirtualChassisInventory:
         assert result[0]["serial"] == "BCFB9793"
         assert result[0]["assigned_member"] == members[0]
 
+    def test_the_serial_rules_load_once_for_the_whole_chassis_loop(self, librenms_server):
+        """normalize_inventory_serial re-queries NormalizationRule per call unless rules are preloaded.
+
+        create_virtual_chassis_with_members() already preloads once before its own member loop;
+        this loop must not pay a query per chassis component.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        _vc, members = make_virtual_chassis_members("inventory-preload", count=1)
+        inventory = [
+            {
+                "entPhysicalClass": "chassis",
+                "entPhysicalDescr": f"Member {index}",
+                "entPhysicalSerialNum": f"VC-PRELOAD-{index}",
+                "entPhysicalModelName": "Member model",
+            }
+            for index in range(5)
+        ]
+        _register_device(librenms_server, 6645, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6645
+
+        with CaptureQueriesContext(connection) as captured:
+            result = view._get_vc_inventory_serials(members[0])
+
+        assert len(result) == 5
+        rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
+        # One preload reads the scoped and unscoped rows; per-call lookups would scale with the
+        # five components instead.
+        assert len(rule_queries) <= 2, f"expected one preload for the loop, saw {len(rule_queries)} queries"
+
     def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-failure", count=1)
         librenms_server.register("/api/v0/inventory/6642/all", {"status": "error"}, status=404)
