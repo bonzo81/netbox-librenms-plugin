@@ -285,6 +285,53 @@ class TestInstallSingleResolutionPaths:
             **kwargs,
         )
 
+    def test_a_resolved_parent_narrows_the_search_without_hiding_a_device_level_bay(self):
+        """An installed parent must narrow the candidate bays, not shrink them to nothing.
+
+        _find_parent_module_id only resolves a parent once that parent is installed, and the
+        candidate set then collapses to that module's own child bays with no fallback. A row whose
+        NetBox bay is device-level installs on a first pass and then skips as "no matching bay" on
+        the next, which is what a second branch install (or installing the rows one at a time
+        first) produces.
+        """
+        from dcim.models import Module
+
+        device = make_device_with_module_bays("parent-hides-device-bay", ["Slot 1", "Supervisor Slot"])
+        install_module(device, "Slot 1", "PARENT-HIDES-CARD", child_bays=("Transceiver 1",))
+        module_type = make_module_type("PARENT-HIDES-SUP")
+        # The parent resolves through a mapping, so its own name is not a bay name and cannot be
+        # what the item matches on.
+        _mapping(librenms_name="Linecard 1", librenms_class="container", netbox_bay_name="Slot 1")
+        index_map = {
+            10: _item(10, "", "Linecard 1", phys_class="container"),
+            20: _item(20, module_type.model, "Supervisor Slot", parent=10),
+        }
+
+        result = self._install(device, index_map[20], index_map, module_types=[module_type])
+
+        assert result["status"] == "installed", result
+        installed = Module.objects.get(device=device, module_type=module_type)
+        assert installed.module_bay.name == "Supervisor Slot"
+        assert installed.module_bay.module_id is None, "the device-level bay, not one under the parent"
+
+    def test_the_same_row_installs_while_no_parent_module_is_installed_yet(self):
+        """The control: the trigger is the installed parent, not the row.
+
+        Nothing about the item or its bay changes. Leaving the line card out is the only
+        difference, and then the combined candidate set is used and the row installs.
+        """
+        device = make_device_with_module_bays("parent-absent-device-bay", ["Slot 1", "Supervisor Slot"])
+        module_type = make_module_type("PARENT-ABSENT-SUP")
+        _mapping(librenms_name="Linecard 1", librenms_class="container", netbox_bay_name="Slot 1")
+        index_map = {
+            10: _item(10, "", "Linecard 1", phys_class="container"),
+            20: _item(20, module_type.model, "Supervisor Slot", parent=10),
+        }
+
+        result = self._install(device, index_map[20], index_map, module_types=[module_type])
+
+        assert result["status"] == "installed", result
+
     def test_omitted_mappings_are_loaded_from_the_database(self):
         device = make_device_with_module_bays("install-loads-mappings", ["PS1"])
         module_type = make_module_type("INSTALL-LOAD-PSU")

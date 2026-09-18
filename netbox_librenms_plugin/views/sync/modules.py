@@ -1506,23 +1506,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
             exact_mappings, regex_mappings = load_bay_mappings()
 
-        # Determine if this item belongs under an installed module
-        # by tracing its LibreNMS parent hierarchy to an installed item
-        parent_module_id = InstallBranchView._find_parent_module_id(
-            item, index_map, bays, exact_mappings, regex_mappings
-        )
-
-        bay_dict = InstallBranchView._candidate_bays_for_item(bays, parent_module_id)
-
-        # Match module bay using preloaded mapping data
-        matched_bay = InstallBranchView._match_bay(
-            item,
-            index_map,
-            bay_dict,
-            exact_mappings,
-            regex_mappings,
-            manufacturer_id=manufacturer_id,
-            norm_rules_bay=norm_rules_bay,
+        matched_bay = InstallBranchView._resolve_bay_for_item(
+            item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id, norm_rules_bay
         )
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
@@ -1593,6 +1578,54 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             "adopted_components": adopted_components,
             "vc_adjustments": vc_adjustments,
         }
+
+    @staticmethod
+    def _resolve_bay_for_item(item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id, norm_rules_bay):
+        """
+        Return the module bay to install *item* into, or None when nothing matches.
+
+        An installed parent module narrows the candidate names so duplicate bay names resolve to
+        the right module. It must not shrink the search to nothing: the parent only resolves once
+        it is installed, so an item whose NetBox bay sits outside that module (a device-level bay)
+        installed on a first pass and then skipped as "no matching bay" on the next, which is what
+        a second branch install, or installing the rows one at a time first, produces.
+
+        The fallback reuses the combined device + module-scoped set, which already drops names
+        owned by two different modules, so it can only ever land on an unambiguous bay.
+
+        Args:
+            item (dict): The LibreNMS inventory item to place.
+            index_map (dict): The inventory items keyed by index.
+            bays: The device's module bays, with ``installed_module`` selected.
+            exact_mappings (list): The exact module bay mappings.
+            regex_mappings (list): The regular expression module bay mappings.
+            manufacturer_id (int | None): The device manufacturer ID.
+            norm_rules_bay (dict | None): The module bay normalization rules.
+
+        Returns:
+            ModuleBay | None: The bay to install into.
+
+        """
+
+        def match_against(scoped_parent_module_id):
+            return InstallBranchView._match_bay(
+                item,
+                index_map,
+                InstallBranchView._candidate_bays_for_item(bays, scoped_parent_module_id),
+                exact_mappings,
+                regex_mappings,
+                manufacturer_id=manufacturer_id,
+                norm_rules_bay=norm_rules_bay,
+            )
+
+        # Trace the item's LibreNMS parent hierarchy to an installed module, if any.
+        parent_module_id = InstallBranchView._find_parent_module_id(
+            item, index_map, bays, exact_mappings, regex_mappings
+        )
+        matched = match_against(parent_module_id)
+        if not matched and parent_module_id:
+            matched = match_against(None)
+        return matched
 
     @staticmethod
     def _find_parent_module_id(item, index_map, device_bays, exact_mappings, regex_mappings):  # noqa: C901
