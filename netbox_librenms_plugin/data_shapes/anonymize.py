@@ -22,6 +22,7 @@ from typing import NamedTuple
 from netbox_librenms_plugin.constants import (
     GENERIC_CONTAINER_MODELS,
     LIBRENMS_EMPTY_MESSAGES,
+    LIBRENMS_GLOBAL_ROUTING_INSTANCE,
     LIBRENMS_PLACEHOLDER_VALUES,
 )
 from netbox_librenms_plugin.data_shapes.ports import (
@@ -544,14 +545,9 @@ def _anon_asn(value, salt):
     return 64512 + int(_hash(str(value), salt, 4), 16) % 1023
 
 
-# The Nokia global routing instance. "Base is not a VRF" is a logic-bearing rule the VRF
-# suggestion has to apply, so a fixture must be able to express it: the literal survives.
-_GLOBAL_ROUTING_INSTANCE = "Base"
-
-
 def _anon_vrf_name(value, salt):
     """Map a VRF name to a deterministic pseudonym, keeping the global-instance literal."""
-    if value == _GLOBAL_ROUTING_INSTANCE:
+    if value == LIBRENMS_GLOBAL_ROUTING_INSTANCE:
         return value
     return f"vrf-{_hash(value, salt)}"
 

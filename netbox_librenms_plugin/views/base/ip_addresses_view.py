@@ -13,7 +13,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.constants import is_supported_interface_name_field
+from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE, is_supported_interface_name_field
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
@@ -46,6 +46,17 @@ def _port_key(port_id):
     return str(port_id)
 
 
+def _valid_librenms_vrf_identity(value):
+    """Return a safe copy of a cached LibreNMS VRF identity, or ``None``."""
+    if not isinstance(value, dict):
+        return None
+    name = value.get("name")
+    rd = value.get("rd")
+    if not isinstance(name, str) or not name or (rd is not None and not isinstance(rd, str)):
+        return None
+    return {"name": name, "rd": rd}
+
+
 class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Base view for synchronizing IP address information from LibreNMS."""
 
@@ -68,7 +79,16 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             return False, self.scoped_lookup_message(lookup_error)
         return self.librenms_api.get_device_ips(self.librenms_id)
 
-    def enrich_ip_data(self, ip_data, obj, interface_name_field, mgmt_ip="", server_key=None, port_data_cache=None):
+    def enrich_ip_data(
+        self,
+        ip_data,
+        obj,
+        interface_name_field,
+        mgmt_ip="",
+        server_key=None,
+        port_data_cache=None,
+        fetch_vrf_identities=True,
+    ):
         """
         Enrich IP data with NetBox information in a more efficient manner.
 
@@ -87,6 +107,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             server_key: The LibreNMS server key scoping per-server interface matching.
             port_data_cache: Optional pre-populated port map (see :func:`_port_key`) so a
                 cached render reads the interface names without a live call.
+            fetch_vrf_identities: Whether to read current VRF identities from LibreNMS.
 
         Returns:
             list: The enriched IP entries.
@@ -120,6 +141,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             port_data_cache.clear()
             port_data_cache.update(rekeyed)
         self._load_port_names(port_data_cache, ip_data)
+        vrf_identities = self._resolve_vrf_identities(port_data_cache, ip_data, fetch_vrf_identities)
+        vrf_suggestions = self._load_vrf_suggestions(vrf_identities, prefetched_data["vrfs"])
 
         enriched_data = []
 
@@ -186,6 +209,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 ip_entry["port_id"],
                 librenms_interface_name,
                 prefetched_data,
+            )
+
+            self._add_vrf_suggestion(
+                enriched_ip,
+                _port_key(ip_entry["port_id"]),
+                vrf_identities,
+                vrf_suggestions,
             )
 
             enriched_data.append(enriched_ip)
@@ -327,6 +357,135 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             key = _port_key(port["port_id"])
             if key in wanted:
                 port_data_cache.setdefault(key, port)
+
+    def _load_vrf_identities(self, port_data_cache, ip_data):
+        """
+        Load LibreNMS VRF identities for tagged ports on the fresh path.
+
+        Args:
+            port_data_cache: LibreNMS port rows keyed by :func:`_port_key`.
+            ip_data: LibreNMS IP rows being enriched.
+
+        Returns:
+            dict: LibreNMS VRF identities keyed by :func:`_port_key`.
+
+        """
+        tagged_ports = {}
+        for row in ip_data:
+            if not isinstance(row, dict) or "port_id" not in row:
+                continue
+            port_key = _port_key(row["port_id"])
+            port = port_data_cache.get(port_key)
+            if not isinstance(port, dict):
+                continue
+            # coerce_librenms_id also rejects 0, which LibreNMS uses for "not tagged".
+            if_vrf = coerce_librenms_id(port.get("ifVrf"))
+            if if_vrf is not None:
+                tagged_ports[port_key] = if_vrf
+
+        if not tagged_ports or not getattr(self, "librenms_id", None):
+            return {}
+
+        success, librenms_vrfs = self.librenms_api.get_device_vrfs(self.librenms_id)
+        if not success:
+            logger.debug("Could not load LibreNMS VRFs for device %s: %s", self.librenms_id, librenms_vrfs)
+            return {}
+
+        librenms_by_id = {}
+        for vrf in librenms_vrfs:
+            if not isinstance(vrf, dict):
+                continue
+            vrf_id = coerce_librenms_id(vrf.get("vrf_id"))
+            vrf_name = vrf.get("vrf_name")
+            if vrf_id is None or not isinstance(vrf_name, str) or not vrf_name:
+                continue
+            if vrf_name == LIBRENMS_GLOBAL_ROUTING_INSTANCE:
+                continue
+            source_rd = vrf.get("mplsVpnVrfRouteDistinguisher")
+            rd = source_rd if isinstance(source_rd, str) else None
+            librenms_by_id[vrf_id] = {"name": vrf_name, "rd": rd}
+
+        return {
+            port_key: librenms_by_id[vrf_id] for port_key, vrf_id in tagged_ports.items() if vrf_id in librenms_by_id
+        }
+
+    def _resolve_vrf_identities(self, port_data_cache, ip_data, fetch_vrf_identities):
+        """
+        Fetch fresh VRF identities or validate the identities carried by cached rows.
+
+        Args:
+            port_data_cache: LibreNMS port rows keyed by :func:`_port_key`.
+            ip_data: LibreNMS IP rows being enriched.
+            fetch_vrf_identities: Whether to read current VRF identities from LibreNMS.
+
+        Returns:
+            dict: Valid LibreNMS VRF identities keyed by :func:`_port_key`.
+
+        """
+        if fetch_vrf_identities:
+            return self._load_vrf_identities(port_data_cache, ip_data)
+
+        identities = {}
+        for row in ip_data:
+            if not isinstance(row, dict) or "port_id" not in row:
+                continue
+            identity = _valid_librenms_vrf_identity(row.get("librenms_vrf"))
+            if identity is not None:
+                identities.setdefault(_port_key(row["port_id"]), identity)
+        return identities
+
+    def _load_vrf_suggestions(self, vrf_identities, netbox_vrfs):
+        """
+        Match cached LibreNMS VRF identities to current NetBox VRFs.
+
+        Args:
+            vrf_identities: LibreNMS VRF identities keyed by :func:`_port_key`.
+            netbox_vrfs: NetBox VRFs available in the dropdown.
+
+        Returns:
+            dict: Suggested NetBox VRF and source data keyed by port.
+
+        """
+        netbox_by_rd = defaultdict(list)
+        netbox_by_name = defaultdict(list)
+        for vrf in netbox_vrfs:
+            if vrf.rd:
+                netbox_by_rd[str(vrf.rd)].append(vrf)
+            netbox_by_name[vrf.name].append(vrf)
+        unique_netbox_by_rd = {rd: matches[0] for rd, matches in netbox_by_rd.items() if len(matches) == 1}
+        unique_netbox_by_name = {name: matches[0] for name, matches in netbox_by_name.items() if len(matches) == 1}
+
+        suggestions = {}
+        for port_key, identity in vrf_identities.items():
+            target = unique_netbox_by_rd.get(identity["rd"]) if isinstance(identity["rd"], str) else None
+            matched_by = "route distinguisher"
+            if target is None:
+                target = unique_netbox_by_name.get(identity["name"])
+                matched_by = "name"
+            if target is None:
+                continue
+            suggestions[port_key] = {
+                "vrf_id": target.pk,
+                "source": {"name": identity["name"], "matched_by": matched_by},
+            }
+        return suggestions
+
+    @staticmethod
+    def _add_vrf_suggestion(enriched_ip, port_key, vrf_identities, vrf_suggestions):
+        """Carry the source identity, and suggest only for an address NetBox does not hold."""
+        librenms_vrf = vrf_identities.get(port_key)
+        if librenms_vrf is not None:
+            enriched_ip["librenms_vrf"] = librenms_vrf
+        # `exists`, not just `vrf_id`: an address already in the Global table has no vrf_id either,
+        # and preselecting a VRF on it contradicts the "Synced" status the row renders.
+        if enriched_ip.get("vrf_id") is not None or enriched_ip.get("exists"):
+            return
+        suggestion = vrf_suggestions.get(port_key)
+        if suggestion is not None:
+            # Its own key, never vrf_id: that one means "the VRF NetBox has for this row", and the
+            # verify path reads it to decide whether an address is already synced.
+            enriched_ip["suggested_vrf_id"] = suggestion["vrf_id"]
+            enriched_ip["vrf_suggested_from"] = suggestion["source"]
 
     def _create_base_ip_entry(self, ip_entry, obj, vrfs):
         """Create the base data structure for an IP entry."""
@@ -534,7 +693,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
         # Enrich data in both cases to ensure current NetBox state
         ip_data = self.enrich_ip_data(
-            ip_data, obj, interface_name_field, mgmt_ip, server_key=server_key, port_data_cache=port_data_cache
+            ip_data,
+            obj,
+            interface_name_field,
+            mgmt_ip,
+            server_key=server_key,
+            port_data_cache=port_data_cache,
+            fetch_vrf_identities=fetch_fresh,
         )
 
         if fetch_fresh:
