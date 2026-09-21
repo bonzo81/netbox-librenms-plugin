@@ -24,6 +24,7 @@ from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
     OOB_BADGE_HTML,
     OOB_INVENTORY_SOURCE,
+    is_module_model_placeholder,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -4845,6 +4846,61 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     return value
 
 
+def _probe_module_type_name(name, module_types, *, manufacturer, norm_rules, generic_fallback):
+    """Run one candidate name through the scoped, global, normalized and generic look-ups."""
+    mfr_mappings = getattr(module_types, "mfr_mappings", None)
+    mfr_pk = getattr(manufacturer, "pk", None)
+
+    def _lookup_mfr(candidate):
+        if mfr_mappings and mfr_pk is not None and candidate:
+            return mfr_mappings.get((mfr_pk, candidate))
+        return None
+
+    def _normalized():
+        return apply_normalization_rules(name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules)
+
+    matched = _lookup_mfr(name) or module_types.get(name)
+    normalized = None
+    if not matched:
+        normalized = _normalized()
+        if normalized != name:
+            matched = _lookup_mfr(normalized) or module_types.get(normalized)
+    if not matched and generic_fallback:
+        matched = generic_fallback.get(name)
+        if not matched:
+            if normalized is None:
+                normalized = _normalized()
+            if normalized != name:
+                matched = generic_fallback.get(normalized)
+    return matched
+
+
+def module_type_lookup_candidates(item):
+    """
+    Return the ordered names one inventory row may be matched by, placeholders removed.
+
+    The model leads. ``entPhysicalDescr`` follows because it carries the real part number when
+    the vendor reports a placeholder model, and because ``_merge_transceiver_data`` stores the
+    transceiver API's type there on a synthetic row. Every call site reads this one definition,
+    so the fallback order cannot differ between the table and the install path.
+
+    Args:
+        item (dict): One LibreNMS inventory row.
+
+    Returns:
+        list[str]: Usable lookup names, most specific first, without duplicates.
+
+    """
+    candidates = []
+    for key in ("entPhysicalModelName", "entPhysicalDescr"):
+        value = item.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if not is_module_model_placeholder(value) and value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
 def resolve_module_type(
     model_name: str,
     module_types: dict,
@@ -4852,6 +4908,7 @@ def resolve_module_type(
     *,
     norm_rules: dict | None = None,
     generic_fallback: dict | None = None,
+    fallback_names: tuple | list = (),
 ):
     """
     Resolve a LibreNMS model name to a NetBox ModuleType via direct lookup then normalization.
@@ -4876,42 +4933,37 @@ def resolve_module_type(
         manufacturer (Manufacturer | None): Optional manufacturer for scoped rules and mappings.
         norm_rules (dict | None): Preloaded normalization rules that avoid repeated database queries.
         generic_fallback (dict | None): Generic manufacturer index used when the primary lookup has no match.
+        fallback_names (tuple | list): Names to try, in order, when *model_name* is a placeholder.
+            They are ignored when it is a real model. :func:`module_type_lookup_candidates` builds
+            these from a row so every call site tries the same names in the same order.
 
     Returns:
         ModuleType | None: Matched ModuleType, or ``None`` when no lookup path matches.
 
     """
-    if not model_name:
-        return None
+    # A placeholder is absent data, not a key: matching on it would let one mapping row answer
+    # for every SFP the vendor declined to identify. The fallbacks apply only then. A real model
+    # that resolves to nothing stays unresolved, because matching it on its own description
+    # would be a guess, and a ModuleTypeMapping row is the supported way to teach that name.
+    if is_module_model_placeholder(model_name):
+        candidates = []
+        for name in fallback_names:
+            if not is_module_model_placeholder(name) and name not in candidates:
+                candidates.append(name)
+    else:
+        candidates = [model_name]
 
-    mfr_mappings = getattr(module_types, "mfr_mappings", None)
-    mfr_pk = getattr(manufacturer, "pk", None)
-
-    def _lookup_mfr(name):
-        if mfr_mappings and mfr_pk is not None and name:
-            return mfr_mappings.get((mfr_pk, name))
-        return None
-
-    matched = _lookup_mfr(model_name)
-    if not matched:
-        matched = module_types.get(model_name)
-    normalized = None
-    if not matched:
-        normalized = apply_normalization_rules(
-            model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
+    for name in candidates:
+        matched = _probe_module_type_name(
+            name,
+            module_types,
+            manufacturer=manufacturer,
+            norm_rules=norm_rules,
+            generic_fallback=generic_fallback,
         )
-        if normalized != model_name:
-            matched = _lookup_mfr(normalized) or module_types.get(normalized)
-    if not matched and generic_fallback:
-        matched = generic_fallback.get(model_name)
-        if not matched:
-            if normalized is None:
-                normalized = apply_normalization_rules(
-                    model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
-                )
-            if normalized != model_name:
-                matched = generic_fallback.get(normalized)
-    return matched
+        if matched:
+            return matched
+    return None
 
 
 def slashless_route_aliases(patterns):

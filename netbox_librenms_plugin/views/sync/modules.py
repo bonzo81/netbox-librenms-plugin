@@ -1468,7 +1468,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         """
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import resolve_module_type
+        from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
         # The serial-scope rules strip vendor markers such as Juniper's "S/N ", and the
@@ -1491,7 +1491,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Match module type (direct, then normalization fallback)
         manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
-        matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
+        matched_type = resolve_module_type(
+            model_name,
+            module_types,
+            manufacturer=manufacturer,
+            fallback_names=module_type_lookup_candidates(item),
+        )
         if not matched_type:
             return {"status": "skipped", "name": name, "reason": "no matching type"}
         if matched_type.pk not in allowed_module_type_ids:
@@ -2474,7 +2479,7 @@ class ModuleMismatchPreviewView(
         inventory_digest = module_inventory_row_digest(librenms_item)
         action_target = {"module_id": installed_module.pk}
 
-        from netbox_librenms_plugin.utils import resolve_module_type
+        from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         librenms_model = normalize_serial(librenms_item.get("entPhysicalModelName")) or "-"
@@ -2489,7 +2494,10 @@ class ModuleMismatchPreviewView(
         # Detect type mismatch
         module_types = get_module_types_indexed()
         matched_type = resolve_module_type(
-            librenms_model if librenms_model != "-" else "", module_types, manufacturer=manufacturer
+            librenms_model if librenms_model != "-" else "",
+            module_types,
+            manufacturer=manufacturer,
+            fallback_names=module_type_lookup_candidates(librenms_item),
         )
 
         type_mismatch = matched_type is not None and installed_module.module_type_id != matched_type.pk
@@ -2685,7 +2693,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         if refusal:
             return refusal
 
-        from netbox_librenms_plugin.utils import resolve_module_type
+        from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
@@ -2696,7 +2704,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             serial = ""
 
         module_types = get_module_types_indexed()
-        matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
+        matched_type = resolve_module_type(
+            model_name,
+            module_types,
+            manufacturer=manufacturer,
+            fallback_names=module_type_lookup_candidates(librenms_item),
+        )
 
         if not matched_type:
             messages.error(request, f"No matching module type found for '{model_name}'.")
