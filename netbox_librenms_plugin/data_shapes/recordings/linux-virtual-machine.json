@@ -14,9 +14,9 @@
       "devices": [
         {
           "device_id": 2000,
-          "hostname": "device-vm0001",
-          "sysName": "device-vm0001",
-          "display": "device-vm0001",
+          "hostname": "vm-linux-1",
+          "sysName": "vm-linux-1-sys",
+          "display": "vm-linux-1",
           "ip": "192.0.2.200",
           "hardware": "MODEL-91bf2d",
           "version": "stub-linux-1",

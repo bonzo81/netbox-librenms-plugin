@@ -18,6 +18,12 @@ from netbox_librenms_plugin.tests.recordings import load_recording
 pytestmark = pytest.mark.django_db
 
 
+# The row list each collection route answers with. An unregistered route must fall back to a
+# WELL-FORMED empty body for its own field, the way a real LibreNMS does — a bare {"status": "ok"}
+# is a malformed payload that the capture rightly refuses.
+_STUB_ROW_FIELDS = {"ip": "addresses", "links": "links", "ports": "ports", "transceivers": "transceivers"}
+
+
 class _StubApi:
     """Serve controlled API responses without serial sensor support for capture logic tests."""
 
@@ -26,7 +32,10 @@ class _StubApi:
         self.server_key = "stub"
 
     def _raw_get(self, path, params=None):
-        return self.routes.get(path, (200, {"status": "ok"}))
+        if path in self.routes:
+            return self.routes[path]
+        row_field = _STUB_ROW_FIELDS.get(path.rsplit("/", 1)[-1])
+        return 200, {"status": "ok"} if row_field is None else {"status": "ok", row_field: []}
 
 
 def _with_empty_inventory_source(recording):
@@ -253,6 +262,106 @@ def test_capture_skips_sensors_route_when_device_has_none(recording_server):
     captured = capture_device_recording(api, 2000)
 
     assert "GET /api/v0/resources/sensors" not in captured["responses"]
+
+
+def _vrf_seed(*, ports, vrfs, ip_addresses=None, links=None):
+    """Build a capture source serving the VRF / IP / links routes the tabs read."""
+    responses = {
+        "GET /api/v0/devices/3100": {
+            "status": "ok",
+            "devices": [{"device_id": 3100, "os": "timos", "hostname": "rtr.example.net"}],
+        },
+        "GET /api/v0/devices/3100/ports": {"status": "ok", "ports": ports},
+        "GET /api/v0/devices/3100/port_stack": {"status": "ok", "mappings": []},
+        "GET /api/v0/devices/3100/transceivers": {"status": "ok", "transceivers": []},
+        "GET /api/v0/devices/3100/ip": {"status": "ok", "addresses": ip_addresses or []},
+        "GET /api/v0/devices/3100/links": {"status": "ok", "links": links or []},
+        "GET /api/v0/routing/vrf": {"status": "ok", "vrfs": vrfs, "count": len(vrfs)},
+    }
+    return _with_empty_inventory_source(
+        {
+            "schema_version": 1,
+            "name": "vrf-seed",
+            "device_id": 3100,
+            "meta": {"os": "timos"},
+            "responses": responses,
+        }
+    )
+
+
+def test_capture_records_the_ip_and_links_routes(recording_server):
+    """The IP and cables tabs read these; without them no recording can drive either tab."""
+    seed = _vrf_seed(
+        ports=[{"port_id": 1, "ifName": "1/1/c1/1", "ifVrf": 0}],
+        vrfs=[],
+        ip_addresses=[{"ipv4_address": "192.0.2.10", "ipv4_prefixlen": 31, "port_id": 1}],
+        links=[{"id": 7, "local_port_id": 1, "remote_hostname": "peer.example.net", "remote_port": "et-0/0/1"}],
+    )
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, 3100)
+
+    assert captured["responses"]["GET /api/v0/devices/3100/ip"] == seed["responses"]["GET /api/v0/devices/3100/ip"]
+    assert (
+        captured["responses"]["GET /api/v0/devices/3100/links"] == seed["responses"]["GET /api/v0/devices/3100/links"]
+    )
+
+
+def test_capture_records_only_this_devices_vrfs(recording_server):
+    """/routing/vrf is instance-wide by default; a recording must never carry another device's VRFs."""
+    seed = _vrf_seed(
+        ports=[{"port_id": 1, "ifName": "1/1/c1/1", "ifVrf": 7}],
+        vrfs=[
+            {"vrf_id": 7, "vrf_name": "customer-a", "device_id": 3100},
+            {"vrf_id": 9, "vrf_name": "someone-elses", "device_id": 4200},
+        ],
+    )
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, 3100)
+
+    recorded = captured["responses"]["GET /api/v0/routing/vrf"]
+    assert [row["vrf_id"] for row in recorded["vrfs"]] == [7]
+    assert "someone-elses" not in str(recorded)
+
+
+def test_capture_skips_the_vrf_route_when_no_port_is_vrf_tagged(recording_server):
+    """Most devices have no VRF, and the instance-wide route must not reach their recordings."""
+    seed = _vrf_seed(
+        ports=[{"port_id": 1, "ifName": "eth0", "ifVrf": 0}, {"port_id": 2, "ifName": "eth1", "ifVrf": None}],
+        vrfs=[{"vrf_id": 7, "vrf_name": "customer-a", "device_id": 3100}],
+    )
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, 3100)
+
+    assert "GET /api/v0/routing/vrf" not in captured["responses"]
+
+
+def test_capture_replays_the_vrf_route_for_the_reader(recording_server):
+    """Round-trip: the recorded VRF body is what get_device_vrfs reads back on replay."""
+    seed = _vrf_seed(
+        ports=[{"port_id": 1, "ifName": "1/1/c1/1", "ifVrf": 7}],
+        vrfs=[{"vrf_id": 7, "vrf_name": "customer-a", "device_id": 3100}],
+    )
+    _server, api = recording_server(seed)
+    captured = capture_device_recording(api, 3100)
+
+    _server2, api2 = recording_server(captured)
+    success, rows = api2.get_device_vrfs(3100)
+
+    assert success is True
+    assert [row["vrf_name"] for row in rows] == ["customer-a"]
+
+
+def test_capture_fails_when_the_vrf_read_fails(recording_server):
+    """A VRF-tagged device whose VRF table cannot be read must not ship as a complete capture."""
+    seed = _vrf_seed(ports=[{"port_id": 1, "ifName": "1/1/c1/1", "ifVrf": 7}], vrfs=[])
+    seed["responses"]["GET /api/v0/routing/vrf"] = {"status": "error", "message": "boom"}
+    _server, api = recording_server(seed)
+
+    with pytest.raises(RuntimeError, match="VRF"):
+        capture_device_recording(api, 3100)
 
 
 def test_capture_roundtrip_preserves_vc_outcome(recording_server):

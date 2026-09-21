@@ -75,21 +75,22 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 description=f"Captured from {device.name}.",
                 oob_id=oob["id"] if oob and oob.get("id") else None,
             )
+            # Trim redundant high-cardinality ports BEFORE anonymizing — on the raw port names,
+            # which is exactly what relationship resolution reads — so the shape stays intact while
+            # the recording the contributor submits is small and reviewable.
+            recording = compress_recording(recording)
+            # A fresh high-entropy salt per capture. The pseudonyms only need to be consistent
+            # WITHIN one recording (that is what keeps cross-references matching), and the
+            # contributor publishes this file: with the empty default salt, a sha256 of a
+            # low-entropy value like a hostname is recoverable by hashing dictionary candidates.
+            anonymized = anonymize_recording(recording, salt=secrets.token_hex(16))
         except RuntimeError as exc:
-            # capture deliberately raises on an incomplete capture (transport failure or an
-            # error status on a required structural route, e.g. a stale librenms_id). An
-            # unhandled raise would 500 — and htmx doesn't swap non-2xx responses, so the
-            # Capture button would just appear dead. Render the error panel built for this.
+            # capture raises on an incomplete capture (a transport failure, or an error status on a
+            # required structural route such as a stale librenms_id), and anonymization raises when
+            # a device carries more distinct addresses than the documentation ranges hold. An
+            # unhandled raise would 500 — and htmx doesn't swap non-2xx responses, so the Capture
+            # button would just appear dead. Render the error panel built for this.
             return self._error(request, device, f"Capture failed: {exc}")
-        # Trim redundant high-cardinality ports BEFORE anonymizing — on the raw port names, which is
-        # exactly what relationship resolution reads — so the shape stays intact while the recording
-        # the contributor submits is small and reviewable.
-        recording = compress_recording(recording)
-        # A fresh high-entropy salt per capture. The pseudonyms only need to be consistent WITHIN
-        # one recording (that is what keeps cross-references matching), and the contributor
-        # publishes this file: with the empty default salt, a sha256 of a low-entropy value like a
-        # hostname is recoverable by hashing candidates from a dictionary.
-        anonymized = anonymize_recording(recording, salt=secrets.token_hex(16))
         signature = compute_shape_signature(anonymized)
         try:
             manifest = recordings_store.load_manifest()

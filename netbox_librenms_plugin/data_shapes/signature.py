@@ -2,7 +2,7 @@
 Lightweight, informational fingerprint of what a data-shape recording exercises.
 
 The signature captures the axes that matter for the outcome tests — OS family, Virtual-Chassis
-shape, LAG style, sub-interface style, port_stack/VLAN/transceiver presence — so a contributor
+shape, LAG style, sub-interface style, port_stack/VLAN/transceiver/VRF presence — so a contributor
 (or the mgmt command) can get a fuzzy "is this shape already covered?" verdict. It is a nudge,
 not a gate: :func:`classify_novelty` returns ``"new"`` / ``"likely-covered"`` with the closest
 match and a reason, never an authoritative decision.
@@ -128,7 +128,7 @@ def compute_shape_signature(recording):
     Returns:
         dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base},
             lag:{present,ieee8023ad,name_prefix}, sub_interfaces:{present,styles}, port_stack,
-            vlans, transceivers, serial, oob}``.
+            vlans, transceivers, serial, vrf, oob}``.
 
     """
     device_id = recording.get("device_id")
@@ -217,6 +217,14 @@ def compute_shape_signature(recording):
         isinstance(serial_body, dict) and isinstance(serial_body.get("sensors"), list) and bool(serial_body["sensors"])
     )
 
+    # VRF presence. Capture records /routing/vrf only for a device whose ports carry a VRF id, and
+    # stores a body holding just that device's rows, so a non-empty list is the authoritative
+    # signal that this recording exercises the VRF shape. Without this axis a VRF capture and a
+    # plain one of the same OS/VC/LAG/sub shape collapse into one novelty bucket. Mirrors the
+    # transceivers axis: require a real non-empty list, not merely a captured body.
+    vrf_body = _body(recording, lambda k: k.split("?", 1)[0].endswith("/routing/vrf"))
+    has_vrf = isinstance(vrf_body, dict) and isinstance(vrf_body.get("vrfs"), list) and bool(vrf_body["vrfs"])
+
     # OOB controller presence. Capture stamps meta["oob_id"] only when a separate OOB-controller
     # device's ports were merged into the host capture (and anonymization preserves meta), so it's
     # the authoritative signal. Without it an OOB and a non-OOB capture of the same host OS share an
@@ -240,6 +248,7 @@ def compute_shape_signature(recording):
         "vlans": any(port_has_vlan(p) for p in ports),
         "transceivers": has_transceivers,
         "serial": has_serial,
+        "vrf": has_vrf,
         "oob": oob_present,
     }
 
@@ -278,6 +287,7 @@ def _structural_axes(signature):
         signature.get("vlans", False),
         signature.get("transceivers", False),
         signature.get("serial", False),
+        signature.get("vrf", False),
         signature.get("oob", False),
     )
 
@@ -330,7 +340,7 @@ def signature_schema_errors(signature):  # noqa: C901
         if not isinstance(styles, list) or any(not isinstance(style, str) for style in styles):
             errors.append("sub_interfaces.styles must be a list of strings")
 
-    for name in ("port_stack", "vlans", "transceivers", "serial", "oob"):
+    for name in ("port_stack", "vlans", "transceivers", "serial", "vrf", "oob"):
         if not isinstance(signature.get(name), bool):
             errors.append(f"{name} must be a boolean")
     return errors

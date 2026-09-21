@@ -16,6 +16,103 @@ def _port(port_id, name, iftype, **extra):
     return p
 
 
+def _vrf_compression_recording():
+    """A recording whose only VRF-tagged port is buried among redundant untagged ones."""
+    ports = [_port(1, "1/1/c1/1", "ethernetCsmacd", ifVrf=0)]
+    ports += [_port(100 + i, f"1/1/c2/{i}", "ethernetCsmacd", ifVrf=0) for i in range(60)]
+    ports.append(_port(900, "1/1/c9/1", "ethernetCsmacd", ifVrf=7))
+    return {
+        "schema_version": 1,
+        "name": "vrf-compress",
+        "device_id": 5,
+        "meta": {"os": "timos"},
+        "responses": {
+            "GET /api/v0/devices/5/ports": {"status": "ok", "ports": ports},
+            "GET /api/v0/devices/5/port_stack": {"status": "ok", "mappings": []},
+            "GET /api/v0/routing/vrf": {
+                "status": "ok",
+                "vrfs": [
+                    {"vrf_id": 7, "vrf_name": "v", "device_id": 5},
+                    {"vrf_id": 8, "vrf_name": "unreferenced", "device_id": 5},
+                ],
+            },
+            "GET /api/v0/devices/5/ip": {
+                "status": "ok",
+                "addresses": [
+                    {"ipv4_address": "192.0.2.1", "ipv4_prefixlen": 31, "port_id": 900},
+                    {"ipv4_address": "192.0.2.3", "ipv4_prefixlen": 31, "port_id": 105},
+                ],
+            },
+            "GET /api/v0/devices/5/links": {
+                "status": "ok",
+                "links": [
+                    {"id": 1, "local_port_id": 900, "remote_port": "swp1"},
+                    {"id": 2, "local_port_id": 106, "remote_port": "swp2"},
+                ],
+            },
+        },
+    }
+
+
+def test_compression_keeps_a_vrf_tagged_port():
+    """Dropping every VRF-tagged port leaves a VRF list nothing in the recording references."""
+    recording = _vrf_compression_recording()
+
+    compressed = compress_recording(recording)
+
+    kept = compressed["responses"]["GET /api/v0/devices/5/ports"]["ports"]
+    assert len(kept) < 62
+    assert any(port.get("ifVrf") == 7 for port in kept)
+
+
+def test_compression_drops_vrf_rows_no_surviving_port_references():
+    """A router carries hundreds of VRFs; only the ones a kept port still names are worth shipping."""
+    compressed = compress_recording(_vrf_compression_recording())
+
+    vrfs = compressed["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
+    assert [row["vrf_id"] for row in vrfs] == [7]
+
+
+def test_compression_keeps_the_vrf_list_when_no_port_names_a_listed_vrf():
+    """Emptying the list would flip the signature's vrf facet, which compression must never do."""
+    recording = _vrf_compression_recording()
+    for port in recording["responses"]["GET /api/v0/devices/5/ports"]["ports"]:
+        if port.get("ifVrf"):
+            port["ifVrf"] = 999  # a vrf_id the table does not list
+
+    compressed = compress_recording(recording)
+
+    assert len(compressed["responses"]["GET /api/v0/routing/vrf"]["vrfs"]) == 2
+    assert compute_shape_signature(compressed)["vrf"] is True
+
+
+def test_compression_drops_ip_rows_for_ports_it_removed():
+    """An IP row pointing at a port the recording no longer holds is a dangling reference."""
+    compressed = compress_recording(_vrf_compression_recording())
+
+    kept_ids = {p["port_id"] for p in compressed["responses"]["GET /api/v0/devices/5/ports"]["ports"]}
+    addresses = compressed["responses"]["GET /api/v0/devices/5/ip"]["addresses"]
+    assert addresses
+    assert all(row["port_id"] in kept_ids for row in addresses)
+
+
+def test_compression_drops_link_rows_for_ports_it_removed():
+    """Same for a neighbour link whose local end was compressed away."""
+    compressed = compress_recording(_vrf_compression_recording())
+
+    kept_ids = {p["port_id"] for p in compressed["responses"]["GET /api/v0/devices/5/ports"]["ports"]}
+    links = compressed["responses"]["GET /api/v0/devices/5/links"]["links"]
+    assert links
+    assert all(row["local_port_id"] in kept_ids for row in links)
+
+
+def test_compression_preserves_the_vrf_signature_axis():
+    """The documented invariant: the signature of the compressed recording is unchanged."""
+    recording = _vrf_compression_recording()
+
+    assert compute_shape_signature(compress_recording(recording)) == compute_shape_signature(recording)
+
+
 def _large_recording():
     """Build a recording with direct and base-name LAGs, a sub-interface, and 200 redundant access ports."""
     ports = [

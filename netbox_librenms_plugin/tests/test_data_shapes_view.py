@@ -330,6 +330,28 @@ def test_capture_view_errors_on_mid_capture_transport_failure(recording_server):
 
 
 @pytest.mark.django_db
+def test_capture_view_reports_an_unanonymizable_recording(recording_server, monkeypatch):
+    """Anonymization refuses a device with more addresses than the documentation ranges hold; an unhandled raise would 500 and htmx would drop it silently."""
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("cap-dev-addresses", librenms_cf={"test": {"id": 1000}})
+    view = _view_with_api(api)
+
+    from netbox_librenms_plugin.views import data_shapes
+
+    def refuse_to_anonymize(*_args, **_kwargs):
+        raise RuntimeError("Cannot place 509 distinct addresses in the documentation ranges")
+
+    monkeypatch.setattr(data_shapes, "anonymize_recording", refuse_to_anonymize)
+    response = _run_capture(view, server, device)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "Capture failed" in html
+    assert "documentation ranges" in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
 def test_capture_view_reports_an_unavailable_novelty_manifest(recording_server):
     """A broken packaged manifest must render an error instead of a false novelty verdict."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))

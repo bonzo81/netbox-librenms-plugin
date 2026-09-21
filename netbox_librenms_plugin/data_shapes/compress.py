@@ -15,7 +15,9 @@ Two invariants, verified by the tests:
 * **Relationship integrity** — every port referenced by ``port_stack`` (and every base-level port its
   name resolution depends on) is kept, so ``resolve_port_relationships`` yields the same LAG/sub maps.
 * **Signature preservation** — one representative per distinct fingerprint keeps every shape the
-  novelty signature reads (OS-agnostic: ifType, sub-interface naming, LAG type, VLAN presence).
+  novelty signature reads (OS-agnostic: ifType, sub-interface naming, LAG type, VLAN presence, VRF).
+* **Referential integrity** — the IP and neighbour-link rows are trimmed to the ports that survive,
+  so the recording never points at a port it no longer holds.
 
 The fingerprint must track whatever axes :func:`compute_shape_signature` reads from ports; widen it in
 lockstep if that signature grows.
@@ -25,7 +27,13 @@ import re
 
 from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response, wrap_response
-from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, port_has_vlan, port_is_lag, port_names
+from netbox_librenms_plugin.data_shapes.ports import (
+    compile_lag_patterns,
+    port_has_vlan,
+    port_has_vrf,
+    port_is_lag,
+    port_names,
+)
 
 _SUB_RE = re.compile(r"\.\d+$")
 
@@ -171,7 +179,62 @@ def _fingerprint(port, compiled_lag_patterns=()):
         # (Cisco "Po1", carried as propVirtual) shares a fingerprint with any other propVirtual
         # port, so compression can drop the only LAG port and flip the signature's lag axis.
         port_is_lag(port, compiled_lag_patterns),
+        # VRF axis — without it compression can drop every VRF-tagged port and leave a VRF list
+        # nothing references. Boolean, not the id: a router carries hundreds of VRFs, and one
+        # representative per id would keep hundreds of ports and defeat compression entirely. The
+        # VRF list is trimmed to what the surviving ports reference instead (see _prune_vrf_rows).
+        port_has_vrf(port),
     )
+
+
+# Routes whose rows name one of the device's OWN ports, and the field that names it. Compression
+# drops ports, so a row left behind would point at a port the recording no longer holds — a
+# dangling reference the IP and cables tabs would render as an unresolvable row. (A link's
+# ``remote_port_id`` belongs to the far device and is deliberately not filtered.)
+_PORT_REFERENCING_ROUTES = (("/ip", "addresses", "port_id"), ("/links", "links", "local_port_id"))
+
+
+def _prune_vrf_rows(recording, responses, kept_ports):
+    """Trim the VRF list to the VRFs the surviving ports still reference."""
+    key = _route_key(recording, "/routing/vrf")
+    if key is None:
+        return
+    body = _unwrap(responses[key])
+    rows = body.get("vrfs") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        return
+    referenced = {str(port.get("ifVrf")) for port in kept_ports if isinstance(port, dict) and port_has_vrf(port)}
+    kept_rows = [row for row in rows if not isinstance(row, dict) or str(row.get("vrf_id")) in referenced]
+    # Compression must never change the novelty signature, and the vrf facet is "the list is
+    # non-empty". A device whose ports name a vrf_id the table does not list would otherwise flip
+    # it, so an empty result means leave the list alone.
+    if not kept_rows or len(kept_rows) == len(rows):
+        return
+    new_body = dict(body)
+    new_body["vrfs"] = kept_rows
+    if "count" in new_body:
+        new_body["count"] = len(kept_rows)
+    responses[key] = _rewrap(responses[key], new_body)
+
+
+def _prune_port_references(recording, responses, keep_ids):
+    """Drop /ip and /links rows whose local port was compressed away."""
+    for suffix, row_field, id_field in _PORT_REFERENCING_ROUTES:
+        key = _route_key(recording, suffix)
+        if key is None:
+            continue
+        body = _unwrap(responses[key])
+        rows = body.get(row_field) if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            continue
+        kept_rows = [row for row in rows if not isinstance(row, dict) or str(row.get(id_field)) in keep_ids]
+        if len(kept_rows) == len(rows):
+            continue
+        new_body = dict(body)
+        new_body[row_field] = kept_rows
+        if "count" in new_body:
+            new_body["count"] = len(kept_rows)
+        responses[key] = _rewrap(responses[key], new_body)
 
 
 def compress_recording(recording):
@@ -234,6 +297,8 @@ def compress_recording(recording):
         new_body["count"] = len(kept)
     new_responses = dict(recording["responses"])
     new_responses[ports_key] = _rewrap(recording["responses"][ports_key], new_body)
+    _prune_port_references(recording, new_responses, {str(p.get("port_id")) for p in kept})
+    _prune_vrf_rows(recording, new_responses, kept)
 
     out = dict(recording)
     out["responses"] = new_responses

@@ -17,8 +17,8 @@
       "devices": [
         {
           "device_id": 1002,
-          "hostname": "device-rtr01",
-          "sysName": "device-rtr01",
+          "hostname": "router-cisco-1",
+          "sysName": "router-cisco-1-sys",
           "hardware": "MODEL-c972d0",
           "os": "os-901310",
           "serial": "SN-ee33ff",

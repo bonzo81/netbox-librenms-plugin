@@ -5,6 +5,8 @@ from time import sleep
 
 import pytest
 
+from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
+
 
 def configure_servers(settings, servers):
     """Replace the plugin's configured servers, leaving the rest of PLUGINS_CONFIG intact."""
@@ -298,12 +300,7 @@ READ_ENDPOINTS = [
         lambda api: api.get_ports(1),
         {"status": "ok", "ports": [{"port_id": 7, "ifName": "Gi0/1"}]},
         {"status": "ok", "ports": [{"port_id": 7, "ifName": "Gi0/1"}]},
-        {
-            "columns": [
-                "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
-            ],
-            "with": ["vlans"],
-        },
+        {"columns": [LIBRENMS_PORTS_COLUMNS], "with": ["vlans"]},
         {
             404: ("Device not found in LibreNMS",),
             500: ("HTTP error:", "500"),

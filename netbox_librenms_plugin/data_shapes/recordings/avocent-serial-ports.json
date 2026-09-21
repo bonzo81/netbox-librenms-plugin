@@ -22,9 +22,9 @@
         {
           "device_id": 12,
           "inserted": "2026-02-15T06:52:17.000000Z",
-          "hostname": "device-4c7c65",
-          "sysName": "device-fc9f02",
-          "display": null,
+          "hostname": "console-avocent-1",
+          "sysName": "console-avocent-1-sys",
+          "display": "console-avocent-1",
           "ip": "192.0.2.23",
           "overwrite_ip": null,
           "community": "",

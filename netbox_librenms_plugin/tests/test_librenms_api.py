@@ -1386,6 +1386,22 @@ class TestLibreNMSAPILocationOperations:
 class TestLibreNMSAPIPortsAndInventory:
     """Test ports and inventory operations."""
 
+    def test_get_ports_requests_the_vrf_column(self, mock_librenms_api, librenms_server):
+        """ifVrf is the per-port VRF join key; without the column nothing downstream can read it."""
+        seen = {}
+
+        def respond(method, path, query, headers, body):
+            seen["columns"] = (query.get("columns") or [""])[0]
+            return 200, {"status": "ok", "ports": []}
+
+        librenms_server.register("/api/v0/devices/7/ports", respond, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, _data = mock_librenms_api.get_ports(7)
+
+        assert success is True
+        assert "ifVrf" in seen["columns"].split(",")
+
     @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_ports_all(self, mock_get, mock_librenms_config):
         """Verify retrieving all ports for a device."""
@@ -2126,6 +2142,119 @@ class TestGetDeviceTransceiversResponseShape:
 
         assert success is False
         assert "boom" in msg
+
+
+class TestGetDeviceVrfs:
+    """Cover get_device_vrfs(): one device's rows out of the instance-wide VRF table."""
+
+    @staticmethod
+    def _recorder(rows):
+        """Register a /routing/vrf route that reports the query it was called with."""
+        seen = {}
+
+        def respond(method, path, query, headers, body):
+            seen["hostname"] = (query.get("hostname") or [None])[0]
+            return 200, {"status": "ok", "vrfs": rows, "count": len(rows)}
+
+        return seen, respond
+
+    def test_asks_the_server_to_filter_by_device(self, mock_librenms_api, librenms_server):
+        """list_vrf documents a hostname filter, so the whole instance is never fetched."""
+        seen, respond = self._recorder([{"vrf_id": 5, "vrf_name": "Base", "device_id": 5}])
+        librenms_server.register("/api/v0/routing/vrf", respond, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, rows = mock_librenms_api.get_device_vrfs(5)
+
+        assert success is True
+        assert seen["hostname"] == "5"
+        assert [row["vrf_id"] for row in rows] == [5]
+
+    def test_drops_rows_a_server_that_ignores_the_filter_returns(self, mock_librenms_api, librenms_server):
+        """A LibreNMS that serves the whole table anyway must not leak other devices into a recording."""
+        _seen, respond = self._recorder(
+            [
+                {"vrf_id": 5, "vrf_name": "Base", "device_id": 5},
+                {"vrf_id": 9, "vrf_name": "customer-vprn", "device_id": 8},
+            ]
+        )
+        librenms_server.register("/api/v0/routing/vrf", respond, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, rows = mock_librenms_api.get_device_vrfs(5)
+
+        assert success is True
+        assert [row["vrf_id"] for row in rows] == [5]
+
+    def test_string_device_ids_still_match(self, mock_librenms_api, librenms_server):
+        """The documented payload types the ids as strings; a live 24.x server answers ints."""
+        _seen, respond = self._recorder([{"vrf_id": "2", "vrf_name": "Mgmt-vrf", "device_id": "5"}])
+        librenms_server.register("/api/v0/routing/vrf", respond, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, rows = mock_librenms_api.get_device_vrfs(5)
+
+        assert success is True
+        assert [row["vrf_name"] for row in rows] == ["Mgmt-vrf"]
+
+    def test_no_vrfs_on_the_instance_is_empty_not_an_error(self, mock_librenms_api, librenms_server):
+        """LibreNMS answers 404 "Vrfs do not exist" for an instance with no VRF table."""
+        librenms_server.register(
+            "/api/v0/routing/vrf",
+            {"status": "error", "message": "Vrfs do not exist"},
+            status=404,
+            method="GET",
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, rows = mock_librenms_api.get_device_vrfs(5)
+
+        assert success is True
+        assert rows == []
+
+    def test_other_404s_stay_failures(self, mock_librenms_api, librenms_server):
+        """A stale device id must not read as "this device has no VRFs"."""
+        librenms_server.register(
+            "/api/v0/routing/vrf",
+            {"status": "error", "message": "Device not found"},
+            status=404,
+            method="GET",
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, message = mock_librenms_api.get_device_vrfs(5)
+
+        assert success is False
+        assert "Device not found" in message
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"status": "error", "message": "boom"},
+            {"status": "ok"},
+            {"status": "ok", "vrfs": "not-a-list"},
+            {"status": "ok", "vrfs": ["not-a-row"]},
+            ["not", "an", "object"],
+        ],
+    )
+    def test_malformed_payloads_fail_closed(self, mock_librenms_api, librenms_server, payload):
+        """An empty VRF list and a broken response must never look the same."""
+        librenms_server.register("/api/v0/routing/vrf", payload, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, _message = mock_librenms_api.get_device_vrfs(5)
+
+        assert success is False
+
+    def test_transport_failure_returns_the_error(self, mock_librenms_api, librenms_server):
+        """A LibreNMS that is down is a failure, never an empty VRF list."""
+        mock_librenms_api.librenms_url = librenms_server.url
+        librenms_server.stop()
+
+        success, message = mock_librenms_api.get_device_vrfs(5)
+
+        assert success is False
+        assert message
 
 
 class TestGetDeviceVlansResponseShape:

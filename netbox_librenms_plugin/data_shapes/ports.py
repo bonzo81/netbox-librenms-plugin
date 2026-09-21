@@ -36,6 +36,25 @@ def port_has_vlan(port):
     return port.get("ifVlan") not in (None, "", 0, "0") or bool(port.get("vlans"))
 
 
+def port_has_vrf(port):
+    """
+    Return whether a port row names a VRF.
+
+    LibreNMS reports ``ifVrf`` 0 (and null) for a port with no VRF, so the value decides, not key
+    presence. The capture uses this to decide whether to record the VRF route at all, and the
+    compressor's port fingerprint uses it as its VRF axis, so the two cannot disagree about which
+    ports are VRF-tagged.
+
+    Args:
+        port (dict): A LibreNMS port row.
+
+    Returns:
+        bool: Whether the port carries a VRF id.
+
+    """
+    return bool(port.get("ifVrf"))
+
+
 # Upper bound on the interface name fed to an untrusted (recording-supplied) LAG regex. This trims the
 # input a well-behaved pattern scans; it is NOT a ReDoS defense on its own — a nested unbounded
 # quantifier backtracks exponentially in the input length, so no practical length cap tames it (that's

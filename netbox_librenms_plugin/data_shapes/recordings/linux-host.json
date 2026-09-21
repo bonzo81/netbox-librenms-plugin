@@ -18,9 +18,9 @@
         {
           "device_id": 32,
           "inserted": "2026-05-02T15:03:27.000000Z",
-          "hostname": "device-1d9e81",
-          "sysName": "device-747d6c",
-          "display": null,
+          "hostname": "host-linux-1",
+          "sysName": "host-linux-1-sys",
+          "display": "host-linux-1",
           "ip": "192.0.2.217",
           "overwrite_ip": null,
           "community": null,

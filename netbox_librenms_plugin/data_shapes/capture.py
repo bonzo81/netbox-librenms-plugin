@@ -2,19 +2,18 @@
 Capture a device's LibreNMS API responses verbatim into a data-shape recording.
 
 The capture issues the same structural requests the sync logic reads — device info, the two
-Virtual-Chassis detection inventory calls, ports (with VLAN data), and port_stack — and
-assembles them into a recording dict that
+Virtual-Chassis detection inventory calls, ports (with VLAN data), port_stack, IP addresses,
+neighbour links and, for a device whose ports carry one, its VRFs — and assembles them into a
+recording dict that
 :meth:`netbox_librenms_plugin.tests.mock_librenms_server.MockLibreNMSServer.load_recording`
 can replay. See ``data_shapes/recordings/`` and issue #95.
 """
 
+from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
 from netbox_librenms_plugin.data_shapes.envelope import MAX_HTTP_STATUS, MIN_HTTP_STATUS, wrap_response
+from netbox_librenms_plugin.data_shapes.ports import port_has_vrf
 
 SCHEMA_VERSION = 1
-
-# Columns get_ports() requests; mirror them so a captured ports payload carries the same fields
-# the sync / relationship-resolution logic reads (port_id, ifName, ifType, ...).
-_PORTS_COLUMNS = "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
 
 
 def _select_parent_index(root_items):
@@ -43,6 +42,12 @@ def _select_parent_index(root_items):
         elif item_class == "chassis" and chassis_index is None:
             chassis_index = item.get("entPhysicalIndex")
     return stack_index if stack_index is not None else chassis_index
+
+
+def _has_vrf_tagged_port(ports_body):
+    """Return whether any captured port names a VRF."""
+    ports = ports_body.get("ports") if isinstance(ports_body, dict) else None
+    return any(isinstance(port, dict) and port_has_vrf(port) for port in ports or [])
 
 
 def capture_device_recording(api, device_id, *, name=None, description="", meta=None, oob_id=None):  # noqa: C901
@@ -207,9 +212,9 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     # 3. Ports (request VLAN data so the body matches what get_ports reads) and 4. port_stack
     #    (LAG / sub-interface relationships). Both are keyed path-only — there's a single variant
     #    per path, so the loader serves it for any query the production readers send.
-    record(
+    _, ports_body = record(
         f"devices/{device_id}/ports",
-        {"columns": _PORTS_COLUMNS, "with": "vlans"},
+        {"columns": LIBRENMS_PORTS_COLUMNS, "with": "vlans"},
         key_params=None,
         required=True,
         row_field="ports",
@@ -217,7 +222,29 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     _, port_stack_body = record(f"devices/{device_id}/port_stack", required=True)
     require_port_stack(f"devices/{device_id}/port_stack", port_stack_body)
 
-    # 5. Transceivers (optics shape). Per-device route — safe to record verbatim; anonymization
+    # 5. The IP tab's and the cables tab's own sources. Both are per-device routes, safe to record
+    #    verbatim. LibreNMS answers 404 for a device that simply has none of either, which is a
+    #    definitive answer; a transport error is not, and must not be baked in as "none".
+    for suffix, row_field in (("ip", "addresses"), ("links", "links")):
+        record(
+            f"devices/{device_id}/{suffix}",
+            required=True,
+            allow_not_found=True,
+            allow_transport_failure=True,
+            row_field=row_field,
+        )
+
+    # 6. VRFs. /api/v0/routing/vrf serves the whole instance, so it is read through the
+    #    device-filtered accessor and stored as a synthesized body carrying only this device's
+    #    rows — the same treatment serial sensors get below. Recorded only when a port actually
+    #    carries a VRF id, so the route never reaches the recordings of devices that have none.
+    if _has_vrf_tagged_port(ports_body):
+        vrf_ok, device_vrfs = api.get_device_vrfs(device_id)
+        if not vrf_ok:
+            raise RuntimeError(f"Capture failed for VRFs: {device_vrfs}")
+        responses["GET /api/v0/routing/vrf"] = {"status": "ok", "vrfs": device_vrfs}
+
+    # 7. Transceivers (optics shape). Per-device route — safe to record verbatim; anonymization
     #    pseudonymizes the transceiver serial and preserves the optics shape plus the `model` SKU
     #    (the module-matching key for ModuleType resolution).
     # A 404 is a definitive answer from a LibreNMS version without this endpoint. Transport errors,
@@ -230,7 +257,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         row_field="transceivers",
     )
 
-    # 6. Serial-port sensors (Avocent console servers). The underlying LibreNMS route,
+    # 8. Serial-port sensors (Avocent console servers). The underlying LibreNMS route,
     #    /api/v0/resources/sensors, is INSTANCE-WIDE — it returns every sensor on every device, so
     #    recording it verbatim would embed other devices' data (cross-device PII). Fetch through the
     #    device-filtered accessor and synthesize a sensors body carrying ONLY this device's serial
@@ -248,7 +275,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             responses["GET /api/v0/resources/sensors"] = {"status": "ok", "sensors": device_serial_sensors}
             serial_sensors_present = True
 
-    # 7. OOB controller ports — a SEPARATE LibreNMS device the interfaces view merges into the host.
+    # 9. OOB controller ports — a SEPARATE LibreNMS device the interfaces view merges into the host.
     #    Record them under the controller's own /ports route so replay's get_ports(oob_id) serves them.
     # Spread caller meta first, then stamp the captured device_os last so it always wins — a
     # caller-supplied meta["os"] must not override the OS we actually captured (it scopes
@@ -268,7 +295,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     if oob_id is not None and oob_id != coerce_librenms_id(device_id):
         oob_status, _ = record(
             f"devices/{oob_id}/ports",
-            {"columns": _PORTS_COLUMNS, "with": "vlans"},
+            {"columns": LIBRENMS_PORTS_COLUMNS, "with": "vlans"},
             key_params=None,
             required=True,
             row_field="ports",
@@ -277,7 +304,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         if 200 <= oob_status < 300:
             meta_out["oob_id"] = oob_id
 
-    # 8. LAG name patterns. compute_shape_signature and the replay's
+    # 10. LAG name patterns. compute_shape_signature and the replay's
     #    resolve_port_relationships(lag_patterns=recording["lag_patterns"]) both read this key —
     #    without it a LAG detected only via a configured PortStackLagPattern regex (ifType not
     #    ieee8023adLag) fingerprints as lag.present=False and the fixture can never reproduce the
@@ -308,7 +335,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         "sap_patterns": sap_patterns,
         "responses": responses,
     }
-    # 9. Serial sensor recognition map — ONLY when this device actually has serial sensors. Same
+    # 11. Serial sensor recognition map — ONLY when this device actually has serial sensors. Same
     #    fidelity argument as lag_patterns: recognition lives in the SerialSensorTypePattern table, so
     #    a recording captured under a custom map could not reproduce its serial rows on a host with
     #    different (or no) rows; replay feeds it through the sensor_types injection points

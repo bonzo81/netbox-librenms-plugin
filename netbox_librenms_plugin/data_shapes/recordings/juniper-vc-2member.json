@@ -2,7 +2,11 @@
   "schema_version": 1,
   "name": "juniper-vc-2member",
   "description": "Juniper EX Virtual Chassis, 2 members under a chassis-class root, 0-based positions.",
-  "meta": {"os": "os-990f10", "vendor": "juniper", "topology": "virtual-chassis"},
+  "meta": {
+    "os": "os-990f10",
+    "vendor": "juniper",
+    "topology": "virtual-chassis"
+  },
   "device_id": 1001,
   "lag_patterns": {
     "os-990f10": "^ae\\d+$"
@@ -13,8 +17,8 @@
       "devices": [
         {
           "device_id": 1001,
-          "hostname": "device-vc01",
-          "sysName": "device-vc01",
+          "hostname": "switch-juniper-1",
+          "sysName": "switch-juniper-1-sys",
           "hardware": "MODEL-d40007",
           "os": "os-990f10",
           "serial": "SN-aa11bb",
@@ -67,7 +71,10 @@
     "virtual_chassis": {
       "is_stack": true,
       "member_count": 2,
-      "member_serials": ["SN-aa11bb", "SN-cc22dd"]
+      "member_serials": [
+        "SN-aa11bb",
+        "SN-cc22dd"
+      ]
     }
   }
 }

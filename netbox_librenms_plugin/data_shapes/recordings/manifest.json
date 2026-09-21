@@ -24,6 +24,7 @@
       "vlans": false,
       "transceivers": true,
       "serial": false,
+      "vrf": false,
       "oob": false
     }
   },
@@ -50,6 +51,7 @@
       "vlans": false,
       "transceivers": false,
       "serial": true,
+      "vrf": false,
       "oob": false
     }
   },
@@ -78,6 +80,7 @@
       "vlans": false,
       "transceivers": false,
       "serial": false,
+      "vrf": false,
       "oob": false
     }
   },
@@ -104,6 +107,7 @@
       "vlans": false,
       "transceivers": false,
       "serial": false,
+      "vrf": false,
       "oob": false
     }
   },
@@ -130,8 +134,9 @@
       },
       "port_stack": true,
       "vlans": false,
-      "transceivers": false,
+      "transceivers": true,
       "serial": false,
+      "vrf": true,
       "oob": false
     }
   },
@@ -158,6 +163,7 @@
       "vlans": false,
       "transceivers": false,
       "serial": false,
+      "vrf": false,
       "oob": false
     }
   },
@@ -186,6 +192,7 @@
       "vlans": false,
       "transceivers": true,
       "serial": false,
+      "vrf": true,
       "oob": false
     }
   },
@@ -212,6 +219,7 @@
       "vlans": false,
       "transceivers": false,
       "serial": false,
+      "vrf": false,
       "oob": true
     }
   },
@@ -238,6 +246,7 @@
       "vlans": false,
       "transceivers": false,
       "serial": false,
+      "vrf": false,
       "oob": false
     }
   },
@@ -264,6 +273,7 @@
       "vlans": false,
       "transceivers": false,
       "serial": false,
+      "vrf": false,
       "oob": false
     }
   },
@@ -289,9 +299,10 @@
         ]
       },
       "port_stack": true,
-      "vlans": false,
+      "vlans": true,
       "transceivers": true,
       "serial": false,
+      "vrf": true,
       "oob": false
     }
   }

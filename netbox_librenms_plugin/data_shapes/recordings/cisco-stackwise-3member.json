@@ -17,8 +17,8 @@
       "devices": [
         {
           "device_id": 1000,
-          "hostname": "device-stack01",
-          "sysName": "device-stack01",
+          "hostname": "switch-cisco-1",
+          "sysName": "switch-cisco-1-sys",
           "hardware": "MODEL-8d129e",
           "os": "os-901310",
           "serial": "SN-a1b2c3",

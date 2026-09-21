@@ -19,9 +19,9 @@
         {
           "device_id": 39,
           "inserted": "2026-05-08T11:31:50.000000Z",
-          "hostname": "device-5896a4",
-          "sysName": "device-3baf97",
-          "display": "device-3baf97",
+          "hostname": "host-oob-1",
+          "sysName": "host-oob-1-sys",
+          "display": "host-oob-1",
           "ip": "192.0.2.73",
           "overwrite_ip": null,
           "community": null,

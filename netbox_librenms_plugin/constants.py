@@ -7,6 +7,13 @@ PERM_CHANGE_PLUGIN = "netbox_librenms_plugin.change_librenmssettings"
 # LibreNMS VLAN state values
 LIBRENMS_VLAN_STATE_ACTIVE = 1
 
+# Columns every /devices/{id}/ports read requests. The live reader and the data-shape capture
+# share this one string, so a captured ports payload can never carry fewer fields than the sync
+# logic reads. ifVrf is the per-port VRF id the IP tab joins against /routing/vrf.
+LIBRENMS_PORTS_COLUMNS = (
+    "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk,ifVrf"
+)
+
 # LibreNMS port fields the plugin can display as the interface name. The preference resolver,
 # the snapshot writers, and the snapshot readers all validate against this one set, so a value
 # one side accepts can never be rejected by the other.

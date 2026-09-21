@@ -1,8 +1,19 @@
 """Tests for data-shape anonymization: PII scrubbed, logic fields preserved, deterministic, replayable."""
 
+from ipaddress import ip_address, ip_network
+
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
+
+
+# The allocator draws from every IPv4 documentation range (see _DOC_IPV4_PREFIXES), so a test
+# asserts "this is a documentation address", never one particular range.
+_DOC_NETWORKS = tuple(ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32"))
+
+
+def _is_doc_address(value):
+    return any(ip_address(value.split("/")[0]) in network for network in _DOC_NETWORKS)
 
 
 def _ports(*port_dicts):
@@ -126,7 +137,7 @@ def test_ip_mac_geo_location_freetext_scrubbed():
     anon = anonymize_recording(rec)
 
     dev = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]
-    assert dev["ip"] == "192.0.2." + dev["ip"].split(".")[-1] and dev["ip"].startswith("192.0.2.")
+    assert _is_doc_address(dev["ip"]) and dev["ip"] != "10.1.2.3"
     assert dev["lat"] is None and dev["lng"] is None
     assert dev["location"] == "Lab"
 
@@ -144,7 +155,223 @@ def test_ipv4_with_prefix_keeps_prefix_length():
     rec["responses"]["GET /api/v0/devices/1"] = {"status": "ok", "devices": [{"device_id": 1, "ip": "10.9.9.9/24"}]}
     anon = anonymize_recording(rec)
     ip = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["ip"]
-    assert ip.startswith("192.0.2.") and ip.endswith("/24")
+    assert _is_doc_address(ip) and ip.endswith("/24")
+
+
+def _vrf_recording():
+    """A recording carrying the VRF, IP and links rows the new capture records."""
+    return {
+        "schema_version": 1,
+        "name": "vrf-synthetic",
+        "device_id": 5,
+        "responses": {
+            "GET /api/v0/devices/5/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 485, "ifName": "1/1/c1/1", "ifVrf": 7}],
+            },
+            "GET /api/v0/routing/vrf": {
+                "status": "ok",
+                "vrfs": [
+                    {
+                        "vrf_id": 7,
+                        "vrf_oid": "8.77.103.109.116.45.118.114.102",
+                        "vrf_name": "Mgmt-vrf",
+                        "bgpLocalAs": 6830,
+                        "mplsVpnVrfRouteDistinguisher": "21620:4278681533",
+                        "mplsVpnVrfDescription": "Customer A handover, contact jane@corp.example",
+                        "device_id": 5,
+                    },
+                    {
+                        "vrf_id": 5,
+                        "vrf_oid": "1",
+                        "vrf_name": "Base",
+                        "bgpLocalAs": 6830,
+                        "mplsVpnVrfRouteDistinguisher": None,
+                        "mplsVpnVrfDescription": "",
+                        "device_id": 5,
+                    },
+                ],
+            },
+            "GET /api/v0/devices/5/ip": {
+                "status": "ok",
+                "addresses": [
+                    {
+                        "ipv4_address_id": 64,
+                        "ipv4_address": "84.116.251.34",
+                        "ipv4_prefixlen": 31,
+                        "ipv4_network_id": 54,
+                        "port_id": 485,
+                        "context_name": "CUSTOMER-A-VRF",
+                    }
+                ],
+            },
+            "GET /api/v0/devices/5/links": {
+                "status": "ok",
+                "links": [
+                    {
+                        "id": 23,
+                        "local_port_id": 485,
+                        "local_device_id": 5,
+                        "remote_port_id": 6917,
+                        "remote_device_id": 1,
+                        "active": 1,
+                        "protocol": "lldp",
+                        "remote_hostname": "prod-lab03c-ri5.arcos",
+                        "remote_port": "swp7",
+                        "remote_platform": "x86-64-ufispace-s9610-36d-r0",
+                        "remote_version": "Arrcus Operating System (ArcOS) 4.2.1",
+                    }
+                ],
+            },
+        },
+    }
+
+
+def test_vrf_join_keys_preserved_and_name_pseudonymized():
+    """ifVrf/vrf_id join the IP row to its VRF; the NAME is customer data and must not survive."""
+    anon = anonymize_recording(_vrf_recording())
+
+    port = anon["responses"]["GET /api/v0/devices/5/ports"]["ports"][0]
+    assert port["ifVrf"] == 7
+
+    vrfs = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
+    assert [row["vrf_id"] for row in vrfs] == [7, 5]
+    assert vrfs[0]["vrf_name"] != "Mgmt-vrf"
+    assert vrfs[0]["vrf_name"]
+
+
+def test_nokia_base_vrf_name_preserved_verbatim():
+    """ "Base is the global instance, not a VRF" is a logic rule a fixture has to express."""
+    anon = anonymize_recording(_vrf_recording())
+
+    vrfs = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
+    assert vrfs[1]["vrf_name"] == "Base"
+
+
+def test_vrf_oid_does_not_leak_the_vrf_name():
+    """The SNMP index encodes the name in ASCII: 8.77.103.109… decodes to "Mgmt-vrf"."""
+    anon = anonymize_recording(_vrf_recording())
+
+    vrf_oid = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"][0]["vrf_oid"]
+    decoded = "".join(chr(int(part)) for part in vrf_oid.split(".")[1:] if part.isdigit())
+    assert "Mgmt-vrf" not in decoded
+
+
+def test_route_distinguisher_remapped_and_description_scrubbed():
+    """The RD carries an ASN or an IP; the description is free text read by nothing."""
+    anon = anonymize_recording(_vrf_recording())
+
+    vrfs = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
+    assert vrfs[0]["mplsVpnVrfRouteDistinguisher"] != "21620:4278681533"
+    assert ":" in vrfs[0]["mplsVpnVrfRouteDistinguisher"]
+    assert vrfs[1]["mplsVpnVrfRouteDistinguisher"] is None
+    assert vrfs[0]["mplsVpnVrfDescription"] == ""
+
+
+def test_vrf_local_asn_pseudonymized_like_every_other_asn():
+    anon = anonymize_recording(_vrf_recording())
+
+    assert anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"][0]["bgpLocalAs"] != 6830
+
+
+def test_ip_rows_are_documentation_addresses_with_their_prefix_kept():
+    """ipv4_address is the real routable address; ipv4_prefixlen is what the reader parses."""
+    anon = anonymize_recording(_vrf_recording())
+
+    row = anon["responses"]["GET /api/v0/devices/5/ip"]["addresses"][0]
+    assert row["ipv4_address"] != "84.116.251.34"
+    assert _is_doc_address(row["ipv4_address"])
+    assert row["ipv4_prefixlen"] == 31
+    assert row["port_id"] == 485
+    assert row["context_name"] == ""
+
+
+def test_link_rows_keep_their_join_keys_and_lose_the_neighbour_identity():
+    """The cables tab keys on the port ids and the protocol; the rest names a real neighbour."""
+    anon = anonymize_recording(_vrf_recording())
+
+    link = anon["responses"]["GET /api/v0/devices/5/links"]["links"][0]
+    assert link["local_port_id"] == 485
+    assert link["remote_port_id"] == 6917
+    assert link["local_device_id"] == 5
+    assert link["remote_device_id"] == 1
+    assert link["protocol"] == "lldp"
+    assert link["remote_hostname"] != "prod-lab03c-ri5.arcos"
+    assert link["remote_platform"] != "x86-64-ufispace-s9610-36d-r0"
+    assert "ArcOS" not in link["remote_version"]
+
+
+def test_find_pii_clean_on_an_anonymized_vrf_recording():
+    """The whole new surface must pass the residual-PII sweep."""
+    assert find_pii(anonymize_recording(_vrf_recording())) == []
+
+
+def test_vrf_anonymization_is_deterministic():
+    """A recording re-anonymized with the same salt must produce identical output."""
+    first = anonymize_recording(_vrf_recording())
+    second = anonymize_recording(_vrf_recording())
+
+    assert first["responses"] == second["responses"]
+
+
+def test_documentation_addresses_are_unique_within_a_recording():
+    """Two real addresses colliding onto one would make a fixture claim a duplicate that is not there."""
+    addresses = [{"port_id": index, "ipv4_address": f"10.{index // 256}.{index % 256}.1"} for index in range(300)]
+    recording = {
+        "schema_version": 1,
+        "name": "many-addresses",
+        "device_id": 1,
+        "responses": {"GET /api/v0/devices/1/ip": {"status": "ok", "addresses": addresses}},
+    }
+
+    anon = anonymize_recording(recording)
+
+    mapped = [row["ipv4_address"] for row in anon["responses"]["GET /api/v0/devices/1/ip"]["addresses"]]
+    assert len(set(mapped)) == len(addresses)
+
+
+def test_the_same_address_still_maps_to_one_pseudonym():
+    """Uniqueness must not break the join: equal inputs stay equal.
+
+    A real device does repeat an address — one fe80:: link-local sits on hundreds of sub-interfaces
+    — so the allocator deduplicates by input, never by output position.
+    """
+    recording = {
+        "schema_version": 1,
+        "name": "repeated-address",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ip": {
+                "status": "ok",
+                "addresses": [
+                    {"port_id": 1, "ipv4_address": "10.0.0.1"},
+                    {"port_id": 2, "ipv4_address": "10.0.0.1"},
+                    {"port_id": 3, "ipv4_address": "10.0.0.2"},
+                ],
+            }
+        },
+    }
+
+    rows = anonymize_recording(recording)["responses"]["GET /api/v0/devices/1/ip"]["addresses"]
+
+    assert rows[0]["ipv4_address"] == rows[1]["ipv4_address"]
+    assert rows[2]["ipv4_address"] != rows[0]["ipv4_address"]
+
+
+def test_documentation_addresses_do_not_use_the_stubs_oob_block():
+    """The replay stub gives its synthesized OOB controllers 198.51.100.x; a clash is a duplicate alias."""
+    addresses = [{"port_id": index, "ipv4_address": f"10.1.{index}.1"} for index in range(120)]
+    recording = {
+        "schema_version": 1,
+        "name": "oob-block",
+        "device_id": 1,
+        "responses": {"GET /api/v0/devices/1/ip": {"status": "ok", "addresses": addresses}},
+    }
+
+    anon = anonymize_recording(recording)
+
+    mapped = [row["ipv4_address"] for row in anon["responses"]["GET /api/v0/devices/1/ip"]["addresses"]]
+    assert not any(address.startswith("198.51.100.") for address in mapped)
 
 
 def test_find_pii_passes_clean_anonymized_recording():

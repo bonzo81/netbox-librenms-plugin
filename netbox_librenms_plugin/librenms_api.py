@@ -10,6 +10,8 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from netbox.plugins import get_plugin_config
 
+from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
+
 # HTTP request timeout constants (in seconds)
 DEFAULT_API_TIMEOUT = 10
 EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device listing)
@@ -765,9 +767,7 @@ class LibreNMSAPI:
 
         """
         try:
-            params = {
-                "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
-            }
+            params = {"columns": LIBRENMS_PORTS_COLUMNS}
             if with_vlans:
                 params["with"] = "vlans"
 
@@ -1517,6 +1517,65 @@ class LibreNMSAPI:
             return False, str(e)
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
+
+    def get_device_vrfs(self, device_id):
+        """
+        Return the VRFs LibreNMS holds for one device.
+
+        ``/api/v0/routing/vrf`` serves the whole instance by default and documents a ``hostname``
+        filter that accepts a device id. The filter is asked for AND the returned rows are checked
+        against ``device_id``: a server that ignores the parameter would otherwise hand back every
+        other device's VRF names, which a data-shape recording then publishes.
+
+        Args:
+            device_id: LibreNMS device ID.
+
+        Returns:
+            tuple: (success: bool, data: list of VRF dicts or error string)
+
+        """
+        try:
+            response = _session.get(
+                f"{self.librenms_url}/api/v0/routing/vrf",
+                headers=self.headers,
+                params={"hostname": str(device_id)},
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == HTTP_NOT_FOUND:
+                return self._classify_missing_vrfs(e)
+            return False, str(e)
+        except ValueError as e:
+            # JSONDecodeError subclasses both ValueError and RequestException, so a parse failure
+            # must be classified here or it is mislabeled as a connection problem (mirrors
+            # get_port_stack).
+            return False, f"Invalid JSON from LibreNMS: {str(e)}"
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
+
+        if not isinstance(result, dict) or result.get("status") != "ok":
+            message = result.get("message") if isinstance(result, dict) else None
+            return False, message or "Unexpected response format"
+        rows = result.get("vrfs")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            return False, "Unexpected response format: 'vrfs' must be a list of objects"
+        wanted = str(device_id)
+        return True, [row for row in rows if str(row.get("device_id")) == wanted]
+
+    @staticmethod
+    def _classify_missing_vrfs(error):
+        """Tell "this instance holds no VRF table" apart from a stale device id."""
+        try:
+            payload = error.response.json()
+        except (TypeError, ValueError):
+            payload = None
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if isinstance(message, str) and "vrfs do not exist" in message.lower():
+            return True, []
+        return False, message or str(error)
 
     def get_port_by_id(self, port_id):
         """

@@ -8,6 +8,7 @@ from netbox_librenms_plugin.data_shapes.signature import (
     build_manifest,
     classify_novelty,
     compute_shape_signature,
+    signature_schema_errors,
 )
 from netbox_librenms_plugin.tests.recordings import iter_recordings, load_recording
 
@@ -24,6 +25,69 @@ def test_signature_cisco_stackwise():
     }
     assert sig["lag"]["present"] is False
     assert sig["sub_interfaces"]["present"] is False
+
+
+def _vrf_signature_recording(vrfs, *, ports=None):
+    return {
+        "schema_version": 1,
+        "name": "vrf-sig",
+        "device_id": 5,
+        "meta": {"os": "timos"},
+        "responses": {
+            "GET /api/v0/devices/5/ports": {
+                "status": "ok",
+                "ports": ports if ports is not None else [{"port_id": 1, "ifName": "1/1/c1/1", "ifVrf": 7}],
+            },
+            "GET /api/v0/routing/vrf": {"status": "ok", "vrfs": vrfs},
+        },
+    }
+
+
+def test_signature_reports_the_vrf_axis():
+    """Without a vrf axis a VRF capture and a plain one of the same OS share a novelty bucket."""
+    sig = compute_shape_signature(_vrf_signature_recording([{"vrf_id": 7, "vrf_name": "vrf-abc", "device_id": 5}]))
+
+    assert sig["vrf"] is True
+
+
+def test_signature_vrf_axis_false_without_the_route():
+    """The 11 recordings captured before the VRF routes existed must report vrf: false."""
+    sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
+
+    assert sig["vrf"] is False
+
+
+def test_signature_vrf_axis_false_on_an_empty_vrf_list():
+    """A recorded but empty list is not a VRF shape, mirroring the transceivers axis."""
+    assert compute_shape_signature(_vrf_signature_recording([]))["vrf"] is False
+
+
+def test_signature_vrf_axis_ignores_a_failed_response():
+    """A captured non-2xx body carrying vrfs must not count as present data."""
+    recording = _vrf_signature_recording([{"vrf_id": 7, "vrf_name": "vrf-abc", "device_id": 5}])
+    recording["responses"]["GET /api/v0/routing/vrf"] = wrap_response(
+        500, {"status": "ok", "vrfs": [{"vrf_id": 7, "vrf_name": "vrf-abc", "device_id": 5}]}
+    )
+
+    assert compute_shape_signature(recording)["vrf"] is False
+
+
+def test_novelty_separates_a_vrf_shape_from_an_otherwise_identical_one():
+    """vrf must be a structural axis, or a VRF capture reads as covered by a non-VRF sibling."""
+    with_vrf = _vrf_signature_recording([{"vrf_id": 7, "vrf_name": "vrf-abc", "device_id": 5}])
+    without_vrf = _vrf_signature_recording([])
+    manifest = build_manifest([{**without_vrf, "name": "plain"}])
+
+    verdict = classify_novelty(compute_shape_signature(with_vrf), manifest)
+
+    assert verdict["verdict"] == "new"
+
+
+def test_signature_schema_rejects_a_non_boolean_vrf_axis():
+    sig = compute_shape_signature(_vrf_signature_recording([]))
+    sig["vrf"] = "yes"
+
+    assert any("vrf" in error for error in signature_schema_errors(sig))
 
 
 def test_signature_juniper_vc_zero_based_chassis_root():

@@ -49,9 +49,23 @@ PRESERVE_KEYS = frozenset(
         "ifOperStatus",
         "ifVlan",
         "ifTrunk",
+        # The per-port VRF id and the VRF row it joins to. Ints, no PII; the join is what makes a
+        # VRF fixture usable, while the VRF's NAME is customer data and is pseudonymized below.
+        "ifVrf",
+        "vrf_id",
+        # Address prefix lengths: parse_librenms_ip_entry reads them alongside the address, so a
+        # scrubbed one makes the row unparseable.
+        "prefix_length",
+        "ipv4_prefixlen",
+        "ipv6_prefixlen",
         "port_id",
         "local_port_id",
         "remote_port_id",
+        # Link-row device ids and the discovery protocol. The protocol distinguishes the same
+        # neighbour reported over both CDP and LLDP, which is a shape the cables tab must handle.
+        "local_device_id",
+        "remote_device_id",
+        "protocol",
         "high_port_id",
         "low_port_id",
         "entPhysicalClass",
@@ -91,20 +105,38 @@ PRESERVE_KEYS = frozenset(
 )
 # Interface-name fields: pattern-aware (see _anon_interface_name). The logic-bearing port-name
 # token is preserved; custom names and free-text annotations are dropped/pseudonymized.
-INTERFACE_NAME_KEYS = frozenset({"ifName", "ifDescr"})
+# ``remote_port`` is the same kind of value on the far end of a link, matched against NetBox
+# interface names by the cables tab, so it gets the same pattern-aware treatment.
+INTERFACE_NAME_KEYS = frozenset({"ifName", "ifDescr", "remote_port"})
 # Serial-port sensor label (Avocent). A default/uncustomised label is a generic port name
 # (no PII); a customised one is the attached device's hostname. Pattern-aware (see
 # _anon_serial_label) so the is_configured outcome (label vs port name) is preserved.
 SERIAL_LABEL_KEYS = frozenset({"sensor_descr"})
 # BGP ASN — identifying, not read by the sync logic. Mapped to a deterministic private ASN.
 BGP_KEYS = frozenset({"bgpLocalAs", "bgpLocalas", "bgp_local_as"})
+# The VRF name is the NetBox match key, so the instinct is to preserve it the way
+# entPhysicalModelName is. It is the wrong instinct: a model name is a public vendor catalogue
+# SKU, a VRF name is customer or tenant data, and these recordings are meant to be publishable.
+# Deterministic pseudonymization keeps the join intact and loses no testable outcome, because a
+# test builds its NetBox VRF from the fixture anyway. See _anon_vrf_name for the one exception.
+VRF_NAME_KEYS = frozenset({"vrf_name"})
+# The SNMP table index of the VRF row. On Nokia it is a plain ordinal ("1"), but the ENTITY form
+# other platforms report is the name length followed by its ASCII codes — 8.77.103.109.116.45.118
+# .114.102 spells "Mgmt-vrf" — so copying it through would publish the name the rule above hides.
+# Read by nothing, so it is mapped to a stable dotted-decimal token of the same shape.
+VRF_INDEX_KEYS = frozenset({"vrf_oid"})
+# The route distinguisher holds an ASN or an IP, then the assigned number. Identifying, read by
+# nothing, and find_pii trips on the IP form, so it is remapped with its shape kept.
+ROUTE_DISTINGUISHER_KEYS = frozenset({"mplsVpnVrfRouteDistinguisher"})
 SERIAL_KEYS = frozenset({"serial", "entPhysicalSerialNum"})
 # `display` is the LibreNMS device display name — operators often set it to a real FQDN.
 HOSTNAME_KEYS = frozenset({"hostname", "sysName", "remote_hostname", "display"})
 # Device chassis SKU (e.g. "WS-C3560X-24T-S"). Pseudonymized: it's not a module-matching key, so
 # blanking it loses no testable outcome. (entPhysicalModelName / transceiver `model` ARE matching
 # keys and are preserved via PRESERVE_KEYS instead.)
-MODEL_KEYS = frozenset({"hardware"})
+# ``remote_platform`` is the neighbour's chassis SKU on a link row: same kind of value, and it
+# names the vendor the os-hash masks.
+MODEL_KEYS = frozenset({"hardware", "remote_platform"})
 # entPhysicalMfgName is the ENTITY-MIB manufacturer name (e.g. "Cisco Systems Inc."). It names the
 # vendor the os-hash deliberately masks and is read by no sync logic, so it's pseudonymized to a
 # deterministic MFG-<hash> — the field shape (present, non-empty) survives without the vendor.
@@ -124,8 +156,23 @@ OUI_KEYS = frozenset({"oui"})
 # Firmware / software version strings. Identifying (pin an exact build → deployment fingerprint /
 # CVE surface) and read by no sync logic, so pseudonymized to a deterministic fw-<hash>. (Device
 # chassis HARDWARE revision is left alone — it's not a firmware version.)
-VERSION_KEYS = frozenset({"version", "features", "entPhysicalFirmwareRev", "entPhysicalSoftwareRev"})
-IP_KEYS = frozenset({"ip", "ipv4", "ipv6", "inet", "ip_address", "overwrite_ip"})
+VERSION_KEYS = frozenset({"version", "features", "entPhysicalFirmwareRev", "entPhysicalSoftwareRev", "remote_version"})
+# ``ipv4_address`` / ``ipv6_address`` / ``ipv6_compressed`` are the /devices/{id}/ip row forms
+# parse_librenms_ip_entry accepts. They are real routable addresses, so they map to the
+# documentation ranges like every other address.
+IP_KEYS = frozenset(
+    {
+        "ip",
+        "ipv4",
+        "ipv6",
+        "inet",
+        "ip_address",
+        "overwrite_ip",
+        "ipv4_address",
+        "ipv6_address",
+        "ipv6_compressed",
+    }
+)
 MAC_KEYS = frozenset({"ifPhysAddress", "mac", "mac_address"})
 GEO_KEYS = frozenset({"lat", "lng", "latitude", "longitude"})
 LOCATION_KEYS = frozenset({"location", "sysLocation"})
@@ -144,6 +191,10 @@ FREETEXT_KEYS = frozenset(
         # ENTITY-MIB manufacture date (e.g. "2021-03-15,12:00:00.0") — an identifying build date read
         # by no sync logic, scrubbed to empty.
         "entPhysicalMfgDate",
+        # VRF description is operator free text read by nothing; the SNMPv3 context name on an IP
+        # row is often the VRF name again, which is exactly the value pseudonymized below.
+        "mplsVpnVrfDescription",
+        "context_name",
     }
 )
 # OID-valued fields whose enterprise arc (1.3.6.1.4.1.<N>) names the vendor — e.g. sysObjectID
@@ -344,14 +395,58 @@ def pseudonymize_os(os_name):
     return f"os-{_hash(os_name.lower(), '')}"
 
 
-def _doc_ip(value, salt):
-    """Map an IP (optionally with a /prefix) to a deterministic documentation-range address."""
-    addr, sep, prefix = value.partition("/")
+# IPv4 documentation ranges the allocator draws from. 198.51.100.0/24 is deliberately left out:
+# the replay stub hands its synthesized OOB controllers addresses in that block, and a clash there
+# is a duplicate device lookup alias, not just a duplicate address.
+_DOC_IPV4_PREFIXES = ("192.0.2", "203.0.113")
+# Probes before giving up on placing one address. Far more than a recording can need: the bound
+# exists so a pathological input fails loudly instead of looping.
+_DOC_IP_MAX_PROBES = 64
+
+
+def _doc_ip_candidate(addr, salt, attempt):
+    """Return the *attempt*-th deterministic documentation address for *addr*."""
+    keyed = f"{addr}#{attempt}"
     if ":" in addr:
-        anon = f"2001:db8::{_hash(addr, salt, 4)}"
-    else:
-        octet = int(_hash(addr, salt, 4), 16) % 254 + 1
-        anon = f"192.0.2.{octet}"
+        return f"2001:db8::{_hash(keyed, salt, 4)}"
+    digest = int(_hash(keyed, salt, 6), 16)
+    prefix = _DOC_IPV4_PREFIXES[digest % len(_DOC_IPV4_PREFIXES)]
+    return f"{prefix}.{digest // len(_DOC_IPV4_PREFIXES) % 254 + 1}"
+
+
+def _doc_ip(value, rules):
+    """
+    Map an IP (optionally with a /prefix) to a documentation address, unique within the recording.
+
+    Uniqueness is the point, not just pseudonymity. A recording used to carry a single address
+    (the device row), so a hash collision was theoretical; it now carries every
+    ``/devices/{id}/ip`` row, and two real addresses landing on one documentation address would
+    make the fixture claim a duplicate address the device never reported — which is a shape the IP
+    tab treats specially. Equal inputs still map to one output, so the join survives.
+
+    Args:
+        value (str): The address, optionally with a ``/prefix`` suffix.
+        rules (_Rules): The per-recording rules carrying the allocation table.
+
+    Returns:
+        str: The documentation address, with the original prefix suffix when there was one.
+
+    """
+    addr, sep, prefix = value.partition("/")
+    assigned = rules.doc_ips if rules.doc_ips is not None else {}
+    if addr not in assigned:
+        taken = set(assigned.values())
+        for attempt in range(_DOC_IP_MAX_PROBES):
+            candidate = _doc_ip_candidate(addr, rules.salt, attempt)
+            if candidate not in taken:
+                assigned[addr] = candidate
+                break
+        else:
+            raise RuntimeError(
+                f"Cannot place {len(assigned) + 1} distinct addresses in the documentation ranges "
+                "without repeating one; compress the recording further"
+            )
+    anon = assigned[addr]
     return f"{anon}{sep}{prefix}" if sep else anon
 
 
@@ -470,6 +565,46 @@ def _anon_asn(value, salt):
     return 64512 + int(_hash(str(value), salt, 4), 16) % 1023
 
 
+# The Nokia global routing instance. "Base is not a VRF" is a logic-bearing rule the VRF
+# suggestion has to apply, so a fixture must be able to express it: the literal survives.
+_GLOBAL_ROUTING_INSTANCE = "Base"
+
+
+def _anon_vrf_name(value, salt):
+    """Map a VRF name to a deterministic pseudonym, keeping the global-instance literal."""
+    if value == _GLOBAL_ROUTING_INSTANCE:
+        return value
+    return f"vrf-{_hash(value, salt)}"
+
+
+def _anon_vrf_index(value, salt):
+    """Map a VRF SNMP index to a stable dotted-decimal token (the real one can spell the name)."""
+    digest = _hash(value, salt, 6)
+    return ".".join(str(int(digest[i : i + 2], 16)) for i in (0, 2, 4))
+
+
+def _anon_route_distinguisher(value, rules):
+    """Remap an ASN:NN or IP:NN route distinguisher, keeping which of the two forms it is."""
+    salt = rules.salt
+    administrator, separator, assigned = value.rpartition(":")
+    if not separator:
+        return f"rd-{_hash(value, salt)}"
+    if _looks_like_ip(administrator):
+        administrator = _doc_ip(administrator, rules)
+    else:
+        administrator = str(_anon_asn(administrator, salt))
+    return f"{administrator}:{int(_hash(value, salt, 4), 16)}"
+
+
+def _looks_like_ip(value):
+    """Return whether *value* parses as an IP address."""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _anon_value(key, value, rules):  # noqa: C901
     """Apply the field rule for a single scalar (non-container) value keyed by *key*."""
     salt = rules.salt
@@ -493,6 +628,12 @@ def _anon_value(key, value, rules):  # noqa: C901
         return _anon_serial_label(value, rules)
     if key in SERIAL_KEYS:
         return f"SN-{_hash(value, salt)}"
+    if key in VRF_NAME_KEYS:
+        return _anon_vrf_name(value, salt)
+    if key in VRF_INDEX_KEYS:
+        return _anon_vrf_index(value, salt)
+    if key in ROUTE_DISTINGUISHER_KEYS:
+        return _anon_route_distinguisher(value, rules)
     if key in HOSTNAME_KEYS:
         return f"device-{_hash(value, salt)}"
     if key in MODEL_KEYS:
@@ -512,7 +653,7 @@ def _anon_value(key, value, rules):  # noqa: C901
     if key in OID_KEYS:
         return _anon_oid(value, salt)
     if key in IP_KEYS:
-        return _doc_ip(value, salt)
+        return _doc_ip(value, rules)
     if key in MAC_KEYS:
         return _synthetic_mac(value, salt)
     if key in LOCATION_KEYS:
@@ -531,6 +672,11 @@ class _Rules(NamedTuple):
     # Compiled "this is the default port label" matchers built from the recording's
     # serial_type_patterns (see _anon_serial_label).
     serial_default_labels: tuple = ()
+    # Documentation addresses already handed out for this recording, keyed by the real address
+    # (see _doc_ip). A NamedTuple default is shared by every instance, so a mutable one would leak
+    # across recordings: anonymize_recording always passes a fresh dict, and None means "no
+    # recording context", which only a direct _Rules() in a test produces.
+    doc_ips: dict | None = None
 
 
 # A serial port_name_pattern is a short template like "ttyS{N}" / "Line {N}" (the model caps it at
@@ -605,6 +751,7 @@ def anonymize_recording(recording, *, salt=""):
         salt=salt,
         lag_patterns=tuple(compile_lag_patterns(recording)),
         serial_default_labels=_compile_serial_default_labels(recording),
+        doc_ips={},
     )
     out["responses"] = {key: _walk(body, rules) for key, body in recording.get("responses", {}).items()}
     # Pseudonymize meta.os too (it's outside `responses`, so _walk doesn't reach it) and key the

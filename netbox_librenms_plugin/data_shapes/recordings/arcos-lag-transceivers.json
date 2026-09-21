@@ -20,9 +20,9 @@
         {
           "device_id": 1,
           "inserted": "2026-02-03T08:27:01.000000Z",
-          "hostname": "device-0e41cc",
-          "sysName": "device-0e3d43",
-          "display": null,
+          "hostname": "switch-arrcus-1",
+          "sysName": "switch-arrcus-1-sys",
+          "display": "switch-arrcus-1",
           "ip": "192.0.2.94",
           "overwrite_ip": null,
           "community": "",
