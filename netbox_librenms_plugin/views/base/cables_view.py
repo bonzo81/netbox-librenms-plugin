@@ -44,6 +44,7 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     get_virtual_chassis_member,
     oob_badge_html,
+    remote_port_html,
     resolve_interface_on_device,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -218,6 +219,28 @@ def _remote_endpoint_identity(row):
     if interface_id := row.get("netbox_remote_interface_id"):
         return ("interface", interface_id)
     return None
+
+
+def _endpoint_group_key(row):
+    """
+    Identify the reported link *row* describes, or None when nothing proves which one it is.
+
+    Two rows carrying this key report one link over two discovery protocols. A serial row's
+    ``local_port_id`` is not a LibreNMS port id, so it groups with nothing; OOB rows keep their
+    own namespace, because their local ports live on the controller.
+
+    Args:
+        row (dict): A cable row.
+
+    Returns:
+        tuple | None: The group identity, or None when the row proves no particular link.
+
+    """
+    neighbour = _neighbour_group_key(row)
+    endpoint = _remote_endpoint_identity(row)
+    if neighbour is None or endpoint is None:
+        return None
+    return (row.get("_source"), neighbour, endpoint)
 
 
 def _remote_name_candidates(row):
@@ -1015,32 +1038,67 @@ class BaseCableTableView(
             list[dict]: The rows to render, in their original order.
 
         """
-        endpoints = defaultdict(list)
-        for position, link in enumerate(links_data):
-            # A serial row's local_port_id is not a LibreNMS port id, so it groups with nothing.
-            # OOB rows keep their own namespace: their local ports live on the controller.
-            neighbour = _neighbour_group_key(link)
-            endpoint = _remote_endpoint_identity(link)
-            if neighbour is not None and endpoint is not None:
-                endpoints[(link.get("_source"), neighbour, endpoint)].append(position)
-
         dropped = set()
-        for positions in endpoints.values():
+        for positions in BaseCableTableView._endpoint_groups(links_data).values():
             if len(positions) < 2:
                 continue
             survivor = BaseCableTableView._best_duplicate_row(links_data, positions)
-            absorbed = sorted(
-                {
-                    protocol
-                    for position in positions
-                    if position != survivor and isinstance(protocol := links_data[position].get("protocol"), str)
-                }
-                - {links_data[survivor].get("protocol")}
-            )
-            if absorbed:
+            if absorbed := BaseCableTableView._absorbed_protocols(links_data, positions, survivor):
                 links_data[survivor]["also_reported_by"] = absorbed
             dropped.update(position for position in positions if position != survivor)
         return [link for position, link in enumerate(links_data) if position not in dropped]
+
+    @staticmethod
+    def _endpoint_groups(links_data):
+        """Group row positions by the link they report (:func:`_endpoint_group_key`)."""
+        endpoints = defaultdict(list)
+        for position, link in enumerate(links_data):
+            if (key := _endpoint_group_key(link)) is not None:
+                endpoints[key].append(position)
+        return endpoints
+
+    @staticmethod
+    def _absorbed_protocols(links_data, positions, keeper):
+        """Name the protocols the *keeper* row speaks for: its group's, minus its own."""
+        # Only a string is a protocol, on the keeper side too: LibreNMS ``protocol`` is copied
+        # unvalidated, and an unhashable one would 500 the table and the verify alike.
+        keeper_protocol = links_data[keeper].get("protocol")
+        return sorted(
+            {
+                protocol
+                for position in positions
+                if position != keeper and isinstance(protocol := links_data[position].get("protocol"), str)
+            }
+            - ({keeper_protocol} if isinstance(keeper_protocol, str) else set())
+        )
+
+    @staticmethod
+    def _also_reported_by(links_data, row_id):
+        """
+        Derive one row's ``also_reported_by`` without de-duplicating the whole set.
+
+        The single-row verify path enriches one row, so it never runs
+        :meth:`_dedupe_protocol_duplicates` and the badge would disappear the moment the user
+        re-verified the row. It reads the same grouping, so the two cannot drift. A row that
+        proves its endpoint only through a resolved NetBox interface groups with nothing here,
+        because verify resolves no row but its own.
+
+        Args:
+            links_data (list[dict]): The raw snapshot rows, with row ids assigned.
+            row_id (str): The row being verified.
+
+        Returns:
+            list[str]: The protocols the row speaks for, or ``[]``.
+
+        """
+        position = next((index for index, link in enumerate(links_data) if link.get("row_id") == row_id), None)
+        if position is None:
+            return []
+        key = _endpoint_group_key(links_data[position])
+        if key is None:
+            return []
+        positions = BaseCableTableView._endpoint_groups(links_data).get(key, [])
+        return BaseCableTableView._absorbed_protocols(links_data, positions, position)
 
     @staticmethod
     def _best_duplicate_row(links_data, positions):
@@ -3029,11 +3087,14 @@ class SingleCableVerifyView(BaseCableTableView):
                 )
                 if link_data:
                     manual_remote_id = link_data.get("manual_remote_id")
+                    also_reported_by = self._also_reported_by(valid_links, row_id)
                     # Strip derived fields from cached data to avoid stale
                     # IDs/URLs when NetBox objects are deleted after caching.
                     link_data = {k: v for k, v in link_data.items() if k in _RAW_LINK_KEYS}
                     if manual_remote_id is not None:
                         link_data["manual_remote_id"] = manual_remote_id
+                    if also_reported_by:
+                        link_data["also_reported_by"] = also_reported_by
 
                     # Serial rows have a fixed ConsoleServerPort owner. Their owner selector is
                     # disabled, so they never need the member-change verify path.
@@ -3114,7 +3175,6 @@ class SingleCableVerifyView(BaseCableTableView):
                         # Escape LibreNMS-sourced labels to prevent XSS
                         safe_local_port = escape(local_port)
                         remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
-                        safe_remote_port = escape(remote_port_name)
                         remote_device_name = link_data.get("remote_device_display") or link_data.get(
                             "remote_device", ""
                         )
@@ -3125,11 +3185,7 @@ class SingleCableVerifyView(BaseCableTableView):
                         formatted_row["local_port"] = (
                             f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{safe_local_port}</a>{oob_badge}'
                         )
-                        formatted_row["remote_port"] = (
-                            f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
-                            if link_data.get("remote_port_url")
-                            else safe_remote_port
-                        )
+                        formatted_row["remote_port"] = remote_port_html(remote_port_name, link_data)
                         formatted_row["remote_device"] = (
                             f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
                             if link_data.get("remote_device_url")
@@ -3151,14 +3207,9 @@ class SingleCableVerifyView(BaseCableTableView):
                             """
                     else:
                         formatted_row["local_port"] = f"{escape(local_port)}{oob_badge}"
-                        # Keep remote port name visible, add URL if available
+                        # Keep remote port name visible, add URL and badges if available
                         remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
-                        safe_remote_port = escape(remote_port_name)
-                        formatted_row["remote_port"] = (
-                            f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
-                            if link_data.get("remote_port_url")
-                            else safe_remote_port
-                        )
+                        formatted_row["remote_port"] = remote_port_html(remote_port_name, link_data)
                         # Keep remote device name visible, add URL if available
                         remote_device_name = link_data.get("remote_device_display") or link_data.get(
                             "remote_device", ""
