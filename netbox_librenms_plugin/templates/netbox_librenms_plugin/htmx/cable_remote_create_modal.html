@@ -1,0 +1,91 @@
+{% comment %}
+Check-then-create for the far end of a cable row. Rendered as the #htmx-modal-content shell
+(auto-shown by the page's htmx:afterSettle handler), like cable_remote_picker_modal.html.
+
+The neighbour is in NetBox but its port is not, so the row can never be synced. This says what
+would be created and, on submit, creates the interface and the cable together or neither.
+
+Context: object (page device), row, server_key, remote_device, local_interface, librenms_port,
+proposed_name, proposed_type, type_is_unmapped, existing_interface, post_url.
+{% endcomment %}
+<div class="modal-header">
+  <h5 class="modal-title" id="htmx-modal-label">
+    <i class="mdi mdi-plus-network me-1"></i>Create the remote end &middot; {{ row.local_port }}
+  </h5>
+  <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
+</div>
+<form hx-post="{{ post_url }}" hx-target="#cable-sync-content" hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]">
+  {% csrf_token %}
+  <input type="hidden" name="row_id" value="{{ row.row_id }}">
+  {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+  <div class="modal-body">
+    <p class="small text-muted mb-3">
+      LibreNMS reports <strong>{{ remote_device }}</strong> port
+      &ldquo;{{ row.remote_port|default:"unknown" }}&rdquo; on the far end of
+      <strong>{{ local_interface.device }} {{ local_interface.name }}</strong>. The device is in
+      NetBox; the port is not.
+    </p>
+
+    <dl class="row mb-0 small">
+      <dt class="col-sm-4">Remote device</dt>
+      <dd class="col-sm-8">
+        <a href="{{ remote_device.get_absolute_url }}">{{ remote_device }}</a>
+      </dd>
+
+      <dt class="col-sm-4">Interface to create</dt>
+      <dd class="col-sm-8"><code>{{ proposed_name }}</code></dd>
+
+      <dt class="col-sm-4">Interface type</dt>
+      <dd class="col-sm-8">
+        <code>{{ proposed_type }}</code>
+        {% if type_is_unmapped %}
+          <span class="badge bg-warning text-dark ms-1">no mapping</span>
+        {% endif %}
+      </dd>
+
+      {% if librenms_port %}
+        <dt class="col-sm-4">Reported by LibreNMS as</dt>
+        <dd class="col-sm-8 text-muted">
+          {{ librenms_port.ifType|default:"no ifType" }}{% if librenms_port.ifSpeed %},
+          {{ librenms_port.ifSpeed }} bit/s{% endif %}
+        </dd>
+      {% endif %}
+
+      <dt class="col-sm-4">Cable</dt>
+      <dd class="col-sm-8">
+        {{ local_interface.device }} {{ local_interface.name }}
+        <i class="mdi mdi-arrow-left-right mx-1"></i>
+        {{ remote_device }} {{ proposed_name }}
+      </dd>
+    </dl>
+
+    {% if existing_interface %}
+      <div class="alert alert-danger py-2 mt-3 mb-0 small">
+        <i class="mdi mdi-alert me-1"></i>{{ remote_device }} already has
+        <strong>{{ proposed_name }}</strong>, so this row should not have offered to create it.
+        Refresh the cable data: the row then either resolves to that interface, or reports the name
+        as ambiguous.
+      </div>
+    {% elif type_is_unmapped %}
+      <div class="alert alert-warning py-2 mt-3 mb-0 small">
+        <i class="mdi mdi-alert me-1"></i>No InterfaceTypeMapping matches
+        <code>{{ librenms_port.ifType|default:"this port" }}</code> at this speed, so the interface
+        is created as <code>other</code>. Add a mapping first if you want the real type.
+      </div>
+    {% endif %}
+
+    {% if not librenms_port %}
+      <div class="alert alert-warning py-2 mt-3 mb-0 small">
+        <i class="mdi mdi-alert me-1"></i>LibreNMS did not answer for this port, so the name comes
+        from the neighbour advertisement and the type cannot be derived.
+      </div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
+    {% if not existing_interface %}
+      <button type="submit" class="btn btn-primary">Create and cable</button>
+    {% endif %}
+  </div>
+</form>

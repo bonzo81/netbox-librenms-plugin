@@ -1482,6 +1482,12 @@ class BaseCableTableView(
                 link["remote_device_url"] = reverse("dcim:device", args=[netbox_remote_interface.device_id])
                 link["remote_port_name"] = netbox_remote_interface.name
 
+        # The Remote Port column reads remote_port_name, which only the resolved branch above and
+        # the device-not-found branch of process_remote_device set. A row whose DEVICE resolved and
+        # whose PORT did not therefore rendered an empty cell, hiding the very port the row is
+        # about. Fall back to what LibreNMS advertised, which is what the verify path already does.
+        link.setdefault("remote_port_name", remote_port if isinstance(remote_port, str) else "")
+
         # Return the link even when remote_port is empty (or unresolved): callers assign the
         # result back (link = process_remote_device(...)) and then dereference it, so returning
         # None here would crash enrich_links_data with an AttributeError and take down the whole
@@ -2212,6 +2218,46 @@ class BaseCableTableView(
             query += f"&server_key={quote_plus(server_key)}"
         link["picker_url"] = f"{url}?{query}"
 
+    def _set_remote_create_affordance(self, link, obj, server_key):
+        """
+        Attach a ``remote_create_url`` to a row whose neighbour is modelled but its port is not.
+
+        Such a row can never be synced: ``check_cable_status`` reports "Remote Interface Not Found
+        in Netbox" and ``SyncCablesView`` refuses it. The action offers to create the far end and
+        the cable together. It is the ONE rule the button and the view both read, so a row that
+        renders the button is exactly a row the endpoint will act on.
+
+        A row is offered the action only when the local end resolved, the remote DEVICE resolved,
+        the remote INTERFACE did not, and LibreNMS holds a port record to name and type the new
+        interface from. Without a modelled neighbour there is nothing to attach an interface to,
+        so the action is absent rather than failing.
+
+        Args:
+            link (dict): The enriched cable row, mutated in place.
+            obj: The page device (URL scope for the endpoint).
+            server_key: The active LibreNMS server key, carried in the URL.
+
+        """
+        if (
+            not self.has_write_permission()
+            or link.get("_source") == OOB_INVENTORY_SOURCE
+            or link.get("manual_remote")
+            or link.get("_multi_termination_unsupported")
+            or not link.get("netbox_local_interface_id")
+            or not link.get("netbox_remote_device_id")
+            or link.get("netbox_remote_interface_id")
+        ):
+            return
+        # The port record is what names and types the interface; a row without one would create
+        # a bare "other" interface from a neighbour-advertised string, which is a guess.
+        if coerce_librenms_id(link.get("remote_port_key")) is None:
+            return
+        url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk])
+        query = f"row_id={quote_plus(str(link.get('row_id', '')))}"
+        if server_key:
+            query += f"&server_key={quote_plus(server_key)}"
+        link["remote_create_url"] = f"{url}?{query}"
+
     def _remote_picker_action_html(self, link, obj, server_key):
         """Render the picker action shared by table-verify response paths."""
         self._set_remote_picker_affordance(link, obj, server_key)
@@ -2503,6 +2549,7 @@ class BaseCableTableView(
                 if link.get("netbox_remote_device_id"):
                     link = self.check_cable_status(link, normal_context=normal_context)
             self._set_remote_picker_affordance(link, obj, server_key)
+            self._set_remote_create_affordance(link, obj, server_key)
 
         # Drop a serial row only when its ConsoleServerPort exists but is out of view scope. A
         # sensor with no NetBox port at all is LibreNMS data, not NetBox data: it renders as
