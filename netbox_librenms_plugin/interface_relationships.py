@@ -11,6 +11,7 @@ from netbox_librenms_plugin.utils import (
     build_librenms_id_qs,
     get_librenms_device_id,
     interface_name_fallback_matches_port,
+    invert_relationship_edges,
     is_list_of_dicts,
     normalize_librenms_port_id,
     normalize_relationship_maps,
@@ -27,6 +28,20 @@ class RelationshipMaps:
     sub_interfaces: dict
     ports_by_id: dict
     bridge_members: dict = field(default_factory=dict)
+    # The downward view of each edge map, derived here so every construction site gets it and a
+    # per-row read stays a dict lookup rather than a scan of the device's whole port_stack.
+    lag_members_by_aggregate: dict = field(init=False)
+    sub_interfaces_by_parent: dict = field(init=False)
+    bridge_members_by_bridge: dict = field(init=False)
+
+    def __post_init__(self):
+        """Derive the three downward views once per snapshot."""
+        for source, derived in (
+            ("lag_members", "lag_members_by_aggregate"),
+            ("sub_interfaces", "sub_interfaces_by_parent"),
+            ("bridge_members", "bridge_members_by_bridge"),
+        ):
+            object.__setattr__(self, derived, invert_relationship_edges(getattr(self, source)))
 
 
 @dataclass(frozen=True)
@@ -353,6 +368,23 @@ def enrich_port_relationships(
     port["librenms_bridge_name"] = bridge_name
     port["librenms_bridge_port_id"] = bridge_port_id
     port["bridge_sync_status"] = bridge_status
+
+    def member_names(members_by_aggregate):
+        """Name every member LibreNMS attaches to this row, in the inversion's order."""
+        names = []
+        for member_id in members_by_aggregate.get(port_id, ()) if port_id else ():
+            member_port = relationship_maps.ports_by_id.get(member_id)
+            member_name = member_port.get(interface_name_field) if member_port else None
+            # Only a str is a name: LibreNMS copies ifName unvalidated, and joining an int would
+            # 500 the table. A trimmed snapshot must not shrink the count, so the slot is kept.
+            if not isinstance(member_name, str) or not member_name:
+                member_name = f"port {member_id}"
+            names.append(member_name)
+        return names
+
+    port["librenms_lag_member_names"] = member_names(relationship_maps.lag_members_by_aggregate)
+    port["librenms_sub_interface_names"] = member_names(relationship_maps.sub_interfaces_by_parent)
+    port["librenms_bridge_member_names"] = member_names(relationship_maps.bridge_members_by_bridge)
 
 
 def _row_relationship_source_is_actionable(

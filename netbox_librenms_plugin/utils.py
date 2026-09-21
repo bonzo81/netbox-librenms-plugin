@@ -597,6 +597,36 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict, dict]:
     return lag_members, sub_interfaces, bridge_members
 
 
+def invert_relationship_edges(edges) -> dict[int, list[int]]:
+    """
+    Invert one ``member -> aggregate`` edge map into ``aggregate -> [member, ...]``.
+
+    The three maps :func:`normalize_relationship_maps` returns all point upward, so a row can
+    name what it is attached to but an aggregate cannot name what is attached to it. This is the
+    one place the direction flips, shared by the LAG, sub-interface and bridge views.
+
+    Members are ordered by port id so two renders of one snapshot cannot disagree. A self-edge is
+    dropped: a port is not its own member, so counting one would badge an aggregate that has none.
+    The resolver cannot emit one, but a cached map can hold one, and the writer relies on NetBox's
+    own ``clean()`` to refuse it rather than on the map being filtered.
+
+    Args:
+        edges (dict[int, int]): A normalized ``member -> aggregate`` map.
+
+    Returns:
+        dict[int, list[int]]: Members grouped under their aggregate, each list sorted.
+
+    """
+    inverted: dict[int, list[int]] = {}
+    for member_id, aggregate_id in edges.items():
+        if member_id == aggregate_id:
+            continue
+        inverted.setdefault(aggregate_id, []).append(member_id)
+    for members in inverted.values():
+        members.sort()
+    return inverted
+
+
 def get_cable_sync_settings(*, lock=False):
     """
     Return the settings row driving the cable-sync provenance stamp (tag name/color, description).

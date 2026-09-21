@@ -50,6 +50,19 @@ _RELATIONSHIP_STATUS_MAP = {
     "missing_lnms": ("secondary", "mdi-database-off", "Not in LibreNMS"),
 }
 
+# (row key, mdi icon, singular, plural, device_only) per downward relationship view. These
+# describe what is attached to the row rather than what the row is attached to, so they carry a
+# count, no status colour and no sync button: the members sync from their own rows. device_only
+# mirrors the upward pill's rule, since VMInterface has no lag field.
+_MEMBER_BADGES = (
+    ("librenms_lag_member_names", "mdi-vector-combine", "member", "members", True),
+    ("librenms_sub_interface_names", "mdi-file-tree", "sub-interface", "sub-interfaces", False),
+    ("librenms_bridge_member_names", "mdi-bridge", "bridged port", "bridged ports", False),
+)
+
+# A Linux bridge can hold dozens of ports, and a title attribute that long is unreadable.
+_MEMBER_TOOLTIP_LIMIT = 15
+
 
 # Per-field sync verdict to the colour the sync tab's key explains: red "not present in NetBox",
 # orange "mismatched values", green "matching values".
@@ -556,10 +569,10 @@ class LibreNMSInterfaceTable(tables.Table):
         # button. The cable and module tables still badge their name column: those have no
         # relationship column to move into.
         if record.get("_source") == OOB_INVENTORY_SOURCE:
-            parts.append(self._render_row_marker_pill("purple", "mdi-chip", "OOB", "From OOB controller"))
+            parts.append(self._render_info_pill("purple", "mdi-chip", "OOB", "From OOB controller"))
         if record.get("_dedup_conflict"):
             parts.append(
-                self._render_row_marker_pill(
+                self._render_info_pill(
                     "warning",
                     "mdi-content-duplicate",
                     "Shared LOM",
@@ -569,7 +582,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         if record.get("host_name_collision"):
             parts.append(
-                self._render_row_marker_pill(
+                self._render_info_pill(
                     "danger",
                     "mdi-alert-circle",
                     "Name conflict",
@@ -625,10 +638,40 @@ class LibreNMSInterfaceTable(tables.Table):
                 )
             )
 
+        # What is attached to this row, after what it is attached to. The count comes from the
+        # device's whole port_stack, so it is right even when no member is on this page.
+        for row_key, icon, singular, plural, device_only in _MEMBER_BADGES:
+            if device_only and self.sync_object_type == "virtualmachine":
+                continue
+            member_names = record.get(row_key) or []
+            if member_names:
+                parts.append(self._render_member_count_pill(member_names, icon, singular, plural))
+
         if not parts:
             return mark_safe("")
 
         return mark_safe("".join(str(p) for p in parts))
+
+    def _render_member_count_pill(self, member_names, icon, singular, plural):
+        """
+        Render one "N members" pill naming the LibreNMS ports attached to this row.
+
+        Args:
+            member_names (list[str]): The member names, in the inversion's order.
+            icon (str): Material Design icon class.
+            singular (str): The noun for one member.
+            plural (str): The noun for several.
+
+        Returns:
+            SafeString: The pill markup.
+
+        """
+        count = len(member_names)
+        listed = ", ".join(member_names[:_MEMBER_TOOLTIP_LIMIT])
+        if count > _MEMBER_TOOLTIP_LIMIT:
+            listed = f"{listed}, +{count - _MEMBER_TOOLTIP_LIMIT} more"
+        noun = singular if count == 1 else plural
+        return self._render_info_pill("secondary", icon, f"{count} {noun}", f"In LibreNMS: {listed}")
 
     @cached_property
     def _vc_members(self):
@@ -707,12 +750,14 @@ class LibreNMSInterfaceTable(tables.Table):
         return self.device.pk if self.device else ""
 
     @staticmethod
-    def _render_row_marker_pill(color, icon, label, title):
+    def _render_info_pill(color, icon, label, title):
         """
-        Render one row-origin pill in the relationship column's badge language.
+        Render one non-status pill in the relationship column's badge language.
 
-        Matches the wrapper and badge classes :meth:`_render_relationship_column` emits, so the
-        markers stack with the LAG/Parent/Bridge pills instead of reading as a separate control.
+        Used for the row-origin markers and for the member counts: both state a fact about the
+        row rather than a sync verdict, so neither carries a status colour or a sync button.
+        Matches the wrapper and badge classes :meth:`_render_relationship_column` emits, so they
+        stack with the LAG/Parent/Bridge pills instead of reading as a separate control.
         Tabler's light (``-lt``) variants ship their own readable text colour in both themes.
 
         Args:
