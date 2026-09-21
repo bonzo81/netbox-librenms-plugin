@@ -188,9 +188,12 @@ class TestCableHTTPAndORM:
         assert links[0]["local_port_alt"] == "uplink-1"
         assert links[0]["remote_device"] == "remote-01.example"
         assert links[0]["_source"] == "main"
+        # One read per neighbour, for the other LibreNMS name its ports answer to: the far end
+        # must resolve as widely as the near one (see _attach_remote_port_aliases).
         assert [request["path"] for request in live_librenms.server.requests] == [
             "/api/v0/devices/42/links",
             "/api/v0/devices/42/ports",
+            "/api/v0/devices/99/ports",
         ]
 
     @pytest.mark.parametrize(
