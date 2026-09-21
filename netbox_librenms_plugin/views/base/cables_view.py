@@ -1369,8 +1369,76 @@ class BaseCableTableView(
                 if not local_interface_id
                 else "Remote Interface Not Found in Netbox"
             )
+            # LibreNMS gave only one end, so the row can never be synced. Reporting the cable
+            # the resolved end already has keeps a cabled port from reading as unconnected.
+            self._report_one_sided_cable(link, local_interface_id or remote_interface_id, normal_context)
 
         return link
+
+    def _report_one_sided_cable(self, link, interface_id, normal_context):
+        """
+        Report the NetBox cable on the end of a one-sided row that did resolve.
+
+        Scoped throughout: a cable the request cannot view is never linked, and the far end is
+        named only when its device is viewable. ``can_create_cable`` is left off, because there
+        is still no NetBox remote to cable to.
+
+        Args:
+            link (dict): The cable row to update in place.
+            interface_id (int | None): The one end that resolved, if any.
+            normal_context (dict | None): Preloaded interface, cable, and trace data.
+
+        Returns:
+            None
+
+        """
+        if not interface_id:
+            return
+        if normal_context is not None:
+            interface = normal_context["interfaces_by_pk"].get(interface_id)
+            if interface is None or interface.pk not in normal_context["visible_interface_ids"]:
+                return
+        else:
+            interface = self._viewable_queryset(Interface).filter(pk=interface_id).first()
+            if interface is None:
+                return
+
+        cable = interface.cable
+        if cable is None:
+            return
+        if normal_context is not None:
+            cable_visible = cable.pk in normal_context["visible_cable_ids"]
+        else:
+            cable_visible = self._object_is_viewable(cable)
+        if not cable_visible:
+            return
+
+        link["cable_url"] = reverse("dcim:cable", args=[cable.pk])
+        peer_device = self._viewable_cable_peer_device(interface, cable)
+        link["cable_status"] = f"Cabled to {peer_device.name}" if peer_device is not None else "Cabled in Netbox"
+
+    def _viewable_cable_peer_device(self, interface, cable):
+        """Return the device at the far end of *cable*, only when the request may view it."""
+        if not cable_is_point_to_point(cable):
+            return None
+        a_terminations = list(cable.a_terminations)
+        b_terminations = list(cable.b_terminations)
+        if len(a_terminations) != 1 or len(b_terminations) != 1:
+            return None
+        near, far = a_terminations[0], b_terminations[0]
+        if near != interface:
+            near, far = far, near
+        if near != interface:
+            return None
+        peer_device = getattr(far, "device", None)
+        if peer_device is None:
+            return None
+        # One management switch is the peer of many ports, so memoise per request rather than
+        # asking once per row.
+        memo = self.__dict__.setdefault("_peer_device_visibility", {})
+        if peer_device.pk not in memo:
+            memo[peer_device.pk] = self._object_is_viewable(peer_device)
+        return peer_device if memo[peer_device.pk] else None
 
     def check_serial_cable_status(self, link, csp=None, remote_context=None):
         """
