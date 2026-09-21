@@ -605,6 +605,18 @@ class TestProtocolDuplicates:
 
         assert sorted(row["netbox_remote_interface_id"] for row in rows) == [77, 78]
 
+    def test_a_malformed_survivor_protocol_does_not_break_the_collapse(self):
+        """LibreNMS `protocol` is copied unvalidated: an unhashable one must not 500 the table."""
+        rows = _dedupe(
+            [
+                _row(protocol=[], netbox_remote_interface_id=77),
+                _row(protocol="cdp", link_id=2, remote_port="GigabitEthernet0/1"),
+            ]
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["also_reported_by"] == ["cdp"]
+
     def test_an_unresolved_row_is_kept_beside_two_resolved_ones(self):
         """Two resolved remote interfaces: an unresolved row belongs to neither, so keep it."""
         rows = _dedupe(
@@ -1281,3 +1293,194 @@ class TestCheckAndCreateTheRemoteEnd:
 
         assert response.status_code == 404
         assert Interface.objects.filter(device=remote_device).count() == 1
+
+
+# ---------------------------------------------------------------------------
+# The inline verify renders the far end the same way the table does
+# ---------------------------------------------------------------------------
+
+
+def _seed_cable_rows(device, rows, server_key, snapshot_token="verify-render"):
+    """Put raw snapshot rows in the cables cache, the way a refresh would, and return their ids."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.utils import assign_cable_row_ids
+    from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
+
+    raw = assign_cable_row_ids([{key: value for key, value in row.items() if key in _RAW_LINK_KEYS} for row in rows])
+    cache.set(
+        _make_view().get_cache_key(device, "links", server_key),
+        {"links": raw, "snapshot_token": snapshot_token},
+        timeout=300,
+    )
+    return [entry["row_id"] for entry in raw]
+
+
+def _verify(client, device, row_id, server_key):
+    """POST one row to the inline verify endpoint and return its formatted row."""
+    import json
+
+    from django.urls import reverse
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_cable"),
+        data=json.dumps({"device_id": device.pk, "row_id": row_id, "server_key": server_key}),
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    return response.json()["formatted_row"]
+
+
+@pytest.mark.django_db
+class TestTheVerifiedRowRendersLikeTheTable:
+    """Changing the VC member re-renders one row; it must not lose the badges the table draws."""
+
+    def test_the_verified_row_keeps_the_protocol_badge(self):
+        """The defect: an inline verify dropped the "also reported over CDP" evidence."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key = configured_server_key()
+        # No local interface: this is the branch that renders an unresolved local end.
+        local_device = make_device("verify-badge-local")
+        remote_device = make_device("verify-badge-remote")
+        map_device_to_librenms(remote_device, 9, server_key=server_key)
+        lldp_id, _cdp_id = _seed_cable_rows(
+            local_device,
+            [
+                _row(protocol="lldp", remote_device=remote_device.name),
+                _row(
+                    protocol="cdp",
+                    link_id=2,
+                    remote_port="GigabitEthernet0/1",
+                    remote_device=remote_device.name,
+                ),
+            ],
+            server_key,
+        )
+
+        formatted = _verify(_logged_in(make_superuser("verify-badge-a")), local_device, lldp_id, server_key)
+
+        assert "mdi-lan-connect" in formatted["remote_port"]
+        assert "Also reported over CDP" in formatted["remote_port"]
+
+    def test_a_row_reported_once_gets_no_protocol_badge(self):
+        """Positive control: the badge claims a second protocol, so it must not appear alone."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key = configured_server_key()
+        local_device = make_device("verify-solo-local")
+        remote_device = make_device("verify-solo-remote")
+        map_device_to_librenms(remote_device, 9, server_key=server_key)
+        (row_id,) = _seed_cable_rows(
+            local_device, [_row(protocol="lldp", remote_device=remote_device.name)], server_key
+        )
+
+        formatted = _verify(_logged_in(make_superuser("verify-solo")), local_device, row_id, server_key)
+
+        assert "mdi-lan-connect" not in formatted["remote_port"]
+
+    def test_the_verified_row_keeps_the_manual_pick_badge(self):
+        """The badge the verify path was already dropping before the protocol one existed."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.utils import cable_manual_pick_cache_key
+
+        server_key = configured_server_key()
+        local_device = make_device("verify-manual-local")
+        make_interface(local_device, "eth0")
+        remote_device = make_device("verify-manual-remote")
+        picked = make_interface(remote_device, "Gi0/9")
+        map_device_to_librenms(remote_device, 9, server_key=server_key)
+        (row_id,) = _seed_cable_rows(
+            local_device, [_row(remote_device=remote_device.name)], server_key, snapshot_token="verify-manual"
+        )
+
+        from django.core.cache import cache
+
+        user = make_superuser("verify-manual")
+        cache.set(
+            cable_manual_pick_cache_key(
+                _make_view().get_cache_key(local_device, "links", server_key),
+                "verify-manual",
+                user.pk,
+                row_id,
+            ),
+            {"manual_remote_id": picked.pk},
+            timeout=300,
+        )
+
+        formatted = _verify(_logged_in(user), local_device, row_id, server_key)
+
+        assert "mdi-gesture-tap-button" in formatted["remote_port"]
+        assert "Gi0/9" in formatted["remote_port"]
+
+    def test_a_malformed_protocol_does_not_break_the_verified_row(self):
+        """LibreNMS `protocol` is copied unvalidated; an unhashable one must not 500 the verify."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key = configured_server_key()
+        local_device = make_device("verify-badproto-local")
+        remote_device = make_device("verify-badproto-remote")
+        map_device_to_librenms(remote_device, 9, server_key=server_key)
+        (row_id,) = _seed_cable_rows(local_device, [_row(protocol=[], remote_device=remote_device.name)], server_key)
+
+        formatted = _verify(_logged_in(make_superuser("verify-badproto")), local_device, row_id, server_key)
+
+        assert "mdi-lan-connect" not in formatted["remote_port"]
+
+    def test_the_remote_port_name_is_escaped_with_no_link_and_no_badge(self):
+        """The bare cell is injected as HTML by the page, so it escapes like every other branch."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key = configured_server_key()
+        local_device = make_device("verify-escape-local")
+        (row_id,) = _seed_cable_rows(
+            local_device,
+            [_row(remote_port="<img src=x onerror=alert(1)>", remote_device="not-in-netbox", remote_device_id=None)],
+            server_key,
+        )
+
+        formatted = _verify(_logged_in(make_superuser("verify-escape")), local_device, row_id, server_key)
+
+        assert "<img" not in formatted["remote_port"]
+        assert "&lt;img" in formatted["remote_port"]
+
+
+class TestTheRemotePortCellHasOneDefinition:
+    """The table column and the verify formatter must read the same renderer."""
+
+    def test_the_table_column_only_delegates(self):
+        """A drift guard: comparing output would pass against a re-inlined copy, so read the source."""
+        import ast
+        import inspect
+
+        from netbox_librenms_plugin.tables import cables
+
+        (column,) = [
+            node
+            for node in ast.walk(ast.parse(inspect.getsource(cables)))
+            if isinstance(node, ast.FunctionDef) and node.name == "render_remote_port"
+        ]
+        # Docstring, then one `return remote_port_html(...)`: no second copy of the badge rules.
+        body = [node for node in column.body if not isinstance(node, ast.Expr)]
+
+        assert len(body) == 1
+        assert isinstance(body[0], ast.Return)
+        assert isinstance(body[0].value, ast.Call)
+        assert body[0].value.func.id == "remote_port_html"
+
+    def test_the_table_column_renders_what_the_shared_renderer_returns(self):
+        """The delegation is real: the column's output is the helper's, badges included."""
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+        from netbox_librenms_plugin.utils import remote_port_html
+
+        record = {"manual_remote": True, "also_reported_by": ["cdp"], "remote_port_url": "/dcim/interfaces/1/"}
+
+        table = LibreNMSCableTable([], device=None)
+
+        assert table.render_remote_port("Gi0/1", record) == remote_port_html("Gi0/1", record)
+
+    def test_a_name_with_no_link_and_no_badge_is_escaped(self):
+        """The branch that used to return the raw string: the verify path injects it as HTML."""
+        from netbox_librenms_plugin.utils import remote_port_html
+
+        assert remote_port_html("<b>x</b>", {}) == "&lt;b&gt;x&lt;/b&gt;"

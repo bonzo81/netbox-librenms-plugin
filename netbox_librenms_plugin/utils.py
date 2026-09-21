@@ -14,7 +14,7 @@ from django.db import IntegrityError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
-from django.utils.html import escape
+from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
@@ -2842,6 +2842,47 @@ def oob_badge_html(record, leading_space=False):
     # args and raises TypeError when given a bare string).
     # Static trusted markup, no interpolation.
     return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
+
+
+def remote_port_html(value, record):
+    """
+    Return one cable row's remote-port cell: the port name, its link, and its badges.
+
+    Shared by the cable table column and the cable-verify formatter so an inline verify cannot
+    drop a badge the full render draws. Escaped in every branch, including the bare one: the
+    verify response is injected into the page as HTML.
+
+    Args:
+        value: The remote port name, or None when the row resolved no name.
+        record: A cable row dict.
+
+    Returns:
+        SafeString: The cell markup.
+
+    """
+    # Static trusted markup, mirrors the Serial badge idiom.
+    manual_badge = (
+        mark_safe(' <i class="mdi mdi-gesture-tap-button text-muted" title="Remote end picked manually"></i>')
+        if record.get("manual_remote")
+        else ""
+    )
+    # One adjacency reported over both CDP and LLDP renders once; name the protocol whose
+    # row was collapsed into this one so the evidence is not silently dropped.
+    also = record.get("also_reported_by")
+    protocol_badge = (
+        format_html(
+            ' <i class="mdi mdi-lan-connect text-muted" title="Also reported over {}"></i>',
+            ", ".join(str(protocol).upper() for protocol in also),
+        )
+        if also
+        else ""
+    )
+    # Normalize None to "" like the local-port and remote-device cells — an unset remote port
+    # name would otherwise render the literal "None".
+    display_value = value or ""
+    if url := record.get("remote_port_url"):
+        return format_html('<a href="{}">{}</a>{}{}', url, display_value, manual_badge, protocol_badge)
+    return format_html("{}{}{}", display_value, manual_badge, protocol_badge)
 
 
 def is_valid_ports_payload(payload) -> bool:
