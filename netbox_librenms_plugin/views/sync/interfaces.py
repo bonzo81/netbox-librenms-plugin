@@ -1313,7 +1313,7 @@ class SyncInterfacesView(
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
     def get_netbox_interface_type(self, librenms_interface):
-        """Return the NetBox interface type mapped from LibreNMS type and speed."""
+        """Return the NetBox type mapped from LibreNMS type and speed, or None when unmapped."""
         return get_netbox_interface_type(librenms_interface, speed_converter=convert_speed_to_kbps)
 
     def handle_mac_address(self, interface, ifPhysAddress):
