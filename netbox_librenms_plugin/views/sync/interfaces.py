@@ -1353,8 +1353,9 @@ class SyncInterfacesView(
         """
         port_id = normalize_librenms_port_id(librenms_port.get("port_id"))
 
-        # Build VLAN data from port
+        # Build VLAN data from port. "mode" is the 802.1Q mode LibreNMS reported via ifTrunk.
         vlan_data = {
+            "mode": librenms_port.get("mode"),
             "untagged_vlan": librenms_port.get("untagged_vlan"),
             "tagged_vlans": librenms_port.get("tagged_vlans", []),
         }
