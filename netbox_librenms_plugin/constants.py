@@ -32,6 +32,25 @@ def is_supported_interface_name_field(value):
     return isinstance(value, str) and value in INTERFACE_NAME_FIELDS
 
 
+# The interface fields one sync writes, as (LibreNMS key, NetBox attribute) pairs, in write
+# order. ``INTERFACE_NAME_KEY`` stands for whichever port field is currently acting as the
+# interface name; it can never equal a real LibreNMS key. update_interface_from_port() builds its
+# field map from this tuple and the row diff reads the same one, so the table cannot paint a
+# field the sync leaves alone, or miss one it writes.
+INTERFACE_NAME_KEY = "<interface_name_field>"
+INTERFACE_SYNC_FIELD_PAIRS = (
+    (INTERFACE_NAME_KEY, "name"),
+    ("ifType", "type"),
+    ("ifSpeed", "speed"),
+    ("ifAlias", "description"),
+    ("ifMtu", "mtu"),
+)
+
+# Fields the same sync writes outside that map, each from its own LibreNMS evidence:
+# ifAdminStatus, ifPhysAddress, port_id and the parsed VLAN assignment.
+INTERFACE_SYNC_EXTRA_FIELDS = ("enabled", "mac_address", "librenms_id", "vlans")
+
+
 # Model strings LibreNMS reports when it has no model to report. They are absent data, never a
 # lookup key: a vendor that answers "unspecified" for every SFP in the box would otherwise
 # collapse them all onto one ModuleTypeMapping row, which the schema allows only one of.

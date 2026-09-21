@@ -54,7 +54,7 @@ class TestNonStringMacAddress:
         assert 'class="text-danger"' in html
 
     def test_a_non_string_mac_does_not_break_a_row_matched_in_netbox(self):
-        """The matched-row branch runs the MAC comparison, which reads the formatted value."""
+        """The matched-row branch runs the MAC comparison, which the row diff answers."""
         device = make_device("mac-render-matched")
         interface = make_interface(device, "Ethernet1")
         record = _record(12345, netbox_interface=interface)
@@ -62,7 +62,8 @@ class TestNonStringMacAddress:
         html = str(_table(device, record).render_mac_address(record["ifPhysAddress"], record))
 
         assert "12345" not in html
-        assert "text-warning" in html
+        # A MAC the column cannot store is skipped by the sync, so the row is not a difference.
+        assert "text-success" in html
 
     def test_a_real_string_mac_still_formats(self):
         """The repair must not change the behaviour a well-formed address already had."""

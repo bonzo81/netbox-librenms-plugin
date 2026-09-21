@@ -886,6 +886,10 @@ class TestInterfaceTableFields:
         interface.save()
         mac = MACAddress.objects.create(mac_address="AA:BB:CC:DD:EE:FF")
         interface.mac_addresses.add(mac)
+        # The sync also makes the MAC it writes the primary one, so an interface that is really
+        # in sync has it set; without it the row differs and renders amber.
+        interface.primary_mac_address = mac
+        interface.save()
         InterfaceTypeMapping.objects.create(
             librenms_type="ethernetCsmacd",
             librenms_speed=1_000_000,
@@ -924,16 +928,19 @@ class TestInterfaceTableFields:
         ):
             assert "text-warning" in str(rendered)
 
-    @pytest.mark.parametrize("value", ["up", "UP", True])
+    @pytest.mark.parametrize("value", ["up", "UP", True, None])
     def test_enabled_values_normalize_to_enabled(self, value):
-        html = str(_interface_table().render_enabled(value, {"exists_in_netbox": False}))
+        """An absent ifAdminStatus reads as enabled: that is the value a sync writes."""
+        record = {"exists_in_netbox": False, "ifAdminStatus": value}
+        html = str(_interface_table().render_enabled(value, record))
 
         assert "Enabled" in html
         assert "text-danger" in html
 
-    @pytest.mark.parametrize("value", ["down", False, None])
+    @pytest.mark.parametrize("value", ["down", False])
     def test_disabled_values_normalize_to_disabled(self, value):
-        html = str(_interface_table().render_enabled(value, {"exists_in_netbox": False}))
+        record = {"exists_in_netbox": False, "ifAdminStatus": value}
+        html = str(_interface_table().render_enabled(value, record))
 
         assert "Disabled" in html
 
@@ -1031,15 +1038,19 @@ class TestInterfaceTableFields:
         interface = make_interface(device, "Ethernet1")
         table = _interface_table(device)
 
-        missing = str(table.render_librenms_id(42, {"exists_in_netbox": True, "netbox_interface": interface}))
+        def _row(iface):
+            # port_id is the column accessor, so the rendered value and the row carry the same id.
+            return {"port_id": 42, "exists_in_netbox": True, "netbox_interface": iface}
+
+        missing = str(table.render_librenms_id(42, _row(interface)))
         set_librenms_device_id(interface, 99, "default")
         interface.save()
         interface = type(interface).objects.get(pk=interface.pk)
-        mismatch = str(table.render_librenms_id(42, {"exists_in_netbox": True, "netbox_interface": interface}))
+        mismatch = str(table.render_librenms_id(42, _row(interface)))
         interface.custom_field_data["librenms_id"] = {"default": 42}
         interface.save()
         interface = type(interface).objects.get(pk=interface.pk)
-        matched = str(table.render_librenms_id(42, {"exists_in_netbox": True, "netbox_interface": interface}))
+        matched = str(table.render_librenms_id(42, _row(interface)))
 
         assert "No librenms_id" in missing
         assert "Existing LibreNMS ID: 99" in mismatch
@@ -1402,6 +1413,7 @@ class TestInterfaceFormatting:
             "vlans",
             "librenms_id",
             "parent",
+            "actions",
             "librenms_lag_port_id",
             "librenms_lag_name",
             "librenms_parent_port_id",

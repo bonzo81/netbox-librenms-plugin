@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.interface_diff import interface_enabled_from_port
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
@@ -174,15 +175,14 @@ class BaseInterfaceTableView(
         librenms_id_counts = {}
         duplicate_librenms_ids = set()
 
-        # Prefetch the M2M relations the table renderers dereference per matched row
-        # (render_vlans -> tagged_vlans, render_mac_address -> mac_addresses); without this each
-        # rendered interface row issues its own query for these. Also select related relationships
-        # FKs that render_parent and render_lag dereference.
+        # Prefetch the relations the row diff dereferences for every matched row (VLAN
+        # assignment and MAC addresses); without this each rendered interface row issues its own
+        # queries for these. Also select related relationship FKs that render_parent dereferences.
         related_field = self.get_select_related_field(obj)
         extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
         interfaces = (
             self.get_interfaces(obj)
-            .select_related(related_field, *extra_related)
+            .select_related(related_field, "untagged_vlan", *extra_related)
             .prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
         )
         for interface in interfaces:
@@ -800,15 +800,7 @@ class BaseInterfaceTableView(
             for port in ports_data:
                 if port.get("_source") == OOB_INVENTORY_SOURCE:
                     port["host_name_collision"] = port.get(interface_name_field) in host_owned_names
-                port["enabled"] = (
-                    True
-                    if port.get("ifAdminStatus") is None
-                    else (
-                        port["ifAdminStatus"].lower() == "up"
-                        if isinstance(port["ifAdminStatus"], str)
-                        else bool(port["ifAdminStatus"])
-                    )
-                )
+                port["enabled"] = interface_enabled_from_port(port)
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     chassis_member = resolve_interface_row_device(
