@@ -79,14 +79,21 @@ class IPAddressTable(tables.Table):
     )
     vrf = tables.TemplateColumn(
         template_code="""
-        <select id="vrf_select_{{ record.row_id }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.row_id }}" name="vrf_{{ record.row_id }}">
-            <option value="">Global</option>
-            {% for vrf in record.vrfs %}
-                <option value="{{ vrf.pk }}" {% if record.vrf_id == vrf.pk %}selected{% endif %}>
-                    {{ vrf.name }}
-                </option>
-            {% endfor %}
-        </select>
+        <div class="d-flex align-items-center gap-1">
+            <select id="vrf_select_{{ record.row_id }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.row_id }}" name="vrf_{{ record.row_id }}">
+                <option value="">Global</option>
+                {% for vrf in record.vrfs %}
+                    <option value="{{ vrf.pk }}" {% if record.vrf_id == vrf.pk or record.suggested_vrf_id == vrf.pk %}selected{% endif %}>
+                        {{ vrf.name }}
+                    </option>
+                {% endfor %}
+            </select>
+            {% if record.vrf_suggested_from %}
+                <i class="mdi mdi-lightbulb-on-outline text-muted"
+                   title="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"
+                   aria-label="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"></i>
+            {% endif %}
+        </div>
         """,
         attrs={"td": {"data-col": "vrf"}},
         verbose_name="VRF",

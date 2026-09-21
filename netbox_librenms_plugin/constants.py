@@ -7,6 +7,9 @@ PERM_CHANGE_PLUGIN = "netbox_librenms_plugin.change_librenmssettings"
 # LibreNMS VLAN state values
 LIBRENMS_VLAN_STATE_ACTIVE = 1
 
+# Nokia uses this name for its global routing table, not for a VRF.
+LIBRENMS_GLOBAL_ROUTING_INSTANCE = "Base"
+
 # Columns every /devices/{id}/ports read requests. The live reader and the data-shape capture
 # share this one string, so a captured ports payload can never carry fewer fields than the sync
 # logic reads. ifVrf is the per-port VRF id the IP tab joins against /routing/vrf.
