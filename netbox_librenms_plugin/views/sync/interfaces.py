@@ -276,6 +276,12 @@ class SyncInterfacesView(
 
     def get_selected_port_ids(self, request):
         """Return selected visible LibreNMS port IDs from POST data."""
+        # A row's own Sync button wins over the tick boxes: the user pressed one row, not the
+        # selection, and the browser submits both. Same shape as the cables tab, so the row goes
+        # through this one view with the same permission, cache and duplicate-id checks.
+        sync_one = normalize_librenms_port_id(request.POST.get("sync_one"))
+        if sync_one is not None:
+            return {sync_one}
         visible = {
             port_id
             for raw_port_id in request.POST.getlist("select")

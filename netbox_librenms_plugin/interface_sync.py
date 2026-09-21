@@ -4,16 +4,19 @@ import logging
 from copy import deepcopy
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.fields import MACAddressField
 from dcim.models import Device, Interface, MACAddress
-from django.core.exceptions import ValidationError
 from django.db import transaction
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.constants import INTERFACE_NAME_KEY, INTERFACE_SYNC_FIELD_PAIRS
+from netbox_librenms_plugin.interface_diff import (
+    interface_enabled_from_port,
+    syncable_mac_address,
+    synced_description,
+)
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
-    bounded_interface_text,
     coerce_interface_mtu,
     convert_speed_to_kbps,
     find_by_librenms_id,
@@ -49,15 +52,12 @@ def assign_interface_mac(interface, mac_address):
         bool: Whether the assignment changed anything, so the caller does not have to read
             the relation back to find out.
     """
-    if not isinstance(mac_address, str) or not mac_address.strip():
-        return False
-    try:
-        # Validate through NetBox's own field: the macaddr column rejects whatever netaddr.EUI
-        # cannot parse, and that raises on the filter below, before create() is reached.
-        MACAddressField().to_python(mac_address)
-    except ValidationError:
+    # One gate, shared with the row diff: a MAC the column refuses is neither written nor
+    # reported as a difference.
+    mac_address = syncable_mac_address(mac_address)
+    if mac_address is None:
         # Name the interface, never the value: a MAC is private data to py/clear-text-logging.
-        logger.debug("LibreNMS reported an unusable MAC for interface %s; skipping only the MAC.", interface.pk)
+        logger.debug("LibreNMS reported no usable MAC for interface %s; skipping only the MAC.", interface.pk)
         return False
     existing_mac = interface.mac_addresses.filter(mac_address=mac_address).first()
     mac_obj = existing_mac or MACAddress.objects.create(mac_address=mac_address)
@@ -95,12 +95,11 @@ def update_interface_from_port(  # noqa: C901
         field_name: getattr(interface, field_name) for field_name in tracked_fields if hasattr(interface, field_name)
     }
     before_custom_fields = deepcopy(interface.custom_field_data)
+    # Built from the shared schema the row diff reads, so the table cannot paint a field this
+    # loop leaves alone, or miss one it writes.
     field_mapping = {
-        interface_name_field: "name",
-        "ifType": "type",
-        "ifSpeed": "speed",
-        "ifAlias": "description",
-        "ifMtu": "mtu",
+        (interface_name_field if librenms_key == INTERFACE_NAME_KEY else librenms_key): netbox_field
+        for librenms_key, netbox_field in INTERFACE_SYNC_FIELD_PAIRS
     }
 
     if "name" not in exclude_columns:
@@ -126,10 +125,7 @@ def update_interface_from_port(  # noqa: C901
             # Same rule the interface table renders: an alias echoing either canonical name is
             # not a description. Writing "" rather than skipping keeps the row and the table
             # agreeing after a sync.
-            alias = librenms_interface.get("ifAlias")
-            echoes_name = alias in (librenms_interface.get("ifDescr"), librenms_interface.get("ifName"))
-            usable_alias = alias if isinstance(alias, str) and not echoes_name else ""
-            setattr(interface, netbox_key, bounded_interface_text(netbox_key, usable_alias, type(interface)))
+            setattr(interface, netbox_key, synced_description(librenms_interface, type(interface)))
         elif librenms_key == "ifMtu":
             setattr(interface, netbox_key, coerce_interface_mtu(librenms_interface.get(librenms_key)))
         else:
@@ -148,12 +144,7 @@ def update_interface_from_port(  # noqa: C901
                 logger.warning("Not reassigning port_id %s from %s to %s.", port_id, existing_owner, interface)
 
     if "enabled" not in exclude_columns:
-        admin_status = librenms_interface.get("ifAdminStatus")
-        interface.enabled = (
-            True
-            if admin_status is None
-            else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
-        )
+        interface.enabled = interface_enabled_from_port(librenms_interface)
 
     mac_changed = False
     if "mac_address" not in exclude_columns:
