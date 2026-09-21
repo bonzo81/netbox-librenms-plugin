@@ -1,4 +1,4 @@
-"""Matching the far end of a cable row: the other LibreNMS name, and one link seen twice.
+"""The far end of a cable row: matching it, and creating it when NetBox has no port for it.
 
 Two defects, both "the row said not found, or said it twice, because the matching is wrong":
 
@@ -8,6 +8,9 @@ Two defects, both "the row said not found, or said it twice, because the matchin
   "Remote Interface Not Found in Netbox".
 * LibreNMS returns one row per discovery protocol, so a neighbour seen over both CDP and LLDP
   renders twice and offers two Sync Cable buttons for one physical link.
+
+Then the action that follows from the first: when the neighbour IS modelled and its port is not,
+the row can never be synced, so it offers to create the far end and the cable together.
 """
 
 import time
@@ -86,6 +89,16 @@ class TestRemotePortAliases:
         _make_view().enrich_remote_port(link, remote_device, server_key=server_key)
 
         assert link["netbox_remote_interface_id"] == interface.pk
+
+    def test_an_unresolved_remote_port_still_names_itself(self):
+        """The Remote Port column reads remote_port_name, so an unresolved row rendered blank."""
+        server_key = configured_server_key()
+        remote_device = make_device("alias-remote-unnamed")
+
+        link = _row(remote_port="Gi0/1")
+        _make_view().enrich_remote_port(link, remote_device, server_key=server_key)
+
+        assert link["remote_port_name"] == "Gi0/1"
 
     def test_an_ambiguous_pair_of_names_resolves_nothing(self):
         """Both names exist as separate interfaces: refuse rather than pick one."""
@@ -843,3 +856,428 @@ class TestDuplicatesAreGoneFromTheRenderedRows:
         )
 
         assert len(rows) == 2
+
+
+# ---------------------------------------------------------------------------
+# Creating the far end LibreNMS reports and NetBox does not have
+# ---------------------------------------------------------------------------
+
+
+def _create_setup(name, *, remote_port_key=500, local="eth0", remote_iface=None):
+    """A page device, a modelled neighbour, and one row whose remote port is missing."""
+    server_key = configured_server_key()
+    local_device = make_device(f"{name}-local")
+    local_interface = make_interface(local_device, local)
+    remote_device = make_device(f"{name}-remote")
+    if remote_iface:
+        make_interface(remote_device, remote_iface)
+    row = _row(
+        local_port=local,
+        remote_device=remote_device.name,
+        remote_port_key=remote_port_key,
+        row_id="row-1",
+        netbox_local_interface_id=local_interface.pk,
+        netbox_local_device_id=local_device.pk,
+        netbox_remote_device_id=remote_device.pk,
+        device_id=local_device.pk,
+    )
+    return server_key, local_device, local_interface, remote_device, row
+
+
+@pytest.mark.django_db
+class TestTheCreateAffordance:
+    """One rule decides which rows offer the action, and the endpoint reads the same rule."""
+
+    def _affordance(self, row, device):
+        view = _make_view()
+        view._set_remote_create_affordance(row, device, configured_server_key())
+        return row.get("remote_create_url")
+
+    def test_a_modelled_neighbour_with_no_port_gets_the_action(self):
+        """The case the action exists for."""
+        _, local_device, _, _, row = _create_setup("create-offered")
+
+        assert self._affordance(row, local_device)
+
+    def test_a_resolved_remote_interface_gets_nothing(self):
+        """There is nothing to create: the row is already syncable."""
+        _, local_device, _, _, row = _create_setup("create-resolved")
+        row["netbox_remote_interface_id"] = 77
+
+        assert self._affordance(row, local_device) is None
+
+    def test_a_neighbour_that_is_not_in_netbox_gets_nothing(self):
+        """No device to attach an interface to, so the action is absent, not failing."""
+        _, local_device, _, _, row = _create_setup("create-no-device")
+        del row["netbox_remote_device_id"]
+
+        assert self._affordance(row, local_device) is None
+
+    def test_a_row_with_no_local_end_gets_nothing(self):
+        """There would be nothing to cable the new interface to."""
+        _, local_device, _, _, row = _create_setup("create-no-local")
+        del row["netbox_local_interface_id"]
+
+        assert self._affordance(row, local_device) is None
+
+    def test_a_row_with_no_librenms_port_record_gets_nothing(self):
+        """Without a port record the name and type would both be guesses."""
+        _, local_device, _, _, row = _create_setup("create-no-port", remote_port_key=None)
+
+        assert self._affordance(row, local_device) is None
+
+    def test_an_oob_row_gets_nothing(self):
+        """OOB rows are context only and are never syncable in any state."""
+        _, local_device, _, _, row = _create_setup("create-oob")
+        row["_source"] = "oob"
+
+        assert self._affordance(row, local_device) is None
+
+    def test_a_manual_pick_gets_nothing(self):
+        """The user already chose the far end by hand."""
+        _, local_device, _, _, row = _create_setup("create-manual")
+        row["manual_remote"] = True
+
+        assert self._affordance(row, local_device) is None
+
+    def test_a_read_only_user_gets_nothing(self):
+        """The action writes, so it is not offered without the plugin's change permission."""
+        from django.contrib.auth import get_user_model
+        from uuid import uuid4
+
+        _, local_device, _, _, row = _create_setup("create-readonly")
+        view = _make_view()
+        view.request.user = get_user_model().objects.create_user(username=f"ro-{uuid4().hex}", password="pw")
+        view._set_remote_create_affordance(row, local_device, configured_server_key())
+
+        assert row.get("remote_create_url") is None
+
+
+def _seed_cable_row(device, row, server_key):
+    """
+    Put one raw snapshot row in the cables cache, the way a refresh would, and return its row id.
+
+    The identity is derived from the row, not chosen by the caller, so the test submits exactly
+    what the rendered table would ([[assign_cable_row_ids]]).
+    """
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.utils import assign_cable_row_ids
+    from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
+
+    raw = assign_cable_row_ids([{key: value for key, value in row.items() if key in _RAW_LINK_KEYS}])
+    cache.set(
+        _make_view().get_cache_key(device, "links", server_key),
+        {"links": raw, "snapshot_token": "remote-create"},
+        timeout=300,
+    )
+    return raw[0]["row_id"]
+
+
+def _remote_create_url(device):
+    """The endpoint under test."""
+    from django.urls import reverse
+
+    return reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[device.pk])
+
+
+def _messages(response):
+    """The flash messages a followed response left behind."""
+    from django.contrib.messages import get_messages
+
+    return [str(message) for message in get_messages(response.wsgi_request)]
+
+
+def _logged_in(user):
+    """A real test client for *user*."""
+    from django.test import Client
+
+    client = Client()
+    client.force_login(user)
+    return client
+
+
+@pytest.mark.django_db
+class TestCheckAndCreateTheRemoteEnd:
+    """GET reports what would be created; POST creates it and the cable, or neither."""
+
+    def _scenario(self, name, librenms_server, settings, *, port=None, advertised="Gi0/1", aliases=None):
+        """A page device, a modelled neighbour with no matching port, and a seeded cable row."""
+        from netbox_librenms_plugin.tests.conftest import bind_librenms_server, persist_test_server_mapping
+
+        server_key = configured_server_key()
+        bind_librenms_server(settings, librenms_server, server_key=server_key)
+        local_device = make_device(f"{name}-local")
+        local_interface = make_interface(local_device, "eth0")
+        remote_device = make_device(f"{name}-remote")
+        persist_test_server_mapping(local_device, server_key)
+        map_device_to_librenms(remote_device, 9, server_key=server_key)
+        librenms_server.register(
+            "/api/v0/ports/500",
+            {"status": "ok", "port": [port or {"port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}]},
+        )
+        row = _row(
+            local_port="eth0",
+            remote_device=remote_device.name,
+            remote_port=advertised,
+            remote_port_aliases=aliases,
+            remote_port_key=500,
+        )
+        row_id = _seed_cable_row(local_device, row, server_key)
+        return server_key, local_device, local_interface, remote_device, row_id
+
+    def test_the_check_reports_what_would_be_created(self, librenms_server, settings):
+        """Step one: the far end is not modelled, so say what creating it would mean."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, remote_device, row_id = self._scenario("chk-a", librenms_server, settings)
+
+        response = _logged_in(make_superuser("remote-create-chk-a")).get(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        assert response.status_code == 200
+        body = response.content.decode()
+        assert "Gi0/1" in body
+        assert remote_device.name in body
+
+    def test_the_check_names_the_mapped_interface_type(self, librenms_server, settings):
+        """The type comes from InterfaceTypeMapping, the same path the interface sync uses."""
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, _, row_id = self._scenario(
+            "chk-b",
+            librenms_server,
+            settings,
+            port={"port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd", "ifSpeed": 1000000000},
+        )
+        InterfaceTypeMapping.objects.create(
+            librenms_type="ethernetCsmacd", librenms_speed=1000000, netbox_type="1000base-t"
+        )
+
+        response = _logged_in(make_superuser("remote-create-chk-b")).get(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        assert "1000base-t" in response.content.decode()
+
+    def test_the_check_flags_an_unmapped_type(self, librenms_server, settings):
+        """Nothing maps it, so the interface would be created as "other": say so, do not hide it."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, _, row_id = self._scenario("chk-c", librenms_server, settings)
+
+        body = (
+            _logged_in(make_superuser("remote-create-chk-c"))
+            .get(_remote_create_url(local_device), {"row_id": row_id, "server_key": server_key})
+            .content.decode()
+        )
+
+        assert "no mapping" in body
+
+    def test_the_check_creates_nothing(self, librenms_server, settings):
+        """Step one is read-only."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, remote_device, row_id = self._scenario("chk-d", librenms_server, settings)
+
+        _logged_in(make_superuser("remote-create-chk-d")).get(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        assert not Interface.objects.filter(device=remote_device).exists()
+
+    def test_the_create_makes_the_interface_and_the_cable(self, librenms_server, settings):
+        """Step two: one transaction, both objects."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-a", librenms_server, settings
+        )
+
+        _logged_in(make_superuser("remote-create-mk-a")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        created = Interface.objects.get(device=remote_device, name="Gi0/1")
+        local_interface.refresh_from_db()
+        assert local_interface.cable is not None
+        assert created.cable_id == local_interface.cable_id
+
+    def test_the_interface_is_named_from_the_port_record(self, librenms_server, settings):
+        """CDP can advertise a string the device does not use; create the port's own name."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, remote_device, row_id = self._scenario(
+            "mk-h",
+            librenms_server,
+            settings,
+            advertised="0c:42:a1:00:00:01",
+            port={"port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"},
+        )
+
+        _logged_in(make_superuser("remote-create-mk-h")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        assert list(Interface.objects.filter(device=remote_device).values_list("name", flat=True)) == ["Gi0/1"]
+
+    def test_the_created_interface_carries_the_librenms_port_id(self, librenms_server, settings):
+        """The row resolves by port id from now on, never by name luck."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        server_key, local_device, _, remote_device, row_id = self._scenario("mk-b", librenms_server, settings)
+
+        _logged_in(make_superuser("remote-create-mk-b")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        created = Interface.objects.get(device=remote_device, name="Gi0/1")
+        assert get_librenms_device_id(created, server_key, auto_save=False) == 500
+
+    def test_a_name_that_is_already_taken_is_refused(self, librenms_server, settings):
+        """The row was offered on the premise that the port is missing. If it is not, stop.
+
+        Two interfaces make the name ambiguous, so the row does not resolve and still offers the
+        action; creating or adopting either one would be a guess.
+        """
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, remote_device, row_id = self._scenario(
+            "mk-c", librenms_server, settings, aliases=["GigabitEthernet0/1"]
+        )
+        make_interface(remote_device, "Gi0/1", iface_type="10gbase-x-sfpp")
+        make_interface(remote_device, "GigabitEthernet0/1")
+
+        _logged_in(make_superuser("remote-create-mk-c")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        assert Interface.objects.filter(device=remote_device).count() == 2
+        assert Interface.objects.get(device=remote_device, name="Gi0/1").cable is None
+
+    def test_a_name_netbox_will_not_accept_is_refused(self, librenms_server, settings):
+        """LibreNMS is not bound by NetBox's field limits; a bad name must not 500 the tab."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, remote_device, row_id = self._scenario(
+            "mk-i",
+            librenms_server,
+            settings,
+            port={"port_id": 500, "ifName": "x" * 200, "ifType": "ethernetCsmacd"},
+        )
+
+        response = _logged_in(make_superuser("remote-create-mk-i")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+            follow=True,
+        )
+
+        assert not Interface.objects.filter(device=remote_device).exists()
+        assert any("will not accept" in text for text in _messages(response))
+
+    def test_a_failed_cable_rolls_the_interface_back(self, librenms_server, settings):
+        """Both or neither: a half-done create leaves a stray interface nobody asked for."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import cable_together, make_superuser
+
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-d", librenms_server, settings
+        )
+        # The local end is already cabled elsewhere, so the cable create must fail.
+        cable_together(local_interface, make_interface(make_device("mk-d-occupier"), "eth9"))
+
+        _logged_in(make_superuser("remote-create-mk-d")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        assert not Interface.objects.filter(device=remote_device, name="Gi0/1").exists()
+
+    def test_a_user_without_add_interface_is_refused_by_name(self, librenms_server, settings):
+        """The action writes to a device the user is not even looking at."""
+        from dcim.models import Cable, Device, Interface
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        server_key, local_device, _, remote_device, row_id = self._scenario("mk-e", librenms_server, settings)
+        user = make_user_with_perms(
+            "remote-create-mk-e",
+            [("view", Device), ("view", Interface), ("change", Interface), ("add", Cable), ("change", Cable)],
+        )
+
+        response = _logged_in(user).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+            follow=True,
+        )
+
+        assert not Interface.objects.filter(device=remote_device, name="Gi0/1").exists()
+        assert any("add_interface" in text for text in _messages(response))
+
+    def test_a_constrained_add_grant_cannot_reach_the_remote_device(self, librenms_server, settings):
+        """The model-level grant says nothing about WHICH devices; the constraint does.
+
+        The user passes every model-level gate, so only the re-read of the saved object through
+        their own 'add' constraints can stop this.
+        """
+        from dcim.models import Cable, Device, Interface
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        server_key, local_device, _, remote_device, row_id = self._scenario("mk-f", librenms_server, settings)
+        user = make_user_with_perms(
+            "remote-create-mk-f",
+            [("view", Device), ("view", Interface), ("change", Interface), ("add", Cable), ("change", Cable)],
+        )
+        # May add interfaces, but only on the device being viewed, never on the neighbour.
+        user = grant(user, "add", Interface, constraints={"device__name": local_device.name})
+
+        response = _logged_in(user).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+            follow=True,
+        )
+
+        assert not Interface.objects.filter(device=remote_device, name="Gi0/1").exists()
+        assert any(remote_device.name in text and "may not add" in text for text in _messages(response))
+
+    def test_a_row_that_never_offered_the_action_is_refused(self, librenms_server, settings):
+        """The affordance is the eligibility rule; the endpoint does not re-derive it."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, remote_device, row_id = self._scenario("mk-g", librenms_server, settings)
+        # An interface the row resolves to: the row becomes syncable, so the action is absent.
+        make_interface(remote_device, "Gi0/1")
+
+        response = _logged_in(make_superuser("remote-create-mk-g")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        assert response.status_code == 404
+        assert Interface.objects.filter(device=remote_device).count() == 1

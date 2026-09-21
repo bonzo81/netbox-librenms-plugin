@@ -154,7 +154,7 @@ from .object_sync import (
 )
 from .settings_views import LibreNMSSettingsView, TestLibreNMSConnectionView
 from .status_check import DeviceStatusListView, VMStatusListView
-from .sync.cables import SyncCablesView
+from .sync.cables import CableRemoteCreateView, SyncCablesView
 from .sync.device_fields import (
     AssignVCSerialView,
     ConvertLegacyLibreNMSIdView,

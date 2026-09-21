@@ -71,6 +71,17 @@ class LibreNMSCableTable(tables.Table):
                 Sync Cable
             </button>
         {% endif %}
+        {% if record.remote_create_url %}
+            {# Shares the cable tab's modal opener with the remote picker; the attribute names #}
+            {# that loader, not the picker specifically. #}
+            <button type="button"
+                    class="btn btn-sm btn-outline-primary"
+                    title="Create the remote interface and the cable"
+                    aria-label="Create the remote interface and the cable"
+                    data-cable-picker-url="{{ record.remote_create_url }}">
+                <i class="mdi mdi-plus-network"></i>
+            </button>
+        {% endif %}
         {% if record.picker_url %}
             <button type="button"
                     class="btn btn-sm btn-outline-secondary"

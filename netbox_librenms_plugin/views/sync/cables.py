@@ -8,16 +8,23 @@ from urllib.parse import quote_plus
 from dcim.models import Cable, CableTermination, ConsolePort, ConsoleServerPort, Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
-from django.core.exceptions import PermissionDenied
-from django.db import transaction
-from django.shortcuts import redirect
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import IntegrityError, transaction
+from django.http import HttpResponse
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, SERIAL_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import (
+    INTERFACE_NAME_FIELDS,
+    OOB_INVENTORY_SOURCE,
+    SERIAL_INVENTORY_SOURCE,
+)
+from netbox_librenms_plugin.interface_sync import get_netbox_interface_type
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
+    render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.utils import (
@@ -27,11 +34,13 @@ from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_cable_sync_settings,
     get_librenms_cable_tag,
+    get_interface_name_field,
     get_librenms_sync_device,
     get_migrated_to_marker,
     is_list_of_dicts,
     render_cable_trace,
     resolve_interface_on_device,
+    set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -1142,3 +1151,230 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             interfaces = results.get(key)
             if interfaces:
                 getattr(messages, level)(request, template.format(items=", ".join(interfaces)))
+
+
+class _RemoteCreateAborted(Exception):
+    """Abandon the whole action: the interface and the cable are created together or not at all."""
+
+
+class CableRemoteCreateView(SyncCablesView):
+    """
+    Create the far end of a cable row in NetBox, then the cable, or neither.
+
+    LibreNMS reports a neighbour that IS modelled in NetBox on a port that is NOT, so the row can
+    never be synced: it reports "Remote Interface Not Found in Netbox" and cable sync refuses it.
+    The only escape was to pick an interface that already exists.
+
+    GET is the check step: it reports the remote device, the interface that would be created and
+    the type it would get, and the cable that would follow. POST performs it. The row is offered
+    this at all only where :meth:`BaseCableTableView._set_remote_create_affordance` says so, so
+    the button and the endpoint cannot disagree about which rows are eligible.
+
+    This writes to a device the user is not looking at, so ``add`` on Interface is checked against
+    that REMOTE device, not the viewed one: the model-level grant first, and then the created
+    object against the user's own constraints, which rolls the whole transaction back when it
+    falls outside them.
+    """
+
+    required_object_permissions = {
+        "GET": [("view", Device)],
+        "POST": [
+            ("view", Device),
+            ("add", Interface),
+            ("add", Cable),
+            ("change", Cable),
+        ],
+    }
+
+    def get(self, request, pk):
+        """Report what creating the far end would do, without doing it."""
+        if denied := self.require_object_permissions("GET"):
+            return denied
+        context, error = self._resolve_proposal(request, pk, request.GET)
+        return (
+            error
+            if error is not None
+            else render(
+                request,
+                "netbox_librenms_plugin/htmx/cable_remote_create_modal.html",
+                context,
+            )
+        )
+
+    def post(self, request, pk):
+        """Create the remote interface and the cable in one transaction, or neither."""
+        if denied := self.require_object_permissions("POST"):
+            return denied
+        if denied := self.require_write_permission():
+            return denied
+        context, error = self._resolve_proposal(request, pk, request.POST)
+        if error is not None:
+            return error
+        obj = context["object"]
+        try:
+            with transaction.atomic():
+                interface = self._create_remote_interface(request, context)
+                if not self.create_cable(context["local_interface"], interface, request):
+                    # create_cable already messaged the user; undo the interface it was made for.
+                    raise _RemoteCreateAborted
+        except _RemoteCreateAborted as exc:
+            if str(exc):
+                messages.error(request, str(exc))
+        else:
+            messages.success(
+                request,
+                f"Created {interface.device.name} {interface.name} and cabled it to {context['local_interface'].name}.",
+            )
+        server_key = context["server_key"]
+        redirect_url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[obj.pk])}?tab=cables" + (
+            f"&server_key={quote_plus(server_key)}" if server_key else ""
+        )
+        return self._sync_response(request, obj, server_key, redirect_url)
+
+    def _resolve_proposal(self, request, pk, data):
+        """
+        Resolve one eligible row into everything both steps need, or an error response.
+
+        Args:
+            request (HttpRequest): The current request.
+            pk (int): The page device's pk.
+            data (QueryDict): ``request.GET`` or ``request.POST``.
+
+        Returns:
+            tuple[dict | None, HttpResponse | None]: The template/action context, or the refusal.
+
+        """
+        obj = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.rebind_api_for_posted_server(data)
+        if server_key is None:
+            return None, HttpResponse("Selected LibreNMS server is no longer configured.", status=400)
+        self._post_server_key = server_key
+        row_id = data.get("row_id", "")
+        links = self.get_cached_links_data(request, obj)
+        if links is None:
+            return None, render_sync_cache_miss(request, "Cables")
+        row = next((link for link in links if link.get("row_id") == row_id), None)
+        # The affordance is the eligibility rule. A row that does not carry it is one the table
+        # never offered this on, so the endpoint refuses it rather than re-deriving the rule.
+        if row is None or not row.get("remote_create_url"):
+            return None, HttpResponse("Cable row not found.", status=404)
+        remote_device = self.restricted_queryset(Device, "view").filter(pk=row["netbox_remote_device_id"]).first()
+        local_interface = (
+            self.restricted_queryset(Interface, "change")
+            .filter(pk=row["netbox_local_interface_id"])
+            .select_related("device")
+            .first()
+        )
+        if remote_device is None or local_interface is None:
+            return None, HttpResponse("The row's NetBox objects are no longer available.", status=404)
+        port = self._remote_port_record(row)
+        name = self._proposed_interface_name(request, obj, row, port)
+        if not name:
+            return None, HttpResponse("LibreNMS reports no usable name for the remote port.", status=400)
+        netbox_type = get_netbox_interface_type(port) if port else None
+        return {
+            "object": obj,
+            "row": row,
+            "server_key": server_key,
+            "remote_device": remote_device,
+            "local_interface": local_interface,
+            "librenms_port": port,
+            "proposed_name": name,
+            # An unmapped ifType is written as "other" only because this IS a create; the same
+            # rule the interface sync follows (issue #179 item 1).
+            "proposed_type": netbox_type or "other",
+            "type_is_unmapped": netbox_type is None,
+            # Truthiness only: the template must not be handed an unscoped object to render.
+            "existing_interface": Interface.objects.filter(device=remote_device, name=name).exists(),
+            "post_url": reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk]),
+        }, None
+
+    def _remote_port_record(self, row):
+        """Read the neighbour's port record, for the name and the type it would be created with."""
+        port_id = coerce_librenms_id(row.get("remote_port_key")) or coerce_librenms_id(row.get("remote_port_id"))
+        if port_id is None:
+            return None
+        success, data = self.librenms_api.get_port_by_id(port_id)
+        ports = data.get("port") if success and isinstance(data, dict) else None
+        port = ports[0] if isinstance(ports, list) and ports and isinstance(ports[0], dict) else None
+        return port
+
+    @staticmethod
+    def _proposed_interface_name(request, obj, row, port):
+        """Name the new interface from the port record's displayed field, else what was advertised."""
+        if isinstance(port, dict):
+            field = get_interface_name_field(request, obj)
+            for candidate in (port.get(field), *(port.get(other) for other in sorted(INTERFACE_NAME_FIELDS))):
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+        advertised = row.get("remote_port")
+        return advertised.strip() if isinstance(advertised, str) else ""
+
+    def _create_remote_interface(self, request, context):
+        """
+        Create the interface on the remote device, fail-closed at every step.
+
+        The row was offered this action because NetBox has no port for the far end. If the name
+        exists by the time the POST arrives, that premise is gone: either someone created it, or
+        the row failed to resolve because the name is ambiguous on that device. Neither is safe to
+        adopt silently, so the action refuses and the user refreshes, which re-renders the row as
+        an ordinary syncable one.
+
+        Locking mirrors ``_resolve_oob_interface``: the candidate is locked inside the caller's
+        view scope, so a caller cannot hold a row it may not see. The model-level ``add`` grant is
+        the view's declared POST permission and is not re-asked here: nothing can change it between
+        dispatch and this line. What the gate cannot answer is WHICH devices the grant reaches, so
+        the saved object is re-read through the user's own constraints below.
+
+        Args:
+            request (HttpRequest): The current request (for the acting user).
+            context (dict): The resolved proposal.
+
+        Returns:
+            Interface: The interface that was created.
+
+        Raises:
+            _RemoteCreateAborted: When the name is taken, or the user may not add this interface.
+
+        """
+        remote_device = context["remote_device"]
+        name = context["proposed_name"]
+        taken = (
+            Interface.objects.restrict(request.user, "view")
+            # of=("self",): restrict() joins the permission tables, and a bare select_for_update()
+            # would try to lock those joined rows too.
+            .select_for_update(of=("self",))
+            .filter(device=remote_device, name=name)
+            .exists()
+        )
+        # `.exists()` on the plain manager reads no row data and takes no lock, so a name held
+        # outside the caller's scope refuses here instead of racing into an IntegrityError.
+        if taken or Interface.objects.filter(device=remote_device, name=name).exists():
+            raise _RemoteCreateAborted(
+                f"{remote_device.name} already has an interface named {name}. Refresh the cable data and try again."
+            )
+        interface = Interface(device=remote_device, name=name, type=context["proposed_type"])
+        try:
+            # Nested savepoint: an IntegrityError caught without one poisons the outer
+            # transaction. Two simultaneous POSTs both find the name free, so the
+            # dcim_interface_unique_device_name constraint is what actually settles it.
+            with transaction.atomic():
+                # Skip the uniqueness check here: that constraint owns the race, and the scoped
+                # lock above already settled the visible case.
+                interface.full_clean(validate_unique=False)
+                interface.save()
+        except IntegrityError as exc:
+            raise _RemoteCreateAborted(
+                f"{remote_device.name} already has an interface named {name}. Refresh the cable data and try again."
+            ) from exc
+        except ValidationError as exc:
+            raise _RemoteCreateAborted(f"LibreNMS reports a port name NetBox will not accept: {name}.") from exc
+        # The model-level grant says nothing about WHICH devices the user may add interfaces to.
+        # Re-read the saved object through the user's own 'add' constraints, exactly as NetBox's
+        # own object-permission mixin does, so a site-scoped grant cannot reach another site.
+        if not Interface.objects.restrict(request.user, "add").filter(pk=interface.pk).exists():
+            raise _RemoteCreateAborted(f"You may not add interfaces to {remote_device.name}.")
+        # The row resolves by LibreNMS port id from now on, never by name luck.
+        set_librenms_device_id(interface, context["row"].get("remote_port_key"), context["server_key"])
+        interface.save(update_fields=["custom_field_data"])
+        return interface

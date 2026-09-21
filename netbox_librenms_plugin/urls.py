@@ -163,6 +163,7 @@ from .views import (
     SingleIPAddressVerifyView,
     SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
+    CableRemoteCreateView,
     SyncCablesView,
     SyncCacheFragmentView,
     SyncCacheStatusView,
@@ -379,6 +380,12 @@ urlpatterns = [
         "device/<int:pk>/cable-remote-picker/",
         CableRemotePickerView.as_view(),
         name="cable_remote_picker",
+    ),
+    # Create the far end that LibreNMS reports but NetBox does not have (check on GET, act on POST)
+    path(
+        "device/<int:pk>/cable-remote-create/",
+        CableRemoteCreateView.as_view(),
+        name="cable_remote_create",
     ),
     # Sync IP addresses URL
     path(
