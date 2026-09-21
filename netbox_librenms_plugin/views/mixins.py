@@ -1679,8 +1679,10 @@ class VlanAssignmentMixin:
                 return vlan_group_map.get(str(vid), "")
             return single_group_id or ""
 
-        # Determine mode
-        if tagged_vids:
+        # Determine mode. LibreNMS states it in ifTrunk (parse_port_vlan_data puts it on the
+        # row as "mode"); the VLAN lists only refine it. Deriving the mode from the lists alone
+        # wrote "access" for a trunk that happened to carry one untagged VLAN and no tagged ones.
+        if tagged_vids or vlan_data.get("mode") == "tagged":
             interface.mode = "tagged"
         elif untagged_vid:
             interface.mode = "access"

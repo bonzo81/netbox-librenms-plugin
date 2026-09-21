@@ -5011,3 +5011,77 @@ def select_interface_type_mapping(mappings, speed):
             if best is None or mapping.librenms_speed > best.librenms_speed:
                 best = mapping
     return best or wildcard
+
+
+def _row_vlan_shape(port):
+    """Return one row's VLAN assignment as a hashable, comparable ``(untagged, tagged)`` pair."""
+    return port.get("untagged_vlan"), tuple(sorted(port.get("tagged_vlans") or []))
+
+
+def _copy_row_vlan_data(source, target, interface_name_field):
+    """Copy one row's VLAN assignment onto another and record where it came from."""
+    untagged, tagged = _row_vlan_shape(source)
+    target["mode"] = source.get("mode")
+    target["untagged_vlan"] = untagged
+    target["tagged_vlans"] = list(tagged)
+    target["vlan_inherited_from"] = source.get(interface_name_field) or source.get("ifName") or ""
+
+
+def apply_lag_vlan_fill(ports, lag_members, *, interface_name_field="ifName"):
+    """
+    Fill missing VLAN data between a LAG aggregate and its members, in place.
+
+    LibreNMS reports the VLANs on whichever side of the aggregation the platform exposes:
+    Juniper on the aggregate, several switch platforms on the members. Filling only the rows
+    that have none keeps the rule vendor-neutral, because it can complete a picture but never
+    correct one. A filled row carries ``vlan_inherited_from`` naming the row it copied.
+
+    Args:
+        ports: The enriched LibreNMS port rows, mutated in place.
+        lag_members (dict): ``{member_port_id: aggregate_port_id}``.
+        interface_name_field (str): The row field naming the interface ('ifName' or 'ifDescr').
+
+    Returns:
+        None
+
+    """
+    if not lag_members:
+        return
+
+    rows_by_port_id = {}
+    for port in ports:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is not None:
+            rows_by_port_id.setdefault(port_id, port)
+
+    # Snapshot before writing anything: both directions read the original state, so a row this
+    # call fills can never become the source of a second fill.
+    carries_own = {port_id: _row_vlan_shape(port) != (None, ()) for port_id, port in rows_by_port_id.items()}
+
+    members_by_aggregate = {}
+    for raw_member_id, raw_aggregate_id in lag_members.items():
+        member_id = normalize_librenms_port_id(raw_member_id)
+        aggregate_id = normalize_librenms_port_id(raw_aggregate_id)
+        if member_id is None or aggregate_id is None or member_id == aggregate_id:
+            continue
+        members_by_aggregate.setdefault(aggregate_id, []).append(member_id)
+
+    for aggregate_id, member_ids in members_by_aggregate.items():
+        aggregate = rows_by_port_id.get(aggregate_id)
+        if aggregate is None:
+            continue
+        member_ids = sorted(member_ids)
+        if carries_own.get(aggregate_id):
+            for member_id in member_ids:
+                member = rows_by_port_id.get(member_id)
+                if member is not None and not carries_own.get(member_id):
+                    _copy_row_vlan_data(aggregate, member, interface_name_field)
+            continue
+        member_rows = [rows_by_port_id.get(member_id) for member_id in member_ids]
+        # Rolling up the subset that happens to have data would invent an assignment for the
+        # members that have none, so every member must agree on one set.
+        if any(row is None for row in member_rows) or not all(carries_own.get(mid) for mid in member_ids):
+            continue
+        if len({_row_vlan_shape(row) for row in member_rows}) != 1:
+            continue
+        _copy_row_vlan_data(member_rows[0], aggregate, interface_name_field)

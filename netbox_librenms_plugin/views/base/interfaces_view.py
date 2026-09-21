@@ -15,6 +15,7 @@ from netbox_librenms_plugin.interface_relationships import (
 )
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
+    apply_lag_vlan_fill,
     build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -26,6 +27,7 @@ from netbox_librenms_plugin.utils import (
     is_list_of_dicts,
     is_valid_ports_payload,
     normalize_librenms_port_id,
+    normalize_relationship_maps,
     resolve_interface_row_device,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -393,6 +395,13 @@ class BaseInterfaceTableView(
             host_ports_final,
             interface_name_field,
         )
+
+        # Fill the VLAN holes here, on the rows that get cached, so the table and the sync
+        # writer read one derivation instead of each computing its own.
+        lag_members, _sub_interfaces, _bridge_members = normalize_relationship_maps(
+            librenms_data.get("port_stack_relationships", {})
+        )
+        apply_lag_vlan_fill(host_ports_final, lag_members, interface_name_field=interface_name_field)
 
         # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it
         # (which would leave downstream views — SingleInterfaceVerifyView,

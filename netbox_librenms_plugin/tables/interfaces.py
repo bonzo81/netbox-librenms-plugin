@@ -212,20 +212,34 @@ class LibreNMSInterfaceTable(tables.Table):
 
         context = self._vlan_row_context(record)
         summary = self._render_vlan_summary(all_vlans, context)
+        inherited = self._render_vlan_inherited_badge(record)
 
         # Keep the LibreNMS VLAN summary visible, but do not expose or submit NetBox scope
         # details for a row whose owner is outside the user's Device view scope.
         if not record.get("sync_target_resolvable", True):
-            return summary
+            return format_html("{}{}", summary, inherited)
 
         interface_name = record.get(self.interface_name_field, "")
         row_key = self._vlan_row_key(record)
         return format_html(
-            '<span title="{}">{}</span>{}{}',
+            '<span title="{}">{}</span>{}{}{}',
             self._render_vlan_tooltip(all_vlans, context),
             summary,
+            inherited,
             self._render_vlan_edit_button(record, all_vlans, context, interface_name, row_key),
             self._render_vlan_hidden_inputs(all_vlans, context, interface_name, row_key),
+        )
+
+    @staticmethod
+    def _render_vlan_inherited_badge(record):
+        """Mark a row whose VLANs were filled from the other end of its LAG, not reported."""
+        donor = record.get("vlan_inherited_from")
+        if not donor:
+            return ""
+        return format_html(
+            ' <i class="mdi mdi-arrow-right-bottom text-muted" title="Inherited from {}:'
+            ' LibreNMS reported no VLANs on this port"></i>',
+            donor,
         )
 
     @staticmethod
