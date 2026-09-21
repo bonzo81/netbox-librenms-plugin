@@ -3,6 +3,7 @@
 import logging
 from copy import deepcopy
 
+from dcim.choices import InterfaceTypeChoices
 from dcim.fields import MACAddressField
 from dcim.models import Device, Interface, MACAddress
 from django.core.exceptions import ValidationError
@@ -19,6 +20,7 @@ from netbox_librenms_plugin.utils import (
     interface_name_fallback_matches_port,
     interface_name_rejection_reason,
     normalize_librenms_port_id,
+    select_interface_type_mapping,
     set_librenms_device_id,
 )
 
@@ -26,17 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 def get_netbox_interface_type(librenms_interface, *, speed_converter=convert_speed_to_kbps):
-    """Return the NetBox interface type for one LibreNMS port."""
+    """Return the NetBox interface type for one LibreNMS port, or None when nothing maps it."""
     speed = speed_converter(librenms_interface.get("ifSpeed"))
+    # One type's rows are a handful at most, and resolving them in Python keeps this and the
+    # interface table on the same rule.
     mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface.get("ifType"))
-
-    if speed is not None:
-        speed_mapping = mappings.filter(librenms_speed__lte=speed).order_by("-librenms_speed").first()
-        mapping = speed_mapping or mappings.filter(librenms_speed__isnull=True).first()
-    else:
-        mapping = mappings.filter(librenms_speed__isnull=True).first()
-
-    return mapping.netbox_type if mapping else "other"
+    mapping = select_interface_type_mapping(mappings, speed)
+    return mapping.netbox_type if mapping else None
 
 
 def assign_interface_mac(interface, mac_address):
@@ -117,7 +115,13 @@ def update_interface_from_port(  # noqa: C901
             setattr(interface, netbox_key, speed_converter(librenms_interface.get(librenms_key)))
         elif librenms_key == "ifType":
             if is_device_interface and hasattr(interface, netbox_key):
-                setattr(interface, netbox_key, netbox_type)
+                # No mapping means no opinion: only an interface with no type yet takes the
+                # default, so an unmapped ifType can never flatten a correct type (a LAG
+                # aggregate above all, which NetBox needs typed before it accepts members).
+                if netbox_type is not None:
+                    setattr(interface, netbox_key, netbox_type)
+                elif not getattr(interface, netbox_key, None):
+                    setattr(interface, netbox_key, InterfaceTypeChoices.TYPE_OTHER)
         elif librenms_key == "ifAlias":
             # Same rule the interface table renders: an alias echoing either canonical name is
             # not a description. Writing "" rather than skipping keeps the row and the table

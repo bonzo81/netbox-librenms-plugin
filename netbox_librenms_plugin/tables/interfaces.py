@@ -27,6 +27,7 @@ from netbox_librenms_plugin.utils import (
     normalize_librenms_port_id,
     render_vc_member_options,
     resolve_interface_row_device,
+    select_interface_type_mapping,
 )
 
 # (colour, mdi icon, full status text) per relationship sync status. Colour + icon read at a
@@ -907,20 +908,18 @@ class LibreNMSInterfaceTable(tables.Table):
             speed (int | None): The interface speed in kilobits per second.
 
         Returns:
-            InterfaceTypeMapping | None: The exact or type-only mapping, if one exists.
+            InterfaceTypeMapping | None: The mapping the sync writer would apply, if any.
 
         """
         if getattr(self, "_interface_type_mapping_cache", None) is None:
             cache = {}
-            # Keep the FIRST mapping per key to match the previous .filter().first() semantics.
             for m in InterfaceTypeMapping.objects.all():
-                cache.setdefault((m.librenms_type, m.librenms_speed), m)
+                cache.setdefault(m.librenms_type, []).append(m)
             self._interface_type_mapping_cache = cache
 
-        # Exact (type, speed) match, then the type-only (speed is NULL) fallback.
-        return self._interface_type_mapping_cache.get((librenms_type, speed)) or self._interface_type_mapping_cache.get(
-            (librenms_type, None)
-        )
+        # The writer's rule, not a table-local one, so the row cannot claim a gap the sync
+        # does not have.
+        return select_interface_type_mapping(self._interface_type_mapping_cache.get(librenms_type, ()), speed)
 
     def render_mapping_tooltip(self, value, speed, mapping):
         """Render tooltip for interface type mapping."""
@@ -933,7 +932,12 @@ class LibreNMSInterfaceTable(tables.Table):
             )
         else:
             display = value
-            icon = mark_safe('<i class="mdi mdi-link-variant-off" title="No mapping to NetBox type"></i>')
+            # Name the ifType: the gap is only fixable if the user knows which mapping to add.
+            icon = format_html(
+                '<i class="mdi mdi-link-variant-off" title="No InterfaceTypeMapping for ifType'
+                ' {}; the sync leaves the NetBox type unchanged"></i>',
+                value,
+            )
         return display, icon
 
     def format_interface_data(self, port_data, device):

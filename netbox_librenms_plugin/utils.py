@@ -4982,3 +4982,32 @@ def load_bay_mappings() -> tuple:
     exact = [m for m in all_mappings if not m.is_regex]
     regex = [m for m in all_mappings if m.is_regex]
     return exact, regex
+
+
+def select_interface_type_mapping(mappings, speed):
+    """
+    Return the InterfaceTypeMapping one LibreNMS speed resolves to.
+
+    The sync writer and the interface table must agree about which mapping applies, otherwise
+    the row reports a gap the writer does not see (or hides one it does). Both call this with
+    the rows for a single ``librenms_type``.
+
+    Args:
+        mappings: InterfaceTypeMapping rows for one LibreNMS interface type.
+        speed (int | None): The port speed in kilobits per second, if known.
+
+    Returns:
+        InterfaceTypeMapping | None: The highest speed row at or below *speed*, else the
+        speed-agnostic row for that type, else None.
+
+    """
+    wildcard = None
+    best = None
+    for mapping in mappings:
+        if mapping.librenms_speed is None:
+            if wildcard is None:
+                wildcard = mapping
+        elif speed is not None and mapping.librenms_speed <= speed:
+            if best is None or mapping.librenms_speed > best.librenms_speed:
+                best = mapping
+    return best or wildcard
