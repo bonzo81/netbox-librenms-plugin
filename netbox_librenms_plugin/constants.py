@@ -32,6 +32,17 @@ def is_supported_interface_name_field(value):
     return isinstance(value, str) and value in INTERFACE_NAME_FIELDS
 
 
+# Model strings LibreNMS reports when it has no model to report. They are absent data, never a
+# lookup key: a vendor that answers "unspecified" for every SFP in the box would otherwise
+# collapse them all onto one ModuleTypeMapping row, which the schema allows only one of.
+MODULE_MODEL_PLACEHOLDERS = frozenset({"", "-", "builtin", "default", "n/a", "na", "none", "unknown", "unspecified"})
+
+
+def is_module_model_placeholder(value):
+    """Return whether *value* is a LibreNMS model string that names no hardware."""
+    return not isinstance(value, str) or value.strip().lower() in MODULE_MODEL_PLACEHOLDERS
+
+
 # OOB management controller detection
 # Trailing \d*\b restricts matches to whole tokens (optionally with a numeric suffix like
 # iDRAC9 / drac9) so a prefix collision inside an unrelated word — e.g. "dracut", "ipmitool"

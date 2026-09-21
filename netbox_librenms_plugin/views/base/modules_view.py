@@ -6,7 +6,7 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE, is_module_model_placeholder
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
@@ -1692,7 +1692,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # Supplement existing inventory item if model/serial is missing or a placeholder
                 existing = inv_by_index[ent_idx]
                 existing_model = _clean_librenms_value(existing.get("entPhysicalModelName"))
-                if (not existing_model or existing_model.lower() == "builtin") and display_model:
+                # Any placeholder counts as missing, not just "builtin": a row reporting
+                # "unspecified" was never supplemented, even when the API knew the part number.
+                if is_module_model_placeholder(existing_model) and display_model:
                     existing["entPhysicalModelName"] = display_model
                 existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
                 if (not existing_serial or existing_serial.lower() == "builtin") and serial:
@@ -2857,6 +2859,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
+            module_type_lookup_candidates,
             resolve_module_type,
         )
 
@@ -2946,6 +2949,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             manufacturer=row_manufacturer,
             norm_rules=norm_rules_type,
             generic_fallback=generic_module_types,
+            fallback_names=module_type_lookup_candidates(item),
         )
 
         # Determine status; override to "Name Conflict" when the matched module
