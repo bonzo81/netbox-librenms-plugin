@@ -141,13 +141,24 @@ class LibreNMSCableTable(tables.Table):
             if record.get("manual_remote")
             else ""
         )
+        # One adjacency reported over both CDP and LLDP renders once; name the protocol whose
+        # row was collapsed into this one so the evidence is not silently dropped.
+        also = record.get("also_reported_by")
+        protocol_badge = (
+            format_html(
+                ' <i class="mdi mdi-lan-connect text-muted" title="Also reported over {}"></i>',
+                ", ".join(str(protocol).upper() for protocol in also),
+            )
+            if also
+            else ""
+        )
         # Normalize None to "" like render_local_port/render_remote_device — an unset remote
         # port name would otherwise render the literal "None" in every branch below.
         display_value = value or ""
         if url := record.get("remote_port_url"):
-            return format_html('<a href="{}">{}</a>{}', url, display_value, manual_badge)
-        if manual_badge:
-            return format_html("{}{}", display_value, manual_badge)
+            return format_html('<a href="{}">{}</a>{}{}', url, display_value, manual_badge, protocol_badge)
+        if manual_badge or protocol_badge:
+            return format_html("{}{}{}", display_value, manual_badge, protocol_badge)
         return display_value
 
     def render_cable_status(self, value, record):
