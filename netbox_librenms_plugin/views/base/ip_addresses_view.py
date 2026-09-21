@@ -41,6 +41,11 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
+def _port_key(port_id):
+    """Return the one key form the port map uses; LibreNMS types an id as int here and str there."""
+    return str(port_id)
+
+
 class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Base view for synchronizing IP address information from LibreNMS."""
 
@@ -80,8 +85,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 fresh-fetch path and passed back in on cached renders so this method
                 never makes a live LibreNMS API call.
             server_key: The LibreNMS server key scoping per-server interface matching.
-            port_data_cache: Optional pre-populated port map (keyed by port_id) so
-                cached renders avoid live ``get_port_by_id()`` calls.
+            port_data_cache: Optional pre-populated port map (see :func:`_port_key`) so a
+                cached render reads the interface names without a live call.
 
         Returns:
             list: The enriched IP entries.
@@ -103,11 +108,18 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         # Prefetch all necessary data (scoped to the POST-resolved server when provided
         # so interface librenms_id matching uses the right per-server mapping).
         prefetched_data = self._prefetch_netbox_data(obj, candidate_addresses, server_key=server_key)
-        # LibreNMS port data, keyed by port_id. Callers pass a map pre-populated from the
-        # cache on warm-cache renders so _get_port_info() reads it instead of making N
-        # live get_port_by_id() calls (the cached pipeline must read cache + NetBox only).
+        # LibreNMS port rows, keyed by _port_key. A warm-cache render passes the cached map, which
+        # _load_port_names then leaves alone (the cached pipeline must read cache + NetBox only).
+        # Re-key whatever the caller passed before anything reads it: a snapshot cached before this
+        # keying, or a test's hand-built map, uses the raw id, and a map that half-matches reads as
+        # "not covered" and triggers the very fetch this replaced.
         if port_data_cache is None:
             port_data_cache = {}
+        else:
+            rekeyed = {_port_key(key): value for key, value in port_data_cache.items()}
+            port_data_cache.clear()
+            port_data_cache.update(rekeyed)
+        self._load_port_names(port_data_cache, ip_data)
 
         enriched_data = []
 
@@ -121,8 +133,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             if "port_id" not in ip_entry:
                 continue
 
-            # Get or fetch port data (with caching)
-            port_info = self._get_port_info(ip_entry["port_id"], port_data_cache, interface_name_field)
+            port_info = port_data_cache.get(_port_key(ip_entry["port_id"]))
 
             # Create enriched IP structure with base data. The first loop skips a row whose
             # address will not parse; this one must too, or a direct caller aborts on it.
@@ -279,19 +290,43 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "vrfs": vrfs,
         }
 
-    def _get_port_info(self, port_id, port_data_cache, interface_name_field):
-        """Get port info from LibreNMS with caching to minimize API calls."""
-        if port_id not in port_data_cache:
-            success, port_data = self.librenms_api.get_port_by_id(port_id)
-            # A truthy success can still carry a malformed payload: port_data=None ("port" in
-            # None raises), {"port": ["bad"]} (a non-dict row that later crashes at
-            # port_info.get(...)). Validate the shape and cache only a real dict row, else None
-            # (issue #111, same class as #100).
-            ports = port_data.get("port") if success and isinstance(port_data, dict) else None
-            first_port = ports[0] if isinstance(ports, list) and ports else None
-            port_data_cache[port_id] = first_port if isinstance(first_port, dict) else None
+    def _load_port_names(self, port_data_cache, ip_data):
+        """
+        Fill *port_data_cache* with the device's ports, in one read.
 
-        return port_data_cache[port_id]
+        Each IP row needs one thing from LibreNMS: its port's ``ifName``/``ifDescr``. Both are
+        already in the device ports payload, so one ``/devices/{id}/ports`` read answers every row;
+        this used to be a ``/ports/{port_id}`` call per address. Returns immediately when the map
+        already covers every port the rows name, which is the warm-cache path — it is handed the
+        cached map and must reach cache and NetBox only.
+
+        Only the ports the rows actually name are stored. The map is cached and read back by the
+        sync view, which scans it to decide whether an interface name is ambiguous, so widening it
+        to every port on the device would change that verdict rather than just the fetch.
+
+        Args:
+            port_data_cache (dict): Port rows keyed by :func:`_port_key`; filled in place.
+            ip_data (list): The LibreNMS IP rows about to be enriched.
+
+        """
+        wanted = {_port_key(row["port_id"]) for row in ip_data if isinstance(row, dict) and "port_id" in row}
+        if not wanted - set(port_data_cache):
+            return
+        # No usable device id leaves the rows unnamed rather than building a URL from None,
+        # mirroring _resolve_management_ip.
+        if not getattr(self, "librenms_id", None):
+            return
+        # VLAN data is the expensive half of this payload and no IP row reads it.
+        success, ports_data = self.librenms_api.get_ports(self.librenms_id, with_vlans=False)
+        ports = ports_data.get("ports") if success and isinstance(ports_data, dict) else None
+        for port in ports if isinstance(ports, list) else []:
+            # A malformed LibreNMS payload can carry non-dict rows or rows without an id; a row the
+            # map never gains simply leaves its address unnamed, as an unreachable port always did.
+            if not isinstance(port, dict) or port.get("port_id") is None:
+                continue
+            key = _port_key(port["port_id"])
+            if key in wanted:
+                port_data_cache.setdefault(key, port)
 
     def _create_base_ip_entry(self, ip_entry, obj, vrfs):
         """Create the base data structure for an IP entry."""
@@ -429,8 +464,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # Resolve the management IP once here (live LibreNMS call) and cache it
             # below so cached renders don't re-hit the API.
             mgmt_ip = self._resolve_management_ip()
-            # Fresh fetch may call get_port_by_id() per port; collect those into this
-            # map and cache it so warm-cache renders enrich without any live calls.
+            # Enrichment fills this from one device-ports read; it is cached below so warm
+            # renders enrich without any live call.
             port_data_cache = {}
         else:
             cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
@@ -465,20 +500,26 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             if getattr(self, "cache_only", False) and (
                 "mgmt_ip" not in cached_ip_data
                 or not isinstance(cached_ports_by_id, dict)
-                or any(item["port_id"] not in cached_ports_by_id for item in cached_ip_data["ip_addresses"])
+                or any(
+                    _port_key(item["port_id"]) not in {_port_key(key) for key in cached_ports_by_id}
+                    for item in cached_ip_data["ip_addresses"]
+                )
             ):
                 return None
             ip_data = cached_ip_data.get("ip_addresses", [])
+            # Resolve the id for the whole warm path, not just the mgmt-IP branch below: a
+            # pre-upgrade entry also lacks ports_by_id, and rebuilding that reads the device's
+            # ports. This is a NetBox/cache read, so the cached pipeline stays off LibreNMS.
+            # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/garbage):
+            # get_stored_librenms_id reads the device-id cache verbatim, so a stray True would
+            # otherwise int() to 1 and fetch a stranger's device.
+            self.librenms_id = coerce_librenms_id(self.librenms_api.get_stored_librenms_id(obj))
             # Pre-upgrade entries cached before mgmt_ip was stored lack the key entirely
             # (distinct from a present-but-empty "" meaning "no mgmt IP"). Resolve it now —
             # a one-time live call, mirroring the ports_by_id backfill below — so the
             # "Set Primary IP" auto-select works without forcing a manual refresh first.
             cached_mgmt_ip_missing = "mgmt_ip" not in cached_ip_data
             if cached_mgmt_ip_missing:
-                # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/garbage):
-                # get_stored_librenms_id reads the device-id cache verbatim, so a stray True would
-                # otherwise int() to 1 in _resolve_management_ip and fetch a stranger's mgmt IP.
-                self.librenms_id = coerce_librenms_id(self.librenms_api.get_stored_librenms_id(obj))
                 mgmt_ip = self._resolve_management_ip()
             else:
                 mgmt_ip = cached_ip_data["mgmt_ip"]

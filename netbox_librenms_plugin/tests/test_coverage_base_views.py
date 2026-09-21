@@ -490,10 +490,10 @@ class TestIPAddressHTTPAndORM:
             "/api/v0/devices/42/ip",
             {"status": "ok", "addresses": addresses},
         )
-        live_librenms.server.register(
-            "/api/v0/ports/101",
-            {"status": "ok", "port": [{"port_id": 101, "ifName": "Ethernet1", "ifDescr": "uplink-1"}]},
-        )
+        port = {"port_id": 101, "ifName": "Ethernet1", "ifDescr": "uplink-1"}
+        live_librenms.server.register("/api/v0/ports/101", {"status": "ok", "port": [port]})
+        # The IP tab reads each row's interface name from the device's port list, not per port.
+        live_librenms.server.register("/api/v0/devices/42/ports", {"status": "ok", "ports": [port]})
         live_librenms.server.device_info_response(
             42,
             hostname="ip-address-device.example",
@@ -611,7 +611,7 @@ class TestIPAddressHTTPAndORM:
         assert warm["table"] is not None
         assert len(live_librenms.server.requests) == request_count
         cached = cache.get(view.get_cache_key(device, "ip_addresses", "default"))
-        assert cached["ports_by_id"][101]["ifName"] == "Ethernet1"
+        assert cached["ports_by_id"]["101"]["ifName"] == "Ethernet1"
         assert cached["mgmt_ip"] == "198.18.20.1"
 
     @pytest.mark.parametrize(
