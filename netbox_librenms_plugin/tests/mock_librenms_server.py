@@ -363,8 +363,33 @@ DEFAULT_STUB_RECORDINGS = (
     "linux-host",
     "linux-host-oob",
     "linux-virtual-machine",
+    # The three that carry VRFs, IP addresses and neighbour links, so the IP and cables tabs have
+    # something to render in the development stub rather than only in tests.
+    "iosxe-subinterfaces",
+    "junos-subinterfaces",
+    "nokia-timos-transceivers",
 )
 DEFAULT_RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "data_shapes" / "recordings"
+
+
+def _location_name(location):
+    """
+    Return the location NAME from either shape LibreNMS reports.
+
+    Older instances answer a bare string; current ones nest the whole location object under the
+    same key. Every reader downstream (the location list, the id lookup, the PATCH validation)
+    expects a string, so the two shapes are collapsed here, once, on the way in.
+
+    Args:
+        location: The device row's ``location`` value, in either shape.
+
+    Returns:
+        str | None: The location name, or None when there is no usable one.
+
+    """
+    if isinstance(location, dict):
+        location = location.get("location")
+    return location if isinstance(location, str) and location.strip() else None
 
 
 def _split_recording_key(key):
@@ -441,7 +466,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
         normalised["os"] = normalised.get("os") or "stub-os"
         normalised["serial"] = normalised.get("serial") or f"SN-STUB-{device_id}"
         normalised["type"] = normalised.get("type") or "network"
-        normalised["location"] = normalised.get("location") or "Lab"
+        normalised["location"] = _location_name(normalised.get("location")) or "Lab"
         normalised["location_id"] = normalised.get("location_id") or 1
         status = normalised.get("status", 1)
         normalised["status"] = 1 if status in (True, 1, "1", "up") else 0

@@ -162,16 +162,21 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
 
         ok, devices = api.list_devices()
         assert ok is True
-        assert {device["device_id"] for device in devices} == {1, 12, 25, 32, 39, 1000, 2000}
+        # Derived from the loaded recordings, not listed here: the stub's default set grows, and a
+        # hardcoded list only ever fails later as a puzzling id mismatch.
+        expected_ids = set()
+        for name in RECORDING_NAMES:
+            recording = load_recording(name)
+            expected_ids.add(recording["device_id"])
+            oob_id = (recording.get("meta") or {}).get("oob_id")
+            if oob_id is not None:
+                expected_ids.add(oob_id)
+        assert {device["device_id"] for device in devices} == expected_ids
+        # The list endpoint serves exactly the devices the stub holds, each with a normalised status.
         assert {device["device_id"]: device["status"] for device in devices} == {
-            1: 0,
-            12: 1,
-            25: 1,
-            32: 0,
-            39: 1,
-            1000: 1,
-            2000: 1,
+            device_id: device["status"] for device_id, device in server.devices.items()
         }
+        assert set(device["status"] for device in devices) <= {0, 1}
         assert all(device["location"] == "Lab" for device in devices)
 
         ok, ports = api.get_ports(1)
