@@ -255,6 +255,7 @@ def _serve_librenms_ip_rows(server, rows, *, device_name, management_ip="198.18.
     )
     server.register("/api/v0/poller_group", {"status": "ok", "get_poller_group": []})
     registered_ports = set()
+    device_ports = []
     for row in rows:
         if row["port_id"] in registered_ports:
             continue
@@ -265,7 +266,11 @@ def _serve_librenms_ip_rows(server, rows, *, device_name, management_ip="198.18.
             "ifDescr": row["interface"],
         }
         port.update(row.get("port_fields", {}))
+        device_ports.append(port)
         server.register(f"/api/v0/ports/{row['port_id']}", {"status": "ok", "port": [port]})
+    # A real LibreNMS serves both: the per-port route above and the device's whole port list, which
+    # is where the IP tab reads each row's interface name from.
+    server.register("/api/v0/devices/42/ports", {"status": "ok", "ports": device_ports})
     server.register(
         "/api/v0/devices/42",
         {"status": "ok", "devices": [{"device_id": 42, "ip": management_ip}]},
