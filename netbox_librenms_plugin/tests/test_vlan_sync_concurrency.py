@@ -90,7 +90,12 @@ def _sync_global_vlan(device, user, vid, lookup_wrapper):
             cursor.execute("SET statement_timeout = '5s'")
 
         request = make_request(
-            data={"action": "create_vlans", "select": [str(vid)], "server_key": "default"},
+            data={
+                "action": "create_vlans",
+                "select": [str(vid)],
+                f"vlan_group_{vid}": "",
+                "server_key": "default",
+            },
             user=user,
             path="/sync/vlans/",
         )

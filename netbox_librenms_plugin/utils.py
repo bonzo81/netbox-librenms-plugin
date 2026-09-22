@@ -2675,6 +2675,40 @@ def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -
     return "text-warning"
 
 
+def render_vlan_sync_action(vid, exists_in_netbox, name_matches, *, actions_enabled=True):
+    """
+    Return the VLAN row's status cell: the button that syncs this one row, or its state.
+
+    Shared by the table renderer and the verify endpoint so the row action always matches
+    the current VLAN synchronization state.
+    """
+    canonical_vid = normalize_vlan_vid(vid)
+    can_submit = actions_enabled and canonical_vid is not None
+    css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
+    if not exists_in_netbox:
+        if not can_submit:
+            return format_html('<span class="{}">Not in NetBox</span>', css_class)
+        return format_html(
+            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
+            ' title="Create this VLAN in NetBox"><i class="mdi mdi-plus-thick" aria-hidden="true"></i>'
+            " Create</button>",
+            canonical_vid,
+        )
+    if not name_matches:
+        if not can_submit:
+            return format_html('<span class="{}">Name differs</span>', css_class)
+        return format_html(
+            '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}"'
+            ' title="Update this VLAN\'s name in NetBox"><i class="mdi mdi-pencil" aria-hidden="true"></i>'
+            " Update</button>",
+            canonical_vid,
+        )
+    return format_html(
+        '<span class="{}"><i class="mdi mdi-check-circle"></i> Synced</span>',
+        css_class,
+    )
+
+
 # ============================================
 # Interface VLAN CSS helpers
 # ============================================
@@ -2923,6 +2957,38 @@ def coerce_librenms_id(value) -> int | None:
             return None
         return coerced if coerced > 0 else None
     return None
+
+
+def normalize_vlan_vid(value) -> int | None:
+    """Return one valid NetBox VLAN VID, or None when the source value is unusable."""
+    from ipam.models import VLAN
+
+    vid = coerce_librenms_id(value)
+    if vid is None:
+        return None
+    try:
+        return VLAN._meta.get_field("vid").clean(vid, None)
+    except ValidationError:
+        return None
+
+
+def index_vlan_source_rows(rows):
+    """Index unique source rows by canonical VID and return every unusable row separately."""
+    candidate_counts = {}
+    for row in rows:
+        vid = normalize_vlan_vid(row.get("vlan_vlan"))
+        if vid is not None:
+            candidate_counts[vid] = candidate_counts.get(vid, 0) + 1
+
+    rows_by_vid = {}
+    invalid_rows = []
+    for row in rows:
+        vid = normalize_vlan_vid(row.get("vlan_vlan"))
+        if vid is not None and candidate_counts[vid] == 1:
+            rows_by_vid[vid] = row
+        else:
+            invalid_rows.append(row)
+    return rows_by_vid, invalid_rows
 
 
 def render_vc_member_options(members, selected_id):

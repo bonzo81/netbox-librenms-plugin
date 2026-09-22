@@ -1651,10 +1651,14 @@ function restoreTableSelection(table) {
             row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
                 if (!_isSelectionCompanionName(input.name)) return;
                 if (!Object.hasOwn(companionInputs, input.name)) return;
+                const renderedValue = input.value;
                 if (input.tomselect) {
                     input.tomselect.setValue(companionInputs[input.name], true);
                 } else {
                     input.value = companionInputs[input.name];
+                }
+                if (input.matches('select.vlan-sync-group-select') && input.value !== renderedValue) {
+                    verifyVlanSyncGroup(input, input.dataset.vlanId, input.dataset.vlanName, input.value);
                 }
             });
         }
@@ -1812,7 +1816,7 @@ document.addEventListener('change', function (e) {
 });
 
 document.addEventListener('submit', function (e) {
-    if (e.target instanceof HTMLFormElement) {
+    if (e.target instanceof HTMLFormElement && e.submitter?.name !== 'sync_one') {
         injectOffPageSelections(e.target);
     }
 });
@@ -2169,6 +2173,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             return response.json();
         })
         .then(data => {
+            if (select.value !== groupId) return;
             if (data.status === 'success') {
                 const newCss = data.css_class || 'text-danger';
                 const isMissing = data.is_missing;
@@ -2431,7 +2436,8 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
         body: JSON.stringify({
             vid: String(vid),
             name: vlanName,
-            vlan_group_id: groupId || null
+            vlan_group_id: groupId || null,
+            sync_actions: !!select.closest('form')
         })
     })
         .then(response => {
@@ -2442,6 +2448,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
         })
         .then(data => {
             if (data.status !== 'success') return;
+            if (select.value !== groupId) return;
 
             const row = select.closest('tr');
             if (!row) return;
@@ -2465,6 +2472,11 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
                 } else {
                     nameCell.title = '';
                 }
+            }
+
+            const statusCell = row.querySelector('td[data-col="status"]');
+            if (statusCell && data.status_html) {
+                statusCell.innerHTML = data.status_html;
             }
         })
         .catch(error => {

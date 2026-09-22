@@ -412,6 +412,7 @@ class TestVLANWriteFailures:
                 "server_key": SERVER_KEY,
                 "action": "create_vlans",
                 "select": "3136",
+                "vlan_group_3136": "",
             },
         )
 
@@ -461,6 +462,8 @@ class TestVLANWriteFailures:
                 "server_key": SERVER_KEY,
                 "action": "create_vlans",
                 "select": ["not-a-vid", "0", "3133", "3134"],
+                "vlan_group_3133": "",
+                "vlan_group_3134": "",
             },
         )
 
@@ -468,7 +471,8 @@ class TestVLANWriteFailures:
         assert not VLAN.objects.filter(vid__in=[0, 3133]).exists()
         assert VLAN.objects.filter(vid=3134, name="Valid VLAN").exists()
         errors = _response_messages(response, "error")
-        assert any("VID is invalid" in text for text in errors)
+        assert "VLAN not-a-vid: the LibreNMS VID is invalid; skipped." in errors
+        assert "VLAN 0: the LibreNMS VID is invalid; skipped." in errors
         assert any("name is invalid" in text for text in errors)
 
     def test_unchanged_vlan_is_not_rewritten(self, client, live_librenms):
@@ -480,7 +484,7 @@ class TestVLANWriteFailures:
 
         response = client.post(
             _vlan_url(device),
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3135"},
+            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3135", "vlan_group_3135": ""},
         )
 
         assert response.status_code == 302

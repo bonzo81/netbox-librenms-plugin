@@ -266,6 +266,7 @@ class TestVLANVerifyEndpoints:
             "name_matches": True,
             "css_class": "text-success",
             "netbox_vlan_name": "Application",
+            "status_html": '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>',
         }
 
     def test_vlan_sync_verify_scopes_lookup_to_selected_group(self, client):

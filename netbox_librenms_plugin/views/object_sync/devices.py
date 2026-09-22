@@ -36,6 +36,8 @@ from netbox_librenms_plugin.utils import (
     get_vlan_sync_css_class,
     is_valid_ports_payload,
     normalize_librenms_port_id,
+    normalize_vlan_vid,
+    render_vlan_sync_action,
 )
 
 from ..base.cables_view import BaseCableTableView
@@ -600,12 +602,11 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         vid_str = data.get("vid", "")
         librenms_name = data.get("name", "")
 
-        if not vid_str:
+        if vid_str is None or vid_str == "":
             return JsonResponse({"status": "error", "message": "No VID provided"}, status=400)
 
-        try:
-            vid = int(vid_str)
-        except (ValueError, TypeError):
+        vid = normalize_vlan_vid(vid_str)
+        if vid is None:
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
         selected_gid = coerce_model_pk(vlan_group_id)
@@ -624,6 +625,12 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         exists_in_netbox = bool(netbox_vlan)
         name_matches = netbox_vlan.name == librenms_name if netbox_vlan else False
         css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
+        status_html = render_vlan_sync_action(
+            vid,
+            exists_in_netbox,
+            name_matches,
+            actions_enabled=data.get("sync_actions", True),
+        )
 
         return JsonResponse(
             {
@@ -632,6 +639,7 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 "name_matches": name_matches,
                 "css_class": css_class,
                 "netbox_vlan_name": netbox_vlan.name if netbox_vlan else None,
+                "status_html": status_html,
             }
         )
 

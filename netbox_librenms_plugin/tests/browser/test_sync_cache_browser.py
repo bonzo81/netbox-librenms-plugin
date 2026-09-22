@@ -634,6 +634,87 @@ class TestCrossPageSelection:
             assert page.locator(f'[name="{name}"]').input_value() == expected
 
 
+def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
+    """A per-row VLAN action must not consume the bulk selection stored on another page."""
+    page_one = f"""
+        <input name="server_key" value="production">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+          <table id="librenms-vlan-table"><tbody><tr>
+            <td><input id="vlan-101" type="checkbox" name="select" value="101"></td>
+            <td><select name="vlan_group_101">
+              <option value="1">Group A</option><option value="2">Group B</option>
+            </select></td>
+          </tr></tbody></table>
+        </form>
+    """
+    page_two = f"""
+        <input name="server_key" value="production">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+          <table id="librenms-vlan-table"><tbody><tr>
+            <td><input type="checkbox" name="select" value="201"></td>
+            <td><button id="sync-one" type="submit" name="sync_one" value="201">Create</button></td>
+          </tr></tbody></table>
+        </form>
+    """
+
+    def serve_page(route):
+        body = page_two if "page=2" in route.request.url else page_one
+        route.fulfill(status=200, content_type="text/html", body=body)
+
+    page.route(f"{SELECTION_PAGE_URL}**", serve_page)
+    page.goto(f"{SELECTION_PAGE_URL}?page=1")
+    _add_page_scripts(page)
+    page.select_option('[name="vlan_group_101"]', "2")
+    page.check("#vlan-101")
+
+    page.goto(f"{SELECTION_PAGE_URL}?page=2")
+    _add_page_scripts(page)
+    page.locator("#sync-form").evaluate("form => form.addEventListener('submit', event => event.preventDefault())")
+    page.click("#sync-one")
+
+    posted = page.locator("#sync-form").evaluate(
+        """form => Array.from(new FormData(form, document.getElementById('sync-one')).entries())"""
+    )
+    stored = page.evaluate("readStoredSelection(document.getElementById('librenms-vlan-table'))")
+    assert [pair for pair in posted if pair[0] == "sync_one"] == [["sync_one", "201"]]
+    assert [pair for pair in posted if pair == ["select", "101"]] == []
+    assert stored["101"]["inputs"]["vlan_group_101"] == "2"
+
+
+@pytest.mark.parametrize(
+    "table_id",
+    ["librenms-interface-table", "librenms-ipaddress-table", "librenms-cable-table"],
+)
+def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs(page, table_id):
+    """Bulk actions still submit and clear off-page rows for every other row-action tab."""
+    page.set_content(
+        f"""
+        <input name="server_key" value="production">
+        <form id="sync-form" method="post" action="/bulk">
+          <table id="{table_id}"><tbody><tr>
+            <td><input type="checkbox" name="select" value="201"></td>
+          </tr></tbody></table>
+          <button id="bulk-submit" type="submit">Sync selected</button>
+        </form>
+        """
+    )
+    _add_page_scripts(page)
+    page.evaluate(
+        """() => {
+            const table = document.querySelector('table');
+            writeStoredSelection(table, {'101': {inputs: {}, auto: ''}});
+            document.getElementById('sync-form').addEventListener('submit', event => event.preventDefault());
+        }"""
+    )
+
+    page.click("#bulk-submit")
+
+    posted = page.locator("#sync-form").evaluate("form => Array.from(new FormData(form).entries())")
+    stored = page.evaluate("readStoredSelection(document.querySelector('table'))")
+    assert ["select", "101"] in posted
+    assert stored == {}
+
+
 def _selection_form_pairs(post_data):
     """Parse an application/x-www-form-urlencoded body into (name, value) pairs."""
     from urllib.parse import parse_qsl
@@ -1698,6 +1779,229 @@ def test_vlan_filters_hide_nonmatching_vlan_rows(page):
     page.locator("#filter-vlan-group").fill("campus")
     assert page.locator("#users-vlan").evaluate("row => row.style.display") == ""
     assert page.locator("#guests-vlan").evaluate("row => row.style.display") == "none"
+
+
+def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
+    """A late group response must not replace the selected group's row state."""
+    page.set_content(
+        """
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <form>
+          <table id="librenms-vlan-table"><tbody><tr>
+            <td data-col="vlan_id"><span class="text-danger">501</span></td>
+            <td data-col="name"><span class="text-danger">Users</span></td>
+            <td data-col="vlan_group_selection">
+              <select class="vlan-sync-group-select" name="vlan_group_501"
+                      data-vlan-id="501" data-vlan-name="Users">
+                <option value="" selected>Global</option>
+                <option value="1">Group A</option>
+                <option value="2">Group B</option>
+              </select>
+            </td>
+            <td data-col="status">Not in NetBox</td>
+          </tr></tbody></table>
+        </form>
+        """
+    )
+    held_routes = {}
+
+    def hold_verification(route):
+        group_id = json.loads(route.request.post_data)["vlan_group_id"]
+        held_routes[str(group_id)] = route
+
+    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", hold_verification)
+    _add_page_scripts(page)
+    page.evaluate("initializeVlanSyncGroupSelects()")
+
+    with page.expect_request("**/plugins/librenms_plugin/verify-vlan-sync-group/"):
+        page.locator(".vlan-sync-group-select").select_option("1")
+    with page.expect_request("**/plugins/librenms_plugin/verify-vlan-sync-group/"):
+        page.locator(".vlan-sync-group-select").select_option("2")
+    for _attempt in range(40):
+        if held_routes.keys() >= {"1", "2"}:
+            break
+        page.wait_for_timeout(25)
+    assert held_routes.keys() >= {"1", "2"}
+
+    held_routes["2"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "status": "success",
+                "css_class": "text-warning",
+                "exists_in_netbox": True,
+                "name_matches": False,
+                "netbox_vlan_name": "Group B name",
+                "status_html": '<button id="group-b-action">Update B</button>',
+            }
+        ),
+    )
+    page.locator("#group-b-action").wait_for()
+    held_routes["1"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "status": "success",
+                "css_class": "text-success",
+                "exists_in_netbox": True,
+                "name_matches": True,
+                "netbox_vlan_name": "Users",
+                "status_html": '<span id="group-a-status">Synced A</span>',
+            }
+        ),
+    )
+    page.wait_for_timeout(100)
+
+    assert page.locator(".vlan-sync-group-select").input_value() == "2"
+    assert page.locator("#group-a-status").count() == 0
+    assert page.locator('td[data-col="status"]').inner_text() == "Update B"
+    assert page.locator('td[data-col="vlan_id"] span').get_attribute("class") == "text-warning"
+
+
+def test_vlan_modal_group_verification_ignores_a_late_response_for_an_old_selection(page):
+    """A late modal response must not replace the selected group's saved row state."""
+    page.set_content(
+        """
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <button id="saveVlanGroups">Save</button>
+        <div id="vlanDetailModal" data-current-row-key="port-1">
+          <table><tbody><tr id="modal-vlan-row">
+            <td><span class="text-danger">501</span></td>
+            <td><select id="modal-vlan-group" data-interface="Ethernet1">
+              <option value="" selected>Global</option>
+              <option value="1">Group A</option>
+              <option value="2">Group B</option>
+            </select></td>
+          </tr></tbody></table>
+        </div>
+        <button class="vlan-edit-btn" data-row-key="port-1"
+                data-vlans='[{"vid": 501, "css": "text-danger", "missing": true}]'>Edit</button>
+        """
+    )
+    held_routes = {}
+
+    def hold_verification(route):
+        group_id = json.loads(route.request.post_data)["vlan_group_id"]
+        held_routes[str(group_id)] = route
+
+    page.route("**/plugins/librenms_plugin/verify-vlan-group/", hold_verification)
+    _add_page_scripts(page)
+    select = page.locator("#modal-vlan-group")
+
+    select.select_option("1")
+    page.evaluate("verifyVlanInGroup(document.getElementById('modal-vlan-group'), '7', 501, 'T', '1')")
+    select.select_option("2")
+    page.evaluate("verifyVlanInGroup(document.getElementById('modal-vlan-group'), '7', 501, 'T', '2')")
+    for _attempt in range(40):
+        if held_routes.keys() >= {"1", "2"}:
+            break
+        page.wait_for_timeout(25)
+    assert held_routes.keys() >= {"1", "2"}
+
+    held_routes["2"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"status": "success", "css_class": "text-warning", "is_missing": True}),
+    )
+    page.wait_for_function("document.getElementById('modal-vlan-row').dataset.resolvedCss === 'text-warning'")
+    held_routes["1"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"status": "success", "css_class": "text-success", "is_missing": False}),
+    )
+    page.wait_for_timeout(100)
+
+    row = page.locator("#modal-vlan-row")
+    button_vlans = json.loads(page.locator('.vlan-edit-btn[data-row-key="port-1"]').get_attribute("data-vlans"))
+    assert select.input_value() == "2"
+    assert row.get_attribute("data-resolved-css") == "text-warning"
+    assert row.locator("td:first-child span").get_attribute("class") == "text-warning"
+    assert button_vlans == [{"vid": 501, "css": "text-warning", "missing": True}]
+    assert not page.locator("#saveVlanGroups").is_disabled()
+
+
+def test_restored_vlan_group_selection_reverifies_only_a_changed_group(page):
+    """A restored group must repaint its row without rechecking an unchanged row."""
+    page.set_content(
+        """
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <input name="server_key" value="default">
+        <form>
+          <table id="librenms-vlan-table"><tbody>
+            <tr>
+              <td data-col="selection"><input type="checkbox" name="select" value="501"></td>
+              <td data-col="vlan_id"><span class="text-success">501</span></td>
+              <td data-col="name"><span class="text-success">Users</span></td>
+              <td data-col="vlan_group_selection">
+                <select class="vlan-sync-group-select" name="vlan_group_501"
+                        data-vlan-id="501" data-vlan-name="Users">
+                  <option value="1" selected>Group A</option>
+                  <option value="2">Group B</option>
+                </select>
+              </td>
+              <td data-col="status">Synced in A</td>
+            </tr>
+            <tr>
+              <td data-col="selection"><input type="checkbox" name="select" value="502"></td>
+              <td data-col="vlan_id"><span class="text-success">502</span></td>
+              <td data-col="name"><span class="text-success">Servers</span></td>
+              <td data-col="vlan_group_selection">
+                <select class="vlan-sync-group-select" name="vlan_group_502"
+                        data-vlan-id="502" data-vlan-name="Servers">
+                  <option value="1" selected>Group A</option>
+                  <option value="2">Group B</option>
+                </select>
+              </td>
+              <td data-col="status">Synced in A</td>
+            </tr>
+          </tbody></table>
+        </form>
+        """
+    )
+    requests = []
+
+    def answer_verification(route):
+        payload = json.loads(route.request.post_data)
+        requests.append((payload["vid"], str(payload["vlan_group_id"])))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "status": "success",
+                    "css_class": "text-danger",
+                    "exists_in_netbox": False,
+                    "name_matches": False,
+                    "status_html": '<button id="restored-group-action">Create in B</button>',
+                }
+            ),
+        )
+
+    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", answer_verification)
+    _add_page_scripts(page)
+    page.evaluate(
+        """() => {
+            const table = document.getElementById('librenms-vlan-table');
+            writeStoredSelection(table, {
+                '501': {inputs: {vlan_group_501: '2'}, auto: ''},
+                '502': {inputs: {vlan_group_502: '1'}, auto: ''}
+            });
+            restoreTableSelection(table);
+        }"""
+    )
+    for _attempt in range(40):
+        if requests:
+            break
+        page.wait_for_timeout(25)
+
+    assert requests == [("501", "2")]
+    page.locator("#restored-group-action").wait_for()
+    assert page.locator('[name="vlan_group_501"]').input_value() == "2"
+    assert page.locator('[name="vlan_group_502"]').input_value() == "1"
+    assert page.locator('tr:has([name="vlan_group_501"]) td[data-col="status"]').inner_text() == "Create in B"
+    assert page.locator('tr:has([name="vlan_group_502"]) td[data-col="status"]').inner_text() == "Synced in A"
 
 
 def test_filter_disclosure_state_survives_fragment_replacement(page):
