@@ -183,9 +183,11 @@ from .sync.migrate import (
 )
 from .sync.modules import (
     AddBayTemplateView,
+    ApplyModuleInterfaceTypesView,
     InstallBranchView,
     InstallModuleView,
     InstallSelectedView,
+    ModuleInterfaceTypePreviewView,
     ModuleMismatchPreviewView,
     MoveModuleView,
     ReplaceModuleView,

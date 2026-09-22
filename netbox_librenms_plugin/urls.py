@@ -20,6 +20,7 @@ from .views import (
     AddDeviceToLibreNMSView,
     AddDeviceTypeMappingView,
     AddPlatformMappingView,
+    ApplyModuleInterfaceTypesView,
     AssignVCSerialView,
     BulkImportConfirmView,
     BulkImportDevicesView,
@@ -103,6 +104,7 @@ from .views import (
     ModuleBayMappingEditView,
     ModuleBayMappingListView,
     ModuleBayMappingView,
+    ModuleInterfaceTypePreviewView,
     ModuleMismatchPreviewView,
     ModuleTypeMappingBulkDeleteView,
     ModuleTypeMappingBulkExportYAMLView,
@@ -257,6 +259,16 @@ urlpatterns = [
         "devices/<int:pk>/module-mismatch-preview/",
         ModuleMismatchPreviewView.as_view(),
         name="module_mismatch_preview",
+    ),
+    path(
+        "devices/<int:pk>/module-interface-type-preview/",
+        ModuleInterfaceTypePreviewView.as_view(),
+        name="module_interface_type_preview",
+    ),
+    path(
+        "devices/<int:pk>/apply-module-interface-types/",
+        ApplyModuleInterfaceTypesView.as_view(),
+        name="apply_module_interface_types",
     ),
     path(
         "devices/<int:pk>/vc-normalization-report/",

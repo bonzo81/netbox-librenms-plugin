@@ -21,6 +21,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_oob,
     get_librenms_sync_device,
     get_module_template_interface_names,
+    get_module_template_interface_specs,
     is_valid_ports_payload,
     load_module_type_bay_types,
     module_bay_fits,
@@ -349,6 +350,45 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return 0
 
         return Interface.objects.filter(device=device, module__isnull=True, name__in=template_names).count()
+
+    def _find_module_interface_type_mismatches(self, module):
+        """Return viewable module interfaces whose template has a different type."""
+        from dcim.models import Interface
+
+        # A row built outside _build_context has no requester, so nothing can be permission-scoped.
+        if getattr(self, "request", None) is None:
+            return []
+        device = getattr(module, "device", None)
+        if device is None:
+            return []
+
+        interfaces_by_device = self.__dict__.setdefault("_module_bound_interfaces_by_device", {})
+        if device.pk not in interfaces_by_device:
+            grouped = {}
+            interfaces = (
+                self.restricted_queryset(Interface)
+                .filter(device=device, module__isnull=False)
+                .only("id", "module_id", "name", "type")
+                .order_by("name", "pk")
+            )
+            for interface in interfaces:
+                grouped.setdefault(interface.module_id, []).append(interface)
+            interfaces_by_device[device.pk] = grouped
+
+        module_interfaces = interfaces_by_device[device.pk].get(module.pk, [])
+        if not module_interfaces:
+            return []
+
+        template_types = {
+            name: template_type
+            for name, template_type in get_module_template_interface_specs(device, module)
+            if template_type
+        }
+        return [
+            interface
+            for interface in module_interfaces
+            if interface.name in template_types and interface.type != template_types[interface.name]
+        ]
 
     @staticmethod
     def _vc_member_at_position(vc_members, position):
@@ -748,6 +788,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         pin_rows_to_object=False,
     ):
         """Build context with matched inventory items and table."""
+        self.request = request
         # Scope cache reads + per-row interface binding to the POST-resolved server when
         # provided (fallback: session server). Stored on self so _build_member_contexts
         # (reached via the row builders) uses the same key without threading it through
@@ -2254,8 +2295,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "module__module_bay",
             )
             .prefetch_related(
-                # adoptable-interface count instantiates the installed module's interface templates
-                # (get_module_template_interface_names); prefetch them so it isn't one query per row.
+                # Interface adoption and type comparison instantiate the installed module's templates.
+                # Prefetch them so these checks do not add one query per row.
                 "installed_module__module_type__interfacetemplates",
             )
         )
@@ -3136,6 +3177,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["module_url"] = installed.get_absolute_url()
                 row["installed_module_id"] = installed.pk
                 self._apply_installed_status(row, installed, matched_type, serial)
+                if row.get("status") != "Type Mismatch":
+                    interface_type_mismatches = self._find_module_interface_type_mismatches(installed)
+                    if interface_type_mismatches:
+                        row["interface_type_mismatch_count"] = len(interface_type_mismatches)
+                        row["interface_type_mismatch_names"] = [
+                            interface.name for interface in interface_type_mismatches[:10]
+                        ]
                 if matched_type is not None and installed.module_type_id == matched_type.pk:
                     adoptable_interface_count = self._count_adoptable_template_interfaces(installed)
                     if adoptable_interface_count:

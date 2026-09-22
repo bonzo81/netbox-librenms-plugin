@@ -1258,8 +1258,8 @@ def rewrite_interface_name_for_vc_member(
     return f"{match.group('prefix')}{vc_position}{match.group('suffix')}"
 
 
-def get_module_template_interface_names(device: Device, module) -> list[str]:
-    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
+def _instantiate_module_template_interface_specs(device: Device, module) -> list[tuple[str, str]]:
+    """Return instantiated template names and types after VC rewriting."""
     if device is None:
         return []
 
@@ -1273,7 +1273,8 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
     if isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
         member_positions = get_vc_member_positions(device)
 
-    template_names = []
+    template_specs = []
+    name_indexes = {}
     for template in template_manager.all():
         try:
             instance = template.instantiate(device=device, module=module)
@@ -1298,11 +1299,44 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
             if rewritten_name:
                 name = rewritten_name
 
-        if name not in template_names:
-            template_names.append(name)
+        if name in name_indexes:
+            template_specs[name_indexes[name]] = (name, "")
+        else:
+            name_indexes[name] = len(template_specs)
+            template_specs.append((name, getattr(template, "type", "") or ""))
+
+    return template_specs
+
+
+def get_module_template_interface_specs(device: Device, module) -> list[tuple[str, str]]:
+    """Return unique instantiated interface-template names and their attributable types."""
+    template_specs = _instantiate_module_template_interface_specs(device, module)
+    names = [name for name, _template_type in template_specs]
+    # One send answers the common case. Only a receiver that actually renames costs one send per
+    # template, because a batch answer cannot prove which input each returned name came from.
+    if predict_module_interface_rename(device, module, names) == names:
+        return template_specs
+
+    predicted_specs = []
+    name_indexes = {}
+    for name, template_type in template_specs:
+        predicted_name = predict_module_interface_rename(device, module, [name])[0]
+        if predicted_name in name_indexes:
+            predicted_specs[name_indexes[predicted_name]] = (predicted_name, "")
+        else:
+            name_indexes[predicted_name] = len(predicted_specs)
+            predicted_specs.append((predicted_name, template_type))
+
+    return predicted_specs
+
+
+def get_module_template_interface_names(device: Device, module) -> list[str]:
+    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
+    template_names = [name for name, _template_type in _instantiate_module_template_interface_specs(device, module)]
 
     from netbox_librenms_plugin.signals import predict_module_interface_names
 
+    # Adoption accepts a receiver's whole-list answer, while typed specs require one result per template.
     # send_robust (not send): this is a public extension point, so a buggy third-party
     # receiver must not break the module-adoption flow. send_robust isolates each receiver
     # and returns the Exception in place of its result; we log and skip those, preserving

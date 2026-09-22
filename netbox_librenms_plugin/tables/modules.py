@@ -393,6 +393,26 @@ class LibreNMSModuleTable(tables.Table):
         else:
             possible_carrier_html = mark_safe("")
 
+        mismatch_count = record.get("interface_type_mismatch_count") or 0
+        if mismatch_count:
+            mismatch_names = record.get("interface_type_mismatch_names") or []
+            more_count = max(0, mismatch_count - len(mismatch_names))
+            names_text = ", ".join(mismatch_names)
+            if more_count:
+                names_text = f"{names_text}, +{more_count} more" if names_text else f"+{more_count} more"
+            noun = "interface type differs" if mismatch_count == 1 else "interface types differ"
+            pronoun = "its" if mismatch_count == 1 else "their"
+            title = f"{mismatch_count} {noun} from {pronoun} module template"
+            if names_text:
+                title = f"{title}: {names_text}"
+            interface_type_html = format_html(
+                ' <span class="badge bg-warning text-dark" title="{}">'
+                '<i class="mdi mdi-swap-vertical"></i> Interface Type</span>',
+                title,
+            )
+        else:
+            interface_type_html = mark_safe("")
+
         if value == "Integrated":
             parent_name = record.get("integrated_in_name") or "parent module"
             tooltip = (
@@ -442,7 +462,7 @@ class LibreNMSModuleTable(tables.Table):
                 fallback_url=url,
                 label="Fix Model",
             )
-            return status_html + fix_html + possible_carrier_html
+            return status_html + fix_html + possible_carrier_html + interface_type_html
 
         # "Fix Device Type" badge when the device type is missing bay templates for this component.
         if record.get("device_type_incomplete"):
@@ -460,9 +480,9 @@ class LibreNMSModuleTable(tables.Table):
                 fallback_url=url,
                 label="Fix Device Type",
             )
-            return status_html + fix_html + possible_carrier_html
+            return status_html + fix_html + possible_carrier_html + interface_type_html
 
-        return status_html + possible_carrier_html
+        return status_html + possible_carrier_html + interface_type_html
 
     def _render_fix_bay_template_badge(
         self, *, title, target_kind, target_pk, target_label, suggestion, fallback_url, label
@@ -736,6 +756,35 @@ class LibreNMSModuleTable(tables.Table):
                     record["installed_module_id"],
                     record.get("ent_physical_index", ""),
                     inventory_binding,
+                )
+            )
+
+        if (
+            getattr(self, "can_change_interface", False)
+            and record.get("interface_type_mismatch_count")
+            and record.get("installed_module_id")
+        ):
+            preview_url = reverse(
+                "plugins:netbox_librenms_plugin:module_interface_type_preview",
+                kwargs={"pk": self.device.pk},
+            )
+            preview_params = urlencode(
+                {
+                    "module_id": record["installed_module_id"],
+                    "server_key": self.server_key or "",
+                    "selected_device_id": record.get("selected_device_id") or self.device.pk,
+                }
+            )
+            buttons.append(
+                format_html(
+                    '<button type="button" class="btn btn-sm btn-outline-warning ms-1"'
+                    ' hx-get="{}?{}" hx-target="#htmx-modal-content"'
+                    ' hx-swap="innerHTML" hx-sync="#htmx-modal-content:replace"'
+                    ' hx-disabled-elt="this" title="Review interface type differences"'
+                    ' aria-label="Review interface type differences">'
+                    '<i class="mdi mdi-swap-vertical"></i></button>',
+                    preview_url,
+                    preview_params,
                 )
             )
 

@@ -28,6 +28,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     get_librenms_sync_device,
     get_module_template_interface_names,
+    get_module_template_interface_specs,
     get_module_types_indexed,
     get_vc_member_positions,
     load_module_type_bay_types,
@@ -2470,6 +2471,220 @@ class UpdateModuleInterfaceView(
                 f"Could not update interface association: {bind_result.get('reason', 'unknown reason')}",
             )
 
+        return _modules_action_response(request, page_device, server_key)
+
+
+def _module_interface_type_targets(device, module):
+    """Return typed interface-template targets keyed by predicted interface name."""
+    return {
+        name: template_type
+        for name, template_type in get_module_template_interface_specs(device, module)
+        if template_type
+    }
+
+
+def _module_interface_skip_message(names, singular_reason, plural_reason):
+    """Compose one warning naming the interfaces an apply left alone."""
+    if len(names) == 1:
+        return f"Skipped 1 interface because {singular_reason}: {names[0]}."
+    return f"Skipped {len(names)} interfaces because {plural_reason}: {', '.join(names)}."
+
+
+def _module_interface_success_message(count):
+    """Compose the success message for applied interface types."""
+    noun = "type" if count == 1 else "types"
+    interface_noun = "interface" if count == 1 else "interfaces"
+    possessive = "its" if count == 1 else "their"
+    template_noun = "template" if count == 1 else "templates"
+    return f"Updated the {noun} of {count} {interface_noun} from {possessive} module {template_noun}."
+
+
+def _apply_module_interface_type(interface, template_type, current_type, offered_template_type):
+    """Apply one offered template type and return its outcome and validation reason."""
+    if interface.type != current_type:
+        return "interface_changed", None
+    if template_type != offered_template_type:
+        return "template_changed", None
+    if not template_type or interface.type == template_type:
+        return "not_different", None
+
+    original_type = interface.type
+    interface.type = template_type
+    try:
+        interface.full_clean(exclude={field.name for field in interface._meta.fields if field.name != "type"})
+    except ValidationError as exc:
+        interface.type = original_type
+        return "validation_failed", "; ".join(exc.messages)
+    interface.save(update_fields=["type"])
+    return "updated", None
+
+
+class ModuleInterfaceTypePreviewView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Render the current module interface type differences."""
+
+    def get(self, request, pk):
+        from dcim.models import Device, Interface, Module
+
+        self.required_object_permissions = {"GET": [("view", Device), ("view", Module), ("view", Interface)]}
+        if error := self.require_object_permissions("GET"):
+            return error
+
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        target_device, invalid_selected_device = _resolve_target_device_with_validation(
+            page_device,
+            request.GET.get("selected_device_id"),
+            self.restricted_queryset(Device),
+        )
+        if invalid_selected_device:
+            _warn_invalid_selected_device(request)
+        server_key = self.resolve_posted_server_key_or_none(request.GET)
+        if server_key is None:
+            return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
+
+        try:
+            module_id = int(request.GET.get("module_id"))
+        except (TypeError, ValueError):
+            return HttpResponse("Missing or invalid module_id.", status=400)
+
+        module = self.restrict_object_or_404(
+            Module,
+            "view",
+            select_related=("module_type", "module_bay", "device"),
+            pk=module_id,
+            device=target_device,
+        )
+        template_types = _module_interface_type_targets(target_device, module)
+        interfaces = (
+            self.restricted_queryset(Interface).filter(module=module, name__in=template_types).order_by("name", "pk")
+        )
+        mismatches = [
+            {
+                "interface": interface,
+                "template_type": template_types[interface.name],
+                "template_type_label": Interface(type=template_types[interface.name]).get_type_display(),
+            }
+            for interface in interfaces
+            if interface.type != template_types[interface.name]
+        ]
+
+        return render(
+            request,
+            "netbox_librenms_plugin/htmx/module_interface_type_modal.html",
+            {
+                "device_pk": page_device.pk,
+                "module": module,
+                "mismatches": mismatches,
+                "server_key": server_key,
+                "selected_device_id": target_device.pk,
+            },
+        )
+
+
+class ApplyModuleInterfaceTypesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Apply selected module interface-template types after checking preview state."""
+
+    def post(self, request, pk):
+        from dcim.models import Device, Interface, Module
+
+        self.required_object_permissions = {"POST": [("view", Device), ("view", Module), ("change", Interface)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
+
+        target_device, invalid_selected_device = _resolve_target_device_with_validation(
+            page_device,
+            request.POST.get("selected_device_id"),
+            self.restricted_queryset(Device),
+        )
+        if invalid_selected_device:
+            _warn_invalid_selected_device(request)
+
+        try:
+            module_id = int(request.POST.get("module_id"))
+            interface_ids = {int(interface_id) for interface_id in request.POST.getlist("interface_id")}
+        except (TypeError, ValueError):
+            messages.error(request, "Missing or invalid module or interface ID.")
+            return _modules_action_response(request, page_device, server_key)
+
+        module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
+        if not interface_ids:
+            messages.warning(request, "No interfaces were selected.")
+            return _modules_action_response(request, page_device, server_key)
+
+        outcomes = {
+            "updated": [],
+            "interface_changed": [],
+            "template_changed": [],
+            "not_different": [],
+        }
+        validation_failures = []
+        with transaction.atomic():
+            template_types = _module_interface_type_targets(target_device, module)
+            interfaces = list(
+                self.restricted_queryset(Interface, "change")
+                .select_for_update(of=("self",))
+                .filter(module=module, pk__in=interface_ids)
+                .order_by("name", "pk")
+            )
+            unavailable_count = len(interface_ids) - len(interfaces)
+            for interface in interfaces:
+                template_type = template_types.get(interface.name)
+                outcome, reason = _apply_module_interface_type(
+                    interface,
+                    template_type,
+                    request.POST.get(f"current_type_{interface.pk}"),
+                    request.POST.get(f"template_type_{interface.pk}"),
+                )
+                if reason:
+                    validation_failures.append((interface.name, reason))
+                else:
+                    outcomes[outcome].append(interface.name)
+
+        updated_names = outcomes["updated"]
+        if updated_names:
+            messages.success(request, _module_interface_success_message(len(updated_names)))
+        if changed_names := outcomes["interface_changed"]:
+            messages.warning(
+                request,
+                _module_interface_skip_message(
+                    changed_names,
+                    "it changed after the preview",
+                    "they changed after the preview",
+                ),
+            )
+        if changed_template_names := outcomes["template_changed"]:
+            messages.warning(
+                request,
+                _module_interface_skip_message(
+                    changed_template_names,
+                    "its template type changed after the preview",
+                    "their template types changed after the preview",
+                ),
+            )
+        if no_longer_different_names := outcomes["not_different"]:
+            messages.warning(
+                request,
+                _module_interface_skip_message(
+                    no_longer_different_names,
+                    "its template no longer requires a type change",
+                    "their templates no longer require a type change",
+                ),
+            )
+        for interface_name, reason in validation_failures:
+            messages.warning(request, f"Skipped {interface_name} because {reason.rstrip('.')}.")
+        if unavailable_count:
+            if unavailable_count == 1:
+                detail = "1 selected interface because it is unavailable for this module"
+            else:
+                detail = f"{unavailable_count} selected interfaces because they are unavailable for this module"
+            messages.warning(request, f"Skipped {detail}.")
+
+        # No inventory binding token is needed: object IDs identify the targets, and current types guard the race.
         return _modules_action_response(request, page_device, server_key)
 
 
