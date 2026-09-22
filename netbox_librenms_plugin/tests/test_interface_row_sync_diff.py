@@ -68,6 +68,7 @@ def _synced_interface(tag, **overrides):
 def _row(interface=None, **overrides):
     """Return a table row bound to *interface* (or to nothing, for a NetBox-absent row)."""
     row = _port(**overrides)
+    row.setdefault("synced_name", row["ifName"])
     row["netbox_interface"] = interface
     row["exists_in_netbox"] = interface is not None
     return row
@@ -144,6 +145,7 @@ class TestTheDiffMatchesTheWriter:
         changed = update_interface_from_port(
             interface,
             row,
+            synced_name=row["ifName"],
             server_key=SERVER_KEY,
             interface_name_field="ifName",
             netbox_type=get_netbox_interface_type(row),

@@ -49,6 +49,7 @@ def _port(port_id=42, **overrides):
         "vlan_group_map": {},
     }
     record.update(overrides)
+    record.setdefault("synced_name", record["ifName"])
     return record
 
 
@@ -983,9 +984,8 @@ class TestInterfaceTableFields:
         assert "From OOB controller" in relationships_html
         assert "Shared LOM" in relationships_html
 
-    def test_a_name_collision_row_is_reported_in_the_relationships_column(self):
-        """A collided OOB row is skipped on sync, so the column has to say why."""
-        device = make_device("collision-pill-device")
+    def test_a_derived_oob_name_is_reported_in_the_relationships_column(self):
+        device = make_device("derived-name-pill-device")
         table = _interface_table(device)
         html = str(
             table.render_parent(
@@ -995,16 +995,80 @@ class TestInterfaceTableFields:
                     port_id=9301,
                     exists_in_netbox=False,
                     _source="oob",
-                    host_name_collision=True,
+                    synced_name="eth0-oob",
+                    synced_name_is_derived=True,
+                    synced_name_contested=False,
                     selected_object_id=device.pk,
                     selected_object_type="device",
                 ),
             )
         )
 
+        assert "Will sync as eth0-oob" in html
+        assert "Name conflict" not in html
+        assert "<button" not in html, "the informational pill does not offer an action"
+
+    def test_a_contested_derived_name_is_reported_as_not_synced(self):
+        table = _interface_table(make_device("contested-name-pill-device"))
+        reason = "derived interface name is already used by another row"
+        html = str(
+            table.render_parent(
+                None,
+                _port(
+                    ifName="eth0",
+                    port_id=9302,
+                    exists_in_netbox=False,
+                    _source="oob",
+                    synced_name="eth0-oob",
+                    synced_name_is_derived=True,
+                    synced_name_contested=True,
+                    synced_name_rejection_reason=reason,
+                ),
+            )
+        )
+
         assert "Name conflict" in html
-        assert "the OOB port is not synced" in html
-        assert "<button" not in html, "the pill reports the skip; it does not offer an action"
+        assert reason in html
+        assert "not synced" in html
+
+    def test_a_derived_oob_name_is_escaped_in_the_pill(self):
+        table = _interface_table(make_device("escaped-derived-name-pill-device"))
+        html = str(
+            table.render_parent(
+                None,
+                _port(
+                    ifName="eth0",
+                    port_id=9304,
+                    exists_in_netbox=False,
+                    _source="oob",
+                    synced_name='<img src=x onerror="alert(1)">-oob',
+                    synced_name_is_derived=True,
+                    synced_name_contested=False,
+                ),
+            )
+        )
+
+        assert "<img" not in html
+        assert "&lt;img" in html
+
+    def test_a_derived_name_that_matches_netbox_is_in_sync(self):
+        from netbox_librenms_plugin.interface_diff import MATCHES
+
+        device = make_device("derived-name-in-sync-device")
+        interface = make_interface(device, "eth0-oob")
+        record = _port(
+            ifName="eth0",
+            exists_in_netbox=True,
+            netbox_interface=interface,
+            _source="oob",
+            synced_name="eth0-oob",
+            synced_name_is_derived=True,
+            synced_name_contested=False,
+        )
+
+        state = _interface_table(device).row_sync_state(record)
+
+        assert state.verdict("name") == MATCHES
 
     def test_a_host_row_never_shows_a_name_collision(self):
         """The host owns the name, so it is never the row that has to move."""
@@ -1041,7 +1105,12 @@ class TestInterfaceTableFields:
 
         def _row(iface):
             # port_id is the column accessor, so the rendered value and the row carry the same id.
-            return {"port_id": 42, "exists_in_netbox": True, "netbox_interface": iface}
+            return {
+                "port_id": 42,
+                "exists_in_netbox": True,
+                "netbox_interface": iface,
+                "synced_name": "Ethernet1",
+            }
 
         missing = str(table.render_librenms_id(42, _row(interface)))
         set_librenms_device_id(interface, 99, "default")

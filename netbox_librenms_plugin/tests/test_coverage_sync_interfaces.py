@@ -72,6 +72,7 @@ def test_an_unreadable_vlan_scope_skips_the_vlan_write_instead_of_clearing_it(se
         {"ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []},
         exclude_columns=set(),
         interface_name_field="ifName",
+        synced_name=interface.name,
     )
 
     interface.refresh_from_db()
@@ -107,6 +108,7 @@ def test_a_constrained_vlan_grant_also_skips_the_vlan_write(settings):
         {"ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []},
         exclude_columns=set(),
         interface_name_field="ifName",
+        synced_name=interface.name,
     )
 
     interface.refresh_from_db()
@@ -576,12 +578,11 @@ class TestInterfaceContextOOBRows:
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
         device = make_device("host1")
-        # Main device has an "idrac0" interface that LibreNMS only reports on the
-        # OOB-controller side (same name) — it must still surface as netbox-only.
+        # The OOB row can adopt this unbound interface by name.
         make_interface(device, "idrac0")
         return device
 
-    def test_oob_row_does_not_hide_netbox_only_interface(self):
+    def test_oob_row_name_is_not_offered_for_netbox_only_deletion(self):
         from django.core.cache import cache
         from django.utils import timezone
 
@@ -601,10 +602,41 @@ class TestInterfaceContextOOBRows:
             cache.delete(last_fetched_key)
 
         names = {i["name"] for i in ctx["netbox_only_interfaces"]}
-        assert "idrac0" in names  # OOB row must not suppress the main-device interface
+        assert "idrac0" not in names
 
-    def test_a_collided_oob_row_reaches_the_table_marked_and_offering_a_rename(self):
-        """The collision has to survive the real context build, not just the helper.
+    def test_derived_oob_name_is_not_offered_for_netbox_only_deletion(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("oob-derived-name-adoption")
+        make_interface(device, "eth0-oob")
+        snapshot = {
+            "ports": [
+                {"port_id": 9301, "ifName": "eth0", "ifType": "ethernetCsmacd"},
+                {"port_id": 9302, "ifName": "eth0", "ifType": "ethernetCsmacd", "_source": "oob"},
+            ]
+        }
+        request = _make_request()
+        view = DeviceInterfaceTableView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        view.request = request
+
+        context = view.get_context_data(
+            request,
+            device,
+            "ifName",
+            "default",
+            fresh_data=snapshot,
+            sync_device=device,
+        )
+
+        netbox_only_names = {interface["name"] for interface in context["netbox_only_interfaces"]}
+        assert "eth0-oob" not in netbox_only_names
+
+    def test_a_collided_oob_row_reaches_the_table_with_its_derived_name(self):
+        """The derived name has to survive the real context build, not just the helper.
 
         The name field is switchable while the cached snapshot is not, so the flag is derived per
         render. This walks the whole path: snapshot -> get_context_data -> rendered column.
@@ -618,6 +650,9 @@ class TestInterfaceContextOOBRows:
                 {"port_id": 9401, "ifName": "eth0", "ifType": "ethernetCsmacd"},
                 {"port_id": 9402, "ifName": "eth0", "ifType": "ethernetCsmacd", "_source": "oob"},
                 {"port_id": 9403, "ifName": "bmc0", "ifType": "ethernetCsmacd", "_source": "oob"},
+                {"port_id": 9404, "ifName": "eth1", "ifType": "ethernetCsmacd"},
+                {"port_id": 9405, "ifName": "eth1-oob", "ifType": "ethernetCsmacd"},
+                {"port_id": 9406, "ifName": "eth1", "ifType": "ethernetCsmacd", "_source": "oob"},
             ]
         }
         request = _make_request()
@@ -629,15 +664,23 @@ class TestInterfaceContextOOBRows:
 
         context = view.get_context_data(request, device, "ifName", "default", fresh_data=snapshot, sync_device=device)
 
-        host_row, collided_oob_row, free_oob_row = snapshot["ports"]
-        assert "host_name_collision" not in host_row, "the host owns the name, so it never collides"
-        assert collided_oob_row["host_name_collision"] is True
-        assert free_oob_row["host_name_collision"] is False
+        host_row, collided_oob_row, free_oob_row, _, _, contested_oob_row = snapshot["ports"]
+        assert host_row["synced_name"] == "eth0"
+        assert host_row["synced_name_is_derived"] is False
+        assert collided_oob_row["synced_name"] == "eth0-oob"
+        assert collided_oob_row["synced_name_is_derived"] is True
+        assert collided_oob_row["synced_name_contested"] is False
+        assert free_oob_row["synced_name"] == "bmc0"
+        assert free_oob_row["synced_name_is_derived"] is False
+        assert contested_oob_row["synced_name"] == "eth1-oob"
+        assert contested_oob_row["synced_name_is_derived"] is True
+        assert contested_oob_row["synced_name_contested"] is True
 
         table = context["table"]
-        assert "Name conflict" in str(table.render_parent(None, collided_oob_row))
-        assert "Name conflict" not in str(table.render_parent(None, free_oob_row))
-        assert "Name conflict" not in str(table.render_parent(None, host_row))
+        assert "Will sync as eth0-oob" in str(table.render_parent(None, collided_oob_row))
+        assert "Will sync as" not in str(table.render_parent(None, free_oob_row))
+        assert "Will sync as" not in str(table.render_parent(None, host_row))
+        assert "Name conflict" in str(table.render_parent(None, contested_oob_row))
 
     def test_host_name_on_another_chassis_member_does_not_mark_oob_collision(self):
         from dcim.models import VirtualChassis
@@ -671,7 +714,9 @@ class TestInterfaceContextOOBRows:
 
         view.get_context_data(request, master, "ifName", "default", fresh_data=snapshot, sync_device=master)
 
-        assert snapshot["ports"][1]["host_name_collision"] is False
+        assert snapshot["ports"][1]["synced_name"] == "eth0"
+        assert snapshot["ports"][1]["synced_name_is_derived"] is False
+        assert snapshot["ports"][1]["synced_name_contested"] is False
         assert snapshot["ports"][1]["selected_object_id"] == master.pk
 
     def test_switching_the_name_field_re_evaluates_the_collision(self):
@@ -700,12 +745,86 @@ class TestInterfaceContextOOBRows:
         view.request = request
 
         view.get_context_data(request, device, "ifName", "default", fresh_data=snapshot, sync_device=device)
-        assert snapshot["ports"][1]["host_name_collision"] is True
+        assert snapshot["ports"][1]["synced_name"] == "eth0-oob"
+        assert snapshot["ports"][1]["synced_name_is_derived"] is True
 
         view.get_context_data(request, device, "ifDescr", "default", fresh_data=snapshot, sync_device=device)
-        assert snapshot["ports"][1]["host_name_collision"] is False, (
-            "the descriptions differ, so nothing collides under ifDescr"
+        assert snapshot["ports"][1]["synced_name"] == "bmc-nic"
+        assert snapshot["ports"][1]["synced_name_is_derived"] is False
+
+    def test_rejected_derived_name_shows_why_the_row_cannot_sync(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("oob-rejected-derived-name")
+        limit = Interface._meta.get_field("name").max_length
+        name = "x" * limit
+        snapshot = {
+            "ports": [
+                {"port_id": 9601, "ifName": name, "ifType": "ethernetCsmacd"},
+                {"port_id": 9602, "ifName": name, "ifType": "ethernetCsmacd", "_source": "oob"},
+            ]
+        }
+        request = _make_request()
+        view = DeviceInterfaceTableView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        view.request = request
+
+        context = view.get_context_data(
+            request,
+            device,
+            "ifName",
+            "default",
+            fresh_data=snapshot,
+            sync_device=device,
         )
+
+        oob_row = snapshot["ports"][1]
+        rendered = str(context["table"].render_parent(None, oob_row))
+        assert f"derived interface name is longer than the {limit} characters NetBox stores" in rendered
+        assert "not synced" in rendered
+
+    def test_shared_lom_does_not_promise_a_derived_sync_name(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("oob-shared-lom-derived-pill")
+        snapshot = {
+            "ports": [
+                {"port_id": 9701, "ifName": "eth0", "ifType": "ethernetCsmacd"},
+                {
+                    "port_id": 9702,
+                    "ifName": "eth0",
+                    "ifType": "ethernetCsmacd",
+                    "_source": "oob",
+                    "_dedup_conflict": True,
+                },
+            ]
+        }
+        request = _make_request()
+        view = DeviceInterfaceTableView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        view.request = request
+
+        context = view.get_context_data(
+            request,
+            device,
+            "ifName",
+            "default",
+            fresh_data=snapshot,
+            sync_device=device,
+        )
+
+        shared_lom = snapshot["ports"][1]
+        rendered = str(context["table"].render_parent(None, shared_lom))
+        assert "Shared LOM" in rendered
+        assert "Will sync as" not in rendered
 
     def test_name_fallback_does_not_match_an_interface_bound_to_another_port(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -1655,7 +1774,7 @@ class TestInterfaceContextOOBRows:
         rows = list(ctx["table"].data)
         assert any(row.get("port_id") == 999 for row in rows)
         assert all(row.get("port_id") != 123 for row in rows)
-        assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
+        assert "idrac0" not in {i["name"] for i in ctx["netbox_only_interfaces"]}
 
     def test_malformed_port_stack_relationships_does_not_crash(self):
         """A cached snapshot whose port_stack_relationships is None / a non-dict (corruption, partial write, format migration) must fail soft, not AttributeError on the .get('lag_members') calls."""
@@ -2258,7 +2377,7 @@ class TestSyncInterfacesViewPost:
 
         post_init.connect(capture_interface, sender=Interface, weak=False)
         try:
-            targets = view._resolve_auto_selected_target_ids(
+            targets = view._infer_snapshot_target_ids(
                 page_device,
                 [{"port_id": 10, "ifName": "Ethernet2", "ifType": "ethernetCsmacd"}],
                 {10},
@@ -2299,7 +2418,7 @@ class TestSyncInterfacesViewPost:
             return execute(sql, params, many, context)
 
         with connection.execute_wrapper(capture_parameters):
-            targets = view._resolve_auto_selected_target_ids(
+            targets = view._infer_snapshot_target_ids(
                 page_device,
                 ports,
                 port_ids,
@@ -3807,7 +3926,11 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         assert Interface.objects.filter(device=device, name="lom0").exists() is (selected_port_id == "99")
-        assert any("shared LOM" in text for text in message_texts(request, "warning")) is (selected_port_id == "98")
+        warnings = message_texts(request, "warning")
+        assert any("shared LOM" in text for text in warnings) is (selected_port_id == "98")
+        assert not any("derived interface name" in text for text in warnings), (
+            "the shared physical port must not be treated as a renameable name conflict"
+        )
 
     @pytest.mark.parametrize("viewable", [True, False])
     def test_oob_port_does_not_adopt_an_unbound_host_interface_by_name(self, viewable):
@@ -3842,6 +3965,7 @@ class TestSyncInterfacesViewPost:
             cache_key,
             {
                 "ports": [
+                    {"ifName": "lom0", "port_id": 99, "ifAdminStatus": "up", "_source": "host"},
                     {
                         "ifName": "lom0",
                         "port_id": 98,
@@ -3863,13 +3987,11 @@ class TestSyncInterfacesViewPost:
         assert host_interface.description == "host interface"
         assert get_librenms_device_id(host_interface, "default", auto_save=False) is None
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
-        assert (
-            any("host interface already uses this name" in text for text in message_texts(request, "warning"))
-            is viewable
-        )
+        assert Interface.objects.filter(device=device, name="lom0-oob").exists()
+        assert message_texts(request, "warning") == []
 
-    def test_an_oob_row_never_claims_a_host_rows_interface_name(self):
-        """The host owns its interface names; an OOB port sharing one must not take it.
+    def test_an_oob_row_uses_a_derived_name_when_only_it_is_selected(self):
+        """The host owns its bare name even when only the OOB row is selected.
 
         The host and its OOB controller are two LibreNMS devices but one NetBox device, so both
         rows write into the same ``Interface.name`` namespace. Syncing the OOB row alone used to
@@ -3917,22 +4039,18 @@ class TestSyncInterfacesViewPost:
             cache.delete(cache_key)
 
         assert response.status_code == 302
-        claimed = Interface.objects.filter(device=device, name="eth0").first()
-        assert claimed is None or get_librenms_device_id(claimed, "default", auto_save=False) != 8502, (
-            "the OOB row took the host's interface name; the host row can never bind it again"
-        )
+        derived = Interface.objects.get(device=device, name="eth0-oob")
+        assert get_librenms_device_id(derived, "default", auto_save=False) == 8502
+        assert not Interface.objects.filter(device=device, name="eth0").exists()
 
-    def test_a_host_oob_name_collision_is_reported_as_a_collision(self):
-        """The operator must be told a host interface owns the name, not given a generic skip.
-
-        "port already mapped elsewhere or ambiguous" describes a different failure and offers no
-        remedy. A name collision has one, so it has to be named as one.
-        """
+    def test_a_host_oob_name_collision_syncs_under_the_derived_name(self):
+        """A host-owned bare name derives an OOB name instead of reporting a skip."""
         from types import SimpleNamespace
 
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-reported")
@@ -3965,10 +4083,9 @@ class TestSyncInterfacesViewPost:
         finally:
             cache.delete(cache_key)
 
-        warnings = message_texts(request, "warning")
-        assert any("name" in text and "host" in text.lower() for text in warnings), (
-            f"a host/OOB name collision must say the host owns the name; got {warnings}"
-        )
+        interface = Interface.objects.get(device=device, name="mgmt0-oob")
+        assert get_librenms_device_id(interface, "default", auto_save=False) == 8602
+        assert message_texts(request, "warning") == []
 
     def test_the_host_row_can_still_sync_its_own_name_after_an_oob_collision(self):
         """Host precedence is only real if the host row still gets its name afterwards."""
@@ -4016,6 +4133,8 @@ class TestSyncInterfacesViewPost:
         assert get_librenms_device_id(host_interface, "default", auto_save=False) == 8701, (
             "eth1 belongs to the host port, not the OOB port"
         )
+        oob_interface = Interface.objects.get(device=device, name="eth1-oob")
+        assert get_librenms_device_id(oob_interface, "default", auto_save=False) == 8702
 
     def test_an_unselected_shared_lom_row_is_not_reported_as_skipped(self):
         """A skip warning must describe a row the operator asked to sync.
@@ -4073,14 +4192,8 @@ class TestSyncInterfacesViewPost:
 
     @pytest.mark.parametrize("viewable", [True, False])
     @pytest.mark.parametrize("bound_elsewhere", [True, False])
-    def test_a_collision_with_a_host_interface_no_longer_in_librenms_is_still_a_collision(
-        self, viewable, bound_elsewhere
-    ):
-        """The host port can drop out of the snapshot while its NetBox interface remains.
-
-        No host row is left to own the name, so the pre-loop guard cannot see the collision.
-        Only callers who can view the host interface may receive its collision reason.
-        """
+    def test_an_existing_bound_name_derives_oob_without_a_host_snapshot(self, viewable, bound_elsewhere):
+        """A different bound port keeps the bare name unavailable to the OOB row."""
         from types import SimpleNamespace
 
         from dcim.models import Device, Interface
@@ -4132,14 +4245,13 @@ class TestSyncInterfacesViewPost:
             "the host interface keeps its own port binding"
         )
         warnings = message_texts(request, "warning")
-        reason = (
-            "name already owned by the host interface" if bound_elsewhere else "host interface already uses this name"
-        )
-        if viewable:
-            assert any(reason in text.lower() for text in warnings)
-        else:
-            assert not any(reason in text.lower() for text in warnings)
+        if bound_elsewhere:
+            assert not Interface.objects.filter(device=device, name="eno1-oob").exists()
             assert any("port already mapped elsewhere or ambiguous" in text for text in warnings)
+        else:
+            oob_interface = Interface.objects.get(device=device, name="eno1-oob")
+            assert get_librenms_device_id(oob_interface, "default", auto_save=False) == 8902
+            assert warnings == []
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from types import SimpleNamespace
@@ -4377,7 +4489,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         }
 
         # exclude "vlans" so the (separately tested) VLAN sub-sync isn't exercised here.
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
 
         iface = Interface.objects.get(device=dev, name="Gi0/1")
         assert iface.speed == 1000000
@@ -4413,7 +4525,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifAdminStatus": "up",
         }
 
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
 
         own_iface.refresh_from_db()
         other_iface.refresh_from_db()
@@ -4434,7 +4546,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         _vc, (host, sibling) = make_virtual_chassis_members("selvalid")
         view = self._make_view(_make_request(post_data={"device_selection_10": str(sibling.pk)}))
 
-        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName")
+        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
 
         assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=host, name="Gi0/1").exists()
@@ -4448,7 +4560,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view = self._make_view(_make_request(post_data={"device_selection_10": str(other.pk)}))
         view._skipped_conflicts = []
 
-        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName")
+        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
 
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=other, name="Gi0/1").exists()
@@ -4462,7 +4574,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view = self._make_view(_make_request(post_data={"device_selection_10": str(absent_pk)}))
         view._skipped_conflicts = []
 
-        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName")
+        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
 
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
         assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
@@ -4484,7 +4596,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view = self._make_view(request)
         view._skipped_conflicts = []
 
-        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName")
+        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
 
         assert not Interface.objects.filter(name="Gi0/1").exists()
         assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
@@ -4513,7 +4625,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifAdminStatus": "up",
         }
 
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
 
         iface.refresh_from_db()
         assert iface.mtu == 1400
@@ -4545,7 +4657,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "port_id": 77,
             "ifAdminStatus": "up",
         }
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
 
         # No same-named local interface to fall back to, and we never get_or_create one here.
         assert view._skipped_conflicts == ["Gi0/1 (port already mapped elsewhere or ambiguous)"]
@@ -4560,7 +4672,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         view = _sync_view()
         view._lookup_maps = {}
 
-        view.sync_interface(vm, {"ifName": "eth0", "port_id": None}, ["vlans"], "ifName")
+        view.sync_interface(vm, {"ifName": "eth0", "port_id": None}, ["vlans"], "ifName", "eth0")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
 
@@ -4576,7 +4688,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         view._lookup_maps = {}
         librenms_port = {"ifName": "renamed-in-librenms", "port_id": 55}
 
-        view.sync_interface(vm, librenms_port, ["vlans"], "ifName")
+        view.sync_interface(vm, librenms_port, ["vlans"], "ifName", "renamed-in-librenms")
 
         assert VMInterface.objects.filter(virtual_machine=vm).count() == 1
         matched.refresh_from_db()
@@ -4590,7 +4702,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         librenms_port = {"ifName": "eth0"}
 
         with pytest.raises(ValueError):
-            view.sync_interface(object(), librenms_port, [], "ifName")
+            view.sync_interface(object(), librenms_port, [], "ifName", "eth0")
 
 
 class TestSyncInterfacesViewUpdateInterfaceAttributes:
@@ -4614,7 +4726,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, "1000base-t", [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "1000base-t", [], "ifName", "Gi0/1")
 
         reloaded = Interface.objects.get(pk=interface.pk)
         assert reloaded.name == "Gi0/1"
@@ -4650,6 +4762,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "other",
             ["name", "type", "speed", "description", "mtu", "enabled", "mac_address"],
             "ifName",
+            "Gi0/1",
         )
 
         # Excluded attributes keep their pre-update values.
@@ -4679,7 +4792,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
         # netbox_type "other" (the real get_netbox_interface_type fallback); passing None would
         # set the NOT-NULL type column to NULL — another real-save constraint the mock hid.
-        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName", "Gi0/1")
 
         assert Interface.objects.get(pk=interface.pk).enabled is False
 
@@ -4700,7 +4813,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName", "Gi0/1")
 
         interface = Interface.objects.get(pk=interface.pk)
         assert get_librenms_device_id(interface, "default", auto_save=False) == 42
@@ -4725,7 +4838,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName", "Gi0/1")
 
         interface = Interface.objects.get(pk=interface.pk)
         assert get_librenms_device_id(interface, "default", auto_save=False) is None
@@ -4745,7 +4858,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, "other", ["mac_address"], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "other", ["mac_address"], "ifName", "Gi0/1")
 
         interface.refresh_from_db()
         assert interface.description == ""

@@ -151,7 +151,8 @@ def parse_vlan_group_id(group_id_str):
 
 
 def _name_differs(port, interface, context):
-    return port.get(context.interface_name_field) != interface.name
+    expected_name = port["synced_name"]
+    return expected_name is not None and expected_name != interface.name
 
 
 def _type_differs(port, interface, context):

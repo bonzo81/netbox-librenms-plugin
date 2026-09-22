@@ -321,6 +321,7 @@ class SingleInterfaceVerifyView(
                     unambiguous_name_port_ids,
                     relationship_maps,
                 )
+                port_data["synced_name"] = port_data.get(interface_name_field)
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})
 

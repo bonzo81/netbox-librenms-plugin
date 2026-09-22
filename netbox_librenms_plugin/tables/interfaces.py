@@ -592,13 +592,25 @@ class LibreNMSInterfaceTable(tables.Table):
                 )
             )
 
-        if record.get("host_name_collision"):
+        rejection_reason = record.get("synced_name_rejection_reason")
+        if rejection_reason:
+            label = "Name conflict" if record.get("synced_name_contested") else "Cannot sync"
             parts.append(
                 self._render_info_pill(
                     "danger",
                     "mdi-alert-circle",
-                    "Name conflict",
-                    "The host interface of the same name owns it; the OOB port is not synced",
+                    label,
+                    f"The interface is not synced: {rejection_reason}",
+                )
+            )
+        elif record.get("synced_name_is_derived") and not record.get("_dedup_conflict"):
+            synced_name = record.get("synced_name")
+            parts.append(
+                self._render_info_pill(
+                    "info",
+                    "mdi-form-textbox",
+                    f"Will sync as {synced_name}",
+                    f"Will sync as {synced_name}",
                 )
             )
 

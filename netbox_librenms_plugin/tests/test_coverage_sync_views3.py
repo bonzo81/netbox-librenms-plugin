@@ -136,7 +136,7 @@ class TestSyncInterface:
         dev = make_device("sync-novc")
         v = self._v()
 
-        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName", "eth0")
 
         assert Interface.objects.filter(device=dev, name="eth0").exists()
 
@@ -148,7 +148,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(sibling.pk)})
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName", "eth0")
 
         assert Interface.objects.filter(device=sibling, name="eth0").exists()
         assert not Interface.objects.filter(device=host, name="eth0").exists()
@@ -162,7 +162,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(outsider.pk)})
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName", "eth0")
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=outsider, name="eth0").exists()
@@ -176,7 +176,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(other.pk)})
         v = self._v(req)
 
-        v.sync_interface(dev, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(dev, {"ifName": "eth0", "port_id": 10}, [], "ifName", "eth0")
 
         assert not Interface.objects.filter(device=dev, name="eth0").exists()
         assert not Interface.objects.filter(device=other, name="eth0").exists()
@@ -190,7 +190,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(absent_pk)})
         v = self._v(req)
 
-        v.sync_interface(dev, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(dev, {"ifName": "eth0", "port_id": 10}, [], "ifName", "eth0")
 
         assert not Interface.objects.filter(device=dev, name="eth0").exists()
         assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
@@ -204,7 +204,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(sibling.pk)}, user=user)
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName", "eth0")
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=sibling, name="eth0").exists()
@@ -225,7 +225,7 @@ class TestSyncInterface:
         request = make_request("post", user=user)
         view = self._v(request)
 
-        view.sync_interface(device, {"ifName": hidden.name}, [], "ifName")
+        view.sync_interface(device, {"ifName": hidden.name}, [], "ifName", hidden.name)
 
         assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
 
@@ -243,7 +243,7 @@ class TestSyncInterface:
         request = make_request("post", user=user)
         view = self._v(request)
 
-        view.sync_interface(device, {"ifName": existing.name}, [], "ifName")
+        view.sync_interface(device, {"ifName": existing.name}, [], "ifName", existing.name)
 
         assert view._skipped_conflicts == []
 
@@ -253,7 +253,7 @@ class TestSyncInterface:
         vm = make_vm("sync-vm")
         v = self._v()
 
-        v.sync_interface(vm, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(vm, {"ifName": "eth0"}, [], "ifName", "eth0")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
 

@@ -101,16 +101,21 @@ OOB_TYPES = ("idrac", "ilo", "ipmi", "bmc", "drac", "cimc", "oob")
 OOB_INVENTORY_SOURCE = "oob"
 MAIN_INVENTORY_SOURCE = "main"
 SERIAL_INVENTORY_SOURCE = "serial"
+# Changing this value renames every derived OOB interface on its next sync.
+OOB_NAME_SUFFIX = "-oob"
 
 # Shared "From OOB controller" badge markup (the bare <span>; callers add any leading space).
 # Centralised so a restyle (color/title/text) happens in one place instead of drifting across the
 # cable/module/interface tables and the cable-verify render that each hand-copied it.
 OOB_BADGE_HTML = '<span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
 
-# A host and its OOB controller share one NetBox device, so one interface name cannot serve both.
-# The host owns it. Shared by the sync writer (the skip reason) and the interface table (the pill
-# tooltip) so the two cannot describe the same condition differently.
-HOST_NAME_COLLISION_REASON = "name already owned by the host interface"
+# A derived OOB name can still collide with another host or OOB row. The sync writer and table
+# use one reason so they cannot describe the same condition differently.
+HOST_NAME_COLLISION_REASON = "derived interface name is already used by another row"
+# A host row cannot claim a name that the active server maps to another port.
+REPORTED_NAME_PORT_COLLISION_REASON = "reported name belongs to a different LibreNMS port"
+# Mixed sources for one normalized port ID make its identity ambiguous.
+PORT_ID_SOURCE_COLLISION_REASON = "LibreNMS port ID is claimed by both host and OOB rows"
 
 
 def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:

@@ -5,7 +5,12 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import (
+    HOST_NAME_COLLISION_REASON,
+    MAIN_INVENTORY_SOURCE,
+    OOB_INVENTORY_SOURCE,
+    REPORTED_NAME_PORT_COLLISION_REASON,
+)
 from netbox_librenms_plugin.interface_diff import interface_enabled_from_port
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
@@ -24,13 +29,12 @@ from netbox_librenms_plugin.utils import (
     get_interface_port_identity_sets,
     get_librenms_oob,
     get_librenms_sync_device,
-    host_owned_interface_names,
     is_list_of_dicts,
     is_valid_ports_payload,
     normalize_librenms_port_id,
     normalize_relationship_maps,
     resolve_interface_row_device,
-    syncable_interface_name,
+    synced_interface_names,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -786,7 +790,59 @@ class BaseInterfaceTableView(
                 can_write=can_write_relationships,
             )
 
+            target_device_ids = {}
             for port in ports_data:
+                port_id = normalize_librenms_port_id(port.get("port_id"))
+                if port_id is None:
+                    continue
+                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                    target_device = resolve_interface_row_device(
+                        obj,
+                        port,
+                        interface_name_field,
+                        interfaces_by_port_id=interfaces_by_port_id,
+                        members_by_position=members_by_position,
+                        members_by_id=members_by_id,
+                    )
+                else:
+                    target_device = obj
+                target_device_ids[port_id] = target_device.pk
+            reserved_name_port_ids = {}
+            for device_id, interface_maps in interfaces_by_device.items():
+                for interface_name, interface in interface_maps["by_name"].items():
+                    port_id = self._get_object_librenms_id(interface)
+                    if port_id is not None:
+                        reserved_name_port_ids.setdefault(device_id, {}).setdefault(interface_name, set()).add(port_id)
+            synced_names, rejected_names = synced_interface_names(
+                ports_data,
+                interface_name_field,
+                interface_model,
+                target_device_ids=target_device_ids,
+                reserved_name_port_ids_by_device=reserved_name_port_ids,
+            )
+            claimable_names_by_device = {}
+            for port in ports_data:
+                port_id = normalize_librenms_port_id(port.get("port_id"))
+                if port.get("_dedup_conflict") or port_id in rejected_names:
+                    continue
+                synced_name = synced_names.get(port_id)
+                device_id = target_device_ids.get(port_id)
+                if synced_name is not None and device_id is not None:
+                    claimable_names_by_device.setdefault(device_id, set()).add(synced_name)
+
+            for port in ports_data:
+                port_id = normalize_librenms_port_id(port.get("port_id"))
+                synced_name = synced_names.get(port_id)
+                rejection_reason = rejected_names.get(port_id)
+                port["synced_name"] = synced_name
+                port["synced_name_is_derived"] = synced_name is not None and synced_name != port.get(
+                    interface_name_field
+                )
+                port["synced_name_contested"] = rejection_reason in (
+                    HOST_NAME_COLLISION_REASON,
+                    REPORTED_NAME_PORT_COLLISION_REASON,
+                )
+                port["synced_name_rejection_reason"] = rejection_reason
                 port["enabled"] = interface_enabled_from_port(port)
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
@@ -838,14 +894,6 @@ class BaseInterfaceTableView(
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, row_lookup_maps)
 
-            host_owned_names = host_owned_interface_names(
-                ports_data, interface_name_field, lambda port: port.get("selected_object_id")
-            )
-            for port in ports_data:
-                if port.get("_source") == OOB_INVENTORY_SOURCE:
-                    owner_names = host_owned_names.get(port.get("selected_object_id"), set())
-                    port["host_name_collision"] = syncable_interface_name(port, interface_name_field) in owner_names
-
             table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
             table.allowed_vc_member_ids = actionable_owner_ids
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
@@ -861,10 +909,7 @@ class BaseInterfaceTableView(
                 for interface_name, interface in device_interface_maps["by_name"].items():
                     if interface.id not in viewable_interface_ids or interface.id in matched_interface_ids:
                         continue
-                    # Host ownership is per device, so an OOB row's name cannot suppress
-                    # netbox-only detection here. It also drops names too long for NetBox to
-                    # store, which no NetBox interface name can equal anyway.
-                    if interface_name not in host_owned_names.get(device_id, set()):
+                    if interface_name not in claimable_names_by_device.get(device_id, set()):
                         # Get device name for the interface (reuse the pre-indexed members — the
                         # device_id keys come from interfaces_by_device, which was built from them —
                         # instead of a members.get(id=...) query per netbox-only interface).

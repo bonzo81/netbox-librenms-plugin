@@ -28,6 +28,7 @@ def _port(port_id=42, **overrides):
         "vlan_group_map": {},
     }
     record.update(overrides)
+    record.setdefault("synced_name", record["ifName"])
     return record
 
 

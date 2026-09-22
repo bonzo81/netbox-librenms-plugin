@@ -37,6 +37,7 @@ class TestUpdateInterfaceAttributes:
             "1000base-t",
             set(),
             "ifName",
+            "eth0",
         )
 
         interface.refresh_from_db()
@@ -72,6 +73,7 @@ class TestUpdateInterfaceAttributes:
             "other",
             {"name", "type", "speed", "description", "mtu", "enabled", "mac_address"},
             "ifName",
+            "new-name",
         )
 
         interface.refresh_from_db()
@@ -254,6 +256,7 @@ def test_interface_update_ignores_non_string_mac(mac):
     update_interface_from_port(
         interface,
         {"ifName": "eth0", "ifAlias": "updated description", "ifPhysAddress": mac},
+        synced_name="eth0",
         server_key="default",
         interface_name_field="ifName",
         netbox_type="other",

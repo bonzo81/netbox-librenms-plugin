@@ -192,7 +192,8 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None)
 
         assert re.search(r'id="autoSelectLagMembers"[^>]*data-default-checked="true"[^>]*checked', html)
-        assert len(re.findall(r'name="exclude_columns"[^>]*data-default-checked="false"', html)) == 7
+        assert re.search(r'name="exclude_columns" value="name" id="excludeName"[^>]*data-default-checked="false"', html)
+        assert len(re.findall(r'name="exclude_columns"[^>]*data-default-checked="false"', html)) == 8
 
     def test_interface_type_help_uses_the_shared_modal_helper(self):
         """The info link opens through NetBox's modal helper instead of competing Bootstrap trigger state."""

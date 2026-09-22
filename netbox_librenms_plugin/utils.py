@@ -22,8 +22,12 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
+    HOST_NAME_COLLISION_REASON,
     OOB_BADGE_HTML,
     OOB_INVENTORY_SOURCE,
+    OOB_NAME_SUFFIX,
+    PORT_ID_SOURCE_COLLISION_REASON,
+    REPORTED_NAME_PORT_COLLISION_REASON,
     is_module_model_placeholder,
     is_supported_interface_name_field,
 )
@@ -2011,39 +2015,188 @@ def interface_name_rejection_reason(port, interface_name_field, model=None):
     return None
 
 
-def host_owned_interface_names(ports, interface_name_field, owner_id_for_port, model=None) -> dict[int, set[str]]:
+def synced_interface_name(
+    port,
+    interface_name_field,
+    host_owned_names,
+    reserved_name_port_ids=None,
+    model=None,
+):
     """
-    Return host-owned interface names by target NetBox device.
-
-    A host and its OOB controller are two LibreNMS devices but one NetBox device, so both sides
-    can write into the same ``(device, name)`` namespace. The host owns a name only on its
-    target device. A virtual chassis member can use the same name on another member.
-
-    Derived from the rows on read rather than tagged onto the cached snapshot, so a snapshot
-    written before this existed cannot fail open, and the sync writer and the table reader
-    cannot drift apart on what "the host owns this name" means.
+    Return the name one LibreNMS port will use in NetBox, or ``None``.
 
     Args:
-        ports (list): The merged host + OOB port rows.
+        port (dict): LibreNMS port row.
         interface_name_field (str): Port field that contains the selected interface name.
-        owner_id_for_port (callable): Resolve the target NetBox device ID for a port row.
+        host_owned_names (set[str]): Names owned by host rows in the same snapshot.
+        reserved_name_port_ids (dict[str, set[int]] | None): Active-server port IDs bound to
+            each existing NetBox interface name on the target device.
         model (type | None): Concrete interface model. Defaults to ``Interface``.
 
     Returns:
-        dict[int, set[str]]: Host names keyed by target device ID.
+        str | None: The name to sync, or ``None`` when NetBox cannot store it.
 
     """
-    if not is_list_of_dicts(ports):
-        return {}
-    names_by_device = {}
+    name = syncable_interface_name(port, interface_name_field, model)
+    port_id = normalize_librenms_port_id(port.get("port_id"))
+    reserved_name_port_ids = reserved_name_port_ids or {}
+    name_is_reserved = bool(reserved_name_port_ids.get(name)) and port_id not in reserved_name_port_ids[name]
+    if (
+        name is None
+        or port.get("_source") != OOB_INVENTORY_SOURCE
+        or (name not in host_owned_names and not name_is_reserved)
+    ):
+        if name_is_reserved:
+            return None
+        return name
+    derived_name = f"{name}{OOB_NAME_SUFFIX}"
+    if len(derived_name) > interface_field_limit("name", model):
+        return None
+    if reserved_name_port_ids.get(derived_name) and port_id not in reserved_name_port_ids[derived_name]:
+        return None
+    return derived_name
+
+
+def _cross_source_interface_port_ids(ports):
+    """Return normalized port IDs claimed by both host and OOB rows."""
+    port_sources = {}
+    for port in ports:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is not None:
+            port_sources.setdefault(port_id, set()).add(port.get("_source") == OOB_INVENTORY_SOURCE)
+    return {port_id for port_id, sources in port_sources.items() if len(sources) > 1}
+
+
+def _host_interface_names_by_device(ports, interface_name_field, target_device_ids, model):
+    """Return valid host-row names grouped by target device ID."""
+    host_names = {}
     for port in ports:
         if port.get("_source") == OOB_INVENTORY_SOURCE:
             continue
+        port_id = normalize_librenms_port_id(port.get("port_id"))
         name = syncable_interface_name(port, interface_name_field, model)
-        owner_id = owner_id_for_port(port)
-        if name is not None and owner_id is not None:
-            names_by_device.setdefault(owner_id, set()).add(name)
-    return names_by_device
+        if port_id is not None and name is not None:
+            host_names.setdefault(target_device_ids.get(port_id), set()).add(name)
+    return host_names
+
+
+def _synced_interface_name_rejection_reason(port, interface_name_field, model):
+    """Return why the resolved sync name is unavailable."""
+    reason = interface_name_rejection_reason(port, interface_name_field, model)
+    if reason is not None:
+        return reason
+    if port.get("_source") == OOB_INVENTORY_SOURCE:
+        raw_name = syncable_interface_name(port, interface_name_field, model)
+        derived_name = f"{raw_name}{OOB_NAME_SUFFIX}"
+        limit = interface_field_limit("name", model)
+        if len(derived_name) > limit:
+            return f"derived interface name is longer than the {limit} characters NetBox stores"
+    return HOST_NAME_COLLISION_REASON
+
+
+def _oob_name_collision_rejections(
+    ports,
+    names,
+    host_names_by_device,
+    target_device_ids,
+    interface_name_field,
+    model,
+):
+    """Return OOB port IDs whose candidate names conflict with other snapshot rows."""
+    rejected = {}
+    oob_claims = {}
+    for port in ports:
+        if port.get("_source") != OOB_INVENTORY_SOURCE:
+            continue
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        device_id = target_device_ids.get(port_id)
+        synced_name = names.get(port_id)
+        raw_name = syncable_interface_name(port, interface_name_field, model)
+        if synced_name is not None and synced_name != raw_name:
+            if synced_name in host_names_by_device.get(device_id, set()):
+                rejected[port_id] = HOST_NAME_COLLISION_REASON
+        if synced_name is not None and not port.get("_dedup_conflict"):
+            oob_claims.setdefault((device_id, synced_name), []).append(port_id)
+    for port_ids in oob_claims.values():
+        if len(port_ids) > 1:
+            rejected.update(dict.fromkeys(port_ids, HOST_NAME_COLLISION_REASON))
+    return rejected
+
+
+def synced_interface_names(
+    ports,
+    interface_name_field,
+    model=None,
+    *,
+    target_device_ids=None,
+    reserved_name_port_ids_by_device=None,
+):
+    """
+    Resolve snapshot interface names by normalized LibreNMS port ID.
+
+    Args:
+        ports (list): The merged host and OOB port rows.
+        interface_name_field (str): Port field that contains the selected interface name.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+        target_device_ids (dict[int, int] | None): Target device ID by normalized port ID.
+        reserved_name_port_ids_by_device (dict[int, dict[str, set[int]]] | None): Active-server
+            port IDs bound to each existing name, grouped by target device ID.
+
+    Returns:
+        tuple[dict[int, str], dict[int, str]]: Candidate names and rejection reasons by port ID.
+
+    """
+    if not is_list_of_dicts(ports):
+        return {}, {}
+    target_device_ids = target_device_ids or {}
+    reserved_name_port_ids_by_device = reserved_name_port_ids_by_device or {}
+    cross_source_port_ids = _cross_source_interface_port_ids(ports)
+    host_owned_names_by_device = _host_interface_names_by_device(
+        ports,
+        interface_name_field,
+        target_device_ids,
+        model,
+    )
+    names = {}
+    rejected = {}
+    for port in ports:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is None:
+            continue
+        if port_id in cross_source_port_ids:
+            names.pop(port_id, None)
+            rejected[port_id] = PORT_ID_SOURCE_COLLISION_REASON
+            continue
+        device_id = target_device_ids.get(port_id)
+        host_owned_names = host_owned_names_by_device.get(device_id, set())
+        reserved_name_port_ids = reserved_name_port_ids_by_device.get(device_id, {})
+        name = synced_interface_name(
+            port,
+            interface_name_field,
+            host_owned_names,
+            reserved_name_port_ids,
+            model,
+        )
+        if name is not None:
+            names[port_id] = name
+            continue
+        reported_name = syncable_interface_name(port, interface_name_field, model)
+        reserved_port_ids = reserved_name_port_ids.get(reported_name, set())
+        if port.get("_source") != OOB_INVENTORY_SOURCE and reserved_port_ids and port_id not in reserved_port_ids:
+            rejected[port_id] = REPORTED_NAME_PORT_COLLISION_REASON
+        else:
+            rejected[port_id] = _synced_interface_name_rejection_reason(port, interface_name_field, model)
+    rejected.update(
+        _oob_name_collision_rejections(
+            ports,
+            names,
+            host_owned_names_by_device,
+            target_device_ids,
+            interface_name_field,
+            model,
+        )
+    )
+    return names, rejected
 
 
 def bounded_interface_text(field_name, value, model=None):

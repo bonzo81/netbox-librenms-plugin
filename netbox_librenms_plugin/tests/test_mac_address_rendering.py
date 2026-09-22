@@ -19,6 +19,7 @@ def _record(mac, *, netbox_interface=None):
     return {
         "port_id": 7,
         "ifName": "Ethernet1",
+        "synced_name": "Ethernet1",
         "ifPhysAddress": mac,
         "exists_in_netbox": netbox_interface is not None,
         "netbox_interface": netbox_interface,

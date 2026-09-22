@@ -20,6 +20,7 @@ from netbox_librenms_plugin.utils import (
     coerce_interface_mtu,
     convert_speed_to_kbps,
     find_by_librenms_id,
+    get_librenms_device_id,
     interface_name_fallback_matches_port,
     interface_name_rejection_reason,
     normalize_librenms_port_id,
@@ -28,6 +29,21 @@ from netbox_librenms_plugin.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _bound_interface_name_is_occupied(interface, synced_name, port_id, server_key):
+    """Return whether a bound interface must keep its current name."""
+    if synced_name == interface.name:
+        return False
+    stored_port_id = normalize_librenms_port_id(get_librenms_device_id(interface, server_key, auto_save=False))
+    if port_id is None or stored_port_id != port_id:
+        return False
+    owner_filter = (
+        {"device_id": interface.device_id}
+        if isinstance(interface, Interface)
+        else {"virtual_machine_id": interface.virtual_machine_id}
+    )
+    return type(interface).objects.filter(**owner_filter, name=synced_name).exclude(pk=interface.pk).exists()
 
 
 def get_netbox_interface_type(librenms_interface, *, speed_converter=convert_speed_to_kbps):
@@ -74,6 +90,7 @@ def update_interface_from_port(  # noqa: C901
     interface,
     librenms_interface,
     *,
+    synced_name,
     server_key,
     interface_name_field,
     exclude_columns=(),
@@ -101,9 +118,12 @@ def update_interface_from_port(  # noqa: C901
         (interface_name_field if librenms_key == INTERFACE_NAME_KEY else librenms_key): netbox_field
         for librenms_key, netbox_field in INTERFACE_SYNC_FIELD_PAIRS
     }
+    port_id = normalize_librenms_port_id(librenms_interface.get("port_id"))
 
     if "name" not in exclude_columns:
-        rejection = interface_name_rejection_reason(librenms_interface, interface_name_field, type(interface))
+        rejection = interface_name_rejection_reason(
+            {interface_name_field: synced_name}, interface_name_field, type(interface)
+        )
         if rejection is not None:
             raise ValueError(f"The LibreNMS {rejection}.")
 
@@ -128,10 +148,17 @@ def update_interface_from_port(  # noqa: C901
             setattr(interface, netbox_key, synced_description(librenms_interface, type(interface)))
         elif librenms_key == "ifMtu":
             setattr(interface, netbox_key, coerce_interface_mtu(librenms_interface.get(librenms_key)))
+        elif netbox_key == "name" and _bound_interface_name_is_occupied(
+            interface,
+            synced_name,
+            port_id,
+            server_key,
+        ):
+            continue
         else:
-            setattr(interface, netbox_key, librenms_interface.get(librenms_key))
+            value = synced_name if netbox_key == "name" else librenms_interface.get(librenms_key)
+            setattr(interface, netbox_key, value)
 
-    port_id = normalize_librenms_port_id(librenms_interface.get("port_id"))
     if port_id is not None:
         try:
             existing_owner = find_by_librenms_id(type(interface), port_id, server_key)
@@ -232,6 +259,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
     update_interface_from_port(
         interface,
         librenms_interface,
+        synced_name=interface_name,
         server_key=server_key,
         interface_name_field=interface_name_field,
         netbox_type=netbox_type,

@@ -36,6 +36,7 @@ class TestInterfaceMacContract:
         update_interface_from_port(
             interface,
             _port(ifPhysAddress=mac, ifAlias="Updated alias"),
+            synced_name="Ethernet1",
             server_key="default",
             interface_name_field="ifName",
             netbox_type="1000base-t",
@@ -87,6 +88,7 @@ class TestInterfaceMtuContract:
         update_interface_from_port(
             interface,
             _port(**overrides),
+            synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
             netbox_type="1000base-t",
@@ -119,6 +121,7 @@ class TestInterfaceAliasContract:
         update_interface_from_port(
             interface,
             _port(**overrides),
+            synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
             netbox_type="1000base-t",
@@ -158,8 +161,10 @@ class TestInterfaceNameGateModel:
         vm = make_vm("vm-name-gate")
         view = make_view(SyncInterfacesView)
         view._skipped_conflicts = []
+        view._selected_port_ids = {8100}
+        view._auto_selected_port_ids = set()
 
-        view.sync_interface(vm, _port(ifName="E" * 20), ["vlans"], "ifName")
+        view.sync_selected_interfaces(vm, [_port(ifName="E" * 20)], ["vlans"], "ifName")
 
         assert not VMInterface.objects.filter(virtual_machine=vm).exists()
         assert view._skipped_conflicts == [
@@ -177,8 +182,10 @@ class TestInterfaceNameGateModel:
         vm = make_vm("vm-name-gate-ok")
         view = make_view(SyncInterfacesView)
         view._skipped_conflicts = []
+        view._selected_port_ids = {8100}
+        view._auto_selected_port_ids = set()
 
-        view.sync_interface(vm, _port(ifName="eth0"), ["vlans"], "ifName")
+        view.sync_selected_interfaces(vm, [_port(ifName="eth0")], ["vlans"], "ifName")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
         assert view._skipped_conflicts == []
@@ -208,6 +215,7 @@ class TestInterfaceStringLengthContract:
         update_interface_from_port(
             interface,
             _port(**overrides),
+            synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
             netbox_type="1000base-t",
@@ -262,6 +270,7 @@ class TestInterfaceStringLengthContract:
             update_interface_from_port(
                 interface,
                 _port(ifName="E" * (self._max_length("name") + 1)),
+                synced_name="E" * (self._max_length("name") + 1),
                 server_key="default",
                 interface_name_field="ifName",
                 netbox_type="1000base-t",
