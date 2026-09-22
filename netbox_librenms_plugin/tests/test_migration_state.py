@@ -64,6 +64,7 @@ def test_reverse_bridge_seed_preserves_operator_data(operator_edit):
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     row = PortStackLagPattern.objects.get(librenms_os=mod.BRIDGE_OS)
     if operator_edit == "custom-data":
         PortStackLagPattern.objects.filter(pk=row.pk).update(custom_field_data={"operator-note": "keep"})
@@ -76,6 +77,9 @@ def test_reverse_bridge_seed_preserves_operator_data(operator_edit):
         .apps
     )
     with connection.schema_editor() as editor:
+        # 0021 widened what 0019 seeded, so a rollback reverses it first and 0019's reverse then
+        # sees its own value. Skipping that step would make this assert nothing.
+        widened.restore_bridge_pattern(historical_apps, editor)
         mod.clear_bridge_pattern(historical_apps, editor)
 
     row.refresh_from_db()
@@ -96,6 +100,7 @@ def test_reverse_bridge_seed_without_content_type():
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     row = PortStackLagPattern.objects.get(librenms_os=mod.BRIDGE_OS)
     ContentType.objects.filter(
         app_label="netbox_librenms_plugin",
@@ -108,6 +113,7 @@ def test_reverse_bridge_seed_without_content_type():
     )
 
     with connection.schema_editor() as editor:
+        widened.restore_bridge_pattern(historical_apps, editor)
         mod.clear_bridge_pattern(historical_apps, editor)
 
     assert not PortStackLagPattern.objects.filter(pk=row.pk).exists()

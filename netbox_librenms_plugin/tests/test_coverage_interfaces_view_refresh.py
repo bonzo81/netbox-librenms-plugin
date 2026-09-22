@@ -187,8 +187,11 @@ class TestInterfaceRefreshOobMerge:
         assert message_texts(request, "success") == ["Host interface data refreshed successfully."]
         snapshot = _cached_ports(view, device)
         assert snapshot["oob_incomplete"] is True
-        # The corrupt id must never be turned into a request path.
-        assert [r["path"] for r in librenms_server.requests] == ["/api/v0/devices/21/ports"]
+        # The corrupt id must never be turned into a request path. The refresh also reads the
+        # device OS and the port stack, neither of which can be gated on the ports payload.
+        paths = [r["path"] for r in librenms_server.requests]
+        assert paths == ["/api/v0/devices/21/ports", "/api/v0/devices/21", "/api/v0/devices/21/port_stack"]
+        assert not any("not-an-id" in path for path in paths)
 
     def test_oob_ports_merge_and_only_real_shared_macs_are_flagged(self, librenms_server, settings):
         """OOB rows merge in tagged _source=oob, and only a real MAC on both sides is a conflict."""

@@ -1,5 +1,4 @@
 import logging
-import re
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -12,6 +11,7 @@ from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
     filter_interface_index,
+    relationship_diagnostics_report,
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
@@ -456,77 +456,58 @@ class BaseInterfaceTableView(
         return self.render_sync_partial(request, obj, _server_key, context)
 
     def _enrich_port_stack_relationships(self, request, librenms_data, host_ports, interface_name_field):
-        """Fetch and resolve host port relationships when the snapshot has a relevant signal."""
+        """Fetch and resolve the host port relationships LibreNMS reports for this device."""
         from netbox_librenms_plugin.models import PortStackLagPattern
 
-        # One pass over the ports feeds all three signal checks below.
-        names_per_port = self._relationship_port_names(host_ports, interface_name_field)
-        structural_signal = self._has_structural_relationship_signals(host_ports, interface_name_field, names_per_port)
-        unscoped_patterns = PortStackLagPattern.compiled_patterns_for_os(None)
-        unscoped_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(None)
-        name_signal = self._has_relationship_name_signals(
-            host_ports,
-            interface_name_field,
-            [*unscoped_patterns, *unscoped_bridge_patterns],
-            names_per_port,
-        )
-
-        # The OS scopes the LAG name patterns AND the SAP colon skip in
-        # resolve_port_relationships, so resolve it for a structural snapshot too. Leaving it
-        # unknown there made every Junos breakout port read as a Nokia SAP. get_device_info is
-        # cached per server/device, so the sync-tab header render usually already paid for this.
+        # This used to skip the fetch unless a port name matched a LAG/bridge pattern or a port
+        # was structurally an aggregate or a sub-unit. That gate was only ever sound while every
+        # relationship needed such a signal. A port_stack pair no rule classifies is now carried
+        # as an untyped stacking, and nothing in the ports payload predicts one, so the gate would
+        # hide exactly the devices it was added for. get_device_info is cached per server and
+        # device and the tab header already pays for it; get_port_stack is one request, and a far
+        # smaller one than the get_ports this refresh has already made.
         device_os = ""
         device_os_known = False
-        scoped_patterns = []
-        scoped_bridge_patterns = []
-        if structural_signal or name_signal:
-            info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
-            if info_success and isinstance(device_info, dict):
-                raw_device_os = device_info.get("os")
-                if isinstance(raw_device_os, str) and raw_device_os.strip():
-                    device_os = raw_device_os.strip()
-                    device_os_known = True
-        if name_signal:
-            scoped_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
-            scoped_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(device_os)
-        # Read the OS's SAP rule here too, so the resolver does not repeat the query per call.
+        info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+        if info_success and isinstance(device_info, dict):
+            raw_device_os = device_info.get("os")
+            if isinstance(raw_device_os, str) and raw_device_os.strip():
+                device_os = raw_device_os.strip()
+                device_os_known = True
+
+        # Read every OS-scoped rule here, so the resolver does not repeat the query per call. A
+        # blank OS scopes to no pattern at all: an unknown OS must not apply every vendor's regex.
+        scoped_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
+        scoped_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(device_os)
         scoped_sap_patterns = PortStackLagPattern.compiled_sap_patterns_for_os(device_os)
 
-        scoped_name_signal = self._has_relationship_name_signals(
-            host_ports,
-            interface_name_field,
-            [*scoped_patterns, *scoped_bridge_patterns],
-            names_per_port,
-        )
-        relationship_fetch_failed = False
-        if structural_signal or scoped_name_signal:
-            ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
-            if ps_success:
-                librenms_data["port_stack_relationships"] = self.librenms_api.resolve_port_relationships(
-                    host_ports,
-                    ps_data,
-                    device_os=device_os,
-                    interface_name_field=interface_name_field,
-                    compiled_lag_patterns=scoped_patterns,
-                    compiled_sap_patterns=scoped_sap_patterns,
-                    compiled_bridge_patterns=scoped_bridge_patterns,
-                )
-            else:
-                relationship_fetch_failed = True
-                logger.warning("port_stack fetch failed for device %s: %s", self.librenms_id, ps_data)
-                librenms_data["relationship_data_incomplete"] = True
-                messages.warning(
-                    request,
-                    "Interfaces refreshed, but relationship data could not be fetched from LibreNMS. "
-                    "The Relationships column may be incomplete. "
-                    "See server logs for details.",
-                )
+        ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
+        if not ps_success:
+            logger.warning("port_stack fetch failed for device %s: %s", self.librenms_id, ps_data)
+            librenms_data["relationship_data_incomplete"] = True
+            messages.warning(
+                request,
+                "Interfaces refreshed, but relationship data could not be fetched from LibreNMS. "
+                "The Relationships column may be incomplete. "
+                "See server logs for details.",
+            )
+            return
 
-        # A structural signal still gives a useful partial snapshot when the OS lookup fails.
-        # Mark it incomplete because OS-scoped name patterns could describe additional edges, and
-        # because the SAP rule is OS-scoped too: an unknown OS applies every vendor's rule, which
-        # can suppress a relationship this device really has.
-        if (structural_signal or name_signal) and not device_os_known and not relationship_fetch_failed:
+        relationships = self.librenms_api.resolve_port_relationships(
+            host_ports,
+            ps_data,
+            device_os=device_os,
+            interface_name_field=interface_name_field,
+            compiled_lag_patterns=scoped_patterns,
+            compiled_sap_patterns=scoped_sap_patterns,
+            compiled_bridge_patterns=scoped_bridge_patterns,
+        )
+        librenms_data["port_stack_relationships"] = relationships
+
+        # Mark the answer incomplete because OS-scoped name patterns could describe additional
+        # edges, and because the SAP rule is OS-scoped too. Only a device that reported pairs can
+        # have an incomplete answer, so a device with no port_stack at all raises nothing.
+        if not device_os_known and relationships["diagnostics"]["pairs_seen"]:
             logger.warning("Could not determine the LibreNMS device OS for device %s", self.librenms_id)
             librenms_data["relationship_data_incomplete"] = True
             messages.warning(
@@ -652,6 +633,10 @@ class BaseInterfaceTableView(
         relationship_data_incomplete = (
             bool(cached_data.get("relationship_data_incomplete")) if isinstance(cached_data, dict) else False
         )
+
+        # What the device's port_stack held and what each rule made of it. Read from the same
+        # snapshot the table renders, so the report cannot describe rows the table is not showing.
+        relationship_diagnostics = relationship_diagnostics_report(cached_data, interface_name_field)
 
         virtual_chassis_members = []
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
@@ -930,36 +915,7 @@ class BaseInterfaceTableView(
             "server_key": server_key,
             "oob_incomplete": oob_incomplete,
             "relationship_data_incomplete": relationship_data_incomplete,
+            "relationship_diagnostics": relationship_diagnostics,
             "hidden_ipam_permissions": hidden_ipam_permissions,
             "vlan_scope_incomplete": vlan_scope_incomplete,
         }
-
-    @staticmethod
-    def _relationship_port_names(ports, interface_name_field):
-        """Return each port's distinct string names from the active and canonical fields."""
-        name_fields = {"ifName", "ifDescr", interface_name_field}
-        return [[name for field in name_fields if isinstance(name := port.get(field), str) and name] for port in ports]
-
-    def _has_structural_relationship_signals(self, ports, interface_name_field="ifName", names_per_port=None):
-        """Return true for an explicit LAG type or a child name whose parent also exists."""
-        if names_per_port is None:
-            names_per_port = self._relationship_port_names(ports, interface_name_field)
-        port_names = {name for names in names_per_port for name in names}
-        sub_iface_re = re.compile(r"^(.+)\.\d+$")
-        return any(
-            port.get("ifType", "") == "ieee8023adLag"
-            or any((match := sub_iface_re.match(name)) and match.group(1) in port_names for name in names)
-            for port, names in zip(ports, names_per_port, strict=True)
-        )
-
-    def _has_relationship_name_signals(
-        self,
-        ports,
-        interface_name_field,
-        relationship_patterns,
-        names_per_port=None,
-    ):
-        """Return true when an interface name matches one of the supplied OS-scoped patterns."""
-        if names_per_port is None:
-            names_per_port = self._relationship_port_names(ports, interface_name_field)
-        return any(pat.search(name) for names in names_per_port for pat in relationship_patterns for name in names)

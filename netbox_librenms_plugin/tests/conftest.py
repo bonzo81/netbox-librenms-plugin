@@ -198,12 +198,16 @@ def _seeded_rule_rows():
         rules.SERIAL_RULE,
     )
     bridge = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    # 0021 widened the bridge pattern 0019 seeded, so the restore takes that field from there.
+    # Restoring 0019's value would silently undo the later migration for every test after the
+    # first transactional one.
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     yield (
         PortStackLagPattern,
         {"librenms_os": bridge.BRIDGE_OS},
         {
             "lag_name_pattern": bridge.LAG_PATTERN,
-            "bridge_name_pattern": bridge.BRIDGE_PATTERN,
+            "bridge_name_pattern": widened.NEW_PATTERN,
             "description": bridge.SEEDED_DESCRIPTION,
         },
     )
@@ -408,6 +412,18 @@ def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
 # Site/Manufacturer/DeviceType/DeviceRole quartet in every file. No new dependency
 # (e.g. factory_boy) is introduced — get_or_create keeps the shared infra to a single
 # row set per test transaction, and everything is rolled back between tests.
+
+
+def typed_maps(relationships):
+    """Return only the typed relationship maps from a resolver result.
+
+    ``resolve_port_relationships`` also reports the untyped ``stacked_ports`` map and a
+    ``diagnostics`` block, so a whole-dict comparison would assert those by accident. A test that
+    cares about the untyped map asserts it by name.
+    """
+    from netbox_librenms_plugin.constants import RELATIONSHIP_KINDS
+
+    return {kind: relationships[kind] for kind in RELATIONSHIP_KINDS}
 
 
 def _shared_infra():

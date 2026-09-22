@@ -23,6 +23,8 @@
 </div>
 {% endif %}
 
+{% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}
+
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}

@@ -597,6 +597,46 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict, dict]:
     return lag_members, sub_interfaces, bridge_members
 
 
+def normalize_stacked_ports(relationships) -> dict[int, list[int]]:
+    """
+    Normalize the cached ``stacked_ports`` adjacency into an int-keyed map.
+
+    LibreNMS reports a port_stack pair without saying what kind of relationship it is or which
+    side is the composite. A pair that matches no rule is carried here rather than dropped, so a
+    row can still say which ports it is stacked with. The map is symmetric and states no
+    direction, which is why the relationship writer never reads it: there is nothing to write.
+
+    Fails soft against a corrupt or format-migrated cache, like
+    :func:`normalize_relationship_maps`: a non-dict value, a non-list partner list, an unusable
+    port id or a self-edge is dropped rather than raising.
+
+    Args:
+        relationships (object): Cached ``port_stack_relationships`` mapping.
+
+    Returns:
+        dict[int, list[int]]: Each port's partner port ids, deduplicated and sorted.
+
+    """
+    if not isinstance(relationships, dict):
+        return {}
+    raw_adjacency = relationships.get("stacked_ports")
+    if not isinstance(raw_adjacency, dict):
+        return {}
+    normalized: dict[int, list[int]] = {}
+    for raw_port_id, raw_partners in raw_adjacency.items():
+        port_id = normalize_librenms_port_id(raw_port_id)
+        if port_id is None or not isinstance(raw_partners, list):
+            continue
+        partners = {
+            partner_id
+            for raw_partner in raw_partners
+            if (partner_id := normalize_librenms_port_id(raw_partner)) is not None and partner_id != port_id
+        }
+        if partners:
+            normalized[port_id] = sorted(partners)
+    return normalized
+
+
 def invert_relationship_edges(edges) -> dict[int, list[int]]:
     """
     Invert one ``member -> aggregate`` edge map into ``aggregate -> [member, ...]``.

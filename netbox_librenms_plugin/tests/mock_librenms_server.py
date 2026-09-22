@@ -286,6 +286,14 @@ class MockLibreNMSServer:
                 }
             ]
         self.register(f"/api/v0/devices/{device_id}/ports", {"status": "ok", "ports": ports})
+        # An interface refresh reads the port stack alongside the ports. A real LibreNMS answers
+        # 200 with an empty mappings list for a device that has no stack rows, so serve that
+        # unless the test registered its own rows first.
+        # register() keys a method-less route by its bare path, so check both forms: a test that
+        # registered its own rows either way must keep them.
+        stack_route = f"/api/v0/devices/{device_id}/port_stack"
+        if not any(key in self.routes for key in (stack_route, f"GET {stack_route}")):
+            self.register(stack_route, {"status": "ok", "mappings": []})
 
     def auth_error_response(self, path="/api/v0/devices"):
         self.register(path, {"status": "error", "message": "Authentication failed"}, status=401)

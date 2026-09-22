@@ -357,21 +357,6 @@ class TestInterfaceViewWithRealObjects:
         assert maps["librenms_id_counts"][101] == 2
         assert maps["by_librenms_id_matches"][101] == [first, second]
 
-    @pytest.mark.parametrize(
-        ("ports", "expected"),
-        [
-            ([{"ifName": "Port-Channel1", "ifType": "ieee8023adLag"}], True),
-            ([{"ifName": "Ethernet1"}, {"ifName": "Ethernet1.100"}], True),
-            ([{"ifName": "Ethernet1"}, {"ifName": "Ethernet2"}], False),
-        ],
-    )
-    def test_relationship_detection_uses_real_port_shapes(self, live_librenms, ports, expected):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
-        view = _view(DeviceInterfaceTableView, live_librenms)
-
-        assert view._has_structural_relationship_signals(ports) is expected
-
     def test_real_post_fetches_and_caches_port_snapshot(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
@@ -387,7 +372,13 @@ class TestInterfaceViewWithRealObjects:
         assert response.status_code == 200
         assert cached["ports"][0]["port_id"] == 101
         assert cached["ports"][0]["_source"] == "main"
-        assert [item["path"] for item in live_librenms.server.requests] == ["/api/v0/devices/42/ports"]
+        # The refresh reads the device OS and the port stack too: an unclassified stack pair has
+        # no name or ifType signal in the ports payload, so neither read can be gated on one.
+        assert [item["path"] for item in live_librenms.server.requests] == [
+            "/api/v0/devices/42/ports",
+            "/api/v0/devices/42",
+            "/api/v0/devices/42/port_stack",
+        ]
 
     def test_cached_snapshot_builds_a_real_table_without_http(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
@@ -475,7 +466,13 @@ class TestInterfaceViewWithRealObjects:
 
         visible_row = interface_row(visible)
         hidden_row = interface_row(hidden)
-        assert [item["path"] for item in live_librenms.server.requests] == ["/api/v0/devices/42/ports"]
+        # The refresh reads the device OS and the port stack too: an unclassified stack pair has
+        # no name or ifType signal in the ports payload, so neither read can be gated on one.
+        assert [item["path"] for item in live_librenms.server.requests] == [
+            "/api/v0/devices/42/ports",
+            "/api/v0/devices/42",
+            "/api/v0/devices/42/port_stack",
+        ]
         assert '<span class="text-success">Enabled</span>' in visible_row
         assert '<span class="text-success">Enabled</span>' not in hidden_row
         assert '<span class="text-danger">Enabled</span>' in hidden_row

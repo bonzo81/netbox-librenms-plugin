@@ -50,14 +50,26 @@ _RELATIONSHIP_STATUS_MAP = {
     "missing_lnms": ("secondary", "mdi-database-off", "Not in LibreNMS"),
 }
 
-# (row key, mdi icon, singular, plural, device_only) per downward relationship view. These
-# describe what is attached to the row rather than what the row is attached to, so they carry a
-# count, no status colour and no sync button: the members sync from their own rows. device_only
-# mirrors the upward pill's rule, since VMInterface has no lag field.
+# (row key, mdi icon, singular, plural, device_only, tooltip prefix) per downward relationship
+# view. These describe what is attached to the row rather than what the row is attached to, so
+# they carry a count, no status colour and no sync button: the members sync from their own rows.
+# device_only mirrors the upward pill's rule, since VMInterface has no lag field.
+#
+# The last entry is the untyped one. LibreNMS reports that two ports are stacked without saying
+# what kind of relationship it is, and its high/low position does not say which side is the
+# composite either, so a pair no rule classified is shown on both rows and claims neither.
 _MEMBER_BADGES = (
-    ("librenms_lag_member_names", "mdi-vector-combine", "member", "members", True),
-    ("librenms_sub_interface_names", "mdi-file-tree", "sub-interface", "sub-interfaces", False),
-    ("librenms_bridge_member_names", "mdi-bridge", "bridged port", "bridged ports", False),
+    ("librenms_lag_member_names", "mdi-vector-combine", "member", "members", True, "In LibreNMS"),
+    ("librenms_sub_interface_names", "mdi-file-tree", "sub-interface", "sub-interfaces", False, "In LibreNMS"),
+    ("librenms_bridge_member_names", "mdi-bridge", "bridged port", "bridged ports", False, "In LibreNMS"),
+    (
+        "librenms_stacked_port_names",
+        "mdi-layers-outline",
+        "stacked port",
+        "stacked ports",
+        False,
+        "LibreNMS stacks these with this port, but no rule says how",
+    ),
 )
 
 # A Linux bridge can hold dozens of ports, and a title attribute that long is unreadable.
@@ -640,19 +652,19 @@ class LibreNMSInterfaceTable(tables.Table):
 
         # What is attached to this row, after what it is attached to. The count comes from the
         # device's whole port_stack, so it is right even when no member is on this page.
-        for row_key, icon, singular, plural, device_only in _MEMBER_BADGES:
+        for row_key, icon, singular, plural, device_only, tooltip_prefix in _MEMBER_BADGES:
             if device_only and self.sync_object_type == "virtualmachine":
                 continue
             member_names = record.get(row_key) or []
             if member_names:
-                parts.append(self._render_member_count_pill(member_names, icon, singular, plural))
+                parts.append(self._render_member_count_pill(member_names, icon, singular, plural, tooltip_prefix))
 
         if not parts:
             return mark_safe("")
 
         return mark_safe("".join(str(p) for p in parts))
 
-    def _render_member_count_pill(self, member_names, icon, singular, plural):
+    def _render_member_count_pill(self, member_names, icon, singular, plural, tooltip_prefix="In LibreNMS"):
         """
         Render one "N members" pill naming the LibreNMS ports attached to this row.
 
@@ -661,6 +673,7 @@ class LibreNMSInterfaceTable(tables.Table):
             icon (str): Material Design icon class.
             singular (str): The noun for one member.
             plural (str): The noun for several.
+            tooltip_prefix (str): What the tooltip says before the names.
 
         Returns:
             SafeString: The pill markup.
@@ -671,7 +684,7 @@ class LibreNMSInterfaceTable(tables.Table):
         if count > _MEMBER_TOOLTIP_LIMIT:
             listed = f"{listed}, +{count - _MEMBER_TOOLTIP_LIMIT} more"
         noun = singular if count == 1 else plural
-        return self._render_info_pill("secondary", icon, f"{count} {noun}", f"In LibreNMS: {listed}")
+        return self._render_info_pill("secondary", icon, f"{count} {noun}", f"{tooltip_prefix}: {listed}")
 
     @cached_property
     def _vc_members(self):

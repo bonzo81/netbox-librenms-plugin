@@ -101,9 +101,11 @@ Port Stack LAG Patterns help the plugin interpret LibreNMS port-stack relationsh
 
 Normally, a LAG aggregate is identified by the LibreNMS `ifType` value `ieee8023adLag`. Some platforms report another type, so **LAG Name Pattern** provides a Python regular expression that recognizes aggregate interface names instead. For example, Cisco IOS can report port channels as `propVirtual`, while names such as `Po1` match `^Po\d+$`.
 
+A bridge has no equivalent `ifType`: LibreNMS reports a Linux bridge as `ethernetCsmacd`, the same as its members. **Bridge Name Pattern** is therefore the only way to identify the bridge side of a port-stack pair. The side whose name matches is the bridge; the other side is its member. A pattern that matches *both* sides identifies neither, so it must not accept a member name. Ships pre-seeded for `linux`, covering `vmbr0`, `vmbr0v5`, `br0`, `br-lan`, `bridge0`, `virbr0`, `docker0`, `pnet0` and `nat0`.
+
 Some LibreNMS port-stack rows describe a service access point rather than a relationship between NetBox interfaces. The optional **SAP Name Pattern** identifies those names so the rows are skipped. For example, Nokia SR OS can report service access points such as `lag-1:10`.
 
-Patterns are scoped by `librenms_os`, which is matched case-insensitively. The LAG and SAP expressions use Python regular expressions. LAG names use full-match behavior; SAP patterns match when found within the name.
+Patterns are scoped by `librenms_os`, which is matched case-insensitively. The LAG, bridge and SAP expressions use Python regular expressions. LAG and bridge names use full-match behavior; SAP patterns match when found within the name.
 
 ```yaml
 - librenms_os: ios
@@ -115,7 +117,18 @@ Patterns are scoped by `librenms_os`, which is matched case-insensitively. The L
   lag_name_pattern: "^lag-\\d+$"
   sap_name_pattern: ":"
   description: "Recognize Nokia LAGs and skip SAP rows"
+
+- librenms_os: linux
+  lag_name_pattern: "^bond\\d+$"
+  bridge_name_pattern: "^(?:vmbr\\d+(?:v\\d+)?|br\\d+|br-[\\w.-]+|bridge\\d+|virbr\\d+|docker\\d+|pnet\\d+|nat\\d+)$"
+  description: "Linux bond and bridge interface names"
 ```
+
+### When no pattern matches
+
+LibreNMS reports only that two ports are stacked. It does not say what kind of relationship it is, and its row order does not say which side is the composite: a sub-unit sits on the low side on Junos, and a LAG aggregate on either side on Nokia SR OS. A pair that matches none of the rules above is therefore shown untyped, as a **stacked port** count on both rows, rather than dropped.
+
+The Interfaces tab reports what the device's port stack contained under **Relationship data** above the table. It gives the number of rows LibreNMS returned, how many were dropped (an end naming a port LibreNMS does not poll, or a SAP row), how many each rule claimed, the pairs no rule classified, and the patterns in effect. That tells "this OS's name pattern rejects the bridge" apart from "LibreNMS holds no port-stack data for this device", which otherwise look identical.
 
 ## Serial Sensor Types
 

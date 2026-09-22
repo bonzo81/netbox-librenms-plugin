@@ -2,7 +2,7 @@
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, typed_maps
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
 from netbox_librenms_plugin.utils import normalize_relationship_maps
 
@@ -31,11 +31,12 @@ def test_bridge_members_are_independent_from_parent_relationships(mock_librenms_
         compiled_sap_patterns=[],
     )
 
-    assert relationships == {
+    assert typed_maps(relationships) == {
         "lag_members": {},
         "sub_interfaces": {102: 101},
         "bridge_members": {102: 100, 103: 100},
     }
+    assert relationships["stacked_ports"] == {}, "every pair here is classified"
 
 
 def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback(mock_librenms_api):
@@ -61,11 +62,12 @@ def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback(mock_libr
         compiled_sap_patterns=[],
     )
 
-    assert relationships == {
+    assert typed_maps(relationships) == {
         "lag_members": {},
         "sub_interfaces": {},
         "bridge_members": {101: 100},
     }
+    assert relationships["stacked_ports"] == {}, "every pair here is classified"
 
 
 def test_name_field_fallback_does_not_reclassify_a_sub_interface_pair_as_bridge(mock_librenms_api):
@@ -92,11 +94,12 @@ def test_name_field_fallback_does_not_reclassify_a_sub_interface_pair_as_bridge(
         compiled_sap_patterns=[],
     )
 
-    assert relationships == {
+    assert typed_maps(relationships) == {
         "lag_members": {},
         "sub_interfaces": {100: 101},
         "bridge_members": {},
     }
+    assert relationships["stacked_ports"] == {}, "every pair here is classified"
 
 
 def test_bridge_pattern_is_stored_with_the_existing_port_stack_mapping():
@@ -701,7 +704,12 @@ def test_default_linux_bridge_pattern_is_seeded():
     mapping = PortStackLagPattern.objects.get(librenms_os="linux")
 
     assert mapping.lag_name_pattern == r"^bond\d+$"
-    assert mapping.bridge_name_pattern == r"^(vmbr|br|bridge)\d+$"
+    # Widened by 0021: the 0019 form rejected br-lan, virbr0, docker0, pnet0 and vmbr0v5, and a
+    # rejected bridge name is the whole reason its members never appeared (issue #179 item 10).
+    assert (
+        mapping.bridge_name_pattern
+        == r"^(?:vmbr\d+(?:v\d+)?|br\d+|br-[\w.-]+|bridge\d+|virbr\d+|docker\d+|pnet\d+|nat\d+)$"
+    )
 
 
 def test_interface_selection_and_inline_action_include_bridge_dependencies():
