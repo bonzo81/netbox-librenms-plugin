@@ -917,21 +917,51 @@ class SyncInterfacesView(
                     return
                 self.object = obj
                 vlan_scope_devices = [obj]
+            default_host_owner_ids = {}
+            if isinstance(obj, Device) and obj.virtual_chassis_id is not None:
+                host_port_ids = {
+                    port_id
+                    for port in ports_data
+                    if port.get("_source") != OOB_INVENTORY_SOURCE
+                    and (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
+                }
+                default_host_owner_ids = self._resolve_auto_selected_target_ids(
+                    obj,
+                    ports_data,
+                    host_port_ids,
+                    interface_name_field,
+                    self._post_server_key,
+                    members=list(self._locked_target_devices.values()),
+                )
+                # Use the same inferred owner for a selected host row that the table
+                # displayed. Explicit device selections still take precedence.
+                self._auto_selected_target_ids.update(
+                    {
+                        port_id: owner_id
+                        for port_id, owner_id in default_host_owner_ids.items()
+                        if port_id in selected_port_ids
+                    }
+                )
             if "vlans" not in exclude_columns:
                 if isinstance(obj, Device):
                     vlan_scope_devices = self._selected_vlan_scope_devices(obj, ports_data, interface_name_field)
                 self._prepare_vlan_lookup_maps(vlan_scope_devices)
-            # An OOB controller is a second device in LibreNMS but the SAME device in NetBox, so
-            # its ports are modelled as interfaces here and share the host's (device, name)
-            # namespace. The host owns that namespace; see host_owned_interface_names.
-            host_owned_names = host_owned_interface_names(ports_data, interface_name_field)
+
+            def owner_id_for_port(port):
+                port_id = normalize_librenms_port_id(port.get("port_id"))
+                if self._selected_row_target_id(port_id):
+                    target = self._resolve_row_target_device(obj, port_id)
+                    return target.pk if target is not None else None
+                return default_host_owner_ids.get(port_id, obj.pk)
+
+            host_owned_names = host_owned_interface_names(ports_data, interface_name_field, owner_id_for_port)
             try:
                 for port in ports_data:
                     port_id = normalize_librenms_port_id(port.get("port_id"))
                     if port_id not in selected_port_ids:
                         continue
                     if port.get("_source") == OOB_INVENTORY_SOURCE and self._oob_row_is_unsyncable(
-                        port, interface_name_field, host_owned_names
+                        port, interface_name_field, host_owned_names.get(owner_id_for_port(port), set())
                     ):
                         continue
                     row_excludes = exclude_columns

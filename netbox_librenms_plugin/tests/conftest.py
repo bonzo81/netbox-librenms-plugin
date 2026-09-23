@@ -669,7 +669,7 @@ def load_contrib_bay_mappings():
     from netbox_librenms_plugin.models import ModuleBayMapping
 
     contrib = Path(__file__).resolve().parents[2] / "contrib" / "module_bay_mappings.yaml"
-    with contrib.open() as f:
+    with contrib.open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return [
         ModuleBayMapping.objects.create(

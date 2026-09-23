@@ -639,6 +639,41 @@ class TestInterfaceContextOOBRows:
         assert "Name conflict" not in str(table.render_parent(None, free_oob_row))
         assert "Name conflict" not in str(table.render_parent(None, host_row))
 
+    def test_host_name_on_another_chassis_member_does_not_mark_oob_collision(self):
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        master = make_device("oob-collision-scope-master")
+        member = make_device("oob-collision-scope-member")
+        chassis = VirtualChassis.objects.create(name="oob-collision-scope", master=master)
+        for device, position in ((master, 1), (member, 2)):
+            device.virtual_chassis = chassis
+            device.vc_position = position
+            device.save()
+        host_interface = make_interface(member, "eth0")
+        set_librenms_device_id(host_interface, 9401, "default")
+        host_interface.save()
+        snapshot = {
+            "ports": [
+                {"port_id": 9401, "ifName": "eth0", "ifType": "ethernetCsmacd"},
+                {"port_id": 9402, "ifName": "eth0", "ifType": "ethernetCsmacd", "_source": "oob"},
+            ]
+        }
+        request = _make_request()
+        view = DeviceInterfaceTableView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        view.request = request
+
+        view.get_context_data(request, master, "ifName", "default", fresh_data=snapshot, sync_device=master)
+
+        assert snapshot["ports"][1]["host_name_collision"] is False
+        assert snapshot["ports"][1]["selected_object_id"] == master.pk
+
     def test_switching_the_name_field_re_evaluates_the_collision(self):
         """ifName and ifDescr are different namespaces, so a collision under one is not one under the other."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -3553,6 +3588,105 @@ class TestSyncInterfacesViewPost:
         assert Interface.objects.filter(device=device, name="eth0").exists(), (
             "the OOB controller's port must be modellable as an interface on the host device"
         )
+
+    @pytest.mark.parametrize("selected_ports", [["9402"], ["9401", "9402"]])
+    def test_oob_sync_can_use_a_name_owned_by_another_chassis_member(self, selected_ports):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, VirtualChassis
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        master = make_device("oob-sync-scope-master")
+        member = make_device("oob-sync-scope-member")
+        chassis = VirtualChassis.objects.create(name="oob-sync-scope", master=master)
+        for device, position in ((master, 1), (member, 2)):
+            device.virtual_chassis = chassis
+            device.vc_position = position
+            device.save()
+        host_interface = make_interface(member, "eth0")
+        set_librenms_device_id(host_interface, 9401, "default")
+        host_interface.save()
+        user = make_user_with_perms(
+            "oob-sync-scope",
+            [("view", Device), ("add", Interface), ("change", Interface)],
+        )
+        request = _make_request(
+            post_data={
+                "select": selected_ports,
+                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
+            },
+            user=user,
+        )
+        view = SyncInterfacesView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(master, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {"ifName": "eth0", "port_id": 9401, "ifType": "ethernetCsmacd"},
+                    {"ifName": "eth0", "port_id": 9402, "ifType": "ethernetCsmacd", "_source": "oob"},
+                ]
+            },
+        )
+
+        try:
+            response = _post(view, request, object_type="device", object_id=master.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        master_interface = Interface.objects.get(device=master, name="eth0")
+        member_interface = Interface.objects.get(device=member, name="eth0")
+        assert get_librenms_device_id(master_interface, "default", auto_save=False) == 9402
+        assert get_librenms_device_id(member_interface, "default", auto_save=False) == 9401
+
+    def test_unbound_host_and_oob_rows_follow_the_displayed_chassis_owners(self):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        _chassis, (page_device, member_device) = make_virtual_chassis_members("unbound-host-oob-owner")
+        user = make_user_with_perms(
+            "unbound-host-oob-owner", [("view", Device), ("add", Interface), ("change", Interface)]
+        )
+        request = _make_request(
+            post_data={
+                "select": ["9411", "9412"],
+                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
+            },
+            user=user,
+        )
+        view = SyncInterfacesView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(page_device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {"ifName": "Gi2/0/1", "port_id": 9411, "ifType": "ethernetCsmacd"},
+                    {"ifName": "Gi2/0/1", "port_id": 9412, "ifType": "ethernetCsmacd", "_source": "oob"},
+                ]
+            },
+        )
+
+        try:
+            response = _post(view, request, object_type="device", object_id=page_device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        page_interface = Interface.objects.get(device=page_device, name="Gi2/0/1")
+        member_interface = Interface.objects.get(device=member_device, name="Gi2/0/1")
+        assert get_librenms_device_id(page_interface, "default", auto_save=False) == 9412
+        assert get_librenms_device_id(member_interface, "default", auto_save=False) == 9411
 
     def test_a_synced_oob_interface_shows_as_matched(self):
         """Once synced, the OOB row must stop reading as "not in NetBox".

@@ -792,14 +792,7 @@ class BaseInterfaceTableView(
                 can_write=can_write_relationships,
             )
 
-            # The host and its OOB controller are one NetBox device, so both write into the same
-            # (device, name) namespace and the host owns it. Derived per render because the name
-            # field is switchable, where the cached snapshot is not.
-            host_owned_names = host_owned_interface_names(ports_data, interface_name_field)
-
             for port in ports_data:
-                if port.get("_source") == OOB_INVENTORY_SOURCE:
-                    port["host_name_collision"] = port.get(interface_name_field) in host_owned_names
                 port["enabled"] = interface_enabled_from_port(port)
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
@@ -851,6 +844,14 @@ class BaseInterfaceTableView(
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, row_lookup_maps)
 
+            host_owned_names = host_owned_interface_names(
+                ports_data, interface_name_field, lambda port: port.get("selected_object_id")
+            )
+            for port in ports_data:
+                if port.get("_source") == OOB_INVENTORY_SOURCE:
+                    owner_names = host_owned_names.get(port.get("selected_object_id"), set())
+                    port["host_name_collision"] = port.get(interface_name_field) in owner_names
+
             table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
             table.allowed_vc_member_ids = actionable_owner_ids
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
@@ -866,10 +867,10 @@ class BaseInterfaceTableView(
                 for interface_name, interface in device_interface_maps["by_name"].items():
                     if interface.id not in viewable_interface_ids or interface.id in matched_interface_ids:
                         continue
-                    # host_owned_names is host rows only, so an OOB row's name cannot suppress
+                    # Host ownership is per device, so an OOB row's name cannot suppress
                     # netbox-only detection here. It also drops names too long for NetBox to
                     # store, which no NetBox interface name can equal anyway.
-                    if interface_name not in host_owned_names:
+                    if interface_name not in host_owned_names.get(device_id, set()):
                         # Get device name for the interface (reuse the pre-indexed members — the
                         # device_id keys come from interfaces_by_device, which was built from them —
                         # instead of a members.get(id=...) query per netbox-only interface).

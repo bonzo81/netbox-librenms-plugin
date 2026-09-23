@@ -13,6 +13,23 @@ from netbox_librenms_plugin.tests.conftest import (
 pytestmark = pytest.mark.django_db
 
 
+def test_contributed_mappings_load_under_an_ascii_default(monkeypatch):
+    from pathlib import Path
+
+    from netbox_librenms_plugin.tests.conftest import load_contrib_bay_mappings
+
+    original_open = Path.open
+
+    def ascii_default(path, *args, **kwargs):
+        if "encoding" not in kwargs and (not args or "b" not in args[0]):
+            kwargs["encoding"] = "ascii"
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", ascii_default)
+
+    assert load_contrib_bay_mappings()
+
+
 def _item(index, model, name, *, parent=0, descr=None, phys_class="module", serial="", **extra):
     row = {
         "entPhysicalIndex": index,
@@ -244,6 +261,26 @@ class TestCandidateBaysForItem:
 
         assert fallback["X2 Port 2"].installed_module.pk == converter.pk
         assert set(fallback) == {"Slot 1", "X2 Port 2"}
+
+    def test_fallback_reuses_the_preloaded_module_ancestry(self):
+        from dcim.models import Module
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device = make_device_with_module_bays("fallback-cached-ancestry", ["Slot 1"])
+        parent = install_module(device, "Slot 1", "FALLBACK-CACHED-PARENT", child_bays=("Child Bay",))
+        holder_of = dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+        bays = _bays(device)
+
+        with CaptureQueriesContext(connection) as queries:
+            fallback = InstallBranchView._fallback_bays_for_resolved_parent(
+                device, bays, parent.pk, holder_of=holder_of
+            )
+
+        assert "Child Bay" in fallback
+        assert not any('FROM "dcim_module"' in query["sql"] for query in queries)
 
 
 class TestBayEligibilityPredicates:
@@ -547,12 +584,14 @@ class TestInstallSingleResolutionPaths:
             30: _item(30, module_type.model, "2/x1/1/c2", parent=10),
         }
 
-        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+        holder_of = dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+        result = self._install(device, index_map[30], index_map, module_types=[module_type], holder_of=holder_of)
 
         assert result["status"] == "installed", result
         installed = Module.objects.get(device=device, module_type=module_type)
         assert installed.module_bay.name == "1/c2"
         assert installed.module_bay.module.module_type.model == "DESCENDANT-MDA"
+        assert holder_of[installed.pk] == installed.module_bay.module_id
 
     def test_a_descendant_bay_survives_a_bay_the_caller_cannot_change(self):
         """Ancestry must not be read from the permission-filtered bay queryset.

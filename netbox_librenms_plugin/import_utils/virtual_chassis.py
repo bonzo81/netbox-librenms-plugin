@@ -186,8 +186,11 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             master_name = device_info.get("sysName") or device_info.get("hostname")
 
         # Step 1: Get root level items
-        # A device with no inventory rows answers 404, which is a real non-stack, not a failed read.
-        success, root_items = api.get_inventory_filtered(device_id, ent_physical_contained_in=0, missing_is_empty=True)
+        # A confirmed device with no inventory rows is a non-stack. For a missing device,
+        # an inventory 404 is a failed read and must not be cached as a non-stack.
+        success, root_items = api.get_inventory_filtered(
+            device_id, ent_physical_contained_in=0, missing_is_empty=device_found
+        )
 
         if not success:
             logger.warning(f"Could not read root inventory items for device {device_id}")

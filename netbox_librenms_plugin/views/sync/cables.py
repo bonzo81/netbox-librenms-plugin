@@ -1023,7 +1023,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         response = self._sync_response(request, initial_device, server_key, redirect_url)
         return apply_request_cache_transition(request, response)
 
-    def _sync_response(self, request, obj, server_key, redirect_url):
+    def _sync_response(self, request, obj, server_key, redirect_url, *, close_modal=False):
         """
         Return the post-sync response: an HTMX partial re-render, or a full-page redirect.
 
@@ -1041,6 +1041,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             obj (Device): The device whose cable data was synced.
             server_key (str | None): The resolved LibreNMS server key.
             redirect_url (str): The full-page fallback URL.
+            close_modal (bool): Close the modal that submitted this action.
 
         Returns:
             HttpResponse: The partial render or full-page redirect response.
@@ -1088,7 +1089,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             context["server_key"] = resolved_key
             context["object"] = obj
             context["origin_device_id"] = getattr(getattr(self, "_origin_device", None), "pk", obj.pk)
-        elif request.POST.get("force"):
+        elif close_modal or request.POST.get("force"):
             # A force submit comes FROM the force-confirm modal; with every conflict resolved
             # the main swap only refreshes the table, so ship the close_modal OOB block too —
             # otherwise the modal stays open over the refreshed content.
@@ -1211,6 +1212,17 @@ class CableRemoteCreateView(SyncCablesView):
         if error is not None:
             return error
         obj = context["object"]
+        server_key = context["server_key"]
+        redirect_url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[obj.pk])}?tab=cables" + (
+            f"&server_key={quote_plus(server_key)}" if server_key else ""
+        )
+        if any(
+            get_migrated_to_marker(device, server_key)
+            for device in (obj, context["local_interface"].device, getattr(self, "_cache_device", None))
+            if device is not None
+        ):
+            messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
+            return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
         try:
             with transaction.atomic():
                 interface = self._create_remote_interface(request, context)
@@ -1225,11 +1237,7 @@ class CableRemoteCreateView(SyncCablesView):
                 request,
                 f"Created {interface.device.name} {interface.name} and cabled it to {context['local_interface'].name}.",
             )
-        server_key = context["server_key"]
-        redirect_url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[obj.pk])}?tab=cables" + (
-            f"&server_key={quote_plus(server_key)}" if server_key else ""
-        )
-        return self._sync_response(request, obj, server_key, redirect_url)
+        return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
 
     def _resolve_proposal(self, request, pk, data):
         """
@@ -1283,7 +1291,7 @@ class CableRemoteCreateView(SyncCablesView):
             # An unmapped ifType is written as "other" only because this IS a create; the same
             # rule the interface sync follows (issue #179 item 1).
             "proposed_type": netbox_type or "other",
-            "type_is_unmapped": netbox_type is None,
+            "type_is_unmapped": port is not None and netbox_type is None,
             # Truthiness only: the template must not be handed an unscoped object to render.
             "existing_interface": Interface.objects.filter(device=remote_device, name=name).exists(),
             "post_url": reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk]),

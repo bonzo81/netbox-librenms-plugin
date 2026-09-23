@@ -991,8 +991,12 @@ class DeviceImportTable(tables.Table):
         vc_data = validation.get("virtual_chassis", {})
         device_id = record.get("device_id")
 
-        # Show dash for non-VC or single member stacks
-        if not vc_data.get("is_stack") or vc_data.get("member_count", 0) <= 1:
+        # Show a dash only when detection completed without finding a stack.
+        if (
+            not vc_data.get("detection_failed")
+            and not vc_data.get("detection_error")
+            and (not vc_data.get("is_stack") or vc_data.get("member_count", 0) <= 1)
+        ):
             return mark_safe('<span class="text-muted">—</span>')
 
         vc_url = reverse(
@@ -1004,7 +1008,7 @@ class DeviceImportTable(tables.Table):
             vc_url += f"?server_key={quote_plus(str(server_key))}"
 
         # Show error button if detection failed
-        if vc_data.get("detection_error"):
+        if vc_data.get("detection_failed") or vc_data.get("detection_error"):
             return format_html(
                 '<button type="button" class="badge bg-yellow-lt border-0" '
                 'hx-get="{}" hx-target="#htmx-modal-content" hx-swap="innerHTML" '

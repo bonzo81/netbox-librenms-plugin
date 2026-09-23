@@ -216,6 +216,94 @@ def test_a_lone_row_whose_stack_read_failed_is_not_imported_by_the_view(client, 
 
 
 @pytest.mark.django_db
+def test_direct_bulk_writer_refuses_a_failed_stack_read(librenms_server, settings):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
+
+    configure_librenms_servers(
+        settings,
+        {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
+    )
+    infrastructure = make_device("direct-stack-fault-infrastructure")
+    device_id = 97132
+    row = {
+        **_row(device_id, "direct-stack-fault-target"),
+        "hardware": infrastructure.device_type.model,
+        "location": infrastructure.site.name,
+    }
+    librenms_server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+    librenms_server.register(f"/api/v0/inventory/{device_id}", {"status": "error"}, status=500)
+
+    result = bulk_import_devices(
+        [device_id],
+        server_key="default",
+        manual_mappings_per_device={
+            device_id: {
+                "site_id": infrastructure.site_id,
+                "device_type_id": infrastructure.device_type_id,
+                "device_role_id": infrastructure.role_id,
+            }
+        },
+        libre_devices_cache={device_id: row},
+        user=make_superuser("direct-stack-fault-importer"),
+    )
+
+    assert result["success"] == []
+    assert result["failed"]
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+
+
+@pytest.mark.django_db
+def test_a_missing_device_does_not_turn_inventory_404_into_a_non_stack(settings, librenms_server):
+    from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+    configure_librenms_servers(
+        settings,
+        {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
+    )
+
+    result = get_virtual_chassis_data(LibreNMSAPI(server_key="default"), 97133)
+
+    assert result["detection_failed"] is True
+
+
+@pytest.mark.django_db
+def test_confirm_preview_discloses_ambiguous_serialless_stacks(client, librenms_server, settings):
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
+
+    configure_librenms_servers(
+        settings,
+        {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
+    )
+    device_ids = [97140, 97141]
+    for device_id in device_ids:
+        row = _row(device_id, f"preview-stack-{device_id}")
+        librenms_server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 1}],
+            {1: CHASSIS_MEMBERS},
+        )
+    client.force_login(make_superuser("preview-ambiguous-stacks"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id) for device_id in device_ids]},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert b"ambiguous serial-less stacks" in response.content
+    assert b"Confirm Import" not in response.content
+
+
+@pytest.mark.django_db
 def test_ambiguous_stack_ids_are_listed_in_numeric_order():
     """LibreNMS ids are numbers, so the blocked-batch message must not order them lexically."""
     rows = {2: _row(2, "stack-low"), 10: _row(10, "stack-high")}

@@ -166,7 +166,7 @@ def detect_collisions_for_device_ids(
     vm_id_set = set(vm_device_ids or ())
     devices = []
     unresolved_ids = []
-    fingerprint_stack_ids = {}
+    stack_identities = []
     device_ids = list(device_ids)
     for idx, device_id in enumerate(device_ids, start=1):
         # Same cancellation cadence as the import loops below (first id, then every 5th):
@@ -248,8 +248,7 @@ def detect_collisions_for_device_ids(
             identity = stack_identity(get_virtual_chassis_data(api, device_id), device_id)
             if identity.basis == "unknown":
                 unresolved_ids.append(device_id)
-            elif identity.basis == "fingerprint":
-                fingerprint_stack_ids.setdefault(identity.key, set()).add(device_id)
+            stack_identities.append((device_id, identity))
         devices.append(
             {
                 "device_id": device_id,
@@ -260,9 +259,7 @@ def detect_collisions_for_device_ids(
     collisions = detect_bulk_collisions(devices)
     if user is not None:
         collisions = scope_bulk_collisions(collisions, user)
-    stack_ambiguities = [
-        {"key": key, "device_ids": sorted(ids)} for key, ids in sorted(fingerprint_stack_ids.items()) if len(ids) >= 2
-    ]
+    stack_ambiguities = ambiguous_stack_groups(stack_identities)
     return collisions, unresolved_ids, stack_ambiguities
 
 
@@ -434,6 +431,17 @@ def stack_identity(vc_data, device_id) -> StackIdentity:
     return StackIdentity(f"librenms-stack-{fingerprint}", "fingerprint")
 
 
+def ambiguous_stack_groups(identities):
+    """Group distinct rows whose serial-less stack identity is the same guess."""
+    fingerprint_stack_ids = {}
+    for device_id, identity in identities:
+        if identity.basis == "fingerprint":
+            fingerprint_stack_ids.setdefault(identity.key, set()).add(device_id)
+    return [
+        {"key": key, "device_ids": sorted(ids)} for key, ids in sorted(fingerprint_stack_ids.items()) if len(ids) >= 2
+    ]
+
+
 def bulk_import_devices_shared(  # noqa: C901
     device_ids: List[int],
     server_key: str = None,
@@ -583,6 +591,14 @@ def bulk_import_devices_shared(  # noqa: C901
                     continue
 
             vc_data = validation.get("virtual_chassis", {})
+            if vc_data.get("detection_failed"):
+                error_msg = f"Cannot import device {device_id}: virtual chassis detection failed"
+                failed_list.append({"device_id": device_id, "error": error_msg})
+                if job and job.logger:
+                    job.logger.error(error_msg)
+                else:
+                    logger.error(error_msg)
+                continue
             if vc_data.get("is_stack", False):
                 has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
                 if not has_vc_perm:

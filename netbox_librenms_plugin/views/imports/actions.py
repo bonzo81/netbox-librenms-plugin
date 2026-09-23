@@ -59,6 +59,7 @@ from netbox_librenms_plugin.import_utils import (
     validate_device_for_import,
     visible_object_label,
 )
+from netbox_librenms_plugin.import_utils.bulk_import import ambiguous_stack_groups, stack_identity
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -1283,10 +1284,18 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         }
 
         collisions = scope_bulk_collisions(detect_bulk_collisions(devices), request.user)
+        stack_ambiguities = ambiguous_stack_groups(
+            (
+                entry["device_id"],
+                stack_identity(entry["validation"].get("virtual_chassis", {}), entry["device_id"]),
+            )
+            for entry in devices
+            if not entry["is_vm"]
+        )
         # After collision detection, which must key on the unrestricted matches to stop two rows
         # writing the same NetBox device.
         scope_validation_disclosures([entry.get("validation") for entry in devices], request.user)
-        if collisions:
+        if collisions or stack_ambiguities:
             # Render at 200 (not 4xx): this is an interstitial modal swapped
             # into #htmx-modal-content, exactly like the confirm step. A non-2xx
             # status makes HTMX skip the swap and route the body through
@@ -1295,7 +1304,13 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return render(
                 request,
                 "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                {"collisions": collisions},
+                {
+                    "collisions": collisions,
+                    "stack_ambiguities": stack_ambiguities,
+                    "block_message": classify_bulk_precheck(
+                        collisions, [], stack_ambiguities, [entry["device_id"] for entry in devices], {}
+                    ).block_message,
+                },
             )
 
         return render(
