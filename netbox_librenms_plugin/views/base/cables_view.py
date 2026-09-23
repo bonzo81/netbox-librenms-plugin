@@ -243,7 +243,7 @@ def _endpoint_group_key(row):
     return (row.get("_source"), neighbour, endpoint)
 
 
-def _remote_name_candidates(row):
+def _remote_port_name_candidates(row):
     """Every LibreNMS name the far end of *row* is known by: advertised first, then the aliases."""
     names = [row.get("remote_port"), *(row.get("remote_port_aliases") or [])]
     return [name for name in names if isinstance(name, str) and name]
@@ -639,7 +639,7 @@ class BaseCableTableView(
                     candidate_specs[local_owner.pk]["ids"].add(local_id)
             remote_owner = remote_owner_by_link.get(id(link))
             if remote_owner is not None:
-                candidate_specs[remote_owner.pk]["names"].update(_remote_name_candidates(link))
+                candidate_specs[remote_owner.pk]["names"].update(_remote_port_name_candidates(link))
                 if (remote_id := coerce_librenms_id(link.get("remote_port_id"))) is not None:
                     candidate_specs[remote_owner.pk]["ids"].add(remote_id)
         return manual_ids, candidate_specs
@@ -716,7 +716,7 @@ class BaseCableTableView(
                     context,
                     remote_owner_by_link.get(id(link)),
                     link.get("remote_port_id"),
-                    _remote_name_candidates(link),
+                    _remote_port_name_candidates(link),
                 )
             if self._link_ends_conflict(local_interface, remote_interface, context["visible_cable_ids"]):
                 if local_interface.pk not in trace_paths:
@@ -1495,7 +1495,7 @@ class BaseCableTableView(
         """Add remote port URL if device and interface exist in NetBox."""
         remote_port = link.get("remote_port")
         if isinstance(remote_port, str) and remote_port:
-            remote_name_candidates = _remote_name_candidates(link)
+            remote_name_candidates = _remote_port_name_candidates(link)
             netbox_remote_interface = None
             librenms_remote_port_id = link.get("remote_port_id")
             if server_key is None:
