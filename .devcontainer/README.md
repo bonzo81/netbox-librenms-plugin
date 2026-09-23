@@ -85,12 +85,15 @@ The `librenms-stub` Compose service serves anonymized data-shape recordings over
 
 The default catalog contains these scenarios:
 
-- Cisco StackWise virtual chassis
-- Arcos LAGs and transceivers
-- Avocent serial ports
-- Plain Linux host
-- Linux host with a paired OOB controller
-- Synthetic minimal Linux virtual machine
+- Cisco StackWise virtual chassis (`cisco-stackwise-3member`)
+- Arcos LAGs and transceivers (`arcos-lag-transceivers`)
+- Avocent serial ports (`avocent-serial-ports`)
+- Plain Linux host (`linux-host`)
+- Linux host with a paired OOB controller (`linux-host-oob`)
+- Synthetic minimal Linux virtual machine (`linux-virtual-machine`)
+- IOS-XE subinterfaces (`iosxe-subinterfaces`)
+- Junos subinterfaces (`junos-subinterfaces`)
+- Nokia transceivers (`nokia-timos-transceivers`)
 
 The structural device, port, inventory, port-stack, transceiver, and sensor responses come from the committed recordings. For the OOB pair, the controller ports come from the host recording and the stub derives the missing controller device row with the same chassis serial. The stub also adds deterministic development data for API areas that the recordings do not capture. This includes discovery lists, VLANs 100 and 200, IP-to-port associations, one LLDP-style link per device, locations, and poller groups.
 

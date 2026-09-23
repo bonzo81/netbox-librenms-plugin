@@ -96,7 +96,7 @@ def browser_launch_options():
     executable = os.environ.get("E2E_CHROMIUM_EXECUTABLE")
     if executable:
         options["executable_path"] = executable
-    args = os.environ.get("E2E_BROWSER_ARGS", "").split()
+    args = shlex.split(os.environ.get("E2E_BROWSER_ARGS", ""))
     if args:
         options["args"] = args
     return options
@@ -107,23 +107,25 @@ def browser():
     """Launch the browser for the test module."""
     from playwright.sync_api import sync_playwright
 
-    pw = sync_playwright().start()
-    b = pw.chromium.launch(**browser_launch_options())
-    yield b
-    b.close()
-    pw.stop()
+    with sync_playwright() as pw:
+        b = pw.chromium.launch(**browser_launch_options())
+        try:
+            yield b
+        finally:
+            b.close()
 
 
 @pytest.fixture
 def page(browser):
     """Create a new page and log in to NetBox."""
     ctx = browser.new_context(ignore_https_errors=True)
-    pg = ctx.new_page()
-
-    pg.goto(f"{NETBOX_URL}/login/", timeout=10000)
-    pg.fill("#id_username", NETBOX_USER)
-    pg.fill("#id_password", NETBOX_PASS)
-    pg.click("button[type=submit]")
-    pg.wait_for_load_state("networkidle")
-    yield pg
-    ctx.close()
+    try:
+        pg = ctx.new_page()
+        pg.goto(f"{NETBOX_URL}/login/", timeout=10000)
+        pg.fill("#id_username", NETBOX_USER)
+        pg.fill("#id_password", NETBOX_PASS)
+        pg.click("button[type=submit]")
+        pg.wait_for_load_state("networkidle")
+        yield pg
+    finally:
+        ctx.close()

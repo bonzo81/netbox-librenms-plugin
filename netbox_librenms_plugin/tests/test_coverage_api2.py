@@ -226,12 +226,14 @@ class TestDeviceStatusFilterSet:
         from netbox_librenms_plugin.filtersets import DeviceStatusFilterSet
 
         matching = make_device("search-device")
-        make_device("unrelated-device")
+        unrelated = make_device("unrelated-device")
         filterset = object.__new__(DeviceStatusFilterSet)
 
         result = filterset.search(Device.objects.all(), "q", query)
 
         assert matching in result
+        if query == "search-device":
+            assert unrelated not in result
 
     def test_whitespace_search_returns_the_original_queryset(self):
         from dcim.models import Device
@@ -250,10 +252,11 @@ class TestVMStatusFilterSet:
         from netbox_librenms_plugin.filtersets import VMStatusFilterSet
 
         matching = make_vm("search-vm")
-        make_vm("unrelated-vm")
+        unrelated = make_vm("unrelated-vm")
         filterset = object.__new__(VMStatusFilterSet)
 
         assert matching in filterset.search(VirtualMachine.objects.all(), "q", "search-vm")
+        assert unrelated not in filterset.search(VirtualMachine.objects.all(), "q", "search-vm")
         assert matching in filterset.search(VirtualMachine.objects.all(), "q", "testcluster")
 
     def test_whitespace_search_returns_the_original_queryset(self):

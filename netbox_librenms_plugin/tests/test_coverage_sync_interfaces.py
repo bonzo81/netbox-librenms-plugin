@@ -2077,7 +2077,8 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         assert any("rolled back by a concurrent change" in text for text in message_texts(request, "error"))
 
-    def test_vlan_maps_cover_only_selected_row_owners(self):
+    @pytest.mark.parametrize("source", ["host", "oob"])
+    def test_vlan_maps_cover_only_selected_row_owners(self, source):
         """One selected row must not build VLAN scope maps for unrelated chassis members."""
         from types import SimpleNamespace
 
@@ -2102,6 +2103,7 @@ class TestSyncInterfacesViewPost:
             "ifAdminStatus": "up",
             "untagged_vlan": None,
             "tagged_vlans": [],
+            "_source": source,
         }
         request = _make_request(
             post_data={
@@ -3520,7 +3522,8 @@ class TestSyncInterfacesViewPost:
         assert port["exists_in_netbox"] is True
         assert port["name_fallback_allowed"] is False, "an OOB row must never match by name"
 
-    def test_a_shared_lom_row_is_skipped_and_reported(self):
+    @pytest.mark.parametrize("selected_port_id", ["98", "99"])
+    def test_a_shared_lom_row_is_reported_only_when_selected(self, selected_port_id):
         """One physical port reported on both sides must not become two NetBox interfaces."""
         from types import SimpleNamespace
 
@@ -3536,7 +3539,7 @@ class TestSyncInterfacesViewPost:
         )
         request = _make_request(
             post_data={
-                "select": ["98"],
+                "select": [selected_port_id],
                 "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
             },
             user=user,
@@ -3550,11 +3553,17 @@ class TestSyncInterfacesViewPost:
                 "ports": [
                     {
                         "ifName": "lom0",
+                        "port_id": 99,
+                        "ifAdminStatus": "up",
+                        "_source": "host",
+                    },
+                    {
+                        "ifName": "lom0",
                         "port_id": 98,
                         "ifAdminStatus": "up",
                         "_source": "oob",
                         "_dedup_conflict": True,
-                    }
+                    },
                 ]
             },
         )
@@ -3565,10 +3574,8 @@ class TestSyncInterfacesViewPost:
             cache.delete(cache_key)
 
         assert response.status_code == 302
-        assert not Interface.objects.filter(device=device, name="lom0").exists()
-        assert any("shared LOM" in text for text in message_texts(request, "warning")), (
-            "a skipped shared-LOM row must say why, not vanish"
-        )
+        assert Interface.objects.filter(device=device, name="lom0").exists() is (selected_port_id == "99")
+        assert any("shared LOM" in text for text in message_texts(request, "warning")) is (selected_port_id == "98")
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from types import SimpleNamespace

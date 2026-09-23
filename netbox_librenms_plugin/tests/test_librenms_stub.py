@@ -153,6 +153,19 @@ def _start_stub():
     return LibreNMSStubServer(recordings=recordings, api_token=TOKEN).start()
 
 
+def test_persistent_stub_request_log_keeps_only_recent_requests():
+    server = _start_stub()
+    try:
+        for index in range(258):
+            assert _request(server, "GET", f"/api/v0/devices?probe={index}").status_code == 200
+
+        assert len(server.requests) == 256
+        assert server.requests[0]["query"]["probe"] == ["2"]
+        assert server.requests[-1]["query"]["probe"] == ["257"]
+    finally:
+        server.stop()
+
+
 def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
     server = _start_stub()
     try:

@@ -470,7 +470,7 @@ def interface_name_fallback_matches_port(interface, port_id, server_key) -> bool
 
 
 def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[int], set[int]]:
-    """Return host IDs that are unique and the subset with a unique selected display name."""
+    """Return unique host and OOB port IDs and the subset with a unique display name per source."""
     if not is_list_of_dicts(ports):
         return set(), set()
 

@@ -48,11 +48,12 @@ from playwright.sync_api import expect  # noqa: E402  (import after the opt-in s
 SERVER_KEY = os.environ.get("E2E_STUB_SERVER_KEY", "stub")
 STUB_DEVICE_ID = int(os.environ.get("E2E_STUB_DEVICE_ID", "1"))
 
-DEVICE_NAME = f"e2e-modules-stub-{uuid4().hex}"
-MANUFACTURER_SLUG = "e2e-modules-mfg"
-DEVICE_TYPE_MODEL = "E2E-MODULES-DT"
-SITE_SLUG = "e2e-modules-site"
-ROLE_SLUG = "e2e-modules-role"
+RUN_ID = uuid4().hex
+DEVICE_NAME = f"e2e-modules-stub-{RUN_ID}"
+MANUFACTURER_SLUG = f"e2e-modules-mfg-{RUN_ID}"
+DEVICE_TYPE_MODEL = f"E2E-MODULES-DT-{RUN_ID}"
+SITE_SLUG = f"e2e-modules-site-{RUN_ID}"
+ROLE_SLUG = f"e2e-modules-role-{RUN_ID}"
 
 # Port names of the stub inventory recording. The module bays must carry the same
 # names, because the bay matcher pairs an inventory item with a bay of that name.
@@ -85,12 +86,12 @@ from netbox_librenms_plugin.utils import set_librenms_device_id
 created = {{}}
 
 manufacturer, was_created = Manufacturer.objects.get_or_create(
-    slug="{MANUFACTURER_SLUG}", defaults={{"name": "E2E Modules Manufacturer"}}
+    slug="{MANUFACTURER_SLUG}", defaults={{"name": "E2E Modules Manufacturer {RUN_ID}"}}
 )
 created["manufacturer"] = [manufacturer.pk, was_created]
 
 device_type, was_created = DeviceType.objects.get_or_create(
-    manufacturer=manufacturer, model="{DEVICE_TYPE_MODEL}", defaults={{"slug": "e2e-modules-dt"}}
+    manufacturer=manufacturer, model="{DEVICE_TYPE_MODEL}", defaults={{"slug": "e2e-modules-dt-{RUN_ID}"}}
 )
 created["device_type"] = [device_type.pk, was_created]
 for bay_name in {BAY_NAMES!r}:
@@ -110,10 +111,10 @@ for model in {LIBRENMS_MODELS!r}:
     )
     created["module_type_mappings"].append([mapping.pk, was_created])
 
-site, was_created = Site.objects.get_or_create(slug="{SITE_SLUG}", defaults={{"name": "E2E Modules Site"}})
+site, was_created = Site.objects.get_or_create(slug="{SITE_SLUG}", defaults={{"name": "E2E Modules Site {RUN_ID}"}})
 created["site"] = [site.pk, was_created]
 
-role, was_created = DeviceRole.objects.get_or_create(slug="{ROLE_SLUG}", defaults={{"name": "E2E Modules Role"}})
+role, was_created = DeviceRole.objects.get_or_create(slug="{ROLE_SLUG}", defaults={{"name": "E2E Modules Role {RUN_ID}"}})
 created["role"] = [role.pk, was_created]
 
 device = Device.objects.create(
