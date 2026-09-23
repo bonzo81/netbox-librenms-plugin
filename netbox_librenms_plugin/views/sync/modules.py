@@ -200,6 +200,13 @@ def _lock_page_device_serials(page_device):
     acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
 
 
+def _module_holder_map(device):
+    """Read module ancestry from all modules on a device, independent of bay permissions."""
+    from dcim.models import Module
+
+    return dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+
+
 def _module_already_on_device(device, serial, *, exclude_pk=None):
     """
     Return the Module already holding ``serial`` on ``device``, or None.
@@ -1221,8 +1228,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         try:
             with transaction.atomic():
+                holder_of_by_device = {}
                 for item in branch_items:
                     target_device = ignore_contexts[_inventory_item_key(item)]["selected_device"]
+                    if target_device.pk not in holder_of_by_device:
+                        holder_of_by_device[target_device.pk] = _module_holder_map(target_device)
+                    holder_of = holder_of_by_device[target_device.pk]
                     mfr_id = target_device.device_type.manufacturer_id
                     policy = manufacturer_contexts[mfr_id]
                     result = self._install_single(
@@ -1240,6 +1251,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         changeable_components=changeable_components,
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
+                        holder_of=holder_of,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -1439,6 +1451,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         manufacturer_id=None,
         norm_rules_bay=None,
         norm_rules_serial=None,
+        holder_of=None,
     ):
         """
         Try to install a single inventory item.
@@ -1461,6 +1474,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             manufacturer_id (int | None): The optional device manufacturer ID.
             norm_rules_bay (dict | None): The optional module bay normalization rules.
             norm_rules_serial (dict | None): The optional serial normalization rules.
+            holder_of (dict | None): Mutable module ancestry reused during a bulk install.
 
         Returns:
             dict: The install status and its result details.
@@ -1512,7 +1526,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             exact_mappings, regex_mappings = load_bay_mappings()
 
         matched_bay = InstallBranchView._resolve_bay_for_item(
-            device, item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id, norm_rules_bay
+            device,
+            item,
+            index_map,
+            bays,
+            exact_mappings,
+            regex_mappings,
+            manufacturer_id,
+            norm_rules_bay,
+            holder_of=holder_of,
         )
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
@@ -1569,6 +1591,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 )
             return {"status": "failed", "name": name, "reason": error_msg}
 
+        if holder_of is not None:
+            holder_of[module.pk] = locked_bay.module_id
+
         name = f"{matched_type.model} → {matched_bay.name}"
         if adopted_components:
             name += f" (adopted {adopted_components} existing component(s))"
@@ -1586,7 +1611,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
     @staticmethod
     def _resolve_bay_for_item(
-        device, item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id, norm_rules_bay
+        device,
+        item,
+        index_map,
+        bays,
+        exact_mappings,
+        regex_mappings,
+        manufacturer_id,
+        norm_rules_bay,
+        *,
+        holder_of=None,
     ):
         """
         Return the module bay to install *item* into, or None when nothing matches.
@@ -1610,6 +1644,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             regex_mappings (list): The regular expression module bay mappings.
             manufacturer_id (int | None): The device manufacturer ID.
             norm_rules_bay (dict | None): The module bay normalization rules.
+            holder_of (dict | None): Preloaded module ancestry for a bulk install.
 
         Returns:
             ModuleBay | None: The bay to install into.
@@ -1634,12 +1669,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         matched = match_against(InstallBranchView._candidate_bays_for_item(bays, parent_module_id))
         if not matched and parent_module_id:
             matched = match_against(
-                InstallBranchView._fallback_bays_for_resolved_parent(device, bays, parent_module_id)
+                InstallBranchView._fallback_bays_for_resolved_parent(
+                    device, bays, parent_module_id, holder_of=holder_of
+                )
             )
         return matched
 
     @staticmethod
-    def _fallback_bays_for_resolved_parent(device, bays, parent_module_id):
+    def _fallback_bays_for_resolved_parent(device, bays, parent_module_id, *, holder_of=None):
         """
         Return the bays a row may fall back to once its resolved parent narrowed the search away.
 
@@ -1676,17 +1713,17 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             device (Device): The device being installed onto, used to read the module ancestry.
             bays: The candidate module bays, with ``installed_module`` selected.
             parent_module_id (int): The installed parent module the narrowed pass used.
+            holder_of (dict | None): Preloaded ancestry, updated as modules are installed.
 
         Returns:
             dict: A ``name -> bay`` mapping to match the inventory item against.
 
         """
-        from dcim.models import Module
-
         # Ancestry comes from every module on the device, never from *bays*: that queryset is
         # permission-restricted, so a bay the user cannot change would cut the chain and hide a
         # descendant bay they can. Only the candidates below stay restricted.
-        holder_of = dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+        if holder_of is None:
+            holder_of = _module_holder_map(device)
 
         fallback = {bay.name: bay for bay in bays if not bay.module_id}
         scoped: dict = {}
@@ -2126,6 +2163,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             invalid_selection_seen |= invalid_selected_device
             resolved_items.append((item, target_device, _ignore_rules_for(target_device)))
 
+        holder_of_by_device = {}
         installed, skipped, failed = [], [], []
         bound_any = False
         try:
@@ -2150,6 +2188,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             skipped.append(f"{item.get('entPhysicalName', '?')}: matched ignore rule")
                             continue
                     mfr_id = getattr(getattr(target_device, "device_type", None), "manufacturer_id", None)
+                    if target_device.pk not in holder_of_by_device:
+                        holder_of_by_device[target_device.pk] = _module_holder_map(target_device)
+                    holder_of = holder_of_by_device[target_device.pk]
                     exact_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(all_exact, mfr_id)
                     regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(all_regex, mfr_id)
                     result = InstallBranchView._install_single(
@@ -2167,6 +2208,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         changeable_components=changeable_components,
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
+                        holder_of=holder_of,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":

@@ -2329,6 +2329,20 @@ class BaseCableTableView(
             </button>
         """
 
+    def _remote_create_action_html(self, link, obj, server_key):
+        """Render the create action when the verified row still has no remote interface."""
+        self._set_remote_create_affordance(link, obj, server_key)
+        if not (create_url := link.get("remote_create_url")):
+            return ""
+        return f"""
+            <button type="button" class="btn btn-sm btn-outline-primary"
+                    title="Create the remote interface and the cable"
+                    aria-label="Create the remote interface and the cable"
+                    data-cable-picker-url="{escape(create_url)}">
+                <i class="mdi mdi-plus-network"></i>
+            </button>
+        """
+
     def _build_serial_remote_context(self, links, serial_ports):
         """Bulk-load serial label targets and free ports for one table render."""
         labels = _serial_remote_labels(links)
@@ -2823,6 +2837,7 @@ class BaseCableTableView(
                 continue
             link["can_create_cable"] = False
             link.pop("picker_url", None)
+            link.pop("remote_create_url", None)
 
     @staticmethod
     def _cable_cache_expiry(cache_key):
@@ -3233,6 +3248,11 @@ class SingleCableVerifyView(BaseCableTableView):
                         formatted_row["actions"] = ""
 
                     if not read_only_origin:
+                        formatted_row["actions"] += self._remote_create_action_html(
+                            link_data,
+                            selected_device,
+                            server_key,
+                        )
                         formatted_row["actions"] += self._remote_picker_action_html(
                             link_data,
                             selected_device,

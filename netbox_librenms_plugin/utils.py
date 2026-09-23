@@ -1902,14 +1902,13 @@ def interface_name_rejection_reason(port, interface_name_field, model=None):
     return None
 
 
-def host_owned_interface_names(ports, interface_name_field, model=None) -> set[str]:
+def host_owned_interface_names(ports, interface_name_field, owner_id_for_port, model=None) -> dict[int, set[str]]:
     """
-    Return the interface names the host rows of a merged snapshot own.
+    Return host-owned interface names by target NetBox device.
 
     A host and its OOB controller are two LibreNMS devices but one NetBox device, so both sides
-    write into the same ``(device, name)`` namespace. The host owns it: an OOB row carrying one
-    of these names must not create or bind that interface, or the host row can never resolve
-    its own interface again.
+    can write into the same ``(device, name)`` namespace. The host owns a name only on its
+    target device. A virtual chassis member can use the same name on another member.
 
     Derived from the rows on read rather than tagged onto the cached snapshot, so a snapshot
     written before this existed cannot fail open, and the sync writer and the table reader
@@ -1918,20 +1917,24 @@ def host_owned_interface_names(ports, interface_name_field, model=None) -> set[s
     Args:
         ports (list): The merged host + OOB port rows.
         interface_name_field (str): Port field that contains the selected interface name.
+        owner_id_for_port (callable): Resolve the target NetBox device ID for a port row.
         model (type | None): Concrete interface model. Defaults to ``Interface``.
 
     Returns:
-        set[str]: The names owned by host rows, empty when *ports* is malformed.
+        dict[int, set[str]]: Host names keyed by target device ID.
 
     """
     if not is_list_of_dicts(ports):
-        return set()
-    return {
-        name
-        for port in ports
-        if port.get("_source") != OOB_INVENTORY_SOURCE
-        and (name := syncable_interface_name(port, interface_name_field, model)) is not None
-    }
+        return {}
+    names_by_device = {}
+    for port in ports:
+        if port.get("_source") == OOB_INVENTORY_SOURCE:
+            continue
+        name = syncable_interface_name(port, interface_name_field, model)
+        owner_id = owner_id_for_port(port)
+        if name is not None and owner_id is not None:
+            names_by_device.setdefault(owner_id, set()).add(name)
+    return names_by_device
 
 
 def bounded_interface_text(field_name, value, model=None):

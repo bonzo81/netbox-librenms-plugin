@@ -543,6 +543,7 @@ class TestDeviceImportTable:
             ({}, "—"),
             ({"is_stack": True, "member_count": 1}, "—"),
             ({"is_stack": True, "member_count": 2, "detection_error": "timeout"}, "Error"),
+            ({"is_stack": False, "detection_failed": True, "detection_error": "timeout"}, "Error"),
             ({"is_stack": True, "member_count": 3}, "Stack, 3"),
         ],
     )

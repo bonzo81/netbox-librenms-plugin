@@ -13,6 +13,7 @@ Then the action that follows from the first: when the neighbour IS modelled and 
 the row can never be synced, so it offers to create the far end and the cable together.
 """
 
+import json
 import time
 
 import pytest
@@ -911,6 +912,18 @@ class TestTheCreateAffordance:
 
         assert self._affordance(row, local_device)
 
+    def test_a_migrated_owner_loses_the_remote_create_action(self):
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        server_key, local_device, _, remote_device, row = _create_setup("create-migrated")
+        assert self._affordance(row, local_device)
+        mark_librenms_migrated(local_device, remote_device.pk, server_key)
+        local_device.save(update_fields=["custom_field_data"])
+
+        _make_view()._disable_actions_for_migrated_owners([row], local_device, local_device, server_key)
+
+        assert row.get("remote_create_url") is None
+
     def test_a_resolved_remote_interface_gets_nothing(self):
         """There is nothing to create: the row is already syncable."""
         _, local_device, _, _, row = _create_setup("create-resolved")
@@ -1090,6 +1103,23 @@ class TestCheckAndCreateTheRemoteEnd:
 
         assert "no mapping" in body
 
+    def test_the_check_reports_missing_port_without_claiming_a_mapping_failure(self, librenms_server, settings):
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, _, row_id = self._scenario("chk-no-port", librenms_server, settings)
+        librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": []})
+
+        response = _logged_in(make_superuser("remote-create-chk-no-port")).get(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        assert response.status_code == 200
+        body = response.content.decode()
+        assert "type cannot be derived" in body
+        assert "no mapping" not in body
+        assert "No InterfaceTypeMapping matches" not in body
+
     def test_the_check_creates_nothing(self, librenms_server, settings):
         """Step one is read-only."""
         from dcim.models import Interface
@@ -1124,6 +1154,85 @@ class TestCheckAndCreateTheRemoteEnd:
         local_interface.refresh_from_db()
         assert local_interface.cable is not None
         assert created.cable_id == local_interface.cable_id
+
+    def test_migrated_cable_page_cannot_create_a_remote_interface(self, librenms_server, settings):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        server_key, local_device, _, remote_device, row_id = self._scenario("mk-migrated", librenms_server, settings)
+        mark_librenms_migrated(local_device, remote_device.pk, server_key)
+        local_device.save(update_fields=["custom_field_data"])
+
+        response = _logged_in(make_superuser("remote-create-mk-migrated")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+            follow=True,
+        )
+
+        assert not Interface.objects.filter(device=remote_device).exists()
+        assert any("migrated and is read-only" in message for message in _messages(response))
+
+    def test_migrated_cache_owner_cannot_create_a_remote_interface(self, librenms_server, settings, monkeypatch):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
+
+        server_key, local_device, _, remote_device, row_id = self._scenario(
+            "mk-cache-migrated", librenms_server, settings
+        )
+        cache_device = make_device("mk-cache-migrated-owner")
+        mark_librenms_migrated(cache_device, remote_device.pk, server_key)
+        cache_device.save(update_fields=["custom_field_data"])
+        original = CableRemoteCreateView.get_cached_links_data
+
+        def cached_from_migrated_owner(view, request, obj):
+            links = original(view, request, obj)
+            view._cache_device = cache_device
+            return links
+
+        monkeypatch.setattr(CableRemoteCreateView, "get_cached_links_data", cached_from_migrated_owner)
+        response = _logged_in(make_superuser("remote-create-mk-cache-migrated")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+            follow=True,
+        )
+
+        assert not Interface.objects.filter(device=remote_device).exists()
+        assert any("migrated and is read-only" in message for message in _messages(response))
+
+    def test_remote_create_closes_its_htmx_modal_after_the_action(self, librenms_server, settings):
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, _, row_id = self._scenario("mk-modal", librenms_server, settings)
+
+        response = _logged_in(make_superuser("remote-create-mk-modal")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        body = response.content.decode()
+        assert 'id="htmx-modal-content" hx-swap-oob="innerHTML"' in body
+        assert "closeHtmxModal()" in body
+
+    def test_verify_keeps_remote_create_action_after_member_selection(self, librenms_server, settings):
+        from netbox_librenms_plugin.tests.test_cable_verify import _make_request, _make_view
+
+        server_key, local_device, _, _, row_id = self._scenario("verify-create", librenms_server, settings)
+        view = _make_view(server_key)
+        request = _make_request({"device_id": local_device.pk, "row_id": row_id, "server_key": server_key})
+
+        response = view.post(request)
+
+        assert response.status_code == 200
+        actions = json.loads(response.content)["formatted_row"]["actions"]
+        assert "Create the remote interface and the cable" in actions
+        assert "data-cable-picker-url" in actions
 
     def test_the_interface_is_named_from_the_port_record(self, librenms_server, settings):
         """CDP can advertise a string the device does not use; create the port's own name."""
