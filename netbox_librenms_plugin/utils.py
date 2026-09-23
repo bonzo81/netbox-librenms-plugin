@@ -3889,6 +3889,38 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, sele
     return host_match or oob_match
 
 
+def find_interface_by_librenms_port_id(port_id, server_key: str):
+    """
+    Return the one Interface or VMInterface bound to a LibreNMS port on this server, or None.
+
+    A LibreNMS port ID names one port, so a holder on either model is the only owner. Every
+    writer that binds a port ID reads this, so no writer can add a second owner on the other model.
+
+    Args:
+        port_id (int | str): The LibreNMS port ID.
+        server_key (str): The LibreNMS server key.
+
+    Returns:
+        Interface | VMInterface | None: The interface that holds the port.
+
+    Raises:
+        AmbiguousLibreNMSIdError: When more than one interface, on either model, holds the port.
+
+    """
+    from virtualization.models import VMInterface
+
+    owners = [
+        owner
+        for model in (Interface, VMInterface)
+        if (owner := find_by_librenms_id(model, port_id, server_key)) is not None
+    ]
+    if len(owners) > 1:
+        raise AmbiguousLibreNMSIdError(
+            f"LibreNMS port {port_id!r} is bound to both an Interface and a VMInterface on server {server_key!r}"
+        )
+    return owners[0] if owners else None
+
+
 def lock_librenms_id_assignment(librenms_id, server_key: str, *, owner_queryset=None, owner_pk=None):
     """
     Serialize a Device or VM LibreNMS ID claim and return any existing owner.

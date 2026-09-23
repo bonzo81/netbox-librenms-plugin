@@ -24,6 +24,7 @@ from netbox_librenms_plugin.constants import (
 )
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
+    AmbiguousLibreNMSIdError,
     apply_cable_manual_picks,
     assign_cable_row_ids,
     build_librenms_id_qs,
@@ -35,6 +36,7 @@ from netbox_librenms_plugin.utils import (
     cable_snapshot_token,
     cache_remaining_ttl,
     coerce_librenms_id,
+    find_interface_by_librenms_port_id,
     get_interface_name_field,
     get_librenms_cable_tag,
     get_librenms_device_id,
@@ -2329,6 +2331,12 @@ class BaseCableTableView(
         # The port record is what names and types the interface; a row without one would create
         # a bare "other" interface from a neighbour-advertised string, which is a guess.
         if coerce_librenms_id(link.get("remote_port_key")) is None:
+            return
+        # A port another interface holds (another device, or a VM) would get a second owner.
+        try:
+            if find_interface_by_librenms_port_id(link["remote_port_key"], server_key) is not None:
+                return
+        except AmbiguousLibreNMSIdError:
             return
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk])
         query = f"row_id={quote_plus(str(link.get('row_id', '')))}"

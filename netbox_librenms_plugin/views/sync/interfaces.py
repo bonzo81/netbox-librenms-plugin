@@ -30,6 +30,7 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_interface_by_port_id,
 )
 from netbox_librenms_plugin.interface_sync import (
+    LOOK_UP_PORT_OWNER,
     assign_interface_mac,
     get_netbox_interface_type,
     update_interface_from_port,
@@ -44,7 +45,7 @@ from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     build_migrated_context,
     convert_speed_to_kbps,
-    find_by_librenms_id,
+    find_interface_by_librenms_port_id,
     get_interface_name_field,
     get_interface_port_identity_sets,
     get_librenms_device_id,
@@ -1294,31 +1295,45 @@ class SyncInterfacesView(
         port_id = normalize_librenms_port_id(raw_port_id)
         lookup_port_id = raw_port_id if port_id is not None else None
 
+        if not isinstance(obj, (Device, VirtualMachine)):
+            raise ValueError("Invalid object type.")
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         target_device = None
         if isinstance(obj, Device):
-            server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             target_device = self._resolve_row_target_device(obj, port_id=port_id)
             if target_device is None:
                 # The user explicitly selected a target. If it is stale or outside the
                 # caller's grant, do not silently sync the row onto the page device.
                 self._record_skipped_conflict(interface_name, "selected target unavailable")
                 return
+        # One ownership check serves the resolver and the field writer for this row.
+        try:
+            port_owner = find_interface_by_librenms_port_id(port_id, server_key) if port_id is not None else None
+            port_owner_is_ambiguous = False
+        except AmbiguousLibreNMSIdError:
+            # port_id matches multiple interfaces — skip this row rather than bind
+            # to an arbitrary one (recorded below).
+            logger.warning("Skipping interface row — port_id %s is ambiguous (multiple matches).", port_id)
+            port_owner, port_owner_is_ambiguous = None, True
+        if port_owner_is_ambiguous:
+            interface = None
+        elif target_device is not None:
             try:
                 interface = self._resolve_device_interface(
                     target_device,
                     interface_name,
                     lookup_port_id,
                     server_key,
+                    port_owner=port_owner,
                     oob=librenms_interface.get("_source") == OOB_INVENTORY_SOURCE,
                 )
             except _HostInterfaceNameConflict:
                 self._record_skipped_conflict(interface_name, "host interface already uses this name")
                 return
-        elif isinstance(obj, VirtualMachine):
-            server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            interface = self._resolve_vm_interface(obj, interface_name, lookup_port_id, server_key)
         else:
-            raise ValueError("Invalid object type.")
+            interface = self._resolve_vm_interface(
+                obj, interface_name, lookup_port_id, server_key, port_owner=port_owner
+            )
 
         if interface is None:
             logger.warning(
@@ -1354,6 +1369,7 @@ class SyncInterfacesView(
                 exclude_columns,
                 interface_name_field,
                 synced_name,
+                port_owner=port_owner,
             )
             or changed
         )
@@ -1402,18 +1418,15 @@ class SyncInterfacesView(
             return True
         return False
 
-    def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, oob=False):
-        """Resolve a device interface using port_id first, then safe name fallback."""
+    def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, port_owner, oob=False):
+        """Resolve a device interface from the port's owner first, then safe name fallback."""
         changeable = self.restricted_queryset(Interface, "change")
         if port_id:
-            try:
-                by_id = find_by_librenms_id(Interface, port_id, server_key)
-            except AmbiguousLibreNMSIdError:
-                # port_id matches multiple interfaces — skip this row rather than bind
-                # to an arbitrary one (the caller records the skip).
-                logger.warning("Skipping interface row — port_id %s is ambiguous (multiple matches).", port_id)
-                return None
+            by_id = port_owner
             if by_id is not None:
+                # A VM interface that holds the port is its owner; a device interface is never a second one.
+                if not isinstance(by_id, Interface):
+                    return None
                 if not changeable.filter(pk=by_id.pk).exists():
                     return None
                 if by_id.device_id == target_device.id:
@@ -1451,16 +1464,15 @@ class SyncInterfacesView(
             interface._librenms_sync_created = True
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
-    def _resolve_vm_interface(self, vm, interface_name, port_id, server_key):
-        """Resolve a VM interface using port_id first, then safe name fallback."""
+    def _resolve_vm_interface(self, vm, interface_name, port_id, server_key, *, port_owner):
+        """Resolve a VM interface from the port's owner first, then safe name fallback."""
         changeable = self.restricted_queryset(VMInterface, "change")
         if port_id:
-            try:
-                by_id = find_by_librenms_id(VMInterface, port_id, server_key)
-            except AmbiguousLibreNMSIdError:
-                logger.warning("Skipping VM interface row — port_id %s is ambiguous (multiple matches).", port_id)
-                return None
+            by_id = port_owner
             if by_id is not None:
+                # A device interface that holds the port is its owner; a VM interface is never a second one.
+                if not isinstance(by_id, VMInterface):
+                    return None
                 if not changeable.filter(pk=by_id.pk).exists():
                     return None
                 if by_id.virtual_machine_id == vm.id:
@@ -1505,6 +1517,8 @@ class SyncInterfacesView(
         exclude_columns,
         interface_name_field,
         synced_name,
+        *,
+        port_owner=LOOK_UP_PORT_OWNER,
     ):
         """Update interface fields from LibreNMS data, respecting excluded columns."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
@@ -1517,6 +1531,7 @@ class SyncInterfacesView(
             exclude_columns=exclude_columns,
             netbox_type=netbox_type,
             speed_converter=convert_speed_to_kbps,
+            port_owner=port_owner,
         )
 
     def _sync_interface_vlans(self, interface, librenms_port):
@@ -1715,7 +1730,11 @@ class RebindInterfacePortView(SyncInterfacesView):
             )
         if owner.status != NAME_OWNER_STALE:
             raise _RebindRefusedError(f"Rebind is refused. {owner.explanation()}")
-        if self._port_is_bound(port_id, server_key):
+        try:
+            port_is_bound = find_interface_by_librenms_port_id(port_id, server_key) is not None
+        except AmbiguousLibreNMSIdError:
+            port_is_bound = True
+        if port_is_bound:
             raise _RebindRefusedError(f"LibreNMS port {port_id} is already bound to a NetBox interface.")
         interface.snapshot()
         set_librenms_device_id(interface, port_id, server_key)
@@ -1725,17 +1744,6 @@ class RebindInterfacePortView(SyncInterfacesView):
             )
         interface.save()
         return interface
-
-    @staticmethod
-    def _port_is_bound(port_id, server_key):
-        """Report whether any Interface or VMInterface holds the port for this server; ambiguity counts."""
-        for model in (Interface, VMInterface):
-            try:
-                if find_by_librenms_id(model, port_id, server_key) is not None:
-                    return True
-            except AmbiguousLibreNMSIdError:
-                return True
-        return False
 
 
 class DeleteNetBoxInterfacesView(

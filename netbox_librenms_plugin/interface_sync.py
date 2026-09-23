@@ -19,7 +19,7 @@ from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     coerce_interface_mtu,
     convert_speed_to_kbps,
-    find_by_librenms_id,
+    find_interface_by_librenms_port_id,
     get_librenms_device_id,
     interface_name_fallback_matches_port,
     interface_name_rejection_reason,
@@ -29,6 +29,9 @@ from netbox_librenms_plugin.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Default for update_interface_from_port(port_owner=...): look the port's owner up here.
+LOOK_UP_PORT_OWNER = object()
 
 
 def _bound_interface_name_is_occupied(interface, synced_name, port_id, server_key):
@@ -96,8 +99,14 @@ def update_interface_from_port(  # noqa: C901
     exclude_columns=(),
     netbox_type=None,
     speed_converter=convert_speed_to_kbps,
+    port_owner=LOOK_UP_PORT_OWNER,
 ):
-    """Update one Interface or VMInterface and return whether NetBox changed."""
+    """
+    Update one Interface or VMInterface and return whether NetBox changed.
+
+    Pass ``port_owner`` only when the caller already looked the port up with
+    ``find_interface_by_librenms_port_id`` for this row, so the row reads its owner once.
+    """
     is_device_interface = isinstance(interface, Interface)
     tracked_fields = (
         "name",
@@ -161,11 +170,16 @@ def update_interface_from_port(  # noqa: C901
 
     if port_id is not None:
         try:
-            existing_owner = find_by_librenms_id(type(interface), port_id, server_key)
+            existing_owner = (
+                find_interface_by_librenms_port_id(port_id, server_key)
+                if port_owner is LOOK_UP_PORT_OWNER
+                else port_owner
+            )
         except AmbiguousLibreNMSIdError:
             logger.warning("Not setting port_id %s because it matches multiple interfaces.", port_id)
         else:
-            if existing_owner is None or existing_owner.pk == interface.pk:
+            # Model equality compares the concrete model and the pk, so a VMInterface never matches an Interface.
+            if existing_owner is None or existing_owner == interface:
                 set_librenms_device_id(interface, port_id, server_key)
             else:
                 logger.warning("Not reassigning port_id %s from %s to %s.", port_id, existing_owner, interface)
@@ -217,13 +231,13 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         raise ValueError("The LibreNMS port ID is missing or invalid.")
 
     try:
-        by_id = find_by_librenms_id(model, port_id, server_key)
+        by_id = find_interface_by_librenms_port_id(port_id, server_key)
     except AmbiguousLibreNMSIdError:
         raise ValueError("The LibreNMS port ID matches multiple NetBox interfaces.") from None
 
     owner_id = owner.pk
     if by_id is not None:
-        if getattr(by_id, owner_id_field) != owner_id:
+        if not isinstance(by_id, model) or getattr(by_id, owner_id_field) != owner_id:
             raise ValueError("The LibreNMS port ID is already assigned to another NetBox interface owner.")
         if not viewable_queryset.filter(pk=by_id.pk).exists():
             raise ValueError("The matching NetBox interface is outside your view scope.")
@@ -272,6 +286,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         interface_name_field=interface_name_field,
         netbox_type=netbox_type,
         speed_converter=speed_converter,
+        port_owner=by_id,
     )
     if not viewable_queryset.filter(pk=interface.pk).exists():
         raise ValueError("The synchronized NetBox interface is outside your view scope.")

@@ -24,7 +24,7 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     acquire_advisory_transaction_lock,
-    find_by_librenms_id,
+    find_interface_by_librenms_port_id,
     get_librenms_device_id,
     get_librenms_sync_device,
     get_module_template_interface_names,
@@ -766,7 +766,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         return None
 
     try:
-        existing_owner = find_by_librenms_id(Interface, port_id, server_key)
+        existing_owner = find_interface_by_librenms_port_id(port_id, server_key)
     except AmbiguousLibreNMSIdError:
         return {
             "status": "conflict",
@@ -774,6 +774,11 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
                 f"port_id {port_id} is ambiguous — it matches more than one interface; "
                 "not reassigning. Resolve the duplicate librenms_id first."
             ),
+        }
+    if existing_owner is not None and not isinstance(existing_owner, Interface):
+        return {
+            "status": "conflict",
+            "reason": f"port_id {port_id} already assigned to another NetBox interface owner; not reassigning",
         }
     if existing_owner is not None and not interfaces.filter(pk=existing_owner.pk).exists():
         return {

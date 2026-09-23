@@ -28,11 +28,13 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.utils import (
+    AmbiguousLibreNMSIdError,
     apply_cable_manual_picks,
     build_librenms_id_qs,
     cable_path_reaches,
     classify_cable_action,
     coerce_librenms_id,
+    find_interface_by_librenms_port_id,
     get_cable_sync_settings,
     get_librenms_cable_tag,
     get_interface_name_field,
@@ -1386,6 +1388,15 @@ class CableRemoteCreateView(SyncCablesView):
         """
         remote_device = context["remote_device"]
         name = context["proposed_name"]
+        port_key = context["row"].get("remote_port_key")
+        try:
+            port_is_bound = find_interface_by_librenms_port_id(port_key, context["server_key"]) is not None
+        except AmbiguousLibreNMSIdError:
+            port_is_bound = True
+        if port_is_bound:
+            raise _RemoteCreateAborted(
+                f"LibreNMS port {port_key} is already bound to a NetBox interface. Refresh the cable data and try again."
+            )
         # Unscoped on purpose: a name held outside the caller's view scope also refuses.
         if Interface.objects.filter(device=remote_device, name=name).exists():
             raise _RemoteCreateAborted(
