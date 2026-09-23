@@ -2593,7 +2593,7 @@ class ApplyModuleInterfaceTypesView(
         from dcim.models import Interface
 
         if outcome == "updated" and not self.restricted_queryset(Interface, "change").filter(pk=interface.pk).exists():
-            raise _InterfaceChangeScopeViolation("The updated interface is outside your change permission scope.")
+            raise _InterfaceChangeScopeViolation(interface.name)
 
     def post(self, request, pk):  # noqa: C901
         from dcim.models import Device, Interface, Module
@@ -2659,7 +2659,10 @@ class ApplyModuleInterfaceTypesView(
                     else:
                         outcomes[outcome].append(interface.name)
         except _InterfaceChangeScopeViolation as exc:
-            messages.error(request, str(exc))
+            messages.error(
+                request,
+                f"No interface types were changed. The updated interface is outside your change permission scope: {exc}.",
+            )
             return _modules_action_response(request, page_device, server_key)
 
         updated_names = outcomes["updated"]

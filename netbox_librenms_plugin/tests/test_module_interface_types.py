@@ -728,7 +728,10 @@ class TestApplyModuleInterfaceTypes:
         assert response.status_code == 200
         assert response["HX-Retarget"] == "#module-sync-content"
         assert interface.type == "1000base-t"
-        assert "The updated interface is outside your change permission scope." in response.content.decode()
+        assert (
+            f"No interface types were changed. The updated interface is outside your change permission scope: "
+            f"{interface.name}."
+        ) in response.content.decode()
         assert "X-LibreNMS-Cache-Transition" not in response
 
     def test_changed_current_type_is_skipped(self, settings):
