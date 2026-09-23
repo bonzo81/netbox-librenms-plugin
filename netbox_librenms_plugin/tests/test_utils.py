@@ -1838,9 +1838,10 @@ def test_whitespace_only_names_do_not_count_as_unambiguous():
     ports = [
         {"port_id": 10, "ifDescr": "   "},
         {"port_id": 20, "ifDescr": "Unique"},
+        {"port_id": 30, "ifDescr": "OOB", "_source": "oob"},
     ]
 
     unique_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(ports, "ifDescr")
 
-    assert unique_port_ids == {10, 20}
-    assert unambiguous_name_port_ids == {20}
+    assert unique_port_ids == {10, 20, 30}
+    assert unambiguous_name_port_ids == {20, 30}

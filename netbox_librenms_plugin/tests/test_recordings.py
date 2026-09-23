@@ -64,6 +64,18 @@ def test_bundled_ipv6_representations_name_the_same_address(recording):
                 assert ip_address(row["ipv6_address"]) == ip_address(row["ipv6_compressed"])
 
 
+def test_default_stub_catalog_is_listed_in_the_development_readme():
+    from pathlib import Path
+
+    from netbox_librenms_plugin.tests.mock_librenms_server import DEFAULT_STUB_RECORDINGS
+
+    readme = (Path(__file__).resolve().parents[2] / ".devcontainer" / "README.md").read_text(encoding="utf-8")
+    catalog = readme.split("The default catalog contains these scenarios:", 1)[1].split("The structural device", 1)[0]
+
+    for recording_name in DEFAULT_STUB_RECORDINGS:
+        assert f"`{recording_name}`" in catalog
+
+
 def test_load_recording_rejects_path_traversal():
     """A recording name that escapes the recordings directory must raise ValueError, not read an arbitrary file off disk."""
     from netbox_librenms_plugin.data_shapes.recordings_store import load_recording

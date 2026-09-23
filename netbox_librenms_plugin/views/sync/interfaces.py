@@ -917,7 +917,11 @@ class SyncInterfacesView(
                     # recorded as a skipped conflict rather than overwriting the host interface.
                     # A shared LOM is the exception: one physical port reported on both sides, so
                     # syncing both rows would model it twice.
-                    if port.get("_source") == OOB_INVENTORY_SOURCE and port.get("_dedup_conflict"):
+                    if (
+                        port.get("_source") == OOB_INVENTORY_SOURCE
+                        and port.get("_dedup_conflict")
+                        and normalize_librenms_port_id(port.get("port_id")) in selected_port_ids
+                    ):
                         self._record_skipped_conflict(
                             port.get(interface_name_field),
                             "shared LOM already synced from the host side",
@@ -940,7 +944,7 @@ class SyncInterfacesView(
         auto_selected_port_ids = getattr(self, "_auto_selected_port_ids", set())
         owners = {}
         for port in ports_data:
-            if port.get("_source") == OOB_INVENTORY_SOURCE:
+            if port.get("_source") == OOB_INVENTORY_SOURCE and port.get("_dedup_conflict"):
                 continue
             port_id = normalize_librenms_port_id(port.get("port_id"))
             if (

@@ -14,6 +14,7 @@ import argparse
 import copy
 import json
 import threading
+from collections import deque
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -413,6 +414,8 @@ class LibreNMSStubServer(MockLibreNMSServer):
 
     def __init__(self, recordings, *, api_token, host="127.0.0.1", port=0, quiet=True):
         super().__init__(host, port, api_token=api_token, quiet=quiet)
+        self.requests = deque(maxlen=256)
+        self._server.requests = self.requests
         self._lock = threading.RLock()
         self.devices = {}
         self.ports_by_device = {}
