@@ -103,6 +103,33 @@ def test_cross_reference_serial_preserved():
     assert anon_dev == anon_member  # cross-reference intact → master detection still works
 
 
+def test_numeric_serials_are_masked_and_share_string_identity():
+    recording = {
+        "schema_version": 1,
+        "name": "numeric-serials",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1": {"devices": [{"serial": 12345678}]},
+            "GET /api/v0/inventory/1/all": {"inventory": [{"entPhysicalSerialNum": "12345678"}]},
+            "GET /api/v0/devices/1/transceivers": {"transceivers": [{"serial": 0}]},
+        },
+        "expected": {"virtual_chassis": {"member_serials": [12345678, "12345678", 0, "0", None, "-"]}},
+    }
+
+    anon = anonymize_recording(recording)
+
+    device_serial = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["serial"]
+    inventory_serial = anon["responses"]["GET /api/v0/inventory/1/all"]["inventory"][0]["entPhysicalSerialNum"]
+    transceiver_serial = anon["responses"]["GET /api/v0/devices/1/transceivers"]["transceivers"][0]["serial"]
+    expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
+    assert device_serial == inventory_serial == expected_serials[0] == expected_serials[1]
+    assert transceiver_serial == expected_serials[2] == expected_serials[3]
+    assert device_serial.startswith("SN-") and transceiver_serial.startswith("SN-")
+    assert device_serial != transceiver_serial
+    assert expected_serials[4:] == [None, "-"]
+    assert find_pii(anon) == []
+
+
 def test_expected_member_serials_follow_anonymized_inventory():
     rec = load_recording("juniper-vc-2member")
     original = rec["expected"]["virtual_chassis"]["member_serials"]

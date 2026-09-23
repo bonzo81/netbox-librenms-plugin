@@ -621,6 +621,11 @@ def _anon_value(key, value, rules):  # noqa: C901
     if key in OUI_KEYS:
         # Same reason: LibreNMS reports the OUI as an integer.
         return _anon_oui(value, salt)
+    if key in SERIAL_KEYS:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return value
+        serial = str(value).strip()
+        return f"SN-{_hash(serial, salt)}" if serial and serial != "-" else value
     if not isinstance(value, str) or not value or value == "-":
         # Pseudonym/scrub rules below operate on real string values; leave empties/sentinels
         # and non-strings (ints, bools, null) untouched so logic-bearing numerics survive.
@@ -629,8 +634,6 @@ def _anon_value(key, value, rules):  # noqa: C901
         return _anon_interface_name(value, rules)
     if key in SERIAL_LABEL_KEYS:
         return _anon_serial_label(value, rules)
-    if key in SERIAL_KEYS:
-        return f"SN-{_hash(value, salt)}"
     if key in VRF_NAME_KEYS:
         return _anon_vrf_name(value, salt)
     if key in VRF_INDEX_KEYS:
