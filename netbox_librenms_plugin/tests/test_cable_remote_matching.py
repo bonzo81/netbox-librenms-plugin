@@ -69,6 +69,25 @@ def _row(**overrides):
 class TestRemotePortAliases:
     """A remote port answers to both ifName and ifDescr; the row must carry both."""
 
+    def test_remote_device_name_and_port_alias_resolve_in_one_row(self):
+        """A name-only neighbour still resolves when its port uses an alternate name."""
+        server_key = configured_server_key()
+        remote_device = make_device("alias-remote-device")
+        interface = make_interface(remote_device, "GigabitEthernet0/1")
+        link = _row(
+            remote_device=" ALIAS-REMOTE-DEVICE.example.test ",
+            remote_device_id=None,
+            remote_port_aliases=["GigabitEthernet0/1"],
+        )
+        view = _make_view()
+
+        by_name, by_id, visible_ids = view._load_remote_device_catalog([link], server_key)
+        matched = view._resolve_remote_devices([link], by_name, by_id, visible_ids)[id(link)]
+        view.enrich_remote_port(link, matched, server_key=server_key)
+
+        assert matched == remote_device
+        assert link["netbox_remote_interface_id"] == interface.pk
+
     def test_the_alternate_name_resolves_the_remote_interface(self):
         """The defect: NetBox holds the ifDescr name, LLDP advertised the ifName one."""
         server_key = configured_server_key()
