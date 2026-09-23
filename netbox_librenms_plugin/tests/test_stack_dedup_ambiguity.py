@@ -87,6 +87,38 @@ def _row(device_id, hostname):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("duplicate_identity", ["hostname", "serial"])
+def test_cached_device_ambiguity_adds_a_reason_when_issues_are_absent(duplicate_identity):
+    from dcim.models import Device, Site
+
+    from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    first = make_device("ambiguous-cache-a", serial="AMB-CACHE-SERIAL")
+    second = Device.objects.create(
+        name="ambiguous-cache-b" if duplicate_identity == "serial" else first.name,
+        serial="AMB-CACHE-SERIAL" if duplicate_identity == "serial" else "",
+        device_type=first.device_type,
+        role=first.role,
+        site=Site.objects.create(name="Ambiguous Cache Site", slug="ambiguous-cache-site"),
+        status="active",
+    )
+    assert second.pk != first.pk
+    libre_device = {"device_id": 835771, "hostname": "unmatched-cache-name", "sysName": "unmatched-cache-name"}
+    if duplicate_identity == "hostname":
+        libre_device["hostname"] = first.name
+    else:
+        libre_device["serial"] = "AMB-CACHE-SERIAL"
+    validation = {"existing_device": None, "existing_vm": None, "import_as_vm": False, "can_import": True}
+
+    _refresh_existing_device(validation, libre_device=libre_device)
+
+    assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
+    assert validation["can_import"] is False
+    assert any("Multiple NetBox devices" in issue for issue in validation["issues"])
+
+
+@pytest.mark.django_db
 def test_two_serialless_stacks_that_fingerprint_alike_block_the_batch():
     """Without serials the fingerprint is a guess, so a second stack must not import VC-less."""
     rows = {97101: _row(97101, "stack-a"), 97102: _row(97102, "stack-b")}
