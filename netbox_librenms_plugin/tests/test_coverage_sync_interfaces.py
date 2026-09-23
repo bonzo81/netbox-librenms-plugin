@@ -3577,6 +3577,56 @@ class TestSyncInterfacesViewPost:
         assert Interface.objects.filter(device=device, name="lom0").exists() is (selected_port_id == "99")
         assert any("shared LOM" in text for text in message_texts(request, "warning")) is (selected_port_id == "98")
 
+    def test_oob_port_does_not_adopt_an_unbound_host_interface_by_name(self):
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("oob-name-collision")
+        host_interface = make_interface(device, "lom0")
+        host_interface.description = "host interface"
+        host_interface.save()
+        user = make_user_with_perms(
+            "oob-name-collision",
+            [("view", Device), ("add", Interface), ("change", Interface)],
+        )
+        request = _make_request(
+            post_data={"select": ["98"], "exclude_columns": ["vlans", "mac_address"]},
+            user=user,
+        )
+        view = SyncInterfacesView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {"ifName": "lom0", "port_id": 99, "ifAdminStatus": "up", "_source": "host"},
+                    {
+                        "ifName": "lom0",
+                        "port_id": 98,
+                        "ifAdminStatus": "up",
+                        "ifAlias": "controller interface",
+                        "_source": "oob",
+                    },
+                ]
+            },
+        )
+
+        try:
+            response = _post(view, request, object_type="device", object_id=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        host_interface.refresh_from_db()
+        assert response.status_code == 302
+        assert host_interface.description == "host interface"
+        assert Interface.objects.filter(device=device, name="lom0").count() == 1
+        assert any("ambiguous" in text for text in message_texts(request, "warning"))
+
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from types import SimpleNamespace
 

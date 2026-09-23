@@ -1108,7 +1108,13 @@ class SyncInterfacesView(
                 # caller's grant, do not silently sync the row onto the page device.
                 self._record_skipped_conflict(interface_name, "selected target unavailable")
                 return
-            interface = self._resolve_device_interface(target_device, interface_name, lookup_port_id, server_key)
+            interface = self._resolve_device_interface(
+                target_device,
+                interface_name,
+                lookup_port_id,
+                server_key,
+                oob=librenms_interface.get("_source") == OOB_INVENTORY_SOURCE,
+            )
         elif isinstance(obj, VirtualMachine):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             interface = self._resolve_vm_interface(obj, interface_name, lookup_port_id, server_key)
@@ -1160,7 +1166,7 @@ class SyncInterfacesView(
         if skipped is not None:
             skipped.append(f"{interface_name or '(unnamed)'} ({reason})")
 
-    def _resolve_device_interface(self, target_device, interface_name, port_id, server_key):
+    def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, oob=False):
         """Resolve a device interface using port_id first, then safe name fallback."""
         changeable = self.restricted_queryset(Interface, "change")
         if port_id:
@@ -1176,6 +1182,8 @@ class SyncInterfacesView(
                     return None
                 if by_id.device_id == target_device.id:
                     return by_id
+                if oob:
+                    return None
                 # The port_id resolves to an interface on a DIFFERENT device (a stale or
                 # duplicate stored port_id, e.g. after a device replacement). The LibreNMS row
                 # still describes THIS device's interface, and the rendered table binds it to the
@@ -1194,6 +1202,9 @@ class SyncInterfacesView(
                     )
                 return None
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
+        if oob and not created:
+            # The controller row has no claim on an existing host interface by name.
+            return None
         if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
             return None
         if created:
