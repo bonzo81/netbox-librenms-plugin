@@ -1094,9 +1094,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # existing match, so fail closed exactly like the serial/IP fallback below and the
             # full validate_device_for_import() path — block instead of picking arbitrarily. The
             # "hostname/serial" marker keeps this in lock-step with the stale-blocker cleanup above.
-            validation.setdefault("issues", []).append(
-                "Multiple NetBox devices share this device's hostname/serial; resolve the duplicate before importing."
-            )
+            msgs = validation.get("issues")
+            if isinstance(msgs, list):
+                msgs.append(
+                    "Multiple NetBox devices share this device's hostname/serial; resolve the "
+                    "duplicate before importing."
+                )
             validation["existing_match_type"] = "ambiguous_hostname_or_serial"
             validation["can_import"] = False
             validation["is_ready"] = False
@@ -1145,10 +1148,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # Block without binding to an arbitrary device: append a blocking issue (the
                 # new_device=None `else` branch below recomputes can_import from the issues list)
                 # and mark the row ambiguous so the UI doesn't render a wrong existing match.
-                validation.setdefault("issues", []).append(
-                    "Multiple NetBox devices match this device's serial or management IP; "
-                    "resolve the duplicate before importing."
-                )
+                msgs = validation.get("issues")
+                if isinstance(msgs, list):
+                    msgs.append(
+                        "Multiple NetBox devices match this device's serial or management IP; "
+                        "resolve the duplicate before importing."
+                    )
                 validation["existing_match_type"] = "ambiguous_hostname_or_serial"
                 validation["can_import"] = False
                 validation["is_ready"] = False
