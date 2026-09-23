@@ -49,12 +49,20 @@
     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=effective_server_key %}
     {% endwith %}
 {% else %}
+{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk as sync_url %}
+{# htmx swaps the tab in place, so the page, page size and scroll position survive; method/action stay as the no-JS fallback. #}
 <form method="post"
     data-interface-origin-device-id="{{ interface_sync.object.pk }}"
-    action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
+    action="{{ sync_url }}?interface_name_field={{ interface_name_field }}"
+    hx-post="{{ sync_url }}?interface_name_field={{ interface_name_field }}"
+    hx-target="#interface-sync-content" hx-swap="innerHTML" hx-sync="#interface-sync-content:drop">
     {# Form-only inputs live inside the form branch so migrated (donor) mode, which renders a plain <div> wrapper, never emits hidden fields outside any <form>. #}
     {% csrf_token %}
     {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
+    {% with table=interface_sync.table %}{% if table.page %}
+    <input type="hidden" name="{{ table.prefix }}page" value="{{ table.page.number }}">
+    <input type="hidden" name="{{ table.prefix }}per_page" value="{{ table.paginator.per_page }}">
+    {% endif %}{% endwith %}
 {% endif %}
     {% endwith %}
     {% block table_actions %}

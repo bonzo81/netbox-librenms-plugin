@@ -1179,6 +1179,9 @@ class LibreNMSInterfaceTable(tables.Table):
             "paginator_class": EnhancedPaginator,
             "per_page": get_table_paginate_count(request, self.prefix),
         }
+        # A sync POST re-renders the tab in place, so it posts the page it was rendered at.
+        if page := request.POST.get(f"{self.prefix}page"):
+            paginate["page"] = page
 
         tables.RequestConfig(request, paginate).configure(self)
 

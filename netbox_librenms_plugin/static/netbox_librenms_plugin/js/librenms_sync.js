@@ -1453,6 +1453,27 @@ document.addEventListener('change', function (e) {
  * row and re-submitted alongside it.
  */
 
+/** The htmx events that mean a request got no usable answer. */
+const HTMX_FAILURE_EVENTS = ['htmx:responseError', 'htmx:sendError', 'htmx:timeout'];
+
+/** The off-page rows each form's last submit consumed, by table id, so a failed submit can give them back. */
+const consumedOffPageSelections = new WeakMap();
+
+/**
+ * Return the stored records of a table's off-page rows.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @param {Object} selection - The table's stored selection.
+ * @returns {Object} The off-page records by row key.
+ */
+function offPageRecords(table, selection) {
+    const records = {};
+    offPageSelectionKeys(table).forEach(function (rowKey) {
+        records[rowKey] = selection[rowKey];
+    });
+    return records;
+}
+
 /** Tables whose selection survives pagination, and the tab each belongs to. */
 const SELECTABLE_TABLE_IDS = [
     'librenms-interface-table',
@@ -1818,8 +1839,79 @@ document.addEventListener('change', function (e) {
 // A single-row action submits one row, so it must not consume the stored bulk selection.
 const SINGLE_ROW_SUBMITTERS = ['sync_one', 'rebind_one', 'create_vrf'];
 
+/**
+ * Give the off-page rows of a failed submit back to their tables' stores.
+ *
+ * The submit consumed the store, and a retry drops the rows injected by the failed one, so without
+ * this a retry silently syncs fewer rows than the user selected.
+ *
+ * @param {HTMLFormElement} form - The form whose submit failed.
+ * @returns {void}
+ */
+function restoreOffPageSelections(form) {
+    const consumed = consumedOffPageSelections.get(form) || {};
+    consumedOffPageSelections.delete(form);
+    Object.keys(consumed).forEach(function (tableId) {
+        const table = document.getElementById(tableId);
+        if (!table) return;
+        writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId]));
+        updateOffPageSelectionNotice(table);
+    });
+}
+
+// Only the error events mean failure: htmx leaves `successful` unset on an HX-Redirect success too.
+HTMX_FAILURE_EVENTS.forEach(function (eventName) {
+    document.addEventListener(eventName, function (e) {
+        if (e.detail.elt instanceof HTMLFormElement) {
+            restoreOffPageSelections(e.detail.elt);
+        }
+    });
+});
+
+/**
+ * Move the off-page rows of some tables into an htmx request's parameters, and consume them.
+ *
+ * @param {HTMLElement[]} tables - The tables whose stored rows the request submits.
+ * @param {FormData} params - The request parameters.
+ * @returns {Object} The consumed records by table id and row key.
+ */
+function consumeOffPageSelections(tables, params) {
+    const consumed = {};
+    tables.forEach(function (table) {
+        const records = offPageRecords(table, readStoredSelection(table));
+        Object.keys(records).forEach(function (rowKey) {
+            params.append('select', rowKey);
+            const companions = (records[rowKey] && records[rowKey].inputs) || {};
+            Object.keys(companions)
+                .filter(_isSelectionCompanionName)
+                .forEach(function (name) { params.append(name, companions[name]); });
+        });
+        consumed[table.id] = records;
+        clearStoredSelection(table);
+    });
+    return consumed;
+}
+
+// An htmx form takes its off-page rows here: configRequest fires only for a request htmx sends, after it serialized the form.
+document.addEventListener('htmx:configRequest', function (e) {
+    const form = e.detail.elt;
+    if (!(form instanceof HTMLFormElement)) return;
+    // The module table sits OUTSIDE its form and has its own configRequest injector.
+    const tables = SELECTABLE_TABLE_IDS
+        .map(function (tableId) { return document.getElementById(tableId); })
+        .filter(function (table) { return table && form.contains(table); });
+    if (!tables.length) return;
+    const submitter = e.detail.triggeringEvent && e.detail.triggeringEvent.submitter;
+    const consumed = SINGLE_ROW_SUBMITTERS.includes(submitter && submitter.name)
+        ? {}
+        : consumeOffPageSelections(tables, e.detail.parameters);
+    consumedOffPageSelections.set(form, consumed);
+});
+
 document.addEventListener('submit', function (e) {
-    if (e.target instanceof HTMLFormElement && !SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {
+    // An htmx form never navigates, and the configRequest listener above handles it.
+    if (!(e.target instanceof HTMLFormElement) || e.target.hasAttribute('hx-post')) return;
+    if (!SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {
         injectOffPageSelections(e.target);
     }
 });
@@ -3514,6 +3606,13 @@ function initializeSyncFormSpinners() {
             spinner.style.height = '1rem';
             button.disabled = true;
         });
+        // A failed htmx submit swaps nothing, so the form stays and its button must work again.
+        HTMX_FAILURE_EVENTS.forEach(function (eventName) {
+            form.addEventListener(eventName, function () {
+                spinner.classList.add('d-none');
+                button.disabled = false;
+            });
+        });
     });
 
     // Handle HTMX refresh buttons (btn-outline-primary with hx-post)
@@ -3851,15 +3950,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 });
                 // Modules the user selected on another page of this table: the rows are gone
                 // from the DOM, so their target device travels with them out of the store.
-                const stored = readStoredSelection(table);
-                offPageSelectionKeys(table).forEach((rowKey) => {
-                    params.append('select', rowKey);
-                    const companions = (stored[rowKey] && stored[rowKey].inputs) || {};
-                    Object.keys(companions)
-                        .filter(_isSelectionCompanionName)
-                        .forEach((name) => params.append(name, companions[name]));
-                });
-                clearStoredSelection(table);
+                consumedOffPageSelections.set(event.detail.elt, consumeOffPageSelections([table], params));
             }
         }
     });

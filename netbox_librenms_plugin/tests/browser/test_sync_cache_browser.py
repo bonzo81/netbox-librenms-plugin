@@ -807,6 +807,194 @@ def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs
     assert stored == {}
 
 
+HTMX_SYNC_URL = "https://plugin.example.com/htmx-sync"
+
+
+def _htmx_sync_form(table_id="librenms-interface-table"):
+    return f"""
+        <div id="tab-content">
+          <form id="sync-form" method="post" action="{HTMX_SYNC_URL}"
+                hx-post="{HTMX_SYNC_URL}" hx-target="#tab-content" hx-swap="innerHTML"
+                hx-sync="#tab-content:drop">
+            <table id="{table_id}"><tbody><tr>
+              <td><input type="checkbox" name="select" value="201" checked></td>
+              <td><button id="row-sync" type="submit" name="sync_one" value="201">Sync</button></td>
+            </tr></tbody></table>
+            <button id="bulk-submit" type="submit">
+              <span class="spinner spinner-border d-none" id="sync-spinner"></span>Sync selected
+            </button>
+          </form>
+        </div>
+        """
+
+
+@pytest.mark.parametrize("table_id", ["librenms-interface-table", "librenms-cable-table"])
+def test_an_htmx_submit_carries_the_off_page_selection(page, table_id):
+    """The off-page rows are in the form before htmx serializes it in the form's own submit listener."""
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form(table_id))
+    _add_page_scripts(page)
+    page.evaluate("writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}})")
+
+    page.click("#bulk-submit")
+    page.locator("#swapped").wait_for()
+
+    assert sorted(value for key, value in _selection_form_pairs(bodies[0]) if key == "select") == ["101", "201"]
+
+
+@pytest.mark.parametrize("failure", ["status", "transport"])
+def test_a_failed_htmx_submit_gives_the_button_back(page, failure):
+    """A failed htmx submit swaps nothing, so a button left disabled would look dead."""
+
+    def answer(route):
+        if failure == "status":
+            route.fulfill(status=500, content_type="text/html", body="Server error")
+        else:
+            route.abort()
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncFormSpinners()")
+
+    page.click("#bulk-submit")
+
+    expect(page.locator("#bulk-submit")).to_be_enabled()
+    expect(page.locator("#sync-spinner")).to_have_class(re.compile(r"\bd-none\b"))
+    assert page.locator("#sync-form").count() == 1
+
+
+def test_a_retry_after_a_failed_htmx_submit_still_carries_the_off_page_selection(page):
+    """A failed submit gives the off-page rows back, so the notice shows them and a retry posts them."""
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        if len(bodies) == 1:
+            route.fulfill(status=500, content_type="text/html", body="Server error")
+        else:
+            route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncFormSpinners()")
+    page.evaluate(
+        "writeStoredSelection(document.querySelector('table'), {'101': {inputs: {expected_local_id_101: '7'}, auto: ''}})"
+    )
+
+    page.click("#bulk-submit")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    page.click("#bulk-submit")
+    page.locator("#swapped").wait_for()
+
+    first, retry = (_selection_form_pairs(body) for body in bodies)
+    assert sorted(first) == sorted(retry) == [("expected_local_id_101", "7"), ("select", "101"), ("select", "201")]
+
+
+def test_a_dropped_row_submit_keeps_the_pending_bulk_submit_recoverable(page):
+    """A row submit that htmx drops behind a pending bulk submit must not lose that submit's off-page rows."""
+    held = []
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        if len(bodies) == 1:
+            held.append(route)
+        else:
+            route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    page.evaluate("writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}})")
+
+    with page.expect_request(HTMX_SYNC_URL):
+        page.click("#bulk-submit")
+    page.click("#row-sync")
+    held[0].fulfill(status=500, content_type="text/html", body="Server error")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    page.click("#bulk-submit")
+    page.locator("#swapped").wait_for()
+
+    first, retry = (_selection_form_pairs(body) for body in bodies)
+    assert sorted(first) == sorted(retry) == [("select", "101"), ("select", "201")]
+
+
+def test_a_successful_htmx_redirect_does_not_give_the_off_page_selection_back(page):
+    """An HX-Redirect success leaves htmx's `successful` unset, and it must not read as a failure."""
+    fixture_url = page.url
+    page.route(
+        HTMX_SYNC_URL,
+        lambda route: route.fulfill(status=200, headers={"HX-Redirect": fixture_url}, body=""),
+    )
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    storage_key = page.evaluate(
+        """() => {
+            const table = document.querySelector('table');
+            writeStoredSelection(table, {'101': {inputs: {}, auto: ''}});
+            return _selectionStorageKey(table);
+        }"""
+    )
+
+    # The redirect reloads the same path, so the new document reads the same selection store.
+    with page.expect_navigation():
+        page.click("#bulk-submit")
+
+    assert page.evaluate("key => window.sessionStorage.getItem(key)", storage_key) is None
+
+
+def test_a_retry_after_a_failed_module_install_still_carries_the_off_page_selection(page):
+    """The module table sits outside its form, and its off-page rows come back after a failure too."""
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        if len(bodies) == 1:
+            route.fulfill(status=500, content_type="text/html", body="Server error")
+        else:
+            route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Installed</span>')
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(
+        f"""
+        <div id="module-sync-content">
+          <form id="install-selected-form" method="post" action="{HTMX_SYNC_URL}"
+                hx-post="{HTMX_SYNC_URL}" hx-target="#module-sync-content" hx-swap="innerHTML">
+            <button id="install-submit" type="submit">Install Selected</button>
+          </form>
+          <table id="librenms-module-table"><tbody><tr>
+            <td><input type="checkbox" name="select" value="201" checked>
+                <select id="device_selection_201"><option value="7" selected>m7</option></select></td>
+          </tr></tbody></table>
+        </div>
+        """
+    )
+    _add_page_scripts(page)
+    # The page script wires its htmx:configRequest injector on DOMContentLoaded, which already fired here.
+    page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded'))")
+    page.evaluate(
+        "writeStoredSelection(document.getElementById('librenms-module-table'),"
+        " {'101': {inputs: {device_selection_101: '9'}, auto: ''}})"
+    )
+
+    page.click("#install-submit")
+    expect(page.locator("#librenms-module-table-offpage-selection")).to_contain_text("1 more row")
+    page.click("#install-submit")
+    page.locator("#swapped").wait_for()
+
+    first, retry = (sorted(_selection_form_pairs(body)) for body in bodies)
+    expected = [("device_selection_101", "9"), ("device_selection_201", "7"), ("select", "101"), ("select", "201")]
+    assert first == retry == expected
+
+
 def _selection_form_pairs(post_data):
     """Parse an application/x-www-form-urlencoded body into (name, value) pairs."""
     from urllib.parse import parse_qsl

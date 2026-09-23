@@ -150,22 +150,20 @@ class SyncInterfacesView(
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect(self._interfaces_tab_url(object_type, object_id, interface_name_field, None))
+            return self._tab_response(request, object_type, obj, interface_name_field, None)
         self._post_server_key = server_key
         selected_port_ids = self.get_selected_port_ids(request)
         exclude_columns = request.POST.getlist("exclude_columns")
 
-        redirect_url = self._interfaces_tab_url(object_type, object_id, interface_name_field, server_key)
-
         if selected_port_ids is None:
-            return redirect(redirect_url)
+            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
         visible_port_ids = selected_port_ids
         self._selected_port_ids = set(visible_port_ids)
         self._auto_selected_port_ids = set()
 
         ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
-            return redirect(redirect_url)
+            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
 
         relationships = self._get_cached_relationships(obj, server_key)
         lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
@@ -207,7 +205,7 @@ class SyncInterfacesView(
                 "Selected LibreNMS port IDs are duplicated in the cached interface data. "
                 "Refresh LibreNMS data and resolve the duplicate IDs before syncing.",
             )
-            return redirect(redirect_url)
+            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
         # Resolve inferred off-page owners only after the chassis and its members are locked.
         # A pre-lock position guess can become stale if membership positions change concurrently.
         self._auto_selected_target_ids = {}
@@ -252,7 +250,7 @@ class SyncInterfacesView(
                 "The sync was rolled back by a concurrent change to a related interface. "
                 "Refresh the LibreNMS data and try again.",
             )
-            return redirect(redirect_url)
+            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
 
         if self._skipped_conflicts:
             skipped = ", ".join(self._skipped_conflicts)
@@ -285,21 +283,59 @@ class SyncInterfacesView(
             )
         else:
             cache_transition = None
-        return apply_transition_to_response(request, redirect(redirect_url), cache_transition)
-
-    @staticmethod
-    def _interfaces_tab_url(object_type, object_id, interface_name_field, server_key):
-        """Return the interfaces tab URL the sync POSTs redirect to."""
-        url_name = (
-            "dcim:device_librenms_sync"
-            if object_type == "device"
-            else "plugins:netbox_librenms_plugin:vm_librenms_sync"
+        return apply_transition_to_response(
+            request, self._tab_response(request, object_type, obj, interface_name_field, server_key), cache_transition
         )
-        # quote_plus the request-supplied values so they cannot inject extra query parameters.
-        return (
-            reverse(url_name, kwargs={"pk": object_id})
-            + f"?tab=interfaces&interface_name_field={quote_plus(interface_name_field)}"
-            + (f"&server_key={quote_plus(server_key)}" if server_key else "")
+
+    def _tab_response(self, request, object_type, obj, interface_name_field, server_key):
+        """
+        Return the interfaces tab after a sync or rebind POST.
+
+        An htmx submit gets the ``#interface-sync-content`` fragment in place, so the page, the page
+        size and the scroll position survive. A plain submit gets a redirect to the tab.
+
+        Args:
+            request (HttpRequest): The sync or rebind request.
+            object_type (str): ``device`` or ``virtualmachine``.
+            obj (Device | VirtualMachine): The page object.
+            interface_name_field (str): Port field that contains the interface name.
+            server_key (str | None): The validated POSTed server key, or None when it names no server.
+
+        Returns:
+            HttpResponse: The fragment, or a redirect to the interfaces tab.
+
+        """
+        if request.headers.get("HX-Request") != "true":
+            url_name = (
+                "dcim:device_librenms_sync"
+                if object_type == "device"
+                else "plugins:netbox_librenms_plugin:vm_librenms_sync"
+            )
+            # quote_plus the request-supplied values so they cannot inject extra query parameters.
+            return redirect(
+                reverse(url_name, kwargs={"pk": obj.pk})
+                + f"?tab=interfaces&interface_name_field={quote_plus(interface_name_field)}"
+                + (f"&server_key={quote_plus(server_key)}" if server_key else "")
+            )
+
+        # Imported here: the object_sync views import this module's view stack.
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+        from netbox_librenms_plugin.views.object_sync.vms import VMInterfaceTableView
+
+        tab_view = DeviceInterfaceTableView() if object_type == "device" else VMInterfaceTableView()
+        tab_view.setup(request, pk=obj.pk)
+        if server_key is None:
+            # The same empty tab the refresh renders for a server that is no longer configured.
+            server_key = self.active_server_key
+            context = {"object": obj, "table": None, "cache_expiry": None, "server_key": None}
+        else:
+            tab_view.rebind_api_for_server(server_key)
+            context = tab_view.get_context_data(request, obj, interface_name_field, server_key)
+        return tab_view.render_sync_partial(
+            request,
+            obj,
+            server_key,
+            {"interface_sync": context, "interface_name_field": interface_name_field},
         )
 
     def get_object(self, object_type, object_id):
@@ -1638,29 +1674,28 @@ class RebindInterfacePortView(SyncInterfacesView):
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect(self._interfaces_tab_url(object_type, object_id, interface_name_field, None))
-        redirect_url = self._interfaces_tab_url(object_type, object_id, interface_name_field, server_key)
+            return self._tab_response(request, object_type, obj, interface_name_field, None)
         if isinstance(obj, Device) and build_migrated_context(obj, server_key).get("migrated_to_marker"):
             messages.error(request, "This LibreNMS source has been migrated and is read-only.")
-            return redirect(redirect_url)
+            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
         port_id = normalize_librenms_port_id(request.POST.get("rebind_one"))
         expected_port_id = normalize_librenms_port_id(request.POST.get(f"rebind_expected_port_{port_id}"))
         if port_id is None or expected_port_id is None:
             messages.error(request, "The Rebind request is incomplete. Refresh the page and try again.")
-            return redirect(redirect_url)
+            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
 
         self._post_server_key = server_key
         self._selected_port_ids = {port_id}
         self._auto_selected_port_ids = set()
         ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
-            return redirect(redirect_url)
+            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
         try:
             with transaction.atomic():
                 interface = self._rebind(obj, ports_data, port_id, expected_port_id, interface_name_field, server_key)
         except _RebindRefusedError as refusal:
             messages.error(request, str(refusal))
-            return redirect(redirect_url)
+            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
         finally:
             self.__dict__.pop("_locked_target_devices", None)
 
@@ -1670,7 +1705,9 @@ class RebindInterfacePortView(SyncInterfacesView):
             f"{expected_port_id}. Sync the row to update its other fields.",
         )
         transition = schedule_request_cache_mutation(request, obj, SyncTab.INTERFACES, server_key)
-        return apply_transition_to_response(request, redirect(redirect_url), transition)
+        return apply_transition_to_response(
+            request, self._tab_response(request, object_type, obj, interface_name_field, server_key), transition
+        )
 
     def _rebind(self, obj, ports_data, port_id, expected_port_id, interface_name_field, server_key):
         """
