@@ -434,7 +434,8 @@ def _doc_ip(value, rules):
         str: The documentation address, with the original prefix suffix when there was one.
 
     """
-    addr, sep, prefix = value.partition("/")
+    raw_addr, sep, prefix = value.partition("/")
+    addr = str(ipaddress.ip_address(raw_addr))
     assigned = rules.doc_ips if rules.doc_ips is not None else {}
     if addr not in assigned:
         taken = set(assigned.values())

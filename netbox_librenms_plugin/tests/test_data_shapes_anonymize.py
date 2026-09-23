@@ -219,8 +219,8 @@ def _vrf_recording():
                         "vrf_id": 7,
                         "vrf_oid": "8.77.103.109.116.45.118.114.102",
                         "vrf_name": "Mgmt-vrf",
-                        "bgpLocalAs": 6830,
-                        "mplsVpnVrfRouteDistinguisher": "21620:4278681533",
+                        "bgpLocalAs": 64512,
+                        "mplsVpnVrfRouteDistinguisher": "64513:42",
                         "mplsVpnVrfDescription": "Customer A handover, contact jane@corp.example",
                         "device_id": 5,
                     },
@@ -228,7 +228,7 @@ def _vrf_recording():
                         "vrf_id": 5,
                         "vrf_oid": "1",
                         "vrf_name": "Base",
-                        "bgpLocalAs": 6830,
+                        "bgpLocalAs": 64512,
                         "mplsVpnVrfRouteDistinguisher": None,
                         "mplsVpnVrfDescription": "",
                         "device_id": 5,
@@ -240,7 +240,7 @@ def _vrf_recording():
                 "addresses": [
                     {
                         "ipv4_address_id": 64,
-                        "ipv4_address": "84.116.251.34",
+                        "ipv4_address": "192.0.2.34",
                         "ipv4_prefixlen": 31,
                         "ipv4_network_id": 54,
                         "port_id": 485,
@@ -259,7 +259,7 @@ def _vrf_recording():
                         "remote_device_id": 1,
                         "active": 1,
                         "protocol": "lldp",
-                        "remote_hostname": "prod-lab03c-ri5.arcos",
+                        "remote_hostname": "edge.example.test",
                         "remote_port": "swp7",
                         "remote_platform": "x86-64-ufispace-s9610-36d-r0",
                         "remote_version": "Arrcus Operating System (ArcOS) 4.2.1",
@@ -305,7 +305,7 @@ def test_route_distinguisher_remapped_and_description_scrubbed():
     anon = anonymize_recording(_vrf_recording())
 
     vrfs = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
-    assert vrfs[0]["mplsVpnVrfRouteDistinguisher"] != "21620:4278681533"
+    assert vrfs[0]["mplsVpnVrfRouteDistinguisher"] != "64513:42"
     assert ":" in vrfs[0]["mplsVpnVrfRouteDistinguisher"]
     assert vrfs[1]["mplsVpnVrfRouteDistinguisher"] is None
     assert vrfs[0]["mplsVpnVrfDescription"] == ""
@@ -314,7 +314,7 @@ def test_route_distinguisher_remapped_and_description_scrubbed():
 def test_vrf_local_asn_pseudonymized_like_every_other_asn():
     anon = anonymize_recording(_vrf_recording())
 
-    assert anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"][0]["bgpLocalAs"] != 6830
+    assert anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"][0]["bgpLocalAs"] != 64512
 
 
 def test_ip_rows_are_documentation_addresses_with_their_prefix_kept():
@@ -322,7 +322,7 @@ def test_ip_rows_are_documentation_addresses_with_their_prefix_kept():
     anon = anonymize_recording(_vrf_recording())
 
     row = anon["responses"]["GET /api/v0/devices/5/ip"]["addresses"][0]
-    assert row["ipv4_address"] != "84.116.251.34"
+    assert row["ipv4_address"] != "192.0.2.34"
     assert _is_doc_address(row["ipv4_address"])
     assert row["ipv4_prefixlen"] == 31
     assert row["port_id"] == 485
@@ -339,7 +339,7 @@ def test_link_rows_keep_their_join_keys_and_lose_the_neighbour_identity():
     assert link["local_device_id"] == 5
     assert link["remote_device_id"] == 1
     assert link["protocol"] == "lldp"
-    assert link["remote_hostname"] != "prod-lab03c-ri5.arcos"
+    assert link["remote_hostname"] != "edge.example.test"
     assert link["remote_platform"] != "x86-64-ufispace-s9610-36d-r0"
     assert "ArcOS" not in link["remote_version"]
 
@@ -399,6 +399,27 @@ def test_the_same_address_still_maps_to_one_pseudonym():
 
     assert rows[0]["ipv4_address"] == rows[1]["ipv4_address"]
     assert rows[2]["ipv4_address"] != rows[0]["ipv4_address"]
+
+
+def test_equivalent_ipv6_spellings_share_one_pseudonym():
+    recording = {
+        "schema_version": 1,
+        "name": "equivalent-ipv6",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ip": {
+                "status": "ok",
+                "addresses": [
+                    {"port_id": 1, "ipv6_address": "2001:db8::abcd"},
+                    {"port_id": 2, "ipv6_compressed": "2001:0DB8:0000:0000:0000:0000:0000:ABCD"},
+                ],
+            }
+        },
+    }
+
+    rows = anonymize_recording(recording)["responses"]["GET /api/v0/devices/1/ip"]["addresses"]
+
+    assert rows[0]["ipv6_address"] == rows[1]["ipv6_compressed"]
 
 
 def test_documentation_addresses_do_not_use_the_stubs_oob_block():
