@@ -630,7 +630,7 @@ class TestApplyModuleInterfaceTypes:
             },
             user=user,
         )
-        response = view_post(ApplyModuleInterfaceTypesView(), request, pk=page_device.pk)
+        response = ApplyModuleInterfaceTypesView.as_view()(request, pk=page_device.pk)
         return request, response
 
     def test_real_post_updates_a_vc_member_interface_with_exact_permissions(self, settings):
@@ -656,7 +656,8 @@ class TestApplyModuleInterfaceTypes:
         assert message_texts(request, "success") == ["Updated the type of 1 interface from its module template."]
         assert_locked_before_update(captured, "dcim_interface")
 
-    def test_type_update_invalidates_loaded_interface_snapshot(self, settings, django_capture_on_commit_callbacks):
+    @pytest.mark.django_db(transaction=True)
+    def test_type_update_invalidates_loaded_interface_snapshot(self, settings):
         from dcim.models import Device, Interface, Module
         from django.core.cache import cache
 
@@ -674,15 +675,16 @@ class TestApplyModuleInterfaceTypes:
         )
         keys = seed_every_tab(page_device)
         interface_key = SyncCacheConsistency(page_device).snapshot_key(SyncTab.INTERFACES, "default")
+        module_key = SyncCacheConsistency(page_device).snapshot_key(SyncTab.MODULES, "default")
 
         try:
-            with django_capture_on_commit_callbacks(execute=True):
-                _request, response = self._post(settings, user, page_device, member, module, interface)
+            _request, response = self._post(settings, user, page_device, member, module, interface)
 
             interface.refresh_from_db()
             assert response.status_code == 302
             assert interface.type == "10gbase-x-sfpp"
             assert cache.get(interface_key) is None
+            assert cache.get(module_key) is not None, "the source module snapshot was cleared before its transition"
             assert "X-LibreNMS-Cache-Transition" in response
         finally:
             clear_snapshots(keys)

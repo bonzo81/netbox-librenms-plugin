@@ -2580,7 +2580,9 @@ class ModuleInterfaceTypePreviewView(LibreNMSPermissionMixin, NetBoxObjectPermis
         )
 
 
-class ApplyModuleInterfaceTypesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+class ApplyModuleInterfaceTypesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
+):
     """Apply selected module interface-template types after checking preview state."""
 
     def _assert_updated_interface_change_scope(self, interface, outcome):
