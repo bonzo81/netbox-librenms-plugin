@@ -30,6 +30,23 @@ def test_validate_clean_recording_reports_novelty(tmp_path):
     assert "Novelty: likely-covered" in output
 
 
+def test_validate_reads_utf8_recording_under_an_ascii_default(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    rec = load_recording("cisco-stackwise-3member")
+    rec["description"] = "caf\u00e9"
+    path = tmp_path / "rec.json"
+    path.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def ascii_default(file_path, *args, encoding=None, **kwargs):
+        return original_read_text(file_path, *args, encoding=encoding or "ascii", **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", ascii_default)
+
+    assert "schema-valid and PII-clean" in _run(validate=str(path))
+
+
 def test_validate_accepts_capture_before_outcome_promotion(tmp_path):
     """Captured submissions have no expected outcomes until a maintainer promotes them."""
     rec = anonymize_recording(load_recording("cisco-stackwise-3member"))

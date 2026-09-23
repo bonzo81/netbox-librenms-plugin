@@ -20,6 +20,7 @@ from netbox_librenms_plugin.data_shapes.ports import (
     port_is_lag,
     port_names,
 )
+from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
 
 # Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
 # "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
@@ -133,12 +134,7 @@ def compute_shape_signature(recording):
     """
     device_id = recording.get("device_id")
     dev_body = _body(recording, lambda k: k == f"GET /api/v0/devices/{device_id}")
-    # `recording.get("meta", {})` returns None when "meta" is present-but-null (the default only
-    # applies when the key is absent), and `or {}` still passes a truthy NON-dict through — the
-    # schema doesn't validate meta, so a community recording can carry "meta": null or
-    # "meta": "garbage" and neither must crash --validate/--list. Normalize to a dict once.
-    meta = recording.get("meta")
-    meta = meta if isinstance(meta, dict) else {}
+    meta = recording_meta(recording)
     os_name = meta.get("os")
     if os_name is None and isinstance(dev_body, dict):
         devices = dev_body.get("devices")

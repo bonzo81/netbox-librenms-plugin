@@ -14,6 +14,7 @@ so these tests need no database.
 
 from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
+import json
 from threading import Barrier
 from unittest.mock import patch
 
@@ -36,12 +37,46 @@ def test_recordings_present():
     assert iter_recording_paths(), "no recording JSON files found in data_shapes/recordings/"
 
 
+def test_bundled_inventory_display_text_is_anonymized():
+    from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+
+    recording = load_recording("arcos-lag-transceivers")
+    inventory = recording["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"]["inventory"]
+
+    for item in inventory:
+        for key in ("entPhysicalName", "entPhysicalDescr"):
+            if item.get(key):
+                assert item[key].startswith("entity-"), key
+
+
 def test_load_recording_rejects_path_traversal():
     """A recording name that escapes the recordings directory must raise ValueError, not read an arbitrary file off disk."""
     from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 
     with pytest.raises(ValueError):
         load_recording("../../../../../../etc/passwd")
+
+
+def test_recording_and_manifest_use_utf8_under_an_ascii_default(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from netbox_librenms_plugin.data_shapes import recordings_store
+
+    original_read_text = Path.read_text
+
+    def ascii_default(path, *args, encoding=None, **kwargs):
+        return original_read_text(path, *args, encoding=encoding or "ascii", **kwargs)
+
+    manifest = json.loads(original_read_text(recordings_store.MANIFEST_PATH, encoding="utf-8"))
+    manifest[0]["name"] = "caf\u00e9"
+    monkeypatch.setattr(Path, "read_text", ascii_default)
+    monkeypatch.setattr(recordings_store, "RECORDINGS_DIR", tmp_path)
+    monkeypatch.setattr(recordings_store, "MANIFEST_PATH", tmp_path / "manifest.json")
+    (tmp_path / "unicode.json").write_text('{"name": "caf\u00e9"}', encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    assert recordings_store.load_recording("unicode")["name"] == "caf\u00e9"
+    assert recordings_store.load_manifest()[0]["name"] == "caf\u00e9"
 
 
 def test_load_recording_rejects_manifest_and_non_dict(monkeypatch, tmp_path):
@@ -605,7 +640,17 @@ def test_recording_outcomes(recording, recording_server):
         _assert_transceivers(api, device_id, expected["transceivers"])
 
     if "serial_ports" in expected:
-        _assert_serial_ports(api, device_id, expected["serial_ports"], recording["serial_type_patterns"])
+        _assert_serial_ports(api, device_id, expected["serial_ports"], recording.get("serial_type_patterns") or {})
 
     if "oob" in expected:
         _assert_oob(api, recording, expected["oob"])
+
+
+def test_serial_outcome_without_patterns_replays_as_empty(recording_server):
+    recording = {
+        **next(item for item in _RECORDINGS if "serial_ports" in item["expected"]),
+        "expected": {"serial_ports": {"count": 0}},
+    }
+    recording.pop("serial_type_patterns", None)
+
+    test_recording_outcomes(recording, recording_server)

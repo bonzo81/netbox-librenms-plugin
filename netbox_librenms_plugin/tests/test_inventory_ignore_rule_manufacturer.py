@@ -133,6 +133,26 @@ class TestSeededRuleScoping:
 
         restore_inventory_rule_scoping()
 
+    @pytest.mark.parametrize("slugs", [("juniper",), ("juniper", "juniper-networks")])
+    def test_seed_integrity_restores_a_rule_whose_manufacturer_was_cleared(self, slugs):
+        import importlib
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.conftest import restore_seeded_state
+
+        include = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+        manufacturers = [_manufacturer(slug.title(), slug) for slug in slugs]
+        self._run_migration_scoping()
+        InventoryIgnoreRule.objects.filter(name=include.DEFAULT_RULE["name"], manufacturer=manufacturers[0]).update(
+            manufacturer=None
+        )
+
+        assert restore_seeded_state(force=False) is True
+        for manufacturer in manufacturers:
+            assert InventoryIgnoreRule.objects.filter(
+                name=include.DEFAULT_RULE["name"], manufacturer=manufacturer
+            ).exists()
+
     def test_the_seeded_rule_is_scoped_when_juniper_exists(self):
         import importlib
 

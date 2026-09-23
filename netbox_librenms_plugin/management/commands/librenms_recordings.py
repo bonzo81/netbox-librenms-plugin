@@ -61,7 +61,7 @@ class Command(BaseCommand):
 
     def _validate(self, path):
         try:
-            recording = json.loads(Path(path).read_text())
+            recording = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise CommandError(f"Could not read recording {path}: {exc}") from exc
 

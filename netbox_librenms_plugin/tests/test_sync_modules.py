@@ -8698,7 +8698,12 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+    from netbox_librenms_plugin.utils import (
+        get_enabled_ignore_rules,
+        module_inventory_binding_token,
+        module_inventory_snapshot_digest,
+    )
+    from netbox_librenms_plugin.views.sync.modules import _lock_page_device_serials
     from netbox_librenms_plugin.views.mixins import CacheMixin
 
     device = make_device_with_module_bays("serial-rule-batch", ["Slot 1", "Slot 2", "Slot 3"])
@@ -8753,7 +8758,21 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
     if member is not None:
         data["device_selection_3"] = str(member.pk)
     client.force_login(make_superuser("serial-rule-batch-user"))
-    with CaptureQueriesContext(connection) as queries:
+    events = []
+
+    def record_rule_read(manufacturer):
+        events.append("rules")
+        return get_enabled_ignore_rules(manufacturer)
+
+    def record_lock(page_device):
+        events.append("lock")
+        return _lock_page_device_serials(page_device)
+
+    with (
+        patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", side_effect=record_rule_read),
+        patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials", side_effect=record_lock),
+        CaptureQueriesContext(connection) as queries,
+    ):
         response = client.post(reverse(f"plugins:netbox_librenms_plugin:{endpoint}", args=[device.pk]), data)
     assert response.status_code == 302
     expected = {"BATCH-1", "BATCH-3"}
@@ -8768,6 +8787,9 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         if "SELECT" in query["sql"] and "normalizationrule" in query["sql"] and "'serial'" in query["sql"]
     ]
     assert len(serial_queries) <= (4 if mixed_manufacturers else 2), serial_queries
+    if not is_branch:
+        assert "rules" in events and "lock" in events
+        assert events.index("rules") < events.index("lock"), events
 
 
 @pytest.mark.django_db

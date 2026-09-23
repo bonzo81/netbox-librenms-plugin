@@ -33,6 +33,12 @@ SUPPORTED_EXPECTED_OUTCOMES = frozenset(
 )
 
 
+def recording_meta(recording):
+    """Return recording metadata as a dict when the optional field has another shape."""
+    meta = recording.get("meta")
+    return meta if isinstance(meta, dict) else {}
+
+
 def iter_recording_paths():
     """Return the sorted list of recording JSON file paths (excluding the novelty manifest)."""
     return sorted(p for p in RECORDINGS_DIR.glob("*.json") if p.name != MANIFEST_NAME)
@@ -54,7 +60,7 @@ def load_recording(name: str) -> dict:
         candidate.relative_to(base_dir)
     except ValueError as exc:
         raise ValueError(f"Invalid recording name: {name!r}") from exc
-    loaded = json.loads(candidate.read_text())
+    loaded = json.loads(candidate.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):
         raise ValueError(f"{filename!r} is not a recording object")
     return loaded
@@ -72,7 +78,7 @@ load_bundled_recordings = iter_recordings
 def load_manifest():
     """Load the novelty manifest, or raise when the generated artifact is unavailable."""
     try:
-        manifest = json.loads(MANIFEST_PATH.read_text())
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     except OSError as exc:
         raise RuntimeError(f"Could not read data-shape manifest {MANIFEST_PATH.name!r}.") from exc
     except ValueError as exc:

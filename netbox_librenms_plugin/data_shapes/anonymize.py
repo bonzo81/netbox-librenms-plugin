@@ -35,6 +35,7 @@ from netbox_librenms_plugin.data_shapes.ports import (
     compile_lag_patterns,
     name_matches_lag_pattern,
 )
+from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
 
 # Logic-bearing fields the sync/detection/relationship code reads — never altered.
 # NOTE: ifName/ifDescr are NOT here — they carry real infra (custom names, "** host **"
@@ -195,6 +196,7 @@ FREETEXT_KEYS = frozenset(
         # row is often the VRF name again, which is exactly the value pseudonymized below.
         "mplsVpnVrfDescription",
         "context_name",
+        "snmpEngineID",
     }
 )
 # OID-valued fields whose enterprise arc (1.3.6.1.4.1.<N>) names the vendor — e.g. sysObjectID
@@ -693,7 +695,7 @@ def _compile_serial_default_labels(recording):
     ``map_sensors_to_serial_links`` names the local port by ``port_name_pattern.format(N=<port>)``
     and reads ``is_configured`` from whether the sensor label differs from that name — so what
     counts as a DEFAULT label is defined by the recording's own patterns, not by a fixed prefix
-    list. The literal parts are re.escape'd and only ``{N}`` becomes ``\\d+``, so the result carries
+    list. The literal parts are re.escape'd and only ``{N}`` becomes a digit matcher, so the result carries
     no quantifier the (untrusted) template could have supplied.
 
     Args:
@@ -710,8 +712,11 @@ def _compile_serial_default_labels(recording):
     for template in list(patterns.values())[:_MAX_SERIAL_PATTERNS]:
         if not isinstance(template, str) or "{N}" not in template or len(template) > _MAX_SERIAL_PATTERN_LEN:
             continue
-        head, _, tail = template.partition("{N}")
-        compiled.append(re.compile(rf"^{re.escape(head)}\d+{re.escape(tail)}(?: Status)?$", re.IGNORECASE))
+        head, *tails = template.split("{N}")
+        body = re.escape(head) + r"(?P<port>\d+)"
+        body += "".join(re.escape(tail) + r"(?P=port)" for tail in tails[:-1])
+        body += re.escape(tails[-1])
+        compiled.append(re.compile(rf"^{body}(?: Status)?$", re.IGNORECASE))
     return tuple(compiled)
 
 
@@ -754,9 +759,20 @@ def anonymize_recording(recording, *, salt=""):
         doc_ips={},
     )
     out["responses"] = {key: _walk(body, rules) for key, body in recording.get("responses", {}).items()}
+    expected = recording.get("expected")
+    if isinstance(expected, dict):
+        out["expected"] = dict(expected)
+        virtual_chassis = expected.get("virtual_chassis")
+        if isinstance(virtual_chassis, dict) and isinstance(virtual_chassis.get("member_serials"), list):
+            out["expected"]["virtual_chassis"] = {
+                **virtual_chassis,
+                "member_serials": [
+                    _anon_value("serial", serial, rules) for serial in virtual_chassis["member_serials"]
+                ],
+            }
     # Pseudonymize meta.os too (it's outside `responses`, so _walk doesn't reach it) and key the
     # neutral name off the pseudonymized token, so neither the metadata nor the name leaks the OS.
-    meta = dict(recording.get("meta") or {})
+    meta = dict(recording_meta(recording))
     if meta.get("os"):
         meta["os"] = pseudonymize_os(meta["os"])
     out["meta"] = meta
@@ -812,6 +828,9 @@ def find_pii(recording):
     def scan(obj, path, key=None):
         if isinstance(obj, dict):
             for k, v in obj.items():
+                if k == "snmpEngineID" and v:
+                    findings.append({"path": f"{path}.{k}", "kind": "device identifier", "value": "<redacted>"})
+                    continue
                 is_secret_key = any(hint in k.lower() for hint in _SECRET_KEY_HINTS)
                 if is_secret_key and v:
                     findings.append({"path": f"{path}.{k}", "kind": "credential", "value": "<redacted>"})

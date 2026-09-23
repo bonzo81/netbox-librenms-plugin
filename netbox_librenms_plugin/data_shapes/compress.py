@@ -34,6 +34,7 @@ from netbox_librenms_plugin.data_shapes.ports import (
     port_is_lag,
     port_names,
 )
+from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
 
 _SUB_RE = re.compile(r"\.\d+$")
 
@@ -302,5 +303,5 @@ def compress_recording(recording):
 
     out = dict(recording)
     out["responses"] = new_responses
-    out["meta"] = {**(recording.get("meta") or {}), "compressed_ports": {"from": len(dict_ports), "to": len(kept)}}
+    out["meta"] = {**recording_meta(recording), "compressed_ports": {"from": len(dict_ports), "to": len(kept)}}
     return out

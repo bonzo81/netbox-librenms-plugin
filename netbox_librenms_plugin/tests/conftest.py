@@ -168,6 +168,10 @@ def restore_inventory_rule_scoping():
 
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed, with its declared value."""
+    import importlib
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
     for model, lookup_field, value_field, rows in _seeded_model_rows():
         for lookup, value in rows:
             model.objects.update_or_create(**{lookup_field: lookup}, defaults={value_field: value})
@@ -179,8 +183,18 @@ def seed_migration_rows():
         for lookup, value in rows:
             model.objects.filter(**{lookup_field: lookup}).update(**{value_field: value})
 
+    include = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
     for model, lookup, defaults in _seeded_rule_rows():
-        model.objects.update_or_create(**lookup, defaults=defaults)
+        if model is InventoryIgnoreRule and lookup == {"name": include.DEFAULT_RULE["name"]}:
+            # Migration 0019 can create one copy per Juniper manufacturer. Repair all copies
+            # without selecting an arbitrary one by name.
+            rules = model.objects.filter(**lookup)
+            if rules.exists():
+                rules.update(**defaults)
+            else:
+                model.objects.create(**defaults)
+        else:
+            model.objects.update_or_create(**lookup, defaults=defaults)
 
     # The declared rows carry no manufacturer, so a restored include rule would come back
     # vendor-agnostic while a fresh migrate scopes it. Re-run the migration's own scoping.
@@ -202,7 +216,10 @@ def _restore_librenms_custom_field():
 
 def _seeds_are_intact():
     """Return whether every declared seed row and the plugin's custom field are present."""
-    from dcim.models import Device, Interface
+    import importlib
+
+    from dcim.models import Device, Interface, Manufacturer
+    from django.apps import apps as global_apps
     from django.contrib.contenttypes.models import ContentType
     from extras.models import CustomField
     from virtualization.models import VirtualMachine, VMInterface
@@ -217,6 +234,16 @@ def _seeds_are_intact():
     for model, lookup, defaults in _seeded_rule_rows():
         if not model.objects.filter(**lookup).filter(**defaults).exists():
             return False
+
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0019_inventoryignorerule_manufacturer")
+    juniper_ids = set(Manufacturer.objects.filter(slug__in=migration.JUNIPER_SLUGS).values_list("pk", flat=True))
+    scoped_ids = set(
+        migration._seeded_include_rules(global_apps, "default")
+        .filter(manufacturer_id__in=juniper_ids)
+        .values_list("manufacturer_id", flat=True)
+    )
+    if not juniper_ids.issubset(scoped_ids):
+        return False
 
     custom_field = CustomField.objects.filter(name="librenms_id", type="json").first()
     if custom_field is None:

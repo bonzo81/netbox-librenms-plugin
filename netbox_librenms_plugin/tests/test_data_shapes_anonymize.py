@@ -25,6 +25,35 @@ def _ports(*port_dicts):
     }
 
 
+def test_anonymization_normalizes_unstructured_meta():
+    recording = _ports({"port_id": 1, "ifName": "eth0", "ifType": "ethernetCsmacd"})
+    recording["meta"] = "unstructured"
+
+    anonymized = anonymize_recording(recording)
+
+    assert anonymized["meta"] == {}
+    assert recording["meta"] == "unstructured"
+
+
+def test_snmp_engine_identifier_is_scrubbed_and_rejected_before_anonymization():
+    recording = _ports(
+        {
+            "port_id": 1,
+            "ifName": "eth0",
+            "ifType": "ethernetCsmacd",
+            "snmpEngineID": "80 00 00 00 02 00 00 00 00 01",
+        }
+    )
+    path = "GET /api/v0/devices/1/ports"
+
+    findings = find_pii(recording)
+    anonymized = anonymize_recording(recording)
+
+    assert any(finding["path"].endswith("snmpEngineID") for finding in findings)
+    assert anonymized["responses"][path]["ports"][0]["snmpEngineID"] == ""
+    assert find_pii(anonymized) == []
+
+
 def test_logic_bearing_fields_preserved():
     """ifName/ifType/port ids and ENTITY-MIB class/index/position must survive verbatim."""
     rec = load_recording("cisco-stackwise-3member")
@@ -72,6 +101,20 @@ def test_cross_reference_serial_preserved():
     anon_dev = anon["responses"]["GET /api/v0/devices/1000"]["devices"][0]["serial"]
     anon_member = anon["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
     assert anon_dev == anon_member  # cross-reference intact → master detection still works
+
+
+def test_expected_member_serials_follow_anonymized_inventory():
+    rec = load_recording("juniper-vc-2member")
+    original = rec["expected"]["virtual_chassis"]["member_serials"]
+
+    anon = anonymize_recording(rec)
+
+    key = "GET /api/v0/inventory/1001?entPhysicalClass=chassis&entPhysicalContainedIn=10"
+    inventory_serials = [row["entPhysicalSerialNum"] for row in anon["responses"][key]["inventory"]]
+    expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
+    assert expected_serials == inventory_serials
+    assert expected_serials != original
+    assert rec["expected"]["virtual_chassis"]["member_serials"] == original
 
 
 def test_hostname_and_model_pseudonymized():
@@ -1314,7 +1357,8 @@ def test_lag_pattern_cannot_preserve_free_text():
     assert "core-rtr" not in name
 
 
-def test_serial_default_label_from_the_recordings_own_patterns_is_preserved():
+@pytest.mark.parametrize("template, label", [("Line {N}", "Line 3"), ("Line {N} / Port {N}", "Line 3 / Port 3")])
+def test_serial_default_label_from_the_recordings_own_patterns_is_preserved(template, label):
     """The recording's serial_type_patterns define the default label (the seeded Cisco map is "Line {N}", which no built-in prefix rule knows), and hashing such a label would flip is_configured False -> True on replay."""
     rec = _sensors(
         {
@@ -1322,17 +1366,17 @@ def test_serial_default_label_from_the_recordings_own_patterns_is_preserved():
             "device_id": 1,
             "sensor_type": "ciscoAsyncLine",
             "sensor_index": "ciscoAsyncLine.3",
-            "sensor_descr": "Line 3",
+            "sensor_descr": label,
         },
-        serial_type_patterns={"ciscoAsyncLine": "Line {N}"},
+        serial_type_patterns={"ciscoAsyncLine": template},
     )
 
     anon = anonymize_recording(rec)
     sensors = anon["responses"]["GET /api/v0/resources/sensors"]["sensors"]
 
-    assert sensors[0]["sensor_descr"] == "Line 3"
+    assert sensors[0]["sensor_descr"] == label
     # The outcome the label feeds resolves identically before and after anonymization.
-    types = {"ciscoAsyncLine": "Line {N}"}
+    types = {"ciscoAsyncLine": template}
     raw_sensors = rec["responses"]["GET /api/v0/resources/sensors"]["sensors"]
     raw = map_sensors_to_serial_links(raw_sensors, device_id=1, sensor_types=types)
     anonymized = map_sensors_to_serial_links(sensors, device_id=1, sensor_types=types)

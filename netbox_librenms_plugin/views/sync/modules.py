@@ -1830,24 +1830,25 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 if ("serial", manufacturer.pk) not in norm_rules_serial:
                     norm_rules_serial.update(preload_normalization_rules("serial", manufacturer))
 
+        resolved_items = []
+        invalid_selection_seen = False
+        devices = self.restricted_queryset(Device)
+        for item in items:
+            ent_index = item.get("entPhysicalIndex")
+            target_device, invalid_selected_device = _resolve_target_device_with_validation(
+                page_device,
+                request.POST.get(f"device_selection_{ent_index}"),
+                devices,
+            )
+            invalid_selection_seen |= invalid_selected_device
+            resolved_items.append((item, target_device, _ignore_rules_for(target_device)))
+
         installed, skipped, failed = [], [], []
         bound_any = False
-
-        invalid_selection_seen = False
         try:
             with transaction.atomic():
                 _lock_page_device_serials(page_device)
-                for item in items:
-                    ent_index = item.get("entPhysicalIndex")
-                    selected_device_id = request.POST.get(f"device_selection_{ent_index}")
-                    target_device, invalid_selected_device = _resolve_target_device_with_validation(
-                        page_device,
-                        selected_device_id,
-                        self.restricted_queryset(Device),
-                    )
-                    if invalid_selected_device:
-                        invalid_selection_seen = True
-                    ignore_rules = _ignore_rules_for(target_device)
+                for item, target_device, ignore_rules in resolved_items:
                     if ignore_rules:
                         target_serial = (getattr(target_device, "serial", None) or "").strip()
                         rule_action = _check_ignore_rules(

@@ -384,6 +384,16 @@ def test_compression_no_ports_route_is_noop():
     assert compress_recording(rec) is rec
 
 
+def test_compression_normalizes_unstructured_meta_when_ports_are_trimmed():
+    recording = _large_recording()
+    recording["meta"] = "unstructured"
+
+    compressed = compress_recording(recording)
+
+    assert compressed["meta"]["compressed_ports"]["from"] > compressed["meta"]["compressed_ports"]["to"]
+    assert recording["meta"] == "unstructured"
+
+
 def test_compression_targets_main_device_not_oob_controller():
     """With an OOB controller's /ports route present, compression trims the host's ports, not the OOB's."""
     host_ports = [_port(i, f"eth{i}", "ethernetCsmacd", ifVlan=10) for i in range(20)]  # redundant
