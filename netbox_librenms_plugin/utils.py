@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Optional
 
 import netaddr
@@ -23,6 +24,9 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
     HOST_NAME_COLLISION_REASON,
+    NAME_OWNER_LIVE,
+    NAME_OWNER_STALE,
+    NAME_OWNER_UNKNOWN,
     OOB_BADGE_HTML,
     OOB_INVENTORY_SOURCE,
     OOB_NAME_SUFFIX,
@@ -2197,6 +2201,103 @@ def synced_interface_names(
         )
     )
     return names, rejected
+
+
+@dataclass(frozen=True)
+class ReportedNameOwner:
+    """The LibreNMS port bound to the NetBox interface that holds a host row's reported name."""
+
+    name: str
+    port_id: int
+    status: str
+    owner_row_name: str | None = None
+    owner_row_is_oob: bool = False
+    owner_synced_name: str | None = None
+
+    def explanation(self):
+        """Return the operator-facing text for this owner."""
+        if self.status == NAME_OWNER_LIVE:
+            source = "OOB" if self.owner_row_is_oob else "host"
+            held = (
+                f"NetBox interface '{self.name}' is bound to LibreNMS port {self.port_id}, "
+                f"the {source} row '{self.owner_row_name}'."
+            )
+            if self.owner_synced_name is None:
+                return f"{held} That row cannot sync either, so it cannot release the name."
+            return f"{held} Sync that row first; it syncs as '{self.owner_synced_name}'. Then sync this row."
+        if self.status == NAME_OWNER_STALE:
+            return (
+                f"NetBox interface '{self.name}' is bound to LibreNMS port {self.port_id}, which this device "
+                "no longer reports. Rebind keeps the interface, its IP addresses and cables, and moves only "
+                "the LibreNMS binding to this row's port."
+            )
+        return (
+            f"NetBox interface '{self.name}' is bound to LibreNMS port {self.port_id}. The OOB inventory "
+            "is incomplete, so that port can still exist. Refresh the data."
+        )
+
+
+def reported_name_owners(
+    ports,
+    interface_name_field,
+    synced_names,
+    rejected_names,
+    *,
+    target_device_ids,
+    reserved_name_port_ids_by_device,
+    snapshot_complete,
+    model=None,
+):
+    """
+    Classify who holds the reported name of each host row rejected for a name bound to another port.
+
+    Args:
+        ports (list): The merged host and OOB port rows.
+        interface_name_field (str): Port field that contains the selected interface name.
+        synced_names (dict[int, str]): Candidate names by port ID, from ``synced_interface_names``.
+        rejected_names (dict[int, str]): Rejection reasons by port ID, from ``synced_interface_names``.
+        target_device_ids (dict[int, int]): Target device ID by normalized port ID.
+        reserved_name_port_ids_by_device (dict[int, dict[str, set[int]]]): Active-server port IDs
+            bound to each existing name, grouped by target device ID.
+        snapshot_complete (bool): False when the snapshot is tagged ``oob_incomplete``.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        dict[int, ReportedNameOwner]: The owner by the rejected row's normalized port ID.
+
+    """
+    if not is_list_of_dicts(ports):
+        return {}
+    rows_by_port_id = {}
+    for port in ports:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is not None:
+            rows_by_port_id.setdefault(port_id, port)
+    owners = {}
+    for port_id, port in rows_by_port_id.items():
+        if rejected_names.get(port_id) != REPORTED_NAME_PORT_COLLISION_REASON:
+            continue
+        name = syncable_interface_name(port, interface_name_field, model)
+        reserved = reserved_name_port_ids_by_device.get(target_device_ids.get(port_id), {}).get(name, set())
+        holders = set(reserved) - {port_id}
+        if len(holders) != 1:
+            continue
+        holder = holders.pop()
+        owner_row = rows_by_port_id.get(holder)
+        if owner_row is None:
+            status = NAME_OWNER_STALE if snapshot_complete else NAME_OWNER_UNKNOWN
+            owners[port_id] = ReportedNameOwner(name=name, port_id=holder, status=status)
+            continue
+        owner_can_sync = holder not in rejected_names and not owner_row.get("_dedup_conflict")
+        owners[port_id] = ReportedNameOwner(
+            name=name,
+            port_id=holder,
+            status=NAME_OWNER_LIVE,
+            owner_row_name=owner_row.get(interface_name_field),
+            owner_row_is_oob=owner_row.get("_source") == OOB_INVENTORY_SOURCE,
+            owner_synced_name=synced_names.get(holder) if owner_can_sync else None,
+        )
+    return owners
 
 
 def bounded_interface_text(field_name, value, model=None):

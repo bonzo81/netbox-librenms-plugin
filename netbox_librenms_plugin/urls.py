@@ -146,6 +146,7 @@ from .views import (
     PortStackLagPatternListView,
     PortStackLagPatternView,
     PromoteToHostView,
+    RebindInterfacePortView,
     RemoveServerMappingView,
     ReplaceModuleView,
     SaveUserPrefView,
@@ -374,6 +375,12 @@ urlpatterns = [
         "<str:object_type>/<int:object_id>/sync-interface-bridge/",
         SyncInterfaceBridgeView.as_view(),
         name="sync_interface_bridge",
+    ),
+    # Rebind a stale LibreNMS port binding to an interface row URL
+    path(
+        "<str:object_type>/<int:object_id>/rebind-interface-port/",
+        RebindInterfacePortView.as_view(),
+        name="rebind_interface_port",
     ),
     # Delete NetBox-only interfaces URL
     path(

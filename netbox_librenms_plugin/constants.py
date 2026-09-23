@@ -116,6 +116,11 @@ HOST_NAME_COLLISION_REASON = "derived interface name is already used by another 
 REPORTED_NAME_PORT_COLLISION_REASON = "reported name belongs to a different LibreNMS port"
 # Mixed sources for one normalized port ID make its identity ambiguous.
 PORT_ID_SOURCE_COLLISION_REASON = "LibreNMS port ID is claimed by both host and OOB rows"
+# Who holds a reported name: a snapshot row, a port the complete snapshot no longer reports, or
+# a port that may sit in the missing OOB inventory.
+NAME_OWNER_LIVE = "live"
+NAME_OWNER_STALE = "stale"
+NAME_OWNER_UNKNOWN = "unknown"
 
 
 def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:

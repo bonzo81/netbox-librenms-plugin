@@ -33,6 +33,7 @@ from netbox_librenms_plugin.utils import (
     is_valid_ports_payload,
     normalize_librenms_port_id,
     normalize_relationship_maps,
+    reported_name_owners,
     resolve_interface_row_device,
     synced_interface_names,
 )
@@ -819,6 +820,16 @@ class BaseInterfaceTableView(
                 target_device_ids=target_device_ids,
                 reserved_name_port_ids_by_device=reserved_name_port_ids,
             )
+            name_owners = reported_name_owners(
+                ports_data,
+                interface_name_field,
+                synced_names,
+                rejected_names,
+                target_device_ids=target_device_ids,
+                reserved_name_port_ids_by_device=reserved_name_port_ids,
+                snapshot_complete=not oob_incomplete,
+                model=interface_model,
+            )
             claimable_names_by_device = {}
             for port in ports_data:
                 if port.get("_source") == OOB_INVENTORY_SOURCE:
@@ -844,6 +855,18 @@ class BaseInterfaceTableView(
                     REPORTED_NAME_PORT_COLLISION_REASON,
                 )
                 port["synced_name_rejection_reason"] = rejection_reason
+                # Name the holder only when its interface is in the caller's view scope.
+                name_owner = name_owners.get(port_id)
+                owner_interface = (
+                    interfaces_by_device.get(target_device_ids.get(port_id), {}).get("by_name", {}).get(name_owner.name)
+                    if name_owner is not None
+                    else None
+                )
+                owner_visible = owner_interface is not None and owner_interface.pk in viewable_interface_ids
+                port["reported_name_owner"] = name_owner if owner_visible else None
+                port["reported_name_owner_changeable"] = (
+                    owner_visible and owner_interface.pk in changeable_interface_ids
+                )
                 port["enabled"] = interface_enabled_from_port(port)
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:

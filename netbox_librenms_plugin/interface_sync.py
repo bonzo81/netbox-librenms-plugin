@@ -234,7 +234,15 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         existing_by_name = model.objects.filter(**owner_filter, name=interface_name).first()
         if existing_by_name is not None:
             if not interface_name_fallback_matches_port(existing_by_name, port_id, server_key):
-                raise ValueError("The interface name is already bound to another LibreNMS port.")
+                # Name the holding port only to a caller who may view the interface.
+                holder = (
+                    normalize_librenms_port_id(get_librenms_device_id(existing_by_name, server_key, auto_save=False))
+                    if viewable_queryset.filter(pk=existing_by_name.pk).exists()
+                    else None
+                )
+                if holder is None:
+                    raise ValueError("The interface name is already bound to another LibreNMS port.")
+                raise ValueError(f"The interface name is already bound to LibreNMS port {holder}.")
             if not viewable_queryset.filter(pk=existing_by_name.pk).exists():
                 raise ValueError("The matching NetBox interface is outside your view scope.")
             if not changeable_queryset.filter(pk=existing_by_name.pk).exists():

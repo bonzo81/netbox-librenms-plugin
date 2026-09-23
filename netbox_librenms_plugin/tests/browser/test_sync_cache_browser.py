@@ -721,6 +721,58 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     assert stored["101"]["inputs"]["vlan_group_101"] == "2"
 
 
+@pytest.mark.parametrize("accept", [False, True], ids=["dismissed", "accepted"])
+def test_rebind_asks_first_and_keeps_another_page_selection(page, accept):
+    """Rebind submits only after the confirmation, to its own action, and leaves the bulk selection alone."""
+    page.set_content(
+        """
+        <form id="sync-form" method="post" action="/sync">
+          <table id="librenms-interface-table"><tbody><tr>
+            <td><input type="checkbox" name="select" value="201"></td>
+            <td><input type="hidden" name="rebind_expected_port_201" value="8679">
+                <button id="rebind" type="submit" name="rebind_one" value="201"
+                formaction="/rebind?interface_name_field=ifName" data-confirm="Move the binding?">Rebind</button></td>
+          </tr></tbody></table>
+        </form>
+        """
+    )
+    _add_page_scripts(page)
+    page.evaluate(
+        """() => {
+            writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}});
+            window.submitted = [];
+            document.getElementById('sync-form').addEventListener('submit', event => {
+                event.preventDefault();
+                window.submitted.push([event.submitter.formAction, Array.from(new FormData(event.target, event.submitter).entries())]);
+            });
+        }"""
+    )
+    dialogs = []
+
+    def answer(dialog):
+        dialogs.append(dialog.message)
+        if accept:
+            dialog.accept()
+        else:
+            dialog.dismiss()
+
+    page.on("dialog", answer)
+    page.click("#rebind")
+
+    submitted = page.evaluate("window.submitted")
+    stored = page.evaluate("readStoredSelection(document.querySelector('table'))")
+    assert dialogs == ["Move the binding?"]
+    assert list(stored) == ["101"]
+    if not accept:
+        assert submitted == []
+        return
+    [(action, pairs)] = submitted
+    assert action.endswith("/rebind?interface_name_field=ifName")
+    assert ["rebind_one", "201"] in pairs
+    assert ["rebind_expected_port_201", "8679"] in pairs
+    assert ["select", "101"] not in pairs
+
+
 @pytest.mark.parametrize(
     "table_id",
     ["librenms-interface-table", "librenms-ipaddress-table", "librenms-cable-table"],

@@ -2,6 +2,7 @@ import copy
 import json as json_module
 from functools import cached_property
 from typing import NamedTuple
+from urllib.parse import urlencode
 
 import django_tables2 as tables
 from django.urls import reverse
@@ -11,7 +12,7 @@ from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import NAME_OWNER_STALE, OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import (
     ABSENT,
     DIFFERS,
@@ -593,7 +594,17 @@ class LibreNMSInterfaceTable(tables.Table):
             )
 
         rejection_reason = record.get("synced_name_rejection_reason")
-        if rejection_reason:
+        name_owner = record.get("reported_name_owner")
+        if rejection_reason and name_owner is not None:
+            parts.append(
+                self._render_info_pill(
+                    "danger",
+                    "mdi-alert-circle",
+                    f"Name held by port {name_owner.port_id}",
+                    name_owner.explanation(),
+                )
+            )
+        elif rejection_reason:
             label = "Name conflict" if record.get("synced_name_contested") else "Cannot sync"
             parts.append(
                 self._render_info_pill(
@@ -969,6 +980,9 @@ class LibreNMSInterfaceTable(tables.Table):
             record.get("host_name_collision") or record.get("_dedup_conflict")
         ):
             return ""
+        # A Sync cannot claim a name that a stale port holds, so the row offers Rebind instead.
+        if rebind_button := self._render_rebind_button(record):
+            return rebind_button
         if self.row_sync_state(record).state == ROW_IN_SYNC:
             return ""
         port_id = normalize_librenms_port_id(record.get("port_id"))
@@ -978,6 +992,50 @@ class LibreNMSInterfaceTable(tables.Table):
             '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
             ' title="Sync only this interface">Sync</button>',
             port_id,
+        )
+
+    def _render_rebind_button(self, record):
+        """
+        Render the Rebind button for an unbound row whose reported name a stale port holds.
+
+        The button posts the tab's form to the rebind endpoint, which re-derives every fact from
+        the cached snapshot and trusts only the row's port ID.
+
+        Args:
+            record (dict): The interface table row.
+
+        Returns:
+            SafeString | str: The button markup, or an empty string.
+
+        """
+        name_owner = record.get("reported_name_owner")
+        port_id = normalize_librenms_port_id(record.get("port_id"))
+        if (
+            name_owner is None
+            or name_owner.status != NAME_OWNER_STALE
+            or not record.get("reported_name_owner_changeable")
+            or record.get("netbox_interface") is not None
+            or port_id is None
+            or self.device is None
+        ):
+            return ""
+        url = reverse(
+            "plugins:netbox_librenms_plugin:rebind_interface_port",
+            kwargs={"object_type": self.sync_object_type, "object_id": self.device.pk},
+        )
+        # The holder's port travels with the row, so the server refuses when it changed after render.
+        return format_html(
+            '<input type="hidden" name="rebind_expected_port_{}" value="{}">'
+            '<button type="submit" class="btn btn-sm btn-warning" name="rebind_one" value="{}"'
+            ' formaction="{}?{}" data-confirm="{}" title="{}">Rebind</button>',
+            port_id,
+            name_owner.port_id,
+            port_id,
+            url,
+            urlencode({"interface_name_field": self.interface_name_field}),
+            f"Move the LibreNMS binding of NetBox interface '{name_owner.name}' from port "
+            f"{name_owner.port_id} to port {port_id}? The interface keeps its IP addresses and cables.",
+            name_owner.explanation(),
         )
 
     def render_type(self, value, record):

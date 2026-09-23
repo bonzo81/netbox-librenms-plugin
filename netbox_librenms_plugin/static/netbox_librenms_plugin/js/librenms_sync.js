@@ -1815,9 +1815,20 @@ document.addEventListener('change', function (e) {
     }
 });
 
+// A single-row action submits one row, so it must not consume the stored bulk selection.
+const SINGLE_ROW_SUBMITTERS = ['sync_one', 'rebind_one'];
+
 document.addEventListener('submit', function (e) {
-    if (e.target instanceof HTMLFormElement && e.submitter?.name !== 'sync_one') {
+    if (e.target instanceof HTMLFormElement && !SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {
         injectOffPageSelections(e.target);
+    }
+});
+
+// A row action that changes durable state asks first; cancelling the click stops the submit.
+document.addEventListener('click', function (e) {
+    const button = e.target instanceof Element ? e.target.closest('button[data-confirm]') : null;
+    if (button && !window.confirm(button.dataset.confirm)) {
+        e.preventDefault();
     }
 });
 
