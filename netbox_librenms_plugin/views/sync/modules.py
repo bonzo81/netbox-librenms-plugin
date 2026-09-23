@@ -8,7 +8,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
@@ -2583,6 +2583,12 @@ class ModuleInterfaceTypePreviewView(LibreNMSPermissionMixin, NetBoxObjectPermis
 class ApplyModuleInterfaceTypesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Apply selected module interface-template types after checking preview state."""
 
+    def _assert_updated_interface_change_scope(self, interface, outcome):
+        from dcim.models import Interface
+
+        if outcome == "updated" and not self.restricted_queryset(Interface, "change").filter(pk=interface.pk).exists():
+            raise PermissionDenied("The updated interface is outside your change permission scope.")
+
     def post(self, request, pk):
         from dcim.models import Device, Interface, Module
 
@@ -2640,6 +2646,7 @@ class ApplyModuleInterfaceTypesView(LibreNMSPermissionMixin, NetBoxObjectPermiss
                     request.POST.get(f"current_type_{interface.pk}"),
                     request.POST.get(f"template_type_{interface.pk}"),
                 )
+                self._assert_updated_interface_change_scope(interface, outcome)
                 if reason:
                     validation_failures.append((interface.name, reason))
                 else:

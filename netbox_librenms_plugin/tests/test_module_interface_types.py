@@ -706,6 +706,25 @@ class TestApplyModuleInterfaceTypes:
         assert interface.type == "1000base-t"
         assert any("Missing permissions" in text for text in message_texts(_request))
 
+    def test_type_update_cannot_leave_a_constrained_change_grant(self, settings):
+        from dcim.models import Device, Interface, Module
+        from django.core.exceptions import PermissionDenied
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        page_device, member, module, interface = _vc_member_type_mismatch("type-apply-scope")
+        user = make_user_with_perms(
+            "type-apply-scope-user",
+            [("view", Device), ("view", Module)],
+        )
+        user = grant(user, "change", Interface, constraints={"type": "1000base-t"})
+
+        with pytest.raises(PermissionDenied):
+            self._post(settings, user, page_device, member, module, interface)
+
+        interface.refresh_from_db()
+        assert interface.type == "1000base-t"
+
     def test_changed_current_type_is_skipped(self, settings):
         from dcim.models import Device, Interface, Module
 
