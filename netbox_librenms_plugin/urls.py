@@ -167,6 +167,7 @@ from .views import (
     SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
     CableRemoteCreateView,
+    CreateVRFFromIPRowView,
     SyncCablesView,
     SyncCacheFragmentView,
     SyncCacheStatusView,
@@ -411,6 +412,12 @@ urlpatterns = [
         "<str:object_type>/<int:pk>/sync-ip-addresses/",
         SyncIPAddressesView.as_view(),
         name="sync_device_ip_addresses",
+    ),
+    # Create the NetBox VRF that one IP row's LibreNMS VRF names
+    path(
+        "<str:object_type>/<int:pk>/ip-row-vrf/",
+        CreateVRFFromIPRowView.as_view(),
+        name="create_ip_row_vrf",
     ),
     # VLAN sync URLs
     path(

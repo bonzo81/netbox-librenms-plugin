@@ -175,7 +175,7 @@ from .sync.interfaces import (
     SyncInterfaceParentView,
     SyncInterfacesView,
 )
-from .sync.ip_addresses import SyncIPAddressesView
+from .sync.ip_addresses import CreateVRFFromIPRowView, SyncIPAddressesView
 from .sync.locations import SyncSiteLocationView
 from .sync.migrate import (
     MoveInterfaceToWinnerView,

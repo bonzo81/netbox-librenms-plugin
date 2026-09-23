@@ -7,7 +7,8 @@ from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.core import signing
 from django.core.cache import cache
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -27,6 +28,7 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
+    build_migrated_context,
     get_librenms_device_id,
     get_migrated_to_marker,
     get_virtual_chassis_members,
@@ -63,6 +65,11 @@ def _ip_host_lock_identity(parsed, vrf) -> str:
 def _acquire_ip_host_lock(parsed, vrf) -> None:
     """Serialize writes for one canonical host and VRF."""
     acquire_advisory_transaction_lock(_ip_host_lock_identity(parsed, vrf))
+
+
+def vrf_create_lock_identity(name):
+    """Return the advisory lock identity that serializes creating a VRF with *name*."""
+    return f"netbox-librenms-plugin:vrf-create:{name}"
 
 
 class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -1318,3 +1325,145 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             errors = results.get("errors", {})
             detail = ", ".join(f"{ip} ({errors[ip]})" if errors.get(ip) else ip for ip in results["failed"])
             messages.error(request, f"Failed to sync IP addresses: {detail}")
+
+
+class _VRFCreateRefusedError(Exception):
+    """A Create VRF precondition failed; the message is safe to show the caller."""
+
+
+class CreateVRFFromIPRowView(SyncIPAddressesView):
+    """
+    Create the NetBox VRF that one IP row's LibreNMS VRF names, when NetBox has none.
+
+    Only the row ID comes from the POST. The row and its LibreNMS VRF identity are re-derived from
+    the cached snapshot through the same enrichment the table renders, and a row that does not
+    carry ``vrf_create_url`` is refused, so the button and this endpoint cannot disagree. The
+    action creates the VRF only: the row's normal suggestion then preselects it for the IP sync.
+    """
+
+    def _required_permissions(self, object_type):
+        """Return the POST permissions for the owner model this request targets."""
+        if object_type == "device":
+            owner_model = Device
+        elif object_type == "virtualmachine":
+            owner_model = VirtualMachine
+        else:
+            raise Http404("Invalid object type.")
+        return {"POST": [("view", owner_model), ("add", VRF)]}
+
+    def post(self, request, object_type, pk):
+        """Create one missing NetBox VRF from a cached IP row's LibreNMS VRF identity."""
+        self.required_object_permissions = self._required_permissions(object_type)
+        if error := self.require_all_permissions("POST"):
+            return error
+        obj = self.get_object(object_type, pk)
+        server_key = self.rebind_api_for_posted_server(request.POST)
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return self.redirect_to_ip_tab(request, obj)
+        self._post_server_key = server_key
+        if isinstance(obj, Device) and build_migrated_context(obj, server_key).get("migrated_to_marker"):
+            messages.error(request, "This LibreNMS source has been migrated and is read-only.")
+            return self.redirect_to_ip_tab(request, obj)
+        snapshot = self.get_cached_ip_snapshot(obj)
+        if snapshot is None:
+            messages.error(request, "Cache has expired. Please refresh the IP data.")
+            return self.redirect_to_ip_tab(request, obj)
+        try:
+            identity = self._creatable_vrf_identity(obj, snapshot, request.POST.get("create_vrf"), server_key)
+            with transaction.atomic():
+                vrf = self._create_vrf(request, identity)
+        except _VRFCreateRefusedError as refusal:
+            messages.error(request, str(refusal))
+            return self.redirect_to_ip_tab(request, obj)
+        rd_text = f"route distinguisher {vrf.rd}" if vrf.rd else "no route distinguisher"
+        messages.success(
+            request,
+            f"Created NetBox VRF '{vrf.name}' with {rd_text}. The IP rows on this VRF now select it; "
+            "sync them to assign the addresses.",
+        )
+        return self.redirect_to_ip_tab(request, obj)
+
+    def _creatable_vrf_identity(self, obj, snapshot, raw_row_id, server_key):
+        """
+        Re-derive the posted row from the cached snapshot and return its LibreNMS VRF identity.
+
+        Args:
+            obj (Device | VirtualMachine): The page object.
+            snapshot (dict): The cached IP snapshot.
+            raw_row_id (str | None): The posted row ID.
+            server_key (str): The active LibreNMS server key.
+
+        Returns:
+            dict: The row's ``{"name", "rd"}`` LibreNMS VRF identity.
+
+        Raises:
+            _VRFCreateRefusedError: When the row does not carry the Create VRF action.
+
+        """
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        try:
+            row_id = normalize_ip_sync_row_id(raw_row_id)
+        except ValueError:
+            raise _VRFCreateRefusedError("The Create VRF request names no valid IP row.") from None
+        # The table's own enrichment, against current NetBox state; the cached pipeline never reads LibreNMS.
+        table_view = BaseIPAddressTableView()
+        table_view.setup(self.request)
+        rows = table_view.enrich_ip_data(
+            snapshot["ip_addresses"],
+            obj,
+            snapshot.get("interface_name_field"),
+            server_key=server_key,
+            port_data_cache=dict(snapshot.get("ports_by_id") or {}),
+            fetch_vrf_identities=False,
+        )
+        index, duplicates = index_ip_sync_rows(rows)
+        row = index.get(row_id) if row_id not in duplicates else None
+        if row is None or not row.get("vrf_create_url"):
+            raise _VRFCreateRefusedError(
+                f"IP row {row_id} has no LibreNMS VRF that NetBox lacks. Refresh the IP data and try again."
+            )
+        return row["librenms_vrf"]
+
+    @staticmethod
+    def _create_vrf(request, identity):
+        """
+        Create the VRF, refusing a name or route distinguisher that NetBox now holds.
+
+        Args:
+            request (HttpRequest): The current request (for the acting user).
+            identity (dict): The LibreNMS VRF ``{"name", "rd"}`` identity.
+
+        Returns:
+            VRF: The created VRF.
+
+        Raises:
+            _VRFCreateRefusedError: When the VRF exists now, is invalid, or is outside the add grant.
+
+        """
+        name = identity["name"]
+        rd = identity["rd"] or None
+        # Serializes two creates of one name; NetBox's unique RD constraint settles the RD race.
+        acquire_advisory_transaction_lock(vrf_create_lock_identity(name))
+        if VRF.objects.filter(name=name).exists() or (rd is not None and VRF.objects.filter(rd=rd).exists()):
+            raise _VRFCreateRefusedError(
+                f"NetBox already has a VRF named '{name}' or with that route distinguisher. "
+                "Refresh the IP data and try again."
+            )
+        vrf = VRF(name=name, rd=rd)
+        try:
+            with transaction.atomic():
+                vrf.full_clean()
+                vrf.save()
+        except ValidationError as exc:
+            detail = "; ".join(exc.messages)
+            raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
+        except IntegrityError as exc:
+            raise _VRFCreateRefusedError(
+                f"NetBox already has a VRF with route distinguisher {rd}. Refresh the IP data and try again."
+            ) from exc
+        # The model-level grant says nothing about WHICH VRFs the user may add; a constrained grant rolls back.
+        if not VRF.objects.restrict(request.user, "add").filter(pk=vrf.pk).exists():
+            raise _VRFCreateRefusedError(f"You may not add the NetBox VRF '{name}'.")
+        return vrf

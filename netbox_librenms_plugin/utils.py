@@ -233,6 +233,15 @@ def apply_cable_manual_picks(cache_backend, snapshot_key, cached_payload, user_i
     return result, applied
 
 
+def advisory_lock_key(lock_identity: str) -> int:
+    """Return the signed 64-bit PostgreSQL advisory lock key for *lock_identity*."""
+    return int.from_bytes(
+        hashlib.blake2b(lock_identity.encode(), digest_size=8).digest(),
+        byteorder="big",
+        signed=True,
+    )
+
+
 def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None = None) -> None:
     """
     Acquire one stable PostgreSQL advisory lock for the current transaction.
@@ -253,13 +262,8 @@ def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None =
 
     if not connection.in_atomic_block:
         raise RuntimeError("acquire_advisory_transaction_lock() requires an open transaction")
-    lock_key = int.from_bytes(
-        hashlib.blake2b(lock_identity.encode(), digest_size=8).digest(),
-        byteorder="big",
-        signed=True,
-    )
     with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [advisory_lock_key(lock_identity)])
 
 
 def is_list_of_dicts(value) -> bool:

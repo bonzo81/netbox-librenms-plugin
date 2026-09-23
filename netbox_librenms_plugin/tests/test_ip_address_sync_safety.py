@@ -47,7 +47,8 @@ class TestCachedInterfaceUrlFallback:
     def _view():
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
 
-        return object.__new__(BaseIPAddressTableView)
+        # The VRF dropdown is scoped to the request user, so the bare view needs a request.
+        return make_view(BaseIPAddressTableView, librenms_api=False)
 
     def test_prefetch_returns_the_by_pk_index(self):
         """The map is built either way; the bug was that the view never handed it on."""

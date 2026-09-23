@@ -93,6 +93,13 @@ class IPAddressTable(tables.Table):
                    title="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"
                    aria-label="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"></i>
             {% endif %}
+            {% if record.vrf_create_url %}
+                <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap" name="create_vrf" value="{{ record.row_id }}"
+                        formaction="{{ record.vrf_create_url }}"
+                        data-confirm="Create NetBox VRF '{{ record.librenms_vrf.name }}' with {% if record.librenms_vrf.rd %}route distinguisher {{ record.librenms_vrf.rd }}{% else %}no route distinguisher{% endif %}? The IP address is not synced."
+                        title="LibreNMS VRF {{ record.librenms_vrf.name }} is not in NetBox. Create it."
+                        aria-label="Create NetBox VRF {{ record.librenms_vrf.name }}"><i class="mdi mdi-plus-thick" aria-hidden="true"></i> VRF</button>
+            {% endif %}
         </div>
         """,
         attrs={"td": {"data-col": "vrf"}},

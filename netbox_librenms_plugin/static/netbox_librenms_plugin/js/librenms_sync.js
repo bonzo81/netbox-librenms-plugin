@@ -1816,7 +1816,7 @@ document.addEventListener('change', function (e) {
 });
 
 // A single-row action submits one row, so it must not consume the stored bulk selection.
-const SINGLE_ROW_SUBMITTERS = ['sync_one', 'rebind_one'];
+const SINGLE_ROW_SUBMITTERS = ['sync_one', 'rebind_one', 'create_vrf'];
 
 document.addEventListener('submit', function (e) {
     if (e.target instanceof HTMLFormElement && !SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {

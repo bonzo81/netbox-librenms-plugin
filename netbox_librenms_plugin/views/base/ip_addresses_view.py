@@ -8,6 +8,7 @@ from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
 from django.http import Http404, JsonResponse
+from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 from ipam.models import VRF, IPAddress
@@ -142,7 +143,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             port_data_cache.update(rekeyed)
         self._load_port_names(port_data_cache, ip_data)
         vrf_identities = self._resolve_vrf_identities(port_data_cache, ip_data, fetch_vrf_identities)
-        vrf_suggestions = self._load_vrf_suggestions(vrf_identities, prefetched_data["vrfs"])
+        # Every VRF decides a match, so a VRF the user cannot view still blocks a create; only a
+        # viewable one is ever suggested or listed.
+        vrf_suggestions = self._load_vrf_suggestions(vrf_identities, prefetched_data["all_vrfs"])
+        visible_vrf_ids = {vrf.pk for vrf in prefetched_data["vrfs"]}
+        vrf_create_url = reverse(
+            "plugins:netbox_librenms_plugin:create_ip_row_vrf",
+            kwargs={"object_type": obj._meta.model_name, "pk": obj.pk},
+        )
 
         enriched_data = []
 
@@ -216,6 +224,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 _port_key(ip_entry["port_id"]),
                 vrf_identities,
                 vrf_suggestions,
+                vrf_create_url,
+                visible_vrf_ids,
             )
 
             enriched_data.append(enriched_ip)
@@ -306,8 +316,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 # an IPv4-compatible IPv6 row still matches.
                 ip_addresses_map[str(ip_interface(str(ip.address)))].append(ip)
 
-        # Get all VRFs
-        vrfs = list(VRF.objects.all())
+        # The dropdown lists only VRFs the user may view; the create rule reads every VRF.
+        vrfs = list(self.restricted_queryset(VRF))
+        all_vrfs = list(VRF.objects.all())
 
         return {
             "interfaces_by_librenms_id": interfaces_by_librenms_id,
@@ -318,6 +329,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "device": obj,
             "ip_addresses_map": ip_addresses_map,
             "vrfs": vrfs,
+            "all_vrfs": all_vrfs,
         }
 
     def _load_port_names(self, port_data_cache, ip_data):
@@ -447,7 +459,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             netbox_vrfs: NetBox VRFs available in the dropdown.
 
         Returns:
-            dict: Suggested NetBox VRF and source data keyed by port.
+            dict: Per port, the suggested NetBox VRF and its source data, or ``{"create": True}``
+                when no NetBox VRF has the identity's route distinguisher or name. A value that
+                two NetBox VRFs claim gets neither.
 
         """
         netbox_by_rd = defaultdict(list)
@@ -470,6 +484,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 if target is not None and identity["rd"] and target.rd and str(target.rd) != identity["rd"]:
                     target = None
             if target is None:
+                # Any VRF with the RD or the name, an ambiguous one too, rules out a create.
+                if identity["rd"] not in netbox_by_rd and identity["name"] not in netbox_by_name:
+                    suggestions[port_key] = {"create": True}
                 continue
             suggestions[port_key] = {
                 "vrf_id": target.pk,
@@ -478,8 +495,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         return suggestions
 
     @staticmethod
-    def _add_vrf_suggestion(enriched_ip, port_key, vrf_identities, vrf_suggestions):
-        """Carry the source identity, and suggest only for an address NetBox does not hold."""
+    def _add_vrf_suggestion(enriched_ip, port_key, vrf_identities, vrf_suggestions, vrf_create_url, visible_vrf_ids):
+        """
+        Carry the source identity, and suggest or offer a create only for an address NetBox does not hold.
+
+        This is the one eligibility rule for the row's Create VRF action: the endpoint re-derives
+        the row through it and refuses a row that does not carry ``vrf_create_url``.
+        """
         librenms_vrf = vrf_identities.get(port_key)
         if librenms_vrf is not None:
             enriched_ip["librenms_vrf"] = librenms_vrf
@@ -488,7 +510,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         if enriched_ip.get("vrf_id") is not None or enriched_ip.get("exists"):
             return
         suggestion = vrf_suggestions.get(port_key)
-        if suggestion is not None:
+        if suggestion is not None and suggestion.get("create"):
+            enriched_ip["vrf_create_url"] = vrf_create_url
+        elif suggestion is not None and suggestion["vrf_id"] in visible_vrf_ids:
             # Its own key, never vrf_id: that one means "the VRF NetBox has for this row", and the
             # verify path reads it to decide whether an address is already synced.
             enriched_ip["suggested_vrf_id"] = suggestion["vrf_id"]

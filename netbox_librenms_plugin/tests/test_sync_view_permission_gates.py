@@ -29,6 +29,7 @@ def pytest_generate_tests(metafunc):
                 "DeleteNetBoxInterfacesView",
                 "SyncInterfaceParentView",
                 "SyncIPAddressesView",
+                "CreateVRFFromIPRowView",
                 "AddDeviceToLibreNMSView",
                 "RemoveServerMappingView",
                 "SetPreferredServerView",
