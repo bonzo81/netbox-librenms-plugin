@@ -1,5 +1,7 @@
 """Rendering tests for the real LibreNMS module table."""
 
+import re
+
 import pytest
 from django.test import RequestFactory
 from django.urls import reverse
@@ -32,6 +34,11 @@ def _table(device=None, **overrides):
     table.inventory_snapshot_digest = "table-snapshot-digest"
     table.return_url = "/plugins/librenms-sync/?tab=modules"
     return table
+
+
+def _actions(rendered):
+    """Return the ``data-action`` hook of every control in a rendered actions cell, in document order."""
+    return re.findall(r'data-action="([^"]+)"', rendered)
 
 
 class TestRenderedColumns:
@@ -206,8 +213,7 @@ class TestActionRendering:
 
         rendered = str(table.render_actions(None, record))
 
-        assert "Install" in rendered
-        assert "Install Branch" in rendered
+        assert _actions(rendered) == ["install", "install-branch"]
         # The install reads the serial from the cached row, so the form posts the row index only.
         assert 'name="ent_index" value="42"' in rendered
         assert "TEST-SERIAL" not in rendered
@@ -261,15 +267,15 @@ class TestActionRendering:
             )
         )
 
-        assert "Install Branch" not in rendered
+        assert "install-branch" not in _actions(rendered)
 
     @pytest.mark.parametrize(
-        ("action_label", "record"),
+        ("action", "record"),
         [
-            ("Install", {"can_install": True, "module_bay_id": 5, "module_type_id": 10}),
-            ("Update Serial", {"can_update_serial": True, "installed_module_id": 99}),
+            ("install", {"can_install": True, "module_bay_id": 5, "module_type_id": 10}),
+            ("update-serial", {"can_update_serial": True, "installed_module_id": 99}),
             (
-                "Update Interface",
+                "update-interface",
                 {
                     "can_update_interface_binding": True,
                     "installed_module_id": 99,
@@ -278,12 +284,12 @@ class TestActionRendering:
             ),
         ],
     )
-    def test_standard_actions_require_an_inventory_index(self, action_label, record):
-        device = make_device(f"table-missing-{action_label.lower().replace(' ', '-')}-index")
+    def test_standard_actions_require_an_inventory_index(self, action, record):
+        device = make_device(f"table-missing-{action}-index")
 
         rendered = str(_table(device).render_actions(None, record))
 
-        assert action_label not in rendered
+        assert action not in _actions(rendered)
 
     def test_update_serial_and_interface_actions_carry_real_identifiers(self):
         from netbox_librenms_plugin.utils import module_inventory_binding_matches
@@ -303,8 +309,7 @@ class TestActionRendering:
 
         rendered = str(table.render_actions(None, record))
 
-        assert "Update Serial" in rendered
-        assert "Update Interface" in rendered
+        assert _actions(rendered) == ["update-serial", "update-interface"]
         assert 'name="module_id" value="42"' in rendered
         # The action reads the serial from the cached row, so the form posts the row index.
         assert 'name="ent_index" value="77"' in rendered
@@ -350,7 +355,7 @@ class TestActionRendering:
 
         rendered = str(_table(device).render_actions(None, record))
 
-        assert "Install" not in rendered
+        assert "install" not in _actions(rendered)
 
     def test_render_actions_update_serial_hidden_without_an_inventory_index(self):
         """The view resolves the serial through the cached row, so a row with no index has no action."""
@@ -363,7 +368,7 @@ class TestActionRendering:
 
         rendered = str(_table(device).render_actions(None, record))
 
-        assert "Update Serial" not in rendered
+        assert "update-serial" not in _actions(rendered)
 
     def test_render_actions_update_interface_hidden_without_an_inventory_index(self):
         """The bind reads its metadata from the cached row, so a row with no index has no action."""
@@ -377,7 +382,7 @@ class TestActionRendering:
 
         rendered = str(_table(device).render_actions(None, record))
 
-        assert "Update Interface" not in rendered
+        assert "update-interface" not in _actions(rendered)
 
     def test_interface_update_requires_interface_change_permission(self):
         device = make_device("table-interface-permission")
@@ -389,7 +394,7 @@ class TestActionRendering:
 
         rendered = str(_table(device, can_change_interface=False).render_actions(None, record))
 
-        assert "Update Interface" not in rendered
+        assert "update-interface" not in _actions(rendered)
 
     def test_carrier_option_posts_the_selected_real_ids(self):
         device = make_device("table-carrier")
@@ -402,6 +407,7 @@ class TestActionRendering:
 
         rendered = str(_table(device).render_actions(None, record))
 
+        assert _actions(rendered) == ["install-carrier"]
         assert "Install Carrier A into" in rendered
         assert 'name="module_bay_id" value="12"' in rendered
         assert 'name="module_type_id" value="34"' in rendered
@@ -412,8 +418,8 @@ class TestActionRendering:
         record = {"can_replace": True, "installed_module_id": 55, "ent_physical_index": 200}
 
         for denied in ("can_add_module", "can_change_module", "can_delete_module"):
-            assert "Replace" not in str(_table(device, **{denied: False}).render_actions(None, record))
-        assert "Replace" in str(_table(device).render_actions(None, record))
+            assert "replace" not in _actions(str(_table(device, **{denied: False}).render_actions(None, record)))
+        assert _actions(str(_table(device).render_actions(None, record))) == ["replace"]
 
     def test_replace_opens_the_preview_through_an_htmx_swap(self):
         device = make_device("table-replace-preview")
@@ -498,8 +504,8 @@ class TestActionRendering:
         add_only = str(_table(device, can_change_module=False).render_actions(None, record))
         change_only = str(_table(device, can_add_module=False).render_actions(None, record))
 
-        assert "Install" in add_only and "Update Serial" not in add_only
-        assert "Install" not in change_only and "Update Serial" in change_only
+        assert _actions(add_only) == ["install"]
+        assert _actions(change_only) == ["update-serial"]
 
     def test_mapping_suggestions_use_real_mapping_routes(self):
         device = make_device("table-mapping")
@@ -522,11 +528,11 @@ class TestActionRendering:
         bay_action = str(table.render_actions("", bay_record))
         type_action = str(table.render_actions("", type_record))
 
-        assert "Add Mapping" in bay_action
+        assert _actions(bay_action) == ["add-bay-mapping"]
         assert "module-bay-mappings" in bay_action
         assert "is_regex=true" in bay_action
         assert "return_url=" in bay_action
-        assert "Add Mapping" in type_action
+        assert _actions(type_action) == ["add-type-mapping"]
         assert "module-type-mappings" in type_action
 
     def test_module_type_creation_drops_blank_prefill_values(self):
@@ -543,7 +549,7 @@ class TestActionRendering:
 
         rendered = str(_table(device).render_actions("", record))
 
-        assert "Add Module Type" in rendered
+        assert _actions(rendered) == ["add-module-type"]
         assert "module-types/add" in rendered
         assert "model=MODEL-A" in rendered
         assert "description=" not in rendered
@@ -558,7 +564,98 @@ class TestActionRendering:
 
         rendered = str(_table(device, can_add_module_type=False).render_actions("", record))
 
-        assert "Add Module Type" not in rendered
+        assert "add-module-type" not in _actions(rendered)
+
+    @pytest.mark.parametrize(
+        ("expected", "record"),
+        [
+            (
+                ["install", "install-branch"],
+                {
+                    "can_install": True,
+                    "module_bay_id": 5,
+                    "module_type_id": 10,
+                    "has_installable_children": True,
+                    "ent_physical_index": 42,
+                    "inventory_digest": "rule-row-digest",
+                },
+            ),
+            (
+                ["update-serial", "update-interface", "review-interface-types", "replace"],
+                {
+                    "can_update_serial": True,
+                    "can_update_interface_binding": True,
+                    "interface_type_mismatch_count": 2,
+                    "can_replace": True,
+                    "installed_module_id": 42,
+                    "ent_physical_index": 77,
+                    "inventory_digest": "rule-row-digest",
+                },
+            ),
+            (
+                ["install-carrier", "add-bay-mapping"],
+                {
+                    "status": "No Bay",
+                    "carrier_install_options": [
+                        {"bay_id": 12, "module_type_id": 34, "module_type_name": "CARRIER-A", "bay_name": "Slot 0"}
+                    ],
+                    "model_suggestion": {"librenms_name": "RE0", "netbox_bay_name": "RE0"},
+                },
+            ),
+            (
+                ["add-carrier-rule", "map-existing-bay"],
+                {
+                    "status": "No Bay",
+                    "holder_hint_present": True,
+                    "device_empty_bay_names": ["RE0"],
+                    "mapping_source_name": "Routing Engine 0",
+                },
+            ),
+            (
+                ["add-type-mapping", "add-module-type"],
+                {
+                    "status": "No Type",
+                    "type_suggestion": {"librenms_model": "MODEL-A"},
+                    "module_type_create": {"model": "MODEL-A"},
+                },
+            ),
+        ],
+    )
+    def test_only_an_install_keeps_its_visible_label(self, expected, record):
+        """One rule for the actions column: an install is labelled, every other action is an icon."""
+        from netbox_librenms_plugin.tables.modules import LABELLED_MODULE_ACTIONS
+
+        device = make_device("table-action-label-rule")
+        rendered = str(_table(device, can_map_existing_bay=True).render_actions(None, record))
+
+        assert _actions(rendered) == expected
+        for name in ("button", "a"):
+            for control in re.finditer(rf"<{name}\b([^>]*)>(.*?)</{name}>", rendered, re.S):
+                attrs = next(iter(open_tags(control.group(0), name)))
+                visible_text = re.sub(r"<[^>]*>", "", control.group(2)).strip()
+                assert attrs["title"]
+                if attrs["data-action"] in LABELLED_MODULE_ACTIONS:
+                    assert visible_text
+                else:
+                    assert visible_text == ""
+                    assert attrs["aria-label"]
+
+    def test_move_is_an_icon_named_by_its_aria_label(self):
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+        from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+        if not netbox_relocates_module_subtree():
+            pytest.skip("Move is offered only where NetBox relocates the module subtree")
+        source = make_device_with_module_bays("table-move-source", ["Slot 1"])
+        conflict = install_module(source, "Slot 1", "TABLE-MOVE-TYPE", serial="MOVE-SERIAL")
+        record = {"can_move_from": True, "serial_conflict_module": conflict, "module_bay_id": 7}
+
+        rendered = str(_table(make_device("table-move-target")).render_actions(None, record))
+
+        (button,) = [tag for tag in open_tags(rendered, "button") if tag.get("data-action") == "move"]
+        assert button["aria-label"] == "Move"
+        assert button["title"] == "Move module from table-move-source / Slot 1 to this bay"
+        assert "> Move<" not in rendered
 
 
 class TestTableLifecycle:

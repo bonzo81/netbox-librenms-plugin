@@ -246,7 +246,7 @@ class TestModuleInterfaceTypeTab:
             kwargs={"pk": device.pk},
         )
         assert preview_url in content
-        assert 'aria-label="Review interface type differences"' in content
+        assert 'data-action="review-interface-types"' in content
         assert 'hx-target="#htmx-modal-content"' in content
         assert 'hx-swap="innerHTML"' in content
         assert 'hx-sync="#htmx-modal-content:replace"' in content

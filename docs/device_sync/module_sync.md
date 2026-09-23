@@ -28,10 +28,14 @@ Each row in the table shows:
 
 ## Taking Action
 
-- **Install** — installs a new module into the matched bay using the mapped ModuleType
-- **Update** — updates the serial number or module type of an existing installed module
-- **Add Mapping** — opens the ModuleBayMapping or ModuleTypeMapping creation modal directly from the row, so you can resolve "No Bay" or "No Type" statuses without leaving the page
-- **Add Bay Template** — if the device type is missing a module bay template, this button creates it inline
+Only an install action (**Install**, **Install Carrier**) shows its label in the Actions column. Every other action is an icon button: hover it for a tooltip, and a screen reader announces its name.
+
+- **Install**: installs a new module into the matched bay using the mapped ModuleType
+- **Install Branch**: installs the module and all its installable children
+- **Update Serial** / **Update Interface**: updates the serial of an installed module, or links a matching NetBox interface to it
+- **Replace** / **Move**: replaces a mismatched module, or moves a module with the same serial from another bay
+- **Add Bay Mapping** / **Add Type Mapping** / **Map Existing Bay** / **Add Module Type**: resolve "No Bay" or "No Type" statuses without leaving the page
+- **Add Bay Template**: if the device type is missing a module bay template, this button creates it inline
 
 ## Module Interfaces
 

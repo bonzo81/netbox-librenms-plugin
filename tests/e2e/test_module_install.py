@@ -132,12 +132,12 @@ class TestModuleInstallWorkflow:
             )
         return rows
 
-    def _find_row_with_button(self, rows, button_text):
-        """Find the first top-level row that has a button matching button_text."""
+    def _find_row_with_button(self, rows, action):
+        """Find the first top-level row that offers the actions-column control ``action``."""
         for row in rows:
             if row["name"].startswith("└─"):
                 continue
-            btn = row["tr"].query_selector(f'button:has-text("{button_text}")')
+            btn = row["tr"].query_selector(f'button[data-action="{action}"]')
             if btn:
                 return row, btn
         return None, None
@@ -159,7 +159,7 @@ class TestModuleInstallWorkflow:
         self._goto_modules_tab(page, device_id)
 
         rows = self._get_table_rows(page)
-        row, btn = self._find_row_with_button(rows, "Install")
+        row, btn = self._find_row_with_button(rows, "install")
         if not btn:
             pytest.skip("No installable module found in table")
 
@@ -178,7 +178,7 @@ class TestModuleInstallWorkflow:
         self._goto_modules_tab(page, device_id)
 
         rows = self._get_table_rows(page)
-        row, btn = self._find_row_with_button(rows, "Install Branch")
+        row, btn = self._find_row_with_button(rows, "install-branch")
         if not btn:
             pytest.skip("No branch-installable module found in table")
 
@@ -205,7 +205,7 @@ class TestModuleInstallWorkflow:
         self._goto_modules_tab(page, device_id)
 
         rows = self._get_table_rows(page)
-        row, btn = self._find_row_with_button(rows, "Install Branch")
+        row, btn = self._find_row_with_button(rows, "install-branch")
         if not btn:
             pytest.skip("No branch-installable module found in table")
 
@@ -218,7 +218,7 @@ class TestModuleInstallWorkflow:
         # Navigate back and try again — bays should now be occupied
         self._goto_modules_tab(page, device_id)
         rows = self._get_table_rows(page)
-        _, btn2 = self._find_row_with_button(rows, "Install Branch")
+        _, btn2 = self._find_row_with_button(rows, "install-branch")
         if not btn2:
             pytest.skip(f"No Install Branch button after first install of '{module_name}'")
 
@@ -254,7 +254,7 @@ class TestModuleInstallWorkflow:
         # Step 1: Install a few individual modules
         for _ in range(3):
             rows = self._get_table_rows(page)
-            row, btn = self._find_row_with_button(rows, "Install")
+            row, btn = self._find_row_with_button(rows, "install")
             if not btn:
                 break
             btn.click()
@@ -263,7 +263,7 @@ class TestModuleInstallWorkflow:
         # Step 2: Branch install all available branches
         while True:
             rows = self._get_table_rows(page)
-            row, btn = self._find_row_with_button(rows, "Install Branch")
+            row, btn = self._find_row_with_button(rows, "install-branch")
             if not btn:
                 break
             btn.click()
