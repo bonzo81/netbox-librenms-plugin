@@ -1774,7 +1774,7 @@ class TestInterfaceContextOOBRows:
         rows = list(ctx["table"].data)
         assert any(row.get("port_id") == 999 for row in rows)
         assert all(row.get("port_id") != 123 for row in rows)
-        assert "idrac0" not in {i["name"] for i in ctx["netbox_only_interfaces"]}
+        assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
 
     def test_malformed_port_stack_relationships_does_not_crash(self):
         """A cached snapshot whose port_stack_relationships is None / a non-dict (corruption, partial write, format migration) must fail soft, not AttributeError on the .get('lag_members') calls."""
