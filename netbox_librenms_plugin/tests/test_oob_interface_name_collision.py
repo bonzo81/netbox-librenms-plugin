@@ -347,6 +347,52 @@ def test_oob_derived_name_that_exceeds_the_model_limit_is_skipped(client, settin
 
 
 @pytest.mark.django_db
+def test_excluding_name_does_not_bind_an_oob_port_to_an_overlong_host_name(client, settings):
+    configure_default_librenms_server(settings)
+    device = make_device("oob-excluded-derived-name-too-long", librenms_cf={SERVER_KEY: {"id": 79}})
+    client.force_login(make_superuser("oob-excluded-derived-name-too-long-user"))
+    name = "x" * Interface._meta.get_field("name").max_length
+    host = _port(8581, name)
+    oob = _port(8582, name, source="oob")
+
+    oob_response = _sync(client, device, [host, oob], [8582], exclude_columns=["name", "vlans"])
+
+    assert oob_response.status_code == 302
+    assert not Interface.objects.filter(device=device).exists()
+    assert any(
+        "derived interface name is longer" in str(message) for message in get_messages(oob_response.wsgi_request)
+    )
+
+    host_response = _sync(client, device, [host, oob], [8581])
+
+    assert host_response.status_code == 302
+    host_interface = Interface.objects.get(device=device, name=name)
+    assert _binding(host_interface) == 8581
+
+
+@pytest.mark.django_db
+def test_excluding_name_still_updates_an_oob_interface_bound_by_port_id(client, settings):
+    configure_default_librenms_server(settings)
+    device = make_device("oob-excluded-derived-name-bound", librenms_cf={SERVER_KEY: {"id": 80}})
+    interface = make_interface(device, "management-controller")
+    interface.enabled = False
+    set_librenms_device_id(interface, 8592, SERVER_KEY)
+    interface.save()
+    client.force_login(make_superuser("oob-excluded-derived-name-bound-user"))
+    name = "x" * Interface._meta.get_field("name").max_length
+    ports = [_port(8591, name), _port(8592, name, source="oob")]
+
+    response = _sync(client, device, ports, [8592], exclude_columns=["name", "vlans"])
+
+    assert response.status_code == 302
+    interface.refresh_from_db()
+    assert interface.name == "management-controller"
+    assert interface.enabled is True
+    assert _binding(interface) == 8592
+    assert Interface.objects.filter(device=device).count() == 1
+
+
+@pytest.mark.django_db
 def test_excluding_name_preserves_an_operator_chosen_name(client, settings):
     configure_default_librenms_server(settings)
     device = make_device("oob-excluded-name", librenms_cf={SERVER_KEY: {"id": 78}})

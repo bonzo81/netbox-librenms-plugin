@@ -997,7 +997,6 @@ class SyncInterfacesView(
                         port,
                         interface_name_field,
                         rejected_names,
-                        name_excluded="name" in row_excludes,
                     ):
                         continue
                     if reason := rejected_names.get(port_id):
@@ -1007,8 +1006,10 @@ class SyncInterfacesView(
                             self._record_skipped_conflict(port.get(interface_name_field), reason)
                             continue
                     synced_name = synced_names.get(port_id)
-                    if synced_name is None and (
-                        "name" in row_excludes or reason == REPORTED_NAME_PORT_COLLISION_REASON
+                    if (
+                        synced_name is None
+                        and port.get("_source") != OOB_INVENTORY_SOURCE
+                        and ("name" in row_excludes or reason == REPORTED_NAME_PORT_COLLISION_REASON)
                     ):
                         synced_name = syncable_interface_name(port, interface_name_field, writer_model)
                     self.sync_interface(
@@ -1017,7 +1018,12 @@ class SyncInterfacesView(
                         row_excludes,
                         interface_name_field,
                         synced_name,
-                        name_conflict_reason=(reason if reason == REPORTED_NAME_PORT_COLLISION_REASON else None),
+                        name_conflict_reason=(
+                            reason
+                            if port.get("_source") == OOB_INVENTORY_SOURCE
+                            or reason == REPORTED_NAME_PORT_COLLISION_REASON
+                            else None
+                        ),
                     )
             finally:
                 if not keep_locked_targets:
@@ -1289,7 +1295,7 @@ class SyncInterfacesView(
         if skipped is not None:
             skipped.append(f"{interface_name or '(unnamed)'} ({reason})")
 
-    def _oob_row_is_unsyncable(self, port, interface_name_field, rejected_names, *, name_excluded=False):
+    def _oob_row_is_unsyncable(self, port, interface_name_field, rejected_names):
         """
         Report whether a selected OOB row must be skipped, recording why.
 
@@ -1300,7 +1306,6 @@ class SyncInterfacesView(
             port (dict): The OOB port row.
             interface_name_field (str): Port field that contains the selected interface name.
             rejected_names (dict[int, str]): Rejection reason by normalized port ID.
-            name_excluded (bool): Whether the row will leave its NetBox name unchanged.
 
         Returns:
             bool: True when the row was skipped and the skip recorded.

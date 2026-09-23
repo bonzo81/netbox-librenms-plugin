@@ -809,10 +809,9 @@ class BaseInterfaceTableView(
                 target_device_ids[port_id] = target_device.pk
             reserved_name_port_ids = {}
             for device_id, interface_maps in interfaces_by_device.items():
-                for interface_name, interface in interface_maps["by_name"].items():
-                    port_id = self._get_object_librenms_id(interface)
-                    if port_id is not None:
-                        reserved_name_port_ids.setdefault(device_id, {}).setdefault(interface_name, set()).add(port_id)
+                for port_id, interfaces in interface_maps["by_librenms_id_matches"].items():
+                    for interface in interfaces:
+                        reserved_name_port_ids.setdefault(device_id, {}).setdefault(interface.name, set()).add(port_id)
             synced_names, rejected_names = synced_interface_names(
                 ports_data,
                 interface_name_field,

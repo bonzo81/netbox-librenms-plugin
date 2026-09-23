@@ -613,6 +613,7 @@ class TestApplyModuleInterfaceTypes:
         *,
         current_type="1000base-t",
         template_type="10gbase-x-sfpp",
+        htmx=False,
     ):
         from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
         from netbox_librenms_plugin.views.sync.modules import ApplyModuleInterfaceTypesView
@@ -629,6 +630,7 @@ class TestApplyModuleInterfaceTypes:
                 f"template_type_{interface.pk}": template_type,
             },
             user=user,
+            **({"HTTP_HX_REQUEST": "true"} if htmx else {}),
         )
         response = ApplyModuleInterfaceTypesView.as_view()(request, pk=page_device.pk)
         return request, response
@@ -710,7 +712,6 @@ class TestApplyModuleInterfaceTypes:
 
     def test_type_update_cannot_leave_a_constrained_change_grant(self, settings):
         from dcim.models import Device, Interface, Module
-        from django.core.exceptions import PermissionDenied
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
@@ -721,11 +722,14 @@ class TestApplyModuleInterfaceTypes:
         )
         user = grant(user, "change", Interface, constraints={"type": "1000base-t"})
 
-        with pytest.raises(PermissionDenied):
-            self._post(settings, user, page_device, member, module, interface)
+        _request, response = self._post(settings, user, page_device, member, module, interface, htmx=True)
 
         interface.refresh_from_db()
+        assert response.status_code == 200
+        assert response["HX-Retarget"] == "#module-sync-content"
         assert interface.type == "1000base-t"
+        assert "The updated interface is outside your change permission scope." in response.content.decode()
+        assert "X-LibreNMS-Cache-Transition" not in response
 
     def test_changed_current_type_is_skipped(self, settings):
         from dcim.models import Device, Interface, Module

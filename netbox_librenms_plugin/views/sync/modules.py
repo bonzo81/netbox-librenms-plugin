@@ -8,7 +8,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
@@ -2580,6 +2580,10 @@ class ModuleInterfaceTypePreviewView(LibreNMSPermissionMixin, NetBoxObjectPermis
         )
 
 
+class _InterfaceChangeScopeViolation(Exception):
+    """Abort a type update that leaves the caller's change permission scope."""
+
+
 class ApplyModuleInterfaceTypesView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
 ):
@@ -2589,9 +2593,9 @@ class ApplyModuleInterfaceTypesView(
         from dcim.models import Interface
 
         if outcome == "updated" and not self.restricted_queryset(Interface, "change").filter(pk=interface.pk).exists():
-            raise PermissionDenied("The updated interface is outside your change permission scope.")
+            raise _InterfaceChangeScopeViolation("The updated interface is outside your change permission scope.")
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         from dcim.models import Device, Interface, Module
 
         self.required_object_permissions = {"POST": [("view", Device), ("view", Module), ("change", Interface)]}
@@ -2631,28 +2635,32 @@ class ApplyModuleInterfaceTypesView(
             "not_different": [],
         }
         validation_failures = []
-        with transaction.atomic():
-            template_types = _module_interface_type_targets(target_device, module)
-            interfaces = list(
-                self.restricted_queryset(Interface, "change")
-                .select_for_update(of=("self",))
-                .filter(module=module, pk__in=interface_ids)
-                .order_by("name", "pk")
-            )
-            unavailable_count = len(interface_ids) - len(interfaces)
-            for interface in interfaces:
-                template_type = template_types.get(interface.name)
-                outcome, reason = _apply_module_interface_type(
-                    interface,
-                    template_type,
-                    request.POST.get(f"current_type_{interface.pk}"),
-                    request.POST.get(f"template_type_{interface.pk}"),
+        try:
+            with transaction.atomic():
+                template_types = _module_interface_type_targets(target_device, module)
+                interfaces = list(
+                    self.restricted_queryset(Interface, "change")
+                    .select_for_update(of=("self",))
+                    .filter(module=module, pk__in=interface_ids)
+                    .order_by("name", "pk")
                 )
-                self._assert_updated_interface_change_scope(interface, outcome)
-                if reason:
-                    validation_failures.append((interface.name, reason))
-                else:
-                    outcomes[outcome].append(interface.name)
+                unavailable_count = len(interface_ids) - len(interfaces)
+                for interface in interfaces:
+                    template_type = template_types.get(interface.name)
+                    outcome, reason = _apply_module_interface_type(
+                        interface,
+                        template_type,
+                        request.POST.get(f"current_type_{interface.pk}"),
+                        request.POST.get(f"template_type_{interface.pk}"),
+                    )
+                    self._assert_updated_interface_change_scope(interface, outcome)
+                    if reason:
+                        validation_failures.append((interface.name, reason))
+                    else:
+                        outcomes[outcome].append(interface.name)
+        except _InterfaceChangeScopeViolation as exc:
+            messages.error(request, str(exc))
+            return _modules_action_response(request, page_device, server_key)
 
         updated_names = outcomes["updated"]
         if updated_names:

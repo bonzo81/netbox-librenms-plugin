@@ -398,6 +398,32 @@ class TestInterfaceViewWithRealObjects:
         assert context["netbox_only_interfaces"] == []
         assert live_librenms.server.requests == []
 
+    def test_cached_snapshot_resolves_each_interface_id_once(self, live_librenms, monkeypatch):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = _mapped_device("interface-cache-read-count")
+        bound = make_interface(device, "Ethernet1")
+        unbound = make_interface(device, "Ethernet2")
+        _set_librenms_id(bound, 101)
+        ports = _register_ports(live_librenms)
+        request = _request()
+        view = _view(DeviceInterfaceTableView, live_librenms, request)
+        cache.set(view.get_cache_key(device, "ports", "default"), {"status": "ok", "ports": ports}, timeout=300)
+        resolved = []
+        original_lookup = view._get_object_librenms_id
+
+        def record_lookup(interface):
+            resolved.append(interface.pk)
+            return original_lookup(interface)
+
+        monkeypatch.setattr(view, "_get_object_librenms_id", record_lookup)
+
+        context = view.get_context_data(request, device, "ifName", server_key="default")
+
+        assert context["table"] is not None
+        assert sorted(resolved) == sorted([bound.pk, unbound.pk])
+        assert live_librenms.server.requests == []
+
     def test_hidden_interface_state_is_not_rendered_outside_view_grant(self, client, live_librenms, settings):
         from dcim.models import Device, Interface
         from django.urls import reverse
