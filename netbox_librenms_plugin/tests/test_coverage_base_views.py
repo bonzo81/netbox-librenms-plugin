@@ -617,6 +617,30 @@ class TestIPAddressHTTPAndORM:
         assert cached["ports_by_id"]["101"]["ifName"] == "Ethernet1"
         assert cached["mgmt_ip"] == "198.18.20.1"
 
+    def test_a_missing_port_is_cached_as_a_known_absence(self, live_librenms):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        live_librenms.api.cache_timeout = 300
+        device, _interface = self._device()
+        rows = [
+            {"ip_address": "198.18.50.1", "prefix_length": 24, "port_id": 101},
+            {"ip_address": "198.18.51.1", "prefix_length": 24, "port_id": 202},
+        ]
+        self._register(live_librenms, rows)
+        request = _request()
+        view = _view(DeviceIPAddressTableView, live_librenms, request)
+
+        fresh = view._prepare_context(request, device, "ifName", fetch_fresh=True, server_key="default")
+        request_count = len(live_librenms.server.requests)
+        view.cache_only = True
+        warm = view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+
+        assert fresh["table"] is not None
+        assert warm["table"] is not None
+        assert len(live_librenms.server.requests) == request_count
+        cached = cache.get(view.get_cache_key(device, "ip_addresses", "default"))
+        assert cached["ports_by_id"]["202"] is None
+
     @pytest.mark.parametrize(
         "body",
         [

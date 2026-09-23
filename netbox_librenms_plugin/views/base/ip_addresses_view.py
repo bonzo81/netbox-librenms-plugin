@@ -357,6 +357,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             key = _port_key(port["port_id"])
             if key in wanted:
                 port_data_cache.setdefault(key, port)
+        if success and isinstance(ports, list):
+            # A successful device-port snapshot can omit a port named by an IP row. Record
+            # that absence so warm and cache-only renders do not re-fetch or reject this snapshot.
+            for key in wanted:
+                port_data_cache.setdefault(key, None)
 
     def _load_vrf_identities(self, port_data_cache, ip_data):
         """

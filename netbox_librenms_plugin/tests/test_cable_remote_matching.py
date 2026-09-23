@@ -1155,6 +1155,62 @@ class TestCheckAndCreateTheRemoteEnd:
         assert local_interface.cable is not None
         assert created.cable_id == local_interface.cable_id
 
+    @pytest.mark.parametrize("drift", ["owner", "migration"])
+    def test_remote_create_rechecks_the_local_owner_after_proposal_resolution(
+        self, librenms_server, settings, monkeypatch, drift
+    ):
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
+
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            f"mk-owner-drift-{drift}", librenms_server, settings
+        )
+        original = CableRemoteCreateView._remote_port_record
+
+        def drift_after_proposal(view, row):
+            port = original(view, row)
+            if drift == "owner":
+                Interface.objects.filter(pk=local_interface.pk).update(device=make_device("mk-owner-drift-other"))
+            else:
+                fresh = Device.objects.get(pk=local_device.pk)
+                mark_librenms_migrated(fresh, remote_device.pk, server_key)
+                fresh.save(update_fields=["custom_field_data"])
+            return port
+
+        monkeypatch.setattr(CableRemoteCreateView, "_remote_port_record", drift_after_proposal)
+        _logged_in(make_superuser(f"remote-create-mk-owner-drift-{drift}")).post(
+            _remote_create_url(local_device), {"row_id": row_id, "server_key": server_key}
+        )
+
+        assert not Interface.objects.filter(device=remote_device, name="Gi0/1").exists()
+        local_interface.refresh_from_db()
+        assert local_interface.cable is None
+
+    def test_remote_create_applies_the_page_cache_transition(
+        self, librenms_server, settings, django_capture_on_commit_callbacks
+    ):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        server_key, local_device, _, _, row_id = self._scenario("mk-cache-transition", librenms_server, settings)
+        snapshot_key = BaseCableTableView().get_cache_key(local_device, "ip_addresses", server_key)
+        cache.set(snapshot_key, {"ip_addresses": []}, timeout=300)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            response = _logged_in(make_superuser("remote-create-mk-cache-transition")).post(
+                _remote_create_url(local_device),
+                {"row_id": row_id, "server_key": server_key},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert cache.get(snapshot_key) is None
+        assert "librenmsCacheChanged" in response["HX-Trigger"]
+
     def test_migrated_cable_page_cannot_create_a_remote_interface(self, librenms_server, settings):
         from dcim.models import Interface
 

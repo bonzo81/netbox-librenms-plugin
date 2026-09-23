@@ -1226,18 +1226,29 @@ class CableRemoteCreateView(SyncCablesView):
         try:
             with transaction.atomic():
                 interface = self._create_remote_interface(request, context)
-                if not self.create_cable(context["local_interface"], interface, request):
-                    # create_cable already messaged the user; undo the interface it was made for.
-                    raise _RemoteCreateAborted
+                self._initial_device = obj
+                self._origin_device = context["local_interface"].device
+                row = {
+                    **context["row"],
+                    "netbox_local_device_id": context["local_interface"].device_id,
+                    "netbox_remote_device_id": context["remote_device"].pk,
+                }
+                result = self._apply_cable_action(
+                    context["local_interface"], interface, row, context["local_interface"].name, force=False
+                )
+                if result["status"] != "valid":
+                    raise _RemoteCreateAborted("The cable row changed. Refresh the cable data and try again.")
         except _RemoteCreateAborted as exc:
             if str(exc):
                 messages.error(request, str(exc))
         else:
+            schedule_request_cache_mutation(request, obj, SyncTab.CABLES, server_key)
             messages.success(
                 request,
                 f"Created {interface.device.name} {interface.name} and cabled it to {context['local_interface'].name}.",
             )
-        return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
+        response = self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
+        return apply_request_cache_transition(request, response)
 
     def _resolve_proposal(self, request, pk, data):
         """
