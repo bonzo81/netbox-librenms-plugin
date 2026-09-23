@@ -412,6 +412,7 @@ def test_equivalent_ipv6_spellings_share_one_pseudonym():
                 "addresses": [
                     {"port_id": 1, "ipv6_address": "2001:db8::abcd"},
                     {"port_id": 2, "ipv6_compressed": "2001:0DB8:0000:0000:0000:0000:0000:ABCD"},
+                    {"port_id": 3, "ip_address": " 2001:db8::abcd ", "prefix_length": 64},
                 ],
             }
         },
@@ -420,6 +421,7 @@ def test_equivalent_ipv6_spellings_share_one_pseudonym():
     rows = anonymize_recording(recording)["responses"]["GET /api/v0/devices/1/ip"]["addresses"]
 
     assert rows[0]["ipv6_address"] == rows[1]["ipv6_compressed"]
+    assert rows[0]["ipv6_address"] == rows[2]["ip_address"]
 
 
 def test_documentation_addresses_do_not_use_the_stubs_oob_block():

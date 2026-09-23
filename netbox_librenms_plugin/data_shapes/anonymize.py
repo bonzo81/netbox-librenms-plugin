@@ -435,7 +435,7 @@ def _doc_ip(value, rules):
 
     """
     raw_addr, sep, prefix = value.partition("/")
-    addr = str(ipaddress.ip_address(raw_addr))
+    addr = str(ipaddress.ip_address(raw_addr.strip()))
     assigned = rules.doc_ips if rules.doc_ips is not None else {}
     if addr not in assigned:
         taken = set(assigned.values())
