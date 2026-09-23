@@ -298,6 +298,7 @@ class TestImportDevicesJob:
             ),
             6412: _device_payload(6412, hostname="background-legacy-imported-vm"),
         }
+        librenms_server.register("/api/v0/devices/6411", {"status": "ok", "devices": [rows[6411]]})
 
         ImportDevicesJob.handle(
             job=job,
@@ -346,6 +347,7 @@ class TestImportDevicesJob:
             ),
             6402: _device_payload(6402, hostname="background-imported-vm"),
         }
+        librenms_server.register("/api/v0/devices/6401", {"status": "ok", "devices": [rows[6401]]})
 
         ImportDevicesJob(job).run(
             import_plans=[
@@ -400,6 +402,7 @@ class TestImportDevicesJob:
                 location=infrastructure.site.name,
             )
         }
+        librenms_server.register("/api/v0/devices/6404", {"status": "ok", "devices": [rows[6404]]})
         ImportDevicesJob(job).run(
             import_plans=[
                 {

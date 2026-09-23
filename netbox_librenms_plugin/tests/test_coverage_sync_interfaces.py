@@ -4093,6 +4093,7 @@ class TestSyncInterfacesViewPost:
         assert any("host" in text.lower() for text in warnings), (
             f"the collision must be named as one, not reported as an ambiguous mapping; got {warnings}"
         )
+
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from types import SimpleNamespace
 
