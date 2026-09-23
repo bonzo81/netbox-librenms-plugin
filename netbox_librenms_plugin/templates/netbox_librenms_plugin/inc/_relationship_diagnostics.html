@@ -10,7 +10,7 @@ Context: diagnostics (relationship_diagnostics_report output), or nothing to ren
 {% if diagnostics %}
 <div class="mb-2 noprint">
   <button type="button" class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
-          data-bs-toggle="modal" data-bs-target="#relationshipDiagnosticsModal">
+          onclick="showModal(document.getElementById('relationshipDiagnosticsModal'))">
     <i class="mdi mdi-information-outline me-1"></i>Relationship data: {{ diagnostics.pairs_usable }} of {{ diagnostics.pairs_seen }} stack row{{ diagnostics.pairs_seen|pluralize }} usable{% if diagnostics.pairs_unclassified %}, {{ diagnostics.pairs_unclassified }} unclassified{% endif %}
   </button>
 </div>

@@ -105,7 +105,7 @@ A bridge has no equivalent `ifType`: LibreNMS reports a Linux bridge as `etherne
 
 Some LibreNMS port-stack rows describe a service access point rather than a relationship between NetBox interfaces. The optional **SAP Name Pattern** identifies those names so the rows are skipped. For example, Nokia SR OS can report service access points such as `lag-1:10`.
 
-Patterns are scoped by `librenms_os`, which is matched case-insensitively. The LAG, bridge and SAP expressions use Python regular expressions. LAG and bridge names use full-match behavior; SAP patterns match when found within the name.
+Patterns are scoped by `librenms_os`, which is matched case-insensitively. The LAG, bridge and SAP expressions use Python regular expressions. All three search within the name. Add `^` and `$` when the pattern must match the whole name.
 
 ```yaml
 - librenms_os: ios

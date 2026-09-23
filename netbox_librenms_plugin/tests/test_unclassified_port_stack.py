@@ -158,6 +158,52 @@ class TestTheDiagnosticsCounters:
         assert diagnostics["patterns"]["bridge"] == [OLD_BRIDGE_PATTERN]
         assert diagnostics["patterns"]["lag"] == [r"^bond\d+$"]
 
+    @pytest.mark.parametrize(
+        "stack",
+        [
+            [{"unknown": 1}],
+            [{"unknown": 1}, {"high_port_id": 999, "low_port_id": 8002}],
+        ],
+    )
+    def test_rejected_malformed_rows_do_not_get_a_single_cause_verdict(self, mock_librenms_api, stack):
+        from netbox_librenms_plugin.interface_relationships import relationship_diagnostics_report
+
+        relationships = mock_librenms_api.resolve_port_relationships(
+            EVE_NG_PORTS,
+            stack,
+            lag_patterns={"linux": r"^bond\d+$"},
+            bridge_patterns={"linux": OLD_BRIDGE_PATTERN},
+            compiled_sap_patterns=[],
+            interface_name_field="ifName",
+        )
+        report = relationship_diagnostics_report({"ports": EVE_NG_PORTS, "port_stack_relationships": relationships})
+
+        assert report["pairs_malformed"] == 1
+        assert "none could be used" in report["verdict"]
+
+
+def test_conflicted_lag_claims_survive_an_empty_name_field_fallback(mock_librenms_api):
+    ports = [_port(1, "eth0"), _port(2, "bond0"), _port(3, "bond1")]
+    for port in ports:
+        port["ifDescr"] = "shared description"
+    relationships = mock_librenms_api.resolve_port_relationships(
+        ports,
+        [
+            {"high_port_id": 1, "low_port_id": 2},
+            {"high_port_id": 1, "low_port_id": 3},
+        ],
+        lag_patterns={"linux": r"^bond\d+$"},
+        bridge_patterns={},
+        compiled_sap_patterns=[],
+        interface_name_field="ifName",
+    )
+
+    lag = next(kind for kind in relationships["diagnostics"]["kinds"] if kind["key"] == "lag_members")
+    assert lag["claimed"] == 2
+    assert lag["conflicted"] == 1
+    assert lag["from_fallback"] is False
+    assert relationships["stacked_ports"] == {}
+
 
 class TestTheSeededLinuxPattern:
     """Migration 0021 widens it, reading the row the migration actually left in the database."""

@@ -26,6 +26,46 @@ def _add_page_scripts(page):
     page.add_script_tag(path=str(SCRIPT_PATH))
 
 
+def test_relationship_diagnostics_modal_opens_without_bootstrap(page):
+    from django.template import Context, Engine, Library
+
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name):
+        return "/patterns/"
+
+    engine = Engine()
+    engine.template_builtins.append(urls)
+    template = TEMPLATE_DIR / "inc" / "_relationship_diagnostics.html"
+    diagnostics = {
+        "pairs_seen": 1,
+        "pairs_usable": 1,
+        "pairs_unclassified": 0,
+        "ports_seen": 2,
+        "name_field": "ifName",
+        "verdict": "Every usable pair was classified.",
+        "kinds": [],
+        "patterns": {"lag": [], "bridge": [], "sap": []},
+    }
+    fragment = engine.from_string(template.read_text(encoding="utf-8")).render(
+        Context({"diagnostics": diagnostics}, use_l10n=False)
+    )
+    page.set_content(f"<style>.modal {{ display: none; }} .modal.show {{ display: block; }}</style>{fragment}")
+    _add_page_scripts(page)
+
+    assert page.evaluate("typeof bootstrap") == "undefined"
+    modal = page.locator("#relationshipDiagnosticsModal")
+    assert not modal.is_visible()
+    page.get_by_role("button", name=re.compile("Relationship data:")).click()
+    assert modal.is_visible()
+    assert modal.get_attribute("aria-modal") == "true"
+
+    modal.locator(".modal-footer button[data-bs-dismiss='modal']").click()
+    assert not modal.is_visible()
+    assert page.locator(".modal-backdrop").count() == 0
+
+
 # ===========================================================================
 # Interface selection: the requirement cascade and cross-page state
 # ===========================================================================

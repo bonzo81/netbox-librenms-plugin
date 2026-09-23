@@ -1313,7 +1313,7 @@ class SyncInterfacesView(
             )
             return True
         port_id = normalize_librenms_port_id(port.get("port_id"))
-        if not name_excluded and rejected_names.get(port_id) == HOST_NAME_COLLISION_REASON:
+        if rejected_names.get(port_id) == HOST_NAME_COLLISION_REASON:
             self._record_skipped_conflict(port.get(interface_name_field), HOST_NAME_COLLISION_REASON)
             return True
         return False

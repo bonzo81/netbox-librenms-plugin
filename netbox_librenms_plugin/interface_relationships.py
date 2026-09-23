@@ -291,7 +291,14 @@ def _diagnostics_verdict(diagnostics):
     # A snapshot cached by an older release can be missing a counter the report now reads.
     diagnostics = {
         key: diagnostics.get(key, 0)
-        for key in ("pairs_seen", "pairs_usable", "pairs_unclassified", "pairs_skipped_sap", "pairs_unresolved_end")
+        for key in (
+            "pairs_seen",
+            "pairs_usable",
+            "pairs_unclassified",
+            "pairs_skipped_sap",
+            "pairs_unresolved_end",
+            "pairs_malformed",
+        )
     }
     if not diagnostics["pairs_seen"]:
         return (
@@ -299,15 +306,17 @@ def _diagnostics_verdict(diagnostics):
             "relationship data to read. No name pattern can add one."
         )
     if not diagnostics["pairs_usable"]:
-        if diagnostics["pairs_skipped_sap"] >= diagnostics["pairs_unresolved_end"]:
+        if diagnostics["pairs_skipped_sap"] == diagnostics["pairs_seen"]:
             return (
                 "Every row LibreNMS reported names a service access point, which describes a "
                 "service rather than an interface relationship. Check this OS's SAP name pattern."
             )
-        return (
-            "Every row LibreNMS reported names a port it does not poll, so neither end can be "
-            "resolved. The relationships exist on the device but not in LibreNMS's port list."
-        )
+        if diagnostics["pairs_unresolved_end"] == diagnostics["pairs_seen"]:
+            return (
+                "Every row LibreNMS reported names a port it does not poll, so neither end can be "
+                "resolved. The relationships exist on the device but not in LibreNMS's port list."
+            )
+        return "LibreNMS reported stack rows, but none could be used. See the rejection counts below."
     if diagnostics["pairs_unclassified"]:
         return (
             "LibreNMS reports these ports as stacked, but no rule says what kind of relationship "

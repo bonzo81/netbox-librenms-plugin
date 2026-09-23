@@ -1278,7 +1278,7 @@ class LibreNMSAPI:
             fallback_field = next(field for field in INTERFACE_NAME_FIELDS if field != interface_name_field)
             fallback = _resolve_with(fallback_field, active["claimed_pairs"])
             for kind in RELATIONSHIP_KINDS:
-                if resolved[kind]:
+                if resolved[kind] or claims[kind] or conflicted[kind]:
                     continue
                 logger.debug(
                     "The %s map from %s is empty. The resolver uses %s alone.",

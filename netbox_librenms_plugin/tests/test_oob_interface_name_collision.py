@@ -377,6 +377,33 @@ def test_excluding_name_preserves_an_operator_chosen_name(client, settings):
 
 
 @pytest.mark.django_db
+def test_excluding_name_does_not_bind_oob_port_to_unbound_host_interface(client, settings):
+    configure_default_librenms_server(settings)
+    device = make_device("oob-excluded-colliding-name", librenms_cf={SERVER_KEY: {"id": 87}})
+    host_interface = make_interface(device, "eth0")
+    client.force_login(make_superuser("oob-excluded-colliding-name-user"))
+    ports = [
+        _port(9501, "eth0"),
+        _port(9502, "eth0-oob"),
+        _port(9503, "eth0", source="oob"),
+    ]
+
+    response = _sync(
+        client,
+        device,
+        ports,
+        [9503],
+        exclude_columns=["name", "vlans", "mac_address", "description", "mtu", "speed", "type"],
+    )
+
+    assert response.status_code == 302
+    host_interface.refresh_from_db()
+    assert _binding(host_interface) is None
+    assert Interface.objects.filter(device=device).count() == 1
+    assert any(CONTESTED_REASON in str(message) for message in get_messages(response.wsgi_request))
+
+
+@pytest.mark.django_db
 def test_excluding_name_updates_a_host_row_when_its_reported_name_is_occupied(client, settings):
     configure_default_librenms_server(settings)
     device = make_device("host-excluded-occupied-name", librenms_cf={SERVER_KEY: {"id": 84}})

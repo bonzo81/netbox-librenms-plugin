@@ -578,11 +578,11 @@ class TestInterfaceContextOOBRows:
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
         device = make_device("host1")
-        # The OOB row can adopt this unbound interface by name.
+        # An OOB row cannot claim an unbound host interface by name.
         make_interface(device, "idrac0")
         return device
 
-    def test_oob_row_name_is_not_offered_for_netbox_only_deletion(self):
+    def test_unbound_interface_named_by_oob_row_remains_netbox_only(self):
         from django.core.cache import cache
         from django.utils import timezone
 
@@ -602,9 +602,9 @@ class TestInterfaceContextOOBRows:
             cache.delete(last_fetched_key)
 
         names = {i["name"] for i in ctx["netbox_only_interfaces"]}
-        assert "idrac0" not in names
+        assert "idrac0" in names
 
-    def test_derived_oob_name_is_not_offered_for_netbox_only_deletion(self):
+    def test_unbound_interface_named_by_derived_oob_row_remains_netbox_only(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
@@ -633,7 +633,7 @@ class TestInterfaceContextOOBRows:
         )
 
         netbox_only_names = {interface["name"] for interface in context["netbox_only_interfaces"]}
-        assert "eth0-oob" not in netbox_only_names
+        assert "eth0-oob" in netbox_only_names
 
     def test_a_collided_oob_row_reaches_the_table_with_its_derived_name(self):
         """The derived name has to survive the real context build, not just the helper.

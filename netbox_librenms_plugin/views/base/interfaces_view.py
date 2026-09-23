@@ -822,6 +822,8 @@ class BaseInterfaceTableView(
             )
             claimable_names_by_device = {}
             for port in ports_data:
+                if port.get("_source") == OOB_INVENTORY_SOURCE:
+                    continue
                 port_id = normalize_librenms_port_id(port.get("port_id"))
                 if port.get("_dedup_conflict") or port_id in rejected_names:
                     continue
