@@ -656,6 +656,37 @@ class TestApplyModuleInterfaceTypes:
         assert message_texts(request, "success") == ["Updated the type of 1 interface from its module template."]
         assert_locked_before_update(captured, "dcim_interface")
 
+    def test_type_update_invalidates_loaded_interface_snapshot(self, settings, django_capture_on_commit_callbacks):
+        from dcim.models import Device, Interface, Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
+        from netbox_librenms_plugin.tests.cache_test_helpers import clear_snapshots, seed_every_tab
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        page_device, member, module, interface = _vc_member_type_mismatch("type-apply-cache")
+        set_librenms_device_id(page_device, 179, "default")
+        page_device.save(update_fields=["custom_field_data"])
+        user = make_user_with_perms(
+            "type-apply-cache-user",
+            [("view", Device), ("view", Module), ("change", Interface)],
+        )
+        keys = seed_every_tab(page_device)
+        interface_key = SyncCacheConsistency(page_device).snapshot_key(SyncTab.INTERFACES, "default")
+
+        try:
+            with django_capture_on_commit_callbacks(execute=True):
+                _request, response = self._post(settings, user, page_device, member, module, interface)
+
+            interface.refresh_from_db()
+            assert response.status_code == 302
+            assert interface.type == "10gbase-x-sfpp"
+            assert cache.get(interface_key) is None
+            assert "X-LibreNMS-Cache-Transition" in response
+        finally:
+            clear_snapshots(keys)
+
     def test_post_without_change_interface_permission_changes_nothing(self, settings):
         from dcim.models import Device, Module
 

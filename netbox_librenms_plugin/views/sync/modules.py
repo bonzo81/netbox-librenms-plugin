@@ -2647,6 +2647,7 @@ class ApplyModuleInterfaceTypesView(LibreNMSPermissionMixin, NetBoxObjectPermiss
 
         updated_names = outcomes["updated"]
         if updated_names:
+            _schedule_module_cache_mutation(request, page_device, server_key)
             messages.success(request, _module_interface_success_message(len(updated_names)))
         if changed_names := outcomes["interface_changed"]:
             messages.warning(
