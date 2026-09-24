@@ -1653,6 +1653,8 @@ class SyncInterfacesView(
         if getattr(self, "_synced_count", None) is not None:
             self._synced_count += 1
 
+        # The name that the permission check saw; a concurrent rename can put the fresh name out of view.
+        checked_name = interface.name
         created = bool(getattr(interface, "_librenms_sync_created", False))
         interface, changed = self.update_interface_attributes(
             interface,
@@ -1667,7 +1669,7 @@ class SyncInterfacesView(
         if "name" not in exclude_columns and interface.name != synced_name:
             kept_names = getattr(self, "_kept_name_conflicts", None)
             if kept_names is not None:
-                kept_names.append((interface.name, synced_name, name_conflict_reason))
+                kept_names.append((checked_name, synced_name, name_conflict_reason))
 
         # Sync VLANs if not excluded, and never when the caller cannot read the whole VLAN scope.
         if "vlans" not in exclude_columns and not getattr(self, "_vlan_scope_incomplete", False):

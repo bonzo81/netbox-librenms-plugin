@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 from core.models import ObjectChange
-from dcim.models import Interface
+from dcim.models import Device, Interface
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db import transaction
@@ -44,7 +44,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     sync_port,
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
-from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
 from netbox_librenms_plugin.utils import get_librenms_device_id
 from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -272,6 +272,36 @@ def test_a_written_row_keeps_its_ordering_name_timestamp_and_change_record(clien
         "description": "uplink",
         "label": "set by another operation",
     }
+
+
+@transactional_db_with_all_apps()
+def test_a_kept_name_warning_never_shows_a_name_that_a_concurrent_rename_put_out_of_view(client, monkeypatch):
+    device = make_device("late-write-kept-name", librenms_cf={SERVER_KEY: {"id": 5}})
+    interface = bound_interface(device, "eth10", 10)
+    make_interface(device, "eth11")
+    user = make_user_with_perms("late-write-kept-name-user", [("view", Device), ("add", Interface)])
+    for action in ("view", "change"):
+        user = grant(user, action, Interface, constraints={"name__startswith": "eth"})
+    client.force_login(user)
+    # LibreNMS reports a name that another interface holds, so the sync keeps the stored name.
+    seed_ports(device, [sync_port(10, "eth11", alias="uplink")])
+
+    with second_connection() as other:
+        state = commit_during_the_writer(
+            monkeypatch,
+            ATTRIBUTE_WRITER,
+            interface.pk,
+            lambda: commit_row_change(other, Interface, interface.pk, {"name": "private-link"}),
+            point=BEFORE_THE_FRESH_READ,
+        )
+        response = post_interface_sync(client, device, [10], htmx=False)
+
+    assert state.commits == 1
+    assert not Interface.objects.restrict(user, "view").filter(pk=interface.pk).exists()
+    shown = messages_on(response.wsgi_request)
+    assert any(level == "success" for level, _ in shown), shown
+    assert any(level == "warning" and "'eth10' kept its current name" in text for level, text in shown), shown
+    assert all("private-link" not in text for _, text in shown), shown
 
 
 # ---------------------------------------------------------------------------
