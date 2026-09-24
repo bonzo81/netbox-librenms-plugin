@@ -8,6 +8,7 @@ from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import get_script_prefix
+from django.utils.html import format_html
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
@@ -162,6 +163,46 @@ def _safe_redirect_response(request):
     if is_htmx:
         return HttpResponse("", headers={"HX-Redirect": app_root})
     return redirect(app_root)
+
+
+def _htmx_error_response(message: str) -> HttpResponse:
+    """
+    Return an HTMX-friendly error response that surfaces ``message`` as a toast.
+
+    Uses an out-of-band swap of NetBox's ``#django-messages`` container so the
+    toast renders through the same Bootstrap pipeline NetBox uses for the
+    standard ``messages`` framework. It does not depend on ``window.bootstrap``.
+
+    Returns ``200`` (with ``HX-Reswap: none``) so the primary swap target is
+    left untouched *and* so ``django-htmx``'s DEBUG-mode handler does not
+    replace the page body with the response payload (it only does so for
+    4xx/5xx responses).
+
+    Args:
+        message (str): The error message to show in the toast.
+
+    Returns:
+        HttpResponse: The HTMX error response.
+
+    """
+    toast_html = format_html(
+        '<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">'
+        '<div class="toast toast-dark border-0 shadow-sm" role="alert" aria-live="assertive" '
+        'aria-atomic="true" data-bs-delay="12000">'
+        '<div class="toast-header text-bg-danger">'
+        '<i class="mdi mdi-alert-circle me-1"></i>Error'
+        '<button type="button" class="btn-close me-0 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>'
+        "</div>"
+        '<div class="toast-body">{}</div>'
+        "</div>"
+        "</div>",
+        message,
+    )
+    resp = HttpResponse(toast_html, content_type="text/html")
+    # Prevent the triggering element's hx-swap from clobbering its target with
+    # our OOB-only payload; OOB still applies regardless of HX-Reswap.
+    resp["HX-Reswap"] = "none"
+    return resp
 
 
 def resolve_configured_server_key(server_key):

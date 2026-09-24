@@ -42,12 +42,12 @@ from netbox_librenms_plugin.utils import (
     set_device_ip_fk,
     validation_error_detail,
 )
-from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     SyncSubjectClaimMixin,
+    _htmx_error_response,
     relock_scoped_row,
     resolve_configured_server_key,
     validated_referer,

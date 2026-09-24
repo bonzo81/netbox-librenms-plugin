@@ -7156,7 +7156,7 @@ class TestRebindOrHtmxErrorHelper:
 
 class TestHtmxErrorResponse:
     def test_plain_dynamic_message_is_html_escaped_once(self):
-        from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
+        from netbox_librenms_plugin.views.mixins import _htmx_error_response
 
         response = _htmx_error_response("Conflict with '<script>alert(1)</script>'.")
 

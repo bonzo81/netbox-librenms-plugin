@@ -96,7 +96,12 @@ from netbox_librenms_plugin.utils import (
     set_device_ip_fk,
     validate_import_context_columns,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    _htmx_error_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -252,46 +257,6 @@ def _resolve_vc_detection_enabled(request) -> bool:
             return not skip_vc
 
     return False
-
-
-def _htmx_error_response(message: str) -> HttpResponse:
-    """
-    Return an HTMX-friendly error response that surfaces ``message`` as a toast.
-
-    Uses an out-of-band swap of NetBox's ``#django-messages`` container so the
-    toast renders through the same Bootstrap pipeline NetBox uses for the
-    standard ``messages`` framework. It does not depend on ``window.bootstrap``.
-
-    Returns ``200`` (with ``HX-Reswap: none``) so the primary swap target is
-    left untouched *and* so ``django-htmx``'s DEBUG-mode handler does not
-    replace the page body with the response payload (it only does so for
-    4xx/5xx responses).
-
-    Args:
-        message (str): The error message to show in the toast.
-
-    Returns:
-        HttpResponse: The HTMX error response.
-
-    """
-    toast_html = format_html(
-        '<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">'
-        '<div class="toast toast-dark border-0 shadow-sm" role="alert" aria-live="assertive" '
-        'aria-atomic="true" data-bs-delay="12000">'
-        '<div class="toast-header text-bg-danger">'
-        '<i class="mdi mdi-alert-circle me-1"></i>Error'
-        '<button type="button" class="btn-close me-0 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>'
-        "</div>"
-        '<div class="toast-body">{}</div>'
-        "</div>"
-        "</div>",
-        message,
-    )
-    resp = HttpResponse(toast_html, content_type="text/html")
-    # Prevent the triggering element's hx-swap from clobbering its target with
-    # our OOB-only payload; OOB still applies regardless of HX-Reswap.
-    resp["HX-Reswap"] = "none"
-    return resp
 
 
 def _invalid_import_intent_response(request, device_id: int) -> HttpResponse | None:
