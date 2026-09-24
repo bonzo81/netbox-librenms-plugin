@@ -1094,7 +1094,8 @@ minus the partial saves has no open finding.
    with the new type, `clean_fields(exclude=<all but type>)`, then the members rule
    (`Interface.objects.filter(lag_id=pk).exists()` and the new type is not `lag`), then the guarded
    `clean()`. The first failure is the reason. No two-copy comparison. `TypeRefusal` holds the
-   message and its `ValidationError` field, and marks the members rule as the plugin's own text.
+   message and the `Interface` field it refuses (None for any other key), and marks the members
+   rule as the plugin's own text.
 2. `interface_diff.planned_interface_type(interface, decision, *, created) -> PlannedType(value,
    kept)`. UNMAPPED, VMInterface, `created=True` or an unchanged type: today's behaviour, no
    query. Otherwise `type_change_refusal` decides; a refusal keeps the current type, and `kept`
@@ -1116,11 +1117,12 @@ minus the partial saves has no open finding.
 8. `assign_interface_mac` skips `mac_addresses.add()` when the MAC is already attached.
 9. Disclosure: only an authenticated, active superuser gets NetBox's refusal text, in the Type
    cell, the verify repaint and the module apply warning (`TypeRefusal.text_for`). Every other
-   viewer gets the rule, the planned type and "NetBox refuses the <field> field" (or "the
-   interface" for an error with no field). The members rule text names no object and shows to
-   every viewer, and the writer log keeps the full text. A map from field to named objects was
-   dropped, because admin `CUSTOM_VALIDATORS` and other plugins' `post_clean` receivers can put
-   any text under any field, so no map can prove a message safe.
+   viewer gets the rule, the planned type and "NetBox refuses the <field> field", where <field> is
+   the name of a concrete `Interface` field that the error key resolves to. Any other key reads as
+   "NetBox refuses the interface", because a key can be any text. The members rule text names no
+   object and shows to every viewer, and the writer log keeps the full text. A map from field to
+   named objects was dropped, because admin `CUSTOM_VALIDATORS` and other plugins' `post_clean`
+   receivers can put any text under any field, so no map can prove a message safe.
 
 **Acceptance conditions:** AC1, AC2, AC3, AC4, AC6 (as in D7), AC7 (real 4.4.0 `clean()` on CI's
 `v4.4.0` leg; mutation: remove the guard -> red). Plus: the D7 case (an unrelated `clean()` error

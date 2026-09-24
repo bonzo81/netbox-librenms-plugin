@@ -743,6 +743,14 @@ def _kept_cells(client, device, port_id):
     return _type_cell(_tab_row(client, device, port_id)), _verify_row(client, device, port_id)["type"]
 
 
+class _RuleKeyedByThePeer(CustomValidator):
+    """An admin validator whose error key, not its message, is the bridge device's name."""
+
+    def validate(self, instance, request):
+        if instance.bridge_id is not None:
+            self.fail("Refused.", field=instance.bridge.device.name)
+
+
 class _TypeRuleThatNamesTheBridge(CustomValidator):
     """An admin validator that refuses any type on a bridged interface, under the type field, and names the bridge."""
 
@@ -808,6 +816,22 @@ class TestAKeptNoteShowsNetBoxsMessageOnlyToASuperuser:
         for cell in _kept_cells(client, device, 10):
             assert "sets 1000base-t: NetBox refuses the interface" in cell, cell
             assert custom_field.name not in cell
+
+    def test_an_error_key_that_is_not_an_interface_field_reads_as_the_interface(self, client, settings):
+        """A validator can key its error by any text, so only a concrete Interface field is named."""
+        configure_default_librenms_server(settings)
+        device, _interface, peer, bridge, rule = _stale_cross_device_bridge("keptnotekey")
+        settings.CUSTOM_VALIDATORS = {"dcim.interface": [_RuleKeyedByThePeer()]}
+        client.force_login(_viewer_of("keptnotekey-viewer", device))
+
+        row = _tab_row(client, device, 10)
+        repaint = _verify_row(client, device, 10)
+
+        note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: NetBox refuses the interface ("
+        for cell in (_type_cell(row), repaint["type"]):
+            assert note in cell, cell
+        for rendered in (row, *repaint.values()):
+            assert peer.name not in str(rendered) and bridge.name not in str(rendered), rendered
 
     @pytest.mark.parametrize("superuser", [False, True], ids=["restricted", "superuser"])
     def test_a_custom_validator_message_is_shown_only_to_a_superuser(self, client, settings, superuser):

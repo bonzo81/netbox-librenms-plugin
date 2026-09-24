@@ -15,7 +15,7 @@ from typing import NamedTuple
 from dcim.choices import InterfaceTypeChoices
 from dcim.fields import MACAddressField
 from dcim.models import Interface
-from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
+from django.core.exceptions import FieldDoesNotExist, ValidationError
 
 from netbox_librenms_plugin.constants import INTERFACE_SYNC_EXTRA_FIELDS, INTERFACE_SYNC_FIELD_PAIRS
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, rule_names
@@ -165,10 +165,11 @@ def syncable_mac_address(mac_address):
 
 
 class TypeRefusal(NamedTuple):
-    """Why a saved interface cannot take a type: the first message, and its ValidationError field."""
+    """Why a saved interface cannot take a type: the first message, and the Interface field it refuses."""
 
     message: str
-    field: str
+    # A concrete Interface field name, or None when the error names no such field.
+    field: str | None
     # The plugin's own rule has fixed text that names no object, so every viewer gets it.
     plugin_rule: bool = False
 
@@ -181,7 +182,7 @@ class TypeRefusal(NamedTuple):
             and getattr(user, "is_superuser", False)
         ):
             return self.message
-        subject = "the interface" if self.field == NON_FIELD_ERRORS else f"the {self.field} field"
+        subject = "the interface" if self.field is None else f"the {self.field} field"
         return f"NetBox refuses {subject} (only a superuser sees the message)"
 
 
@@ -212,13 +213,22 @@ class PlannedType(NamedTuple):
     kept: KeptType | None
 
 
+def _refused_field(key):
+    """Return the concrete Interface field that a ValidationError key names, or None for any other key."""
+    # A validator or a post_clean receiver can key an error by any text, such as an object's name.
+    try:
+        field = Interface._meta.get_field(key)
+    except FieldDoesNotExist:
+        return None
+    return field.name if field.concrete else None
+
+
 def _first_refusal(exc):
-    """Return the first message of NetBox's *exc*, with its field."""
-    if hasattr(exc, "error_dict"):
-        field, messages = next(iter(exc.message_dict.items()))
-    else:
-        field, messages = NON_FIELD_ERRORS, exc.messages
-    return TypeRefusal(messages[0], field)
+    """Return the first message of NetBox's *exc*, with the Interface field it refuses."""
+    if not hasattr(exc, "error_dict"):
+        return TypeRefusal(exc.messages[0], None)
+    key, messages = next(iter(exc.message_dict.items()))
+    return TypeRefusal(messages[0], _refused_field(key))
 
 
 def type_change_refusal(interface, new_type):
