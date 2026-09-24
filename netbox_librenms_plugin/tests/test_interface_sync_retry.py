@@ -7,25 +7,31 @@ a test counts attempts and releases the second connection's lock between them), 
 outcome the committed attempt returns to ``post()``, and a counter of relationship passes.
 """
 
-import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from types import SimpleNamespace
 
 import pytest
 from dcim.models import Device, Interface
 from django.contrib.contenttypes.models import ContentType
-from django.core.cache import cache
 from django.db import OperationalError, connection, transaction
-from django.urls import reverse
 
-from netbox_librenms_plugin.middleware import FOLLOW_UP_FAILED_MESSAGE, REQUEST_FAILED_EVENT, TRY_AGAIN_MESSAGE
+from netbox_librenms_plugin.middleware import FOLLOW_UP_FAILED_MESSAGE, TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
     make_interface,
     make_superuser,
     transactional_db_with_all_apps,
+)
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
+    SERVER_KEY,
+    SYNCED,
+    assert_try_again_answer,
+    bound_interface,
+    count_sync_attempts,
+    post_interface_sync,
+    seed_ports,
+    sync_port,
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     backend_pid,
@@ -36,42 +42,12 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     wait_for_lock_wait,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, messages_on
-from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView, _InterfaceSyncOutcome
 
-SERVER_KEY = "default"
 # Long enough for a blocked statement to be a real lock wait, short enough for two attempts.
 LOCK_TIMEOUT_MS = 200
-SYNCED = "Selected interfaces synced successfully."
 PLAIN_AND_HTMX = pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
-
-
-def _port(port_id, name, *, alias="", mac="", if_type="ethernetCsmacd"):
-    return {
-        "port_id": port_id,
-        "ifName": name,
-        "ifDescr": name,
-        "ifType": if_type,
-        "ifAdminStatus": "up",
-        "ifSpeed": 1_000_000_000,
-        "ifMtu": 1500,
-        "ifPhysAddress": mac,
-        "ifAlias": alias,
-    }
-
-
-def _seed(device, ports, *, lag_members=None):
-    relationships = {"lag_members": lag_members or {}, "sub_interfaces": {}, "bridge_members": {}}
-    payload = {"ports": ports, "port_stack_relationships": relationships}
-    cache.set(SyncInterfacesView().get_cache_key(device, "ports", SERVER_KEY), payload, timeout=300)
-
-
-def _bound_interface(device, name, port_id, *, iface_type="other"):
-    interface = make_interface(device, name, iface_type=iface_type)
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
-    interface.save()
-    return interface
 
 
 def _outcome(*, synced_count, skipped_conflicts=(), kept_name_conflicts=(), warnings=()):
@@ -85,29 +61,6 @@ def _outcome(*, synced_count, skipped_conflicts=(), kept_name_conflicts=(), warn
     )
 
 
-def _sync_page(device):
-    return "http://testserver" + reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk}) + "?tab=interfaces"
-
-
-def _post(client, device, port_ids, *, htmx, exclude_columns=("vlans", "mac_address")):
-    url = (
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-            kwargs={"object_type": "device", "object_id": device.pk},
-        )
-        + "?interface_name_field=ifName"
-    )
-    headers = {"HTTP_REFERER": _sync_page(device)}
-    if htmx:
-        headers["HTTP_HX_REQUEST"] = "true"
-    data = {
-        "server_key": SERVER_KEY,
-        "select": [str(port_id) for port_id in port_ids],
-        "exclude_columns": list(exclude_columns),
-    }
-    return client.post(url, data, **headers)
-
-
 @pytest.fixture(autouse=True)
 def _server(settings):
     configure_default_librenms_server(settings)
@@ -115,18 +68,8 @@ def _server(settings):
 
 @pytest.fixture
 def attempts(monkeypatch):
-    """Count sync attempts at the owner lock, and run ``before_retry`` when the second attempt starts."""
-    real_lock = SyncInterfacesView._lock_selected_device_targets
-    state = SimpleNamespace(count=0, before_retry=None)
-
-    def counting_lock(self, obj):
-        state.count += 1
-        if state.count == 2 and state.before_retry is not None:
-            state.before_retry()
-        return real_lock(self, obj)
-
-    monkeypatch.setattr(SyncInterfacesView, "_lock_selected_device_targets", counting_lock)
-    return state
+    """Count sync attempts; ``before_retry`` runs when the second attempt starts."""
+    return count_sync_attempts(monkeypatch)
 
 
 @pytest.fixture
@@ -144,32 +87,18 @@ def committed_outcomes(monkeypatch):
     return outcomes
 
 
-def _assert_try_again_answer(response, device, htmx, message):
-    """Assert the one visible answer the middleware gives for a lock conflict."""
-    if htmx:
-        assert response.status_code == 200
-        assert response["HX-Reswap"] == "none"
-        assert json.loads(response["HX-Trigger"]) == {REQUEST_FAILED_EVENT: None}
-        assert message in response.content.decode()
-        assert messages_on(response.wsgi_request) == []
-    else:
-        assert response.status_code == 302
-        assert response["Location"] == _sync_page(device)
-        assert messages_on(response.wsgi_request) == [("error", message)]
-
-
 @transactional_db_with_all_apps()
 @PLAIN_AND_HTMX
 def test_a_lock_conflict_on_the_first_attempt_is_retried_once(client, attempts, committed_outcomes, htmx):
     device = make_device(f"sync-retry-once-{htmx}", librenms_cf={SERVER_KEY: {"id": 91}})
-    _seed(device, [_port(10, "eth10")])
+    seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-retry-once-user"))
 
     with second_connection() as other:
         lock_row(other, Device, device.pk)
         attempts.before_retry = other.rollback
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = _post(client, device, [10], htmx=htmx)
+            response = post_interface_sync(client, device, [10], htmx=htmx)
 
     assert attempts.count == 2
     assert committed_outcomes == [_outcome(synced_count=1)]
@@ -182,16 +111,16 @@ def test_a_lock_conflict_on_the_first_attempt_is_retried_once(client, attempts, 
 @PLAIN_AND_HTMX
 def test_conflicts_on_both_attempts_give_one_try_again_answer_and_change_nothing(client, attempts, htmx):
     device = make_device(f"sync-retry-exhausted-{htmx}", librenms_cf={SERVER_KEY: {"id": 92}})
-    _seed(device, [_port(10, "eth10")])
+    seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-retry-exhausted-user"))
 
     with second_connection() as other:
         lock_row(other, Device, device.pk)
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = _post(client, device, [10], htmx=htmx)
+            response = post_interface_sync(client, device, [10], htmx=htmx)
 
     assert attempts.count == 2
-    _assert_try_again_answer(response, device, htmx, TRY_AGAIN_MESSAGE)
+    assert_try_again_answer(response, device, htmx, TRY_AGAIN_MESSAGE)
     assert not Interface.objects.filter(device=device).exists()
 
 
@@ -199,8 +128,8 @@ def test_conflicts_on_both_attempts_give_one_try_again_answer_and_change_nothing
 def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts, committed_outcomes):
     """The sync holds its Device and waits for an interface; the other session holds that interface and waits for the Device."""
     device = make_device("sync-deadlock", librenms_cf={SERVER_KEY: {"id": 96}})
-    interface = _bound_interface(device, "eth10", 10)
-    _seed(device, [_port(10, "eth10", alias="uplink")])
+    interface = bound_interface(device, "eth10", 10)
+    seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
     client.force_login(make_superuser("sync-deadlock-user"))
     sync_pid = backend_pid(connection)
     interface_held = Event()
@@ -219,7 +148,7 @@ def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts, 
     with ThreadPoolExecutor(max_workers=1) as executor:
         holder = executor.submit(hold_the_interface_then_lock_the_device)
         assert interface_held.wait(5), "the second session did not lock the interface"
-        response = _post(client, device, [10], htmx=False)
+        response = post_interface_sync(client, device, [10], htmx=False)
         holder.result(timeout=10)
 
     assert attempts.count == 2
@@ -236,26 +165,28 @@ def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, atte
     from ipam.models import VLAN
 
     device = make_device("sync-retry-report", librenms_cf={SERVER_KEY: {"id": 93}})
-    interface = _bound_interface(device, "eth10", 10)
+    interface = bound_interface(device, "eth10", 10)
     # Port 11 reports the name of another interface on the device, so its bound interface keeps its name.
-    _bound_interface(device, "old11", 11)
+    bound_interface(device, "old11", 11)
     make_interface(device, "eth12")
     # Port 7 is bound to another device's interface, so every attempt skips its row.
-    _bound_interface(make_device("sync-retry-report-elsewhere"), "eth7", 7)
+    bound_interface(make_device("sync-retry-report-elsewhere"), "eth7", 7)
     # A VLAN the user cannot view, so every attempt warns that the VLAN scope is incomplete.
     VLAN.objects.create(vid=812, name="sync-retry-report-hidden")
     user = make_user_with_perms(
         "sync-retry-report-user", [("view", Device), ("view", Interface), ("add", Interface), ("change", Interface)]
     )
     client.force_login(user)
-    _seed(device, [_port(7, "eth7"), _port(11, "eth12", alias="kept"), _port(10, "eth10", alias="uplink")])
+    seed_ports(
+        device, [sync_port(7, "eth7"), sync_port(11, "eth12", alias="kept"), sync_port(10, "eth10", alias="uplink")]
+    )
 
     with second_connection() as other:
         # The first attempt warns, skips and keeps a name, then waits for this row at its write.
         lock_row(other, Interface, interface.pk)
         attempts.before_retry = other.rollback
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = _post(client, device, [7, 11, 10], htmx=False, exclude_columns=("mac_address",))
+            response = post_interface_sync(client, device, [7, 11, 10], htmx=False, exclude_columns=("mac_address",))
 
     vlan_warning = (
         "VLANs were not synced for the selected interfaces: your account is missing ipam.view_vlan. "
@@ -286,17 +217,17 @@ def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, atte
 
 def _seed_relationship_sync(device, base, mac, elsewhere):
     """Seed one device for a sync whose attribute pass writes every row before the relationship pass runs."""
-    aggregate = _bound_interface(device, "Po1", base + 100, iface_type="lag")
-    _bound_interface(device, "old11", base + 11)
+    aggregate = bound_interface(device, "Po1", base + 100, iface_type="lag")
+    bound_interface(device, "old11", base + 11)
     make_interface(device, "eth12")
-    _bound_interface(elsewhere, f"x{base + 7}", base + 7)
+    bound_interface(elsewhere, f"x{base + 7}", base + 7)
     ports = [
-        _port(base + 7, "eth7"),
-        _port(base + 11, "eth12", alias="kept"),
-        _port(base + 1, "eth1", mac=mac),
-        _port(base + 100, "Po1", if_type="ieee8023adLag"),
+        sync_port(base + 7, "eth7"),
+        sync_port(base + 11, "eth12", alias="kept"),
+        sync_port(base + 1, "eth1", mac=mac),
+        sync_port(base + 100, "Po1", if_type="ieee8023adLag"),
     ]
-    _seed(device, ports, lag_members={base + 1: base + 100})
+    seed_ports(device, ports, lag_members={base + 1: base + 100})
     return aggregate, [base + 7, base + 11, base + 1]
 
 
@@ -341,7 +272,9 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
         return real_relationships(self, *args, **kwargs)
 
     monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", counting_relationships)
-    control_response = _post(control_client, control, control_ports, htmx=False, exclude_columns=("vlans",))
+    control_response = post_interface_sync(
+        control_client, control, control_ports, htmx=False, exclude_columns=("vlans",)
+    )
     assert (attempts.count, relationship_passes) == (1, [True]), "precondition: the control sync is one clean attempt"
     attempts.count = 0
     relationship_passes.clear()
@@ -351,7 +284,7 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
         lock_row(other, Interface, aggregate.pk)
         attempts.before_retry = other.rollback
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = _post(client, device, ports, htmx=False, exclude_columns=("vlans",))
+            response = post_interface_sync(client, device, ports, htmx=False, exclude_columns=("vlans",))
 
     assert attempts.count == 2
     assert relationship_passes == [True, True], "each attempt wrote the member before its relationship pass"
@@ -387,7 +320,7 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
 def test_a_follow_up_conflict_after_the_commit_is_reported_and_not_retried(client, attempts, monkeypatch, htmx):
     device = make_device(f"sync-follow-up-{htmx}", librenms_cf={SERVER_KEY: {"id": 94}})
     locked = make_device(f"sync-follow-up-locked-{htmx}")
-    _seed(device, [_port(10, "eth10")])
+    seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-follow-up-user"))
     real_relationships = SyncInterfacesView._sync_interface_relationships
 
@@ -403,10 +336,10 @@ def test_a_follow_up_conflict_after_the_commit_is_reported_and_not_retried(clien
     monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", with_follow_up)
     with second_connection() as other:
         lock_row(other, Device, locked.pk)
-        response = _post(client, device, [10], htmx=htmx)
+        response = post_interface_sync(client, device, [10], htmx=htmx)
 
     assert attempts.count == 1
-    _assert_try_again_answer(response, device, htmx, FOLLOW_UP_FAILED_MESSAGE)
+    assert_try_again_answer(response, device, htmx, FOLLOW_UP_FAILED_MESSAGE)
     assert Interface.objects.filter(device=device, name="eth10").exists(), "the committed sync stays"
 
 
@@ -414,7 +347,7 @@ def test_a_follow_up_conflict_after_the_commit_is_reported_and_not_retried(clien
 def test_an_integrity_error_after_a_swallowed_conflict_reaches_the_sync_handler(client, attempts, monkeypatch):
     """A swallowed 55P03 does not make a later 23505 a retry; the sync's own handler reports it."""
     device = make_device("sync-mixed-error", librenms_cf={SERVER_KEY: {"id": 95}})
-    _seed(device, [_port(10, "eth10")])
+    seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-mixed-error-user"))
     # Migrations committed this row, so the second connection can lock it in this non-transactional test.
     locked_pk = ContentType.objects.get_for_model(ContentType).pk
@@ -430,7 +363,7 @@ def test_an_integrity_error_after_a_swallowed_conflict_reaches_the_sync_handler(
     monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", swallow_then_violate)
     with second_connection() as other:
         lock_row(other, ContentType, locked_pk)
-        response = _post(client, device, [10], htmx=False)
+        response = post_interface_sync(client, device, [10], htmx=False)
 
     assert attempts.count == 1
     assert response.status_code == 302
