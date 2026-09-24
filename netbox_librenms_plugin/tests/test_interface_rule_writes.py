@@ -21,6 +21,7 @@ from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from extras.validators import CustomValidator
 from ipam.models import IPAddress
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -742,6 +743,14 @@ def _kept_cells(client, device, port_id):
     return _type_cell(_tab_row(client, device, port_id)), _verify_row(client, device, port_id)["type"]
 
 
+class _TypeRuleThatNamesTheBridge(CustomValidator):
+    """An admin validator that refuses any type on a bridged interface, under the type field, and names the bridge."""
+
+    def validate(self, instance, request):
+        if instance.bridge_id is not None:
+            self.fail(f"Bridged to {instance.bridge} on {instance.bridge.device}.", field="type")
+
+
 @pytest.mark.django_db
 class TestAKeptNoteNamesOnlyWhatTheViewerMayView:
     """The kept note shows NetBox's message only to a viewer who may view every object that message can name."""
@@ -800,6 +809,26 @@ class TestAKeptNoteNamesOnlyWhatTheViewerMayView:
         for cell in _kept_cells(client, device, 10):
             assert "sets 1000base-t: NetBox refuses the interface" in cell, cell
             assert custom_field.name not in cell
+
+    @pytest.mark.parametrize("superuser", [False, True], ids=["restricted", "superuser"])
+    def test_a_custom_validator_message_is_shown_only_to_a_superuser(self, client, settings, superuser):
+        """An admin validator can put any text under any field, so no field makes its message safe to show."""
+        configure_default_librenms_server(settings)
+        tag = f"keptnotevalidator{int(superuser)}"
+        device, _interface, peer, bridge, rule = _stale_cross_device_bridge(tag)
+        settings.CUSTOM_VALIDATORS = {"dcim.interface": [_TypeRuleThatNamesTheBridge()]}
+        client.force_login(make_superuser(f"{tag}-user") if superuser else _viewer_of(f"{tag}-viewer", device))
+
+        row = _tab_row(client, device, 10)
+        repaint = _verify_row(client, device, 10)
+
+        note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: "
+        shown = f"Bridged to {bridge} on {peer}." if superuser else "NetBox refuses the type field"
+        for cell in (_type_cell(row), repaint["type"]):
+            assert note + shown in cell, cell
+        if not superuser:
+            for rendered in (row, *repaint.values()):
+                assert peer.name not in str(rendered) and bridge.name not in str(rendered), rendered
 
 
 @pytest.mark.django_db
@@ -1051,7 +1080,10 @@ def _orm_type_write(call):
         names = fields.elts if isinstance(fields, (ast.List, ast.Tuple, ast.Set)) else []
         return fields if any(isinstance(name, ast.Constant) and name.value == "type" for name in names) else None
     if method in ("update_or_create", "get_or_create"):
-        defaults = (_dict_type_value(keywords.get(keyword)) for keyword in ("defaults", "create_defaults"))
+        # Django takes defaults (and create_defaults on update_or_create) positionally too.
+        positional = ("defaults", "create_defaults") if method == "update_or_create" else ("defaults",)
+        given = {**dict(zip(positional, call.args, strict=False)), **keywords}
+        defaults = (_dict_type_value(given.get(keyword)) for keyword in positional)
         return next((value for value in defaults if value is not None), None)
     return None
 
@@ -1108,8 +1140,12 @@ def test_the_type_guard_finds_the_orm_write_forms():
         "    Interface.objects.update_or_create(pk=pk, defaults={'type': 'lag'})\n"
         "    Interface.objects.get_or_create(pk=pk, defaults={'name': 'x', 'type': new})\n"
         "    Interface.objects.update_or_create(pk=pk, create_defaults={'type': 'lag'})\n"
+        "    Interface.objects.update_or_create({'type': 'virtual'}, pk=pk)\n"
+        "    Interface.objects.update_or_create(None, {'type': new}, pk=pk)\n"
+        "    Interface.objects.get_or_create({'type': 'lag'}, pk=pk)\n"
         "    Interface.objects.filter(pk=pk).update(name='x', **{'mtu': 1500})\n"
         "    Interface.objects.bulk_update(objs, ['name'])\n"
+        "    Interface.objects.get_or_create({'name': 'type'}, pk=pk)\n"
         "    Interface.objects.get_or_create(pk=pk, defaults={'name': 'type'})\n"
     )
 
@@ -1121,6 +1157,9 @@ def test_the_type_guard_finds_the_orm_write_forms():
         ("f", 6, "'lag'"),
         ("f", 7, "new"),
         ("f", 8, "'lag'"),
+        ("f", 9, "'virtual'"),
+        ("f", 10, "new"),
+        ("f", 11, "'lag'"),
     ]
 
 

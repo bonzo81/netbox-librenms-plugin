@@ -1118,7 +1118,9 @@ minus the partial saves has no open finding.
    that device, the virtual chassis, the untagged VLAN). A page shows the message only when the
    viewer may view every such object (`utils.object_is_visible`, the check that `PortDisclosure`
    batches). A field that this plugin does not know can name any object, so only a superuser gets
-   its message. Otherwise the note names the field and hides the message. The log keeps it.
+   its message. An admin `CUSTOM_VALIDATORS` entry for `dcim.interface` can put any text under any
+   field, so while one applies, every NetBox message is treated as unknown. Otherwise the note names
+   the field and hides the message. The log keeps it. The members rule message always shows.
 
 **Acceptance conditions:** AC1, AC2, AC3, AC4, AC6 (as in D7), AC7 (real 4.4.0 `clean()` on CI's
 `v4.4.0` leg; mutation: remove the guard -> red). Plus: the D7 case (an unrelated `clean()` error

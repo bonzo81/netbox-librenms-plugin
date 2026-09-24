@@ -16,6 +16,7 @@ from dcim.choices import InterfaceTypeChoices
 from dcim.fields import MACAddressField
 from dcim.models import Interface
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
+from netbox.config import get_config
 
 from netbox_librenms_plugin.constants import INTERFACE_SYNC_EXTRA_FIELDS, INTERFACE_SYNC_FIELD_PAIRS
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, rule_names
@@ -189,7 +190,7 @@ class TypeRefusal(NamedTuple):
 
     message: str
     field: str
-    # The objects the message can name, or None when the field is not one this plugin knows.
+    # The objects the message can name, or None when they are not known (see _first_refusal).
     named_objects: tuple | None
 
     def text_for(self, user):
@@ -250,13 +251,28 @@ def _named_objects(candidate, field):
     return tuple(obj for obj in named if obj is not None)
 
 
+def _netbox_runs_custom_interface_validators():
+    """Return whether NetBox's ``clean()`` runs an admin ``CUSTOM_VALIDATORS`` entry for an interface."""
+    # NetBox 4.4.0 matches the model label exactly and 4.7 without case; a match without case covers both.
+    return any(
+        key.lower() == Interface._meta.label_lower and validators
+        for key, validators in get_config().CUSTOM_VALIDATORS.items()
+    )
+
+
 def _first_refusal(exc, candidate):
-    """Return the first message of NetBox's *exc*, with its field and the objects it can name."""
+    """
+    Return the first message of NetBox's *exc*, with its field and the objects it can name.
+
+    An admin validator can put any text under any field, so while one applies to interfaces, no
+    NetBox message has known objects.
+    """
     if hasattr(exc, "error_dict"):
         field, messages = next(iter(exc.message_dict.items()))
     else:
         field, messages = NON_FIELD_ERRORS, exc.messages
-    return TypeRefusal(messages[0], field, _named_objects(candidate, field))
+    named_objects = None if _netbox_runs_custom_interface_validators() else _named_objects(candidate, field)
+    return TypeRefusal(messages[0], field, named_objects)
 
 
 def type_change_refusal(interface, new_type):
