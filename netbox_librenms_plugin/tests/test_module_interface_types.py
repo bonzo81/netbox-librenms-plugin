@@ -908,6 +908,28 @@ class TestApplyModuleInterfaceTypes:
             "Skipped TenGigabitEthernet2/1/1 because An interface with LAG members must keep type lag."
         ]
 
+    def test_a_refusal_that_names_an_object_the_user_cannot_view_is_withheld(self, settings):
+        from dcim.models import Device, Interface, Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        page_device, member, module, interface = _vc_member_type_mismatch("type-apply-hidden-bridge")
+        bridge = make_interface(make_device("type-apply-secret-peer"), "br-type-apply-secret", iface_type="bridge")
+        Interface.objects.filter(pk=interface.pk).update(bridge_id=bridge.pk)
+        user = make_user_with_perms(
+            "type-apply-hidden-bridge-user",
+            [("view", Device), ("view", Module), ("change", Interface)],
+        )
+
+        request, _response = self._post(settings, user, page_device, member, module, interface)
+
+        interface.refresh_from_db()
+        assert interface.type == "1000base-t"
+        [warning] = message_texts(request, "warning")
+        assert warning.startswith("Skipped TenGigabitEthernet2/1/1 because NetBox refuses the bridge field")
+        assert bridge.name not in warning and "type-apply-secret-peer" not in warning
+
     def test_interface_bound_to_another_module_is_skipped(self, settings):
         from dcim.models import Device, Interface, InterfaceTemplate, Module
 

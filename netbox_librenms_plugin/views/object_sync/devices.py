@@ -120,6 +120,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 interface_name_field=interface_name_field,
                 vlan_groups=vlan_groups,
                 server_key=server_key,
+                user=self.request.user,
             )
         else:
             table = LibreNMSInterfaceTable(
@@ -128,6 +129,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 interface_name_field=interface_name_field,
                 vlan_groups=vlan_groups,
                 server_key=server_key,
+                user=self.request.user,
             )
         table.htmx_url = f"{self.request.path}?tab=interfaces" + (f"&server_key={server_key}" if server_key else "")
         return table
@@ -280,6 +282,7 @@ class SingleInterfaceVerifyView(
                     interface_name_field=interface_name_field,
                     vlan_groups=vlan_groups,
                     server_key=server_key,
+                    user=request.user,
                 )
                 # Mirror the main table render: a migrated donor's verify response must not
                 # re-introduce a per-row relationship sync button (which posts directly).

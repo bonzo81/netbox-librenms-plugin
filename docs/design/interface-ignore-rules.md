@@ -1090,27 +1090,35 @@ minus the partial saves has no open finding.
 
 ## 7. Ratified scope for issue #185 (2026-09-24)
 
-1. `interface_diff.type_change_refusal(interface, new_type) -> str | None`: on `copy.copy` with the
-   new type, `clean_fields(exclude=<all but type>)`, then the members rule
+1. `interface_diff.type_change_refusal(interface, new_type) -> TypeRefusal | None`: on `copy.copy`
+   with the new type, `clean_fields(exclude=<all but type>)`, then the members rule
    (`Interface.objects.filter(lag_id=pk).exists()` and the new type is not `lag`), then the guarded
-   `clean()`. The first failure is the reason, with the rule names. No two-copy comparison.
+   `clean()`. The first failure is the reason. No two-copy comparison. `TypeRefusal` holds the
+   message, its `ValidationError` field and the objects that the message can name (item 9).
 2. `interface_diff.planned_interface_type(interface, decision, *, created) -> PlannedType(value,
-   kept_reason)`. UNMAPPED, VMInterface, `created=True` or an unchanged type: today's behaviour, no
-   query. Otherwise `type_change_refusal` decides; a refusal keeps the current type.
+   kept)`. UNMAPPED, VMInterface, `created=True` or an unchanged type: today's behaviour, no
+   query. Otherwise `type_change_refusal` decides; a refusal keeps the current type, and `kept`
+   holds the rule names, the planned type and the refusal.
 3. `utils.netbox_interface_clean(interface)`, shared with `_validate_relationship`: the 4.4.0
    `virtual_chassis` fault reruns without the parent on the same chassis, and raises NetBox's
    intended `ValidationError` on a different one. Any other `AttributeError` propagates.
-4. Writer: `update_interface_from_port(..., created)` sets the planned type and logs a kept reason at
-   warning. Callers pass `created` from `get_or_create` (`False` on the id and name branches).
+4. Writer: `update_interface_from_port(..., created)` sets the planned type and logs the kept note,
+   with NetBox's full message, at warning. Callers pass `created` from `get_or_create` (`False` on the id and name branches).
    Save, lock and return value are unchanged.
 5. Diff: `compute_row_sync_state` plans once per existing row; `_type_differs` compares `value`;
-   `RowSyncState.type_kept_reason` renders as a Type-cell note; a kept type is not a difference.
-   Table, verify repaint and single-row response share it.
+   `RowSyncState.type_kept` renders as a Type-cell note for the table's user; a kept type is not a
+   difference. Table, verify repaint and single-row response share it.
 6. Module type apply calls `type_change_refusal`; a refusal returns `validation_failed` with the
-   reason. Lock order unchanged.
+   refusal, and the warning shows it through the rule in item 9. Lock order unchanged.
 7. AST guard: `Interface.type` is assigned only by the writer via the planner, module apply via the
-   check, the ratified promotions and their restore callbacks, and creates.
+   check, the ratified promotions and their restore callbacks, and creates. The guard also finds ORM
+   writes: `update(type=...)`, `bulk_update` with `type`, and `type` in `*_or_create` defaults.
 8. `assign_interface_mac` skips `mac_addresses.add()` when the MAC is already attached.
+9. Disclosure: NetBox's message can name linked objects (a parent, bridge or LAG on another device,
+   that device, the virtual chassis, the untagged VLAN). A page shows the message only when the
+   viewer may view every such object (`utils.object_is_visible`, the check that `PortDisclosure`
+   batches). A field that this plugin does not know can name any object, so only a superuser gets
+   its message. Otherwise the note names the field and hides the message. The log keeps it.
 
 **Acceptance conditions:** AC1, AC2, AC3, AC4, AC6 (as in D7), AC7 (real 4.4.0 `clean()` on CI's
 `v4.4.0` leg; mutation: remove the guard -> red). Plus: the D7 case (an unrelated `clean()` error

@@ -596,17 +596,20 @@ class TestNetBox440ParentChassisFault:
 
         chassis, parent_device, child = self._child_of("nb440-other", same_chassis=False)
 
-        assert type_change_refusal(child, "virtual") == (
+        refusal = type_change_refusal(child, "virtual")
+
+        assert refusal.message == (
             f"The selected parent interface (bond0) belongs to {parent_device}, which is not part of virtual "
             f"chassis {chassis}."
         )
+        assert (refusal.field, refusal.named_objects) == ("parent", (child.parent, parent_device, chassis))
 
     def test_the_retry_without_the_parent_still_refuses_a_virtual_lag_member(self):
         from netbox_librenms_plugin.interface_diff import type_change_refusal
 
         _chassis, _parent_device, child = self._child_of("nb440-lag", same_chassis=True, with_lag=True)
 
-        assert type_change_refusal(child, "virtual") == "Virtual interfaces cannot have a parent LAG interface."
+        assert type_change_refusal(child, "virtual").message == "Virtual interfaces cannot have a parent LAG interface."
 
 
 def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monkeypatch):

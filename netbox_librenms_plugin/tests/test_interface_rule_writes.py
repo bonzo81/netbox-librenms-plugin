@@ -32,6 +32,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.utils import get_librenms_device_id, get_librenms_sync_device, set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -705,6 +706,102 @@ class TestATypeTheLinksRefuseIsKept:
         assert Interface.objects.get(device=device, name="Gi0/1").type == "1000base-t"
 
 
+def _viewer_of(username, *devices):
+    """A user who may view only *devices* and their interfaces."""
+    from dcim.models import Device
+
+    device_ids = [device.pk for device in devices]
+    user = make_user_with_perms(username, [])
+    user = grant(user, "view", Device, constraints={"pk__in": device_ids})
+    return grant(user, "view", Interface, constraints={"device_id__in": device_ids})
+
+
+def _stale_cross_device_bridge(tag):
+    """Port 10's interface keeps a bridge on another device, stored past clean(), and a rule plans a new type."""
+    device = _device(tag, _platform(tag))
+    interface = _bound(device, "Gi0/1", 10, iface_type="1000base-t")
+    peer = make_device(f"secret-peer-{tag}")
+    bridge = make_interface(peer, f"br-secret-{tag}", iface_type="bridge")
+    Interface.objects.filter(pk=interface.pk).update(bridge_id=bridge.pk)
+    rule = InterfaceTypeMapping.objects.create(librenms_type=f"{tag}Type", netbox_type="10gbase-t")
+    _seed(device, [_port(10, "Gi0/1", if_type=f"{tag}Type")])
+    return device, interface, peer, bridge, rule
+
+
+def _netbox_refusal(interface, new_type):
+    """Return the first message NetBox's own clean() gives for *interface* with *new_type*."""
+    candidate = Interface.objects.get(pk=interface.pk)
+    candidate.type = new_type
+    with pytest.raises(ValidationError) as refused:
+        candidate.clean()
+    return refused.value.messages[0]
+
+
+def _kept_cells(client, device, port_id):
+    """Return the Type cell of the tab and of the verify repaint for one row."""
+    return _type_cell(_tab_row(client, device, port_id)), _verify_row(client, device, port_id)["type"]
+
+
+@pytest.mark.django_db
+class TestAKeptNoteNamesOnlyWhatTheViewerMayView:
+    """The kept note shows NetBox's message only to a viewer who may view every object that message can name."""
+
+    @pytest.mark.parametrize("sees_peer", [False, True], ids=["peer-hidden", "peer-visible"])
+    def test_a_link_to_another_device_is_named_only_to_its_viewers(self, client, settings, sees_peer):
+        configure_default_librenms_server(settings)
+        tag = f"keptnote{int(sees_peer)}"
+        device, interface, peer, bridge, rule = _stale_cross_device_bridge(tag)
+        netbox_message = _netbox_refusal(interface, "10gbase-t")
+        assert peer.name in netbox_message and bridge.name in netbox_message
+        client.force_login(_viewer_of(f"{tag}-viewer", *((device, peer) if sees_peer else (device,))))
+
+        row = _tab_row(client, device, 10)
+        repaint = _verify_row(client, device, 10)
+
+        note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: "
+        shown = netbox_message if sees_peer else "NetBox refuses the bridge field"
+        for cell in (_type_cell(row), repaint["type"]):
+            assert note + shown in cell, cell
+        if not sees_peer:
+            for rendered in (row, *repaint.values()):
+                assert peer.name not in str(rendered) and bridge.name not in str(rendered), rendered
+
+    def test_a_superuser_is_shown_netboxs_message(self, superuser_client):
+        device, interface, _peer, _bridge, rule = _stale_cross_device_bridge("keptnotesuper")
+        note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: {_netbox_refusal(interface, '10gbase-t')}"
+
+        for cell in _kept_cells(superuser_client, device, 10):
+            assert note in cell, cell
+
+    def test_the_members_rule_is_shown_to_a_restricted_viewer(self, client, settings):
+        configure_default_librenms_server(settings)
+        device, _planned, _partner, rule = _kept_link_scenario("keptnotemembers", "aggregate", "legacy")
+        client.force_login(_viewer_of("keptnotemembers-viewer", device))
+        note = (
+            f"type kept: interface rule {rule.pk} ({rule}) sets 1000base-t: "
+            "An interface with LAG members must keep type lag."
+        )
+
+        for cell in _kept_cells(client, device, 10):
+            assert note in cell, cell
+
+    def test_a_refusal_the_plugin_cannot_read_is_withheld_from_a_restricted_viewer(self, client, settings):
+        """A message outside the known fields can name any object, so only a viewer who may view all objects gets it."""
+        from netbox_librenms_plugin.tests.conftest import make_required_interface_custom_field
+
+        configure_default_librenms_server(settings)
+        device = _device("keptnoteunknown", _platform("keptnoteunknown"))
+        _bound(device, "Gi0/1", 10, iface_type="other")
+        custom_field = make_required_interface_custom_field("kept_note_unknown_code")
+        InterfaceTypeMapping.objects.create(librenms_type="keptNoteUnknownType", netbox_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1", if_type="keptNoteUnknownType")])
+        client.force_login(_viewer_of("keptnoteunknown-viewer", device))
+
+        for cell in _kept_cells(client, device, 10):
+            assert "sets 1000base-t: NetBox refuses the interface" in cell, cell
+            assert custom_field.name not in cell
+
+
 @pytest.mark.django_db
 def test_the_walk_decides_with_the_platform_read_under_the_lock():
     """A platform change after the request read the device, and before the lock, must not split the walk and the writer."""
@@ -930,12 +1027,42 @@ _TYPE_WRITERS = {
     ("views/sync/modules.py", "_apply_module_interface_type"): "module apply, after type_change_refusal",
     ("views/sync/interfaces.py", "_promote_lag_aggregate"): "the ratified LAG promotion and its restore",
     ("views/sync/interfaces.py", "_promote_parent_child"): "the ratified parent promotion and its restore",
-    ("__init__.py", "_ensure_librenms_id_custom_field"): "a CustomField, not an interface",
+    ("__init__.py", "_ensure_librenms_id_custom_field"): "a CustomField, not an interface (create and update)",
 }
 
 
+def _dict_type_value(node):
+    """Return the value that a dict literal gives its literal ``"type"`` key, or None."""
+    if not isinstance(node, ast.Dict):
+        return None
+    pairs = zip(node.keys, node.values, strict=True)
+    return next((value for key, value in pairs if isinstance(key, ast.Constant) and key.value == "type"), None)
+
+
+def _orm_type_write(call):
+    """Return what an ORM ``update``, ``bulk_update`` or ``*_or_create`` call writes to ``type``, or None."""
+    method = call.func.attr if isinstance(call.func, ast.Attribute) else None
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg is not None}
+    if method == "update":
+        unpacked = (_dict_type_value(keyword.value) for keyword in call.keywords if keyword.arg is None)
+        return keywords.get("type") or next((value for value in unpacked if value is not None), None)
+    if method == "bulk_update":
+        fields = call.args[1] if len(call.args) > 1 else keywords.get("fields")
+        names = fields.elts if isinstance(fields, (ast.List, ast.Tuple, ast.Set)) else []
+        return fields if any(isinstance(name, ast.Constant) and name.value == "type" for name in names) else None
+    if method in ("update_or_create", "get_or_create"):
+        defaults = (_dict_type_value(keywords.get(keyword)) for keyword in ("defaults", "create_defaults"))
+        return next((value for value in defaults if value is not None), None)
+    return None
+
+
 def _type_writes(source):
-    """Return ``(function, line, value)`` for each ``x.type = value`` or ``setattr(x, "type", value)`` in *source*."""
+    """
+    Return ``(function, line, value)`` for each ``type`` write in *source*.
+
+    A write is ``x.type = value``, ``setattr(x, "type", value)``, or an ORM ``update``, ``bulk_update``,
+    ``update_or_create`` or ``get_or_create`` call that writes ``type``.
+    """
     found = []
 
     def visit(node, function):
@@ -957,6 +1084,8 @@ def _type_writes(source):
                 and child.args[1].value == "type"
             ):
                 found.append((function, child.lineno, ast.unparse(child.args[2])))
+            elif isinstance(child, ast.Call) and (value := _orm_type_write(child)) is not None:
+                found.append((function, child.lineno, ast.unparse(value)))
             visit(child, function)
 
     visit(ast.parse(source), None)
@@ -967,6 +1096,32 @@ def test_the_type_guard_finds_both_write_forms():
     source = "def f(i):\n    i.type = 'lag'\n    g = lambda: setattr(i, 'type', old)\n"
 
     assert _type_writes(source) == [("f", 2, "'lag'"), ("f", 3, "old")]
+
+
+def test_the_type_guard_finds_the_orm_write_forms():
+    source = (
+        "def f(pk, objs, new):\n"
+        "    Interface.objects.filter(pk=pk).update(type='virtual')\n"
+        "    Interface.objects.filter(pk=pk).update(**{'type': new})\n"
+        "    Interface.objects.bulk_update(objs, ['name', 'type'])\n"
+        "    Interface.objects.bulk_update(objs, fields=('type',))\n"
+        "    Interface.objects.update_or_create(pk=pk, defaults={'type': 'lag'})\n"
+        "    Interface.objects.get_or_create(pk=pk, defaults={'name': 'x', 'type': new})\n"
+        "    Interface.objects.update_or_create(pk=pk, create_defaults={'type': 'lag'})\n"
+        "    Interface.objects.filter(pk=pk).update(name='x', **{'mtu': 1500})\n"
+        "    Interface.objects.bulk_update(objs, ['name'])\n"
+        "    Interface.objects.get_or_create(pk=pk, defaults={'name': 'type'})\n"
+    )
+
+    assert _type_writes(source) == [
+        ("f", 2, "'virtual'"),
+        ("f", 3, "new"),
+        ("f", 4, "['name', 'type']"),
+        ("f", 5, "('type',)"),
+        ("f", 6, "'lag'"),
+        ("f", 7, "new"),
+        ("f", 8, "'lag'"),
+    ]
 
 
 def test_only_the_planned_writers_assign_an_interface_type():

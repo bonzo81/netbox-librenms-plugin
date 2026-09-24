@@ -215,7 +215,11 @@ class TestTheDiffMatchesTheWriter:
 
         _device, interface = _synced_interface("diff-type-choice")
 
-        assert type_change_refusal(interface, "no-such-type") == "Value 'no-such-type' is not a valid choice."
+        assert type_change_refusal(interface, "no-such-type") == (
+            "Value 'no-such-type' is not a valid choice.",
+            "type",
+            (),
+        )
         assert type_change_refusal(interface, "virtual") is None
 
     def test_an_interface_with_no_stored_id_differs_on_librenms_id(self):

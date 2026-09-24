@@ -136,9 +136,13 @@ class LibreNMSInterfaceTable(tables.Table):
             "id": "librenms-interface-table",
         }
 
-    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, server_key=None, **kwargs):
+    def __init__(
+        self, *args, device=None, interface_name_field=None, vlan_groups=None, server_key=None, user=None, **kwargs
+    ):
         """Initialize table with device context and interface name field."""
         self.device = device
+        # The viewer decides which NetBox refusal messages a cell may show; None shows none that name an object.
+        self.user = user
         self.interface_name_field = interface_name_field or get_interface_name_field()
         self.vlan_groups = vlan_groups or []
         # Default the key so render_librenms_id's get_librenms_device_id(self.server_key) lookup
@@ -1093,12 +1097,12 @@ class LibreNMSInterfaceTable(tables.Table):
                 value,
                 decision_reason(decision),
             )
-        if state.type_kept_reason is not None:
+        if state.type_kept is not None:
             # The sync keeps the NetBox type, so the cell names that type and says why.
             display = format_html(
                 '{} <i class="mdi mdi-lock-outline" title="{}"></i>',
                 record["netbox_interface"].type,
-                state.type_kept_reason,
+                state.type_kept.note_for(self.user),
             )
         elif decision.kind is RuleDecisionKind.SET_TYPE:
             display = format_html(

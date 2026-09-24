@@ -15,7 +15,7 @@ from typing import NamedTuple
 from dcim.choices import InterfaceTypeChoices
 from dcim.fields import MACAddressField
 from dcim.models import Interface
-from django.core.exceptions import ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 
 from netbox_librenms_plugin.constants import INTERFACE_SYNC_EXTRA_FIELDS, INTERFACE_SYNC_FIELD_PAIRS
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, rule_names
@@ -28,6 +28,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     netbox_interface_clean,
     normalize_librenms_port_id,
+    object_is_visible,
 )
 
 # Per-field verdicts. NOT_SYNCED marks every field of a row that no sync may write.
@@ -81,11 +82,11 @@ class DiffContext(NamedTuple):
 
 
 class RowSyncState(NamedTuple):
-    """One row's sync verdict: the row state, the verdict for each field a sync writes, and why a type is kept."""
+    """One row's sync verdict: the row state, the verdict for each field a sync writes, and the kept type change."""
 
     state: str
     fields: dict
-    type_kept_reason: str | None = None
+    type_kept: "KeptType | None" = None
 
     @property
     def differing_fields(self):
@@ -164,11 +165,98 @@ def syncable_mac_address(mac_address):
     return mac_address
 
 
+# Interface.clean() fields whose NetBox messages name no object.
+_FIELDS_THAT_NAME_NO_OBJECT = frozenset(
+    {
+        "type",
+        "mark_connected",
+        "channels",
+        "channel_id",
+        "cable_end",
+        "cable_connector",
+        "cable_positions",
+        "rf_channel",
+        "rf_channel_frequency",
+        "rf_channel_width",
+        "qinq_svlan",
+        "device",
+    }
+)
+
+
+class TypeRefusal(NamedTuple):
+    """Why a saved interface cannot take a type: the first message, its ValidationError field, and what it names."""
+
+    message: str
+    field: str
+    # The objects the message can name, or None when the field is not one this plugin knows.
+    named_objects: tuple | None
+
+    def text_for(self, user):
+        """Return the message when *user* may view every object it can name, else a reason that names no object."""
+        if self.named_objects is None:
+            # An unknown field can name any object, so only a user who may view all objects gets its message.
+            shown = getattr(user, "is_authenticated", False) and getattr(user, "is_superuser", False)
+        else:
+            visibility = {}
+            shown = all(object_is_visible(obj, user, visibility) for obj in self.named_objects)
+        if shown:
+            return self.message
+        subject = "the interface" if self.field == NON_FIELD_ERRORS else f"the {self.field} field"
+        return f"NetBox refuses {subject} (the message is hidden: it can name an object that you cannot view)"
+
+
+class KeptType(NamedTuple):
+    """A type change that a sync holds: the names of the rules that set the type, the type, and the refusal."""
+
+    rules: str
+    new_type: str
+    refusal: TypeRefusal
+
+    def note_for(self, user):
+        """Return the note a page shows *user*."""
+        return self._note(self.refusal.text_for(user))
+
+    @property
+    def log_note(self):
+        """Return the note with the full refusal message, for the server log."""
+        return self._note(self.refusal.message)
+
+    def _note(self, refusal_text):
+        return f"type kept: interface {self.rules} sets {self.new_type}: {refusal_text}"
+
+
 class PlannedType(NamedTuple):
-    """The type a sync writes to one interface, and why it keeps the current type (None when it does not)."""
+    """The type a sync writes to one interface, and the kept change (None when the sync does not keep the type)."""
 
     value: str | None
-    kept_reason: str | None
+    kept: KeptType | None
+
+
+def _named_objects(candidate, field):
+    """Return the objects a NetBox ``clean()`` message for *field* can name on *candidate*, or None when unknown."""
+    if field in _FIELDS_THAT_NAME_NO_OBJECT:
+        return ()
+    if field == "untagged_vlan":
+        named = [candidate.untagged_vlan]
+    elif field in ("parent", "bridge", "lag"):
+        link = getattr(candidate, field)
+        # Only the parent has a message that names a link on the same device.
+        named = [link] if field == "parent" else []
+        if link is not None and link.device_id != candidate.device_id:
+            named = [link, link.device, candidate.device.virtual_chassis]
+    else:
+        return None
+    return tuple(obj for obj in named if obj is not None)
+
+
+def _first_refusal(exc, candidate):
+    """Return the first message of NetBox's *exc*, with its field and the objects it can name."""
+    if hasattr(exc, "error_dict"):
+        field, messages = next(iter(exc.message_dict.items()))
+    else:
+        field, messages = NON_FIELD_ERRORS, exc.messages
+    return TypeRefusal(messages[0], field, _named_objects(candidate, field))
 
 
 def type_change_refusal(interface, new_type):
@@ -176,14 +264,15 @@ def type_change_refusal(interface, new_type):
     Return why a persisted interface cannot take *new_type*, or None when it can.
 
     NetBox judges an in-memory copy that has the new type. The plugin adds one rule NetBox does
-    not have: an aggregate with LAG members stays ``lag``. The first failure is the reason.
+    not have: an aggregate with LAG members stays ``lag``. The first failure is the reason. NetBox's
+    message can name linked objects, so a page shows it through ``TypeRefusal.text_for``.
 
     Args:
         interface (Interface): The saved interface, with its current links.
         new_type (str): The type to check.
 
     Returns:
-        str | None: The first refusal message, or None.
+        TypeRefusal | None: The first refusal, or None.
 
     """
     candidate = copy.copy(interface)
@@ -191,13 +280,13 @@ def type_change_refusal(interface, new_type):
     try:
         candidate.clean_fields(exclude=[field.name for field in candidate._meta.fields if field.name != "type"])
     except ValidationError as exc:
-        return exc.messages[0]
+        return _first_refusal(exc, candidate)
     if new_type != InterfaceTypeChoices.TYPE_LAG and Interface.objects.filter(lag=interface).exists():
-        return "An interface with LAG members must keep type lag."
+        return TypeRefusal("An interface with LAG members must keep type lag.", "type", ())
     try:
         netbox_interface_clean(candidate)
     except ValidationError as exc:
-        return exc.messages[0]
+        return _first_refusal(exc, candidate)
     return None
 
 
@@ -216,7 +305,7 @@ def planned_interface_type(interface, decision, *, created):
         created (bool): Whether this sync created the interface.
 
     Returns:
-        PlannedType: The type to write (None for a VMInterface, which has no type), and the kept reason.
+        PlannedType: The type to write (None for a VMInterface, which has no type), and the kept change.
 
     """
     if not isinstance(interface, Interface):
@@ -229,7 +318,7 @@ def planned_interface_type(interface, decision, *, created):
     refusal = type_change_refusal(interface, new_type)
     if refusal is None:
         return PlannedType(new_type, None)
-    return PlannedType(interface.type, f"type kept: interface {rule_names(decision.rules)} sets {new_type}: {refusal}")
+    return PlannedType(interface.type, KeptType(rule_names(decision.rules), new_type, refusal))
 
 
 def parse_vlan_group_id(group_id_str):
@@ -377,4 +466,4 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, decision, 
             continue
         fields[field] = DIFFERS if _RULES[field](port, interface, context) else MATCHES
     state = ROW_DIFFERS if DIFFERS in fields.values() else ROW_IN_SYNC
-    return RowSyncState(state, fields, planned_type.kept_reason)
+    return RowSyncState(state, fields, planned_type.kept)

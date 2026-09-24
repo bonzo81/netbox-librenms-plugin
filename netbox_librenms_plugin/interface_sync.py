@@ -113,8 +113,8 @@ def update_interface_from_port(  # noqa: C901
     # Planned before any field changes, from the same state the row diff reads.
     if isinstance(interface, Interface) and "type" not in exclude_columns:
         planned_type = planned_interface_type(interface, decision, created=created)
-        if planned_type.kept_reason is not None:
-            logger.warning("Interface %s (%s): %s", interface.pk, interface.name, planned_type.kept_reason)
+        if planned_type.kept is not None:
+            logger.warning("Interface %s (%s): %s", interface.pk, interface.name, planned_type.kept.log_note)
     tracked_fields = (
         "name",
         "type",

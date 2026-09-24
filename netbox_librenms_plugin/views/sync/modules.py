@@ -2506,7 +2506,7 @@ def _module_interface_success_message(count):
 
 
 def _apply_module_interface_type(interface, template_type, current_type, offered_template_type):
-    """Apply one offered template type and return its outcome and validation reason."""
+    """Apply one offered template type and return its outcome and ``TypeRefusal`` (None unless it is refused)."""
     if interface.type != current_type:
         return "interface_changed", None
     if template_type != offered_template_type:
@@ -2657,7 +2657,7 @@ class ApplyModuleInterfaceTypesView(
                         request.POST.get(f"template_type_{interface.pk}"),
                     )
                     self._assert_updated_interface_change_scope(interface, outcome)
-                    if reason:
+                    if reason is not None:
                         validation_failures.append((interface.name, reason))
                     else:
                         outcomes[outcome].append(interface.name)
@@ -2699,8 +2699,8 @@ class ApplyModuleInterfaceTypesView(
                     "their templates no longer require a type change",
                 ),
             )
-        for interface_name, reason in validation_failures:
-            messages.warning(request, f"Skipped {interface_name} because {reason.rstrip('.')}.")
+        for interface_name, refusal in validation_failures:
+            messages.warning(request, f"Skipped {interface_name} because {refusal.text_for(request.user).rstrip('.')}.")
         if unavailable_count:
             if unavailable_count == 1:
                 detail = "1 selected interface because it is unavailable for this module"
