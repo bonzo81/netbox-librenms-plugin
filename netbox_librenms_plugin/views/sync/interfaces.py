@@ -225,11 +225,9 @@ class SyncInterfacesView(
             messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
             return self._tab_response(request, object_type, interface_name_field, server_key)
 
-        request_state = dict(self.__dict__)
         try:
             outcome = run_transaction(
                 lambda: self._sync_attempt(
-                    request_state,
                     visible_port_ids,
                     ports_data,
                     relationships,
@@ -297,7 +295,6 @@ class SyncInterfacesView(
 
     def _sync_attempt(
         self,
-        request_state,
         visible_port_ids,
         ports_data,
         relationships,
@@ -308,12 +305,11 @@ class SyncInterfacesView(
         """
         Run one attempt of the sync transaction and return what it reports.
 
-        ``run_transaction`` calls this once for each attempt. The attempt starts from the view state
-        the request had before the transaction, so a retry reads nothing that a failed attempt
-        derived. It adds no message: ``post()`` publishes the outcome of the committed attempt.
+        ``run_transaction`` calls this once for each attempt. Each attempt sets every attempt list and
+        counter afresh, and it re-locks and re-reads the objects it writes, so a retry reads nothing
+        that a failed attempt derived. It adds no message: ``post()`` publishes the committed outcome.
 
         Args:
-            request_state (dict): The view's attributes before the transaction.
             visible_port_ids (set[int]): The port IDs the user selected.
             ports_data (list[dict]): The cached snapshot rows.
             relationships (dict): The cached relationship maps.
@@ -325,8 +321,6 @@ class SyncInterfacesView(
             _InterfaceSyncOutcome: What the attempt synced, skipped and warned about.
 
         """
-        self.__dict__.clear()
-        self.__dict__.update(request_state)
         self._selected_port_ids = set(visible_port_ids)
         self._auto_selected_port_ids = set()
         # Inferred off-page owners are resolved only after the chassis and its members are locked.
