@@ -100,7 +100,7 @@ def test_a_constrained_vlan_grant_also_skips_the_vlan_write(settings):
     user = grant(user, "view", VLAN, constraints={"pk": visible.pk}, name="vlan-constrained-visible-only")
     view = _sync_view(_make_request(user=user))
 
-    view._prepare_vlan_lookup_maps([device])
+    warning = view._prepare_vlan_lookup_maps([device])
     assert not view.hidden_vlan_permissions([device], user), (
         "precondition: the model-level permission check must pass, or this repeats the other test"
     )
@@ -116,7 +116,7 @@ def test_a_constrained_vlan_grant_also_skips_the_vlan_write(settings):
     interface.refresh_from_db()
     assert interface.untagged_vlan_id == hidden.pk, "the constrained-hidden VLAN assignment was cleared"
     # The skip must be explained: the permission-name check reports nothing missing for this user.
-    assert any("cannot view every VLAN in scope" in text for text in message_texts(view.request, "warning")), (
+    assert "cannot view every VLAN in scope" in (warning or ""), (
         "a silently skipped VLAN sync leaves the user with no way to tell why"
     )
 

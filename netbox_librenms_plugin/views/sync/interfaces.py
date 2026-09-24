@@ -47,6 +47,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_transition_to_response,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import run_transaction
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
@@ -150,6 +151,17 @@ class _HostInterfaceNameConflict(Exception):
     """An OOB row cannot claim a host interface by its name."""
 
 
+@dataclass(frozen=True)
+class _InterfaceSyncOutcome:
+    """What one committed sync attempt reports; ``post()`` publishes it after the transaction."""
+
+    skipped_conflicts: tuple
+    kept_name_conflicts: tuple
+    synced_count: int
+    mutated: bool
+    warnings: tuple
+
+
 class SyncInterfacesView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, VlanAssignmentMixin, CacheMixin, View
 ):
@@ -199,8 +211,6 @@ class SyncInterfacesView(
         if selected_port_ids is None:
             return self._tab_response(request, object_type, interface_name_field, server_key)
         visible_port_ids = selected_port_ids
-        self._selected_port_ids = set(visible_port_ids)
-        self._auto_selected_port_ids = set()
 
         ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
@@ -211,57 +221,36 @@ class SyncInterfacesView(
         self._related_walk = (
             normalize_relationship_maps(relationships) if request.POST.get("auto_select_lag_members") else None
         )
-        if self._selected_port_ids & _duplicated_port_ids(ports_data):
+        if visible_port_ids & _duplicated_port_ids(ports_data):
             messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
             return self._tab_response(request, object_type, interface_name_field, server_key)
-        # Resolve inferred off-page owners only after the chassis and its members are locked.
-        # A pre-lock position guess can become stale if membership positions change concurrently.
-        self._auto_selected_target_ids = {}
 
-        # Collects interfaces skipped because their LibreNMS port_id resolves to an
-        # interface on a *different* device (see _resolve_device/vm_interface). Surfaced
-        # below so the skip isn't silent — otherwise the user only sees it in the logs.
-        self._skipped_conflicts = []
-        self._kept_name_conflicts = []
-        self._synced_count = 0
-        self._mutated = False
+        request_state = dict(self.__dict__)
         try:
-            with transaction.atomic():
-                try:
-                    self.sync_selected_interfaces(
-                        obj,
-                        ports_data,
-                        exclude_columns,
-                        interface_name_field,
-                        keep_locked_targets=True,
-                    )
-
-                    # Keep the target-device locks and their current object map through relationship
-                    # validation and persistence. Reusing the map also avoids one permission-filtered
-                    # Device lookup per selected VC relationship edge.
-                    self._sync_interface_relationships(
-                        self.object,
-                        ports_data,
-                        relationships,
-                        server_key,
-                        excluded_columns=exclude_columns,
-                    )
-                finally:
-                    self.__dict__.pop("_locked_target_devices", None)
+            outcome = run_transaction(
+                lambda: self._sync_attempt(
+                    request_state,
+                    visible_port_ids,
+                    ports_data,
+                    relationships,
+                    exclude_columns,
+                    interface_name_field,
+                    server_key,
+                )
+            )
         except LibreNMSPortBindingConflict as conflict:
             self._synced_count = 0
             self._mutated = False
             messages.warning(request, str(conflict))
             return self._tab_response(request, object_type, interface_name_field, server_key)
         except _DuplicatedSelectionError:
-            # The walk reached a duplicated port before anything was written; the atomic block rolled back.
+            # The walk reached a duplicated port before anything was written; the attempt rolled back.
             messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
             return self._tab_response(request, object_type, interface_name_field, server_key)
         except IntegrityError:
-            # This block is the outermost transaction, and Postgres validates Django's DEFERRABLE
-            # INITIALLY DEFERRED foreign keys at its COMMIT. A related row deleted mid-sync
-            # therefore surfaces here, past every inner savepoint handler, and would otherwise 500.
-            logger.warning("Bulk sync: rolled back by a concurrent DB conflict at commit", exc_info=True)
+            # The runner checks Django's deferred foreign keys as the attempt's last step. A related
+            # row deleted mid-sync therefore surfaces here, past every inner savepoint handler.
+            logger.warning("Bulk sync: rolled back by a concurrent DB conflict", exc_info=True)
             messages.error(
                 request,
                 "The sync was rolled back by a concurrent change to a related interface. "
@@ -269,13 +258,15 @@ class SyncInterfacesView(
             )
             return self._tab_response(request, object_type, interface_name_field, server_key)
 
-        if self._skipped_conflicts:
-            skipped = ", ".join(self._skipped_conflicts)
+        for warning in outcome.warnings:
+            messages.warning(request, warning)
+        if outcome.skipped_conflicts:
+            skipped = ", ".join(outcome.skipped_conflicts)
             messages.warning(
                 request,
-                f"{len(self._skipped_conflicts)} interface(s) skipped: {skipped}.",
+                f"{len(outcome.skipped_conflicts)} interface(s) skipped: {skipped}.",
             )
-        for current_name, reported_name, conflict_reason in self._kept_name_conflicts:
+        for current_name, reported_name, conflict_reason in outcome.kept_name_conflicts:
             reason = (
                 f"the {conflict_reason}"
                 if conflict_reason is not None
@@ -289,9 +280,9 @@ class SyncInterfacesView(
         # synced count rather than comparing skip-vs-selected sizes: a single selected display name
         # can be skipped after another selected port succeeds, so the explicit count remains the
         # source of truth for the success banner.
-        if self._synced_count > 0:
+        if outcome.synced_count > 0:
             messages.success(request, "Selected interfaces synced successfully.")
-        if self._mutated:
+        if outcome.mutated:
             cache_transition = schedule_request_cache_mutation(
                 request,
                 obj,
@@ -302,6 +293,74 @@ class SyncInterfacesView(
             cache_transition = None
         return apply_transition_to_response(
             request, self._tab_response(request, object_type, interface_name_field, server_key), cache_transition
+        )
+
+    def _sync_attempt(
+        self,
+        request_state,
+        visible_port_ids,
+        ports_data,
+        relationships,
+        exclude_columns,
+        interface_name_field,
+        server_key,
+    ):
+        """
+        Run one attempt of the sync transaction and return what it reports.
+
+        ``run_transaction`` calls this once for each attempt. The attempt starts from the view state
+        the request had before the transaction, so a retry reads nothing that a failed attempt
+        derived. It adds no message: ``post()`` publishes the outcome of the committed attempt.
+
+        Args:
+            request_state (dict): The view's attributes before the transaction.
+            visible_port_ids (set[int]): The port IDs the user selected.
+            ports_data (list[dict]): The cached snapshot rows.
+            relationships (dict): The cached relationship maps.
+            exclude_columns (list[str]): The columns this sync must not write.
+            interface_name_field (str): Port field that contains the interface name.
+            server_key (str): The validated POSTed server key.
+
+        Returns:
+            _InterfaceSyncOutcome: What the attempt synced, skipped and warned about.
+
+        """
+        self.__dict__.clear()
+        self.__dict__.update(request_state)
+        self._selected_port_ids = set(visible_port_ids)
+        self._auto_selected_port_ids = set()
+        # Inferred off-page owners are resolved only after the chassis and its members are locked.
+        self._auto_selected_target_ids = {}
+        # Rows the sync skips (for example a port ID bound to another device's interface) are reported.
+        self._skipped_conflicts = []
+        self._kept_name_conflicts = []
+        self._synced_count = 0
+        self._mutated = False
+        self._attempt_warnings = []
+        try:
+            self.sync_selected_interfaces(
+                self.object,
+                ports_data,
+                exclude_columns,
+                interface_name_field,
+                keep_locked_targets=True,
+            )
+            # The relationship pass reuses the locked target map of the attribute pass.
+            self._sync_interface_relationships(
+                self.object,
+                ports_data,
+                relationships,
+                server_key,
+                excluded_columns=exclude_columns,
+            )
+        finally:
+            self.__dict__.pop("_locked_target_devices", None)
+        return _InterfaceSyncOutcome(
+            skipped_conflicts=tuple(self._skipped_conflicts),
+            kept_name_conflicts=tuple(self._kept_name_conflicts),
+            synced_count=self._synced_count,
+            mutated=self._mutated,
+            warnings=tuple(self._attempt_warnings),
         )
 
     def _tab_response(self, request, object_type, interface_name_field, server_key):
@@ -661,9 +720,8 @@ class SyncInterfacesView(
                 "Bulk sync: relationship pass rolled back by a concurrent DB conflict",
                 exc_info=True,
             )
-            messages.warning(
-                self.request,
-                "Interfaces synced, but relationships hit a concurrent change and were not applied. Re-run the sync.",
+            self._attempt_warnings.append(
+                "Interfaces synced, but relationships hit a concurrent change and were not applied. Re-run the sync."
             )
 
     def _relationship_source_rows(
@@ -1110,7 +1168,8 @@ class SyncInterfacesView(
                     if isinstance(obj, Device)
                     else [obj]
                 )
-                self._prepare_vlan_lookup_maps(vlan_scope_devices)
+                if vlan_warning := self._prepare_vlan_lookup_maps(vlan_scope_devices):
+                    self._attempt_warnings.append(vlan_warning)
             writer_model = VMInterface if isinstance(obj, VirtualMachine) else Interface
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             decisions = self._snapshot_name_decisions(obj, ports_data, interface_name_field, writer_model, server_key)
@@ -1331,7 +1390,7 @@ class SyncInterfacesView(
         return list(owners.values())
 
     def _prepare_vlan_lookup_maps(self, vlan_scope_devices):
-        """Build VLAN scope maps from owner rows locked for this sync transaction."""
+        """Build VLAN scope maps from owner rows locked for this sync transaction; return a warning or None."""
         # The gate checks add/change on the interface model, not IPAM, so read VLANs as the
         # caller. A caller without the grant matches no VLAN, which the warning below names.
         vlan_scope_user = self.vlan_scope_user()
@@ -1357,19 +1416,18 @@ class SyncInterfacesView(
             scoped_groups=vlan_groups,
         )
         if hidden:
-            messages.warning(
-                self.request,
+            return (
                 f"VLANs were not synced for the selected interfaces: your account is missing "
-                f"{', '.join(hidden)}. Existing VLAN assignments were left unchanged.",
+                f"{', '.join(hidden)}. Existing VLAN assignments were left unchanged."
             )
-        elif self._vlan_scope_incomplete:
+        if self._vlan_scope_incomplete:
             # A constrained grant passes the permission-name check, so the branch above says
             # nothing. Without this the VLAN write is skipped silently and the user cannot tell why.
-            messages.warning(
-                self.request,
+            return (
                 "VLANs were not synced for the selected interfaces: your account cannot view every "
-                "VLAN in scope for this device. Existing VLAN assignments were left unchanged.",
+                "VLAN in scope for this device. Existing VLAN assignments were left unchanged."
             )
+        return None
 
     def _lock_selected_device_targets(self, obj):
         """Lock the page Device and its current chassis scope in the shared lock order."""
