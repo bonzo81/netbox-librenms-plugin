@@ -496,6 +496,7 @@ def test_a_live_holder_releases_the_name_after_its_own_row_syncs(client, setting
 @pytest.mark.django_db
 @pytest.mark.parametrize("viewable", [True, False], ids=["viewable", "hidden"])
 def test_the_ip_path_names_the_holding_port_only_inside_the_view_scope(viewable):
+    from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
     from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 
     device = _device(f"name-owner-ip-path-{viewable}")
@@ -506,6 +507,7 @@ def test_the_ip_path_names_the_holding_port_only_inside_the_view_scope(viewable)
         resolve_or_create_interface_from_port(
             device,
             _port(HOST_PORT, "eth0"),
+            rules=InterfaceRuleMatcher.load(),
             server_key=SERVER_KEY,
             interface_name_field="ifName",
             changeable_queryset=Interface.objects.all(),

@@ -5,6 +5,26 @@ import importlib
 import pytest
 
 
+def test_interface_rule_migration_state_carries_the_model_help_text():
+    """Every InterfaceTypeMapping field in the final migration state has the model's help_text (NetBox's makemigrations ignores help_text, so only this test sees the drift)."""
+    from django.db.migrations.loader import MigrationLoader
+
+    from netbox_librenms_plugin.models import InterfaceTypeMapping
+
+    loader = MigrationLoader(None, ignore_no_migrations=True)
+    (leaf,) = (node for node in loader.graph.leaf_nodes() if node[0] == "netbox_librenms_plugin")
+    state_fields = (
+        loader.project_state(leaf, at_end=True).models[("netbox_librenms_plugin", "interfacetypemapping")].fields
+    )
+
+    drifted = {
+        field.name: (state_fields[field.name].help_text, field.help_text)
+        for field in InterfaceTypeMapping._meta.get_fields()
+        if field.concrete and state_fields[field.name].help_text != field.help_text
+    }
+    assert not drifted, f"migration help_text drifted from the model: {drifted}"
+
+
 def test_migration_0013_field_help_text_matches_model():
     """Migration 0013's PortStackLagPattern fields must carry the same help_text as the model (else the migration state drifts and makemigrations tracks a phantom AlterField)."""
     from netbox_librenms_plugin.models import PortStackLagPattern

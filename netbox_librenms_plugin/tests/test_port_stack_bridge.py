@@ -2,9 +2,12 @@
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, typed_maps
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision, typed_maps
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
 from netbox_librenms_plugin.utils import normalize_relationship_maps
+
+# The port keys an interface write needs, for rows whose test does not care about their values.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 pytestmark = pytest.mark.django_db
 
@@ -154,8 +157,8 @@ def test_inline_parent_sync_promotes_a_physical_child_to_virtual():
         view.get_cache_key(device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 102, "ifName": child.name},
-                {"port_id": 101, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {},
@@ -252,9 +255,9 @@ def test_inline_lag_sync_does_not_replace_a_parent_child_role():
         parent_view.get_cache_key(device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 100, "ifName": target.name},
-                {"port_id": 101, "ifName": parent.name},
-                {"port_id": 102, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": target.name},
+                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": member.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {102: 100},
@@ -319,8 +322,8 @@ def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch):
         view.get_cache_key(parent_device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 100, "ifName": target.name},
-                {"port_id": 102, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": target.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": member.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {102: 100},
@@ -397,8 +400,8 @@ def test_inline_bridge_sync_sets_the_bridge_relationship():
         view.get_cache_key(device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 103, "ifName": member.name},
-                {"port_id": 100, "ifName": bridge.name},
+                {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {},
@@ -444,9 +447,9 @@ def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch
         view.get_cache_key(parent_device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 101, "ifName": parent.name},
-                {"port_id": 102, "ifName": child.name},
-                {"port_id": 100, "ifName": bridge.name},
+                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {},
@@ -518,9 +521,9 @@ def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monke
         view.get_cache_key(parent_device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 101, "ifName": parent.name},
-                {"port_id": 102, "ifName": child.name},
-                {"port_id": 100, "ifName": aggregate.name},
+                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": aggregate.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {102: 100},
@@ -577,9 +580,9 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface():
         set_librenms_device_id(interface, port_id, "default")
         interface.save()
     ports = [
-        {"port_id": 102, "ifName": child.name},
-        {"port_id": 101, "ifName": parent.name},
-        {"port_id": 100, "ifName": bridge.name},
+        {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
     ]
     view = object.__new__(SyncInterfacesView)
     view.interface_name_field = "ifName"
@@ -639,13 +642,15 @@ def test_relationship_column_renders_bridge_in_the_existing_column():
     html = str(
         table.render_parent(
             None,
-            {
-                "port_id": 103,
-                "netbox_interface": member,
-                "bridge_sync_status": "missing_nb",
-                "librenms_bridge_name": "vmbr0",
-                "librenms_bridge_port_id": 100,
-            },
+            stamp_rule_decision(
+                {
+                    "port_id": 103,
+                    "netbox_interface": member,
+                    "bridge_sync_status": "missing_nb",
+                    "librenms_bridge_name": "vmbr0",
+                    "librenms_bridge_port_id": 100,
+                }
+            ),
         )
     )
 
@@ -679,8 +684,8 @@ def test_inline_bridge_sync_supports_virtual_machine_interfaces():
         view.get_cache_key(vm, "ports", "default"),
         {
             "ports": [
-                {"port_id": 103, "ifName": member.name},
-                {"port_id": 100, "ifName": bridge.name},
+                {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {},

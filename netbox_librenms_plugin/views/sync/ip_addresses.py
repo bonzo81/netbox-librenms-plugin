@@ -17,6 +17,7 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_interface_name_field
+from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
@@ -594,9 +595,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             owner = locked_obj
             interface_model = VMInterface
 
+        # Raises PortSyncBlocked before any write when the rules refuse the port for this owner.
         interface = resolve_or_create_interface_from_port(
             owner,
             port,
+            rules=interface_rules_for_request(self.request),
             server_key=server_key,
             interface_name_field=interface_name_field,
             changeable_queryset=self.restricted_queryset(interface_model, "change"),
@@ -1066,6 +1069,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "primary_no_interface": [],
             "primary_interface_not_eligible": [],
             "skipped_no_interface": [],
+            "skipped_by_rule": [],
             "errors": {},
             "conflicts": [],
             "mutated": False,
@@ -1277,9 +1281,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                 # The row's savepoint rolled back, so drop only this row's keys.
                 row_mutations.clear()
-                logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
-                results["failed"].append(display_address)
-                results["errors"][display_address] = str(exc) or exc.__class__.__name__
+                if isinstance(exc, PortSyncBlocked):
+                    # The interface rules refused the create: an expected outcome, not an error.
+                    logger.info("IP sync skipped %s: %s", row_id, exc)
+                    results["skipped_by_rule"].append(f"{display_address} ({exc})")
+                else:
+                    logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
+                    results["failed"].append(display_address)
+                    results["errors"][display_address] = str(exc) or exc.__class__.__name__
             finally:
                 # `finally`, not `else`: the conflict and no-interface paths leave the row with
                 # `continue`, which skips an `else` clause but keeps their committed writes.
@@ -1309,6 +1318,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "Primary IP not set for "
                 f"{', '.join(results['primary_interface_not_eligible'])} — the matched interface is not eligible "
                 "(it is outside this virtual chassis or is a management-only interface).",
+            )
+        if results.get("skipped_by_rule"):
+            messages.warning(
+                request,
+                f"Skipped (the interface rules refuse the interface): {', '.join(results['skipped_by_rule'])}.",
             )
         if results.get("skipped_no_interface"):
             messages.warning(

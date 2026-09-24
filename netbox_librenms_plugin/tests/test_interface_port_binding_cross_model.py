@@ -7,6 +7,7 @@ from django.core.cache import cache
 from django.urls import reverse
 from virtualization.models import VMInterface
 
+from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_cluster,
@@ -22,6 +23,9 @@ from netbox_librenms_plugin.utils import (
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+# The port keys an interface write needs, for rows whose test does not care about their values.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 SERVER_KEY = "default"
 PORT = 9301
@@ -139,6 +143,7 @@ class TestTheSyncWriter:
         update_interface_from_port(
             interface,
             _port(PORT, "eth0"),
+            rules=InterfaceRuleMatcher.load(),
             synced_name="eth0",
             server_key=SERVER_KEY,
             interface_name_field="ifName",
@@ -163,6 +168,7 @@ class TestTheIPPathResolver:
             resolve_or_create_interface_from_port(
                 device,
                 _port(PORT, "eth0"),
+                rules=InterfaceRuleMatcher.load(),
                 server_key=SERVER_KEY,
                 interface_name_field="ifName",
                 changeable_queryset=Interface.objects.all(),
@@ -201,7 +207,6 @@ def _cable_scenario(librenms_server, settings, name, *, holder=None):
         bind_librenms_server,
         configured_server_key,
         map_device_to_librenms,
-        persist_test_server_mapping,
     )
     from netbox_librenms_plugin.tests.test_cable_remote_matching import _row, _seed_cable_row
 
@@ -210,10 +215,12 @@ def _cable_scenario(librenms_server, settings, name, *, holder=None):
     local_device = make_device(f"{name}-local")
     local_interface = make_interface(local_device, "eth0")
     remote_device = make_device(f"{name}-remote")
-    persist_test_server_mapping(local_device, server_key)
+    # Fixed ids, never the device pk: a local pk of 9 made the neighbour's id 9 ambiguous.
+    map_device_to_librenms(local_device, 8, server_key=server_key)
     map_device_to_librenms(remote_device, 9, server_key=server_key)
     librenms_server.register(
-        "/api/v0/ports/500", {"status": "ok", "port": [{"port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}]}
+        "/api/v0/ports/500",
+        {"status": "ok", "port": [{**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}]},
     )
     if holder is not None:
         _hold_cable_port(name, holder, server_key)

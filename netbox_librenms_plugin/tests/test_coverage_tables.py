@@ -9,6 +9,7 @@ import pytest
 from django.test import RequestFactory
 from django.urls import reverse
 
+from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import (
     make_cluster,
     make_device,
@@ -16,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
     make_vm,
+    stamp_rule_decision,
 )
 
 
@@ -50,7 +52,8 @@ def _port(port_id=42, **overrides):
     }
     record.update(overrides)
     record.setdefault("synced_name", record["ifName"])
-    return record
+    # No rule matches unless a test stamps the record again after it stores rules.
+    return stamp_rule_decision(record, rules=InterfaceRuleMatcher(()))
 
 
 def _interface_table(device=None, *, data=None, server_key="default", interface_name_field="ifName"):
@@ -897,7 +900,7 @@ class TestInterfaceTableFields:
             librenms_speed=1_000_000,
             netbox_type="1000base-t",
         )
-        record = _port(exists_in_netbox=True, netbox_interface=interface)
+        record = stamp_rule_decision(_port(exists_in_netbox=True, netbox_interface=interface))
         table = _interface_table(device)
 
         assert "text-success" in str(table.render_name(record["ifName"], record))
@@ -933,7 +936,9 @@ class TestInterfaceTableFields:
     @pytest.mark.parametrize("value", ["up", "UP", True, None])
     def test_enabled_values_normalize_to_enabled(self, value):
         """An absent ifAdminStatus reads as enabled: that is the value a sync writes."""
-        record = {"exists_in_netbox": False, "ifAdminStatus": value}
+        record = stamp_rule_decision(
+            {"exists_in_netbox": False, "ifAdminStatus": value}, rules=InterfaceRuleMatcher(())
+        )
         html = str(_interface_table().render_enabled(value, record))
 
         assert "Enabled" in html
@@ -941,7 +946,9 @@ class TestInterfaceTableFields:
 
     @pytest.mark.parametrize("value", ["down", False])
     def test_disabled_values_normalize_to_disabled(self, value):
-        record = {"exists_in_netbox": False, "ifAdminStatus": value}
+        record = stamp_rule_decision(
+            {"exists_in_netbox": False, "ifAdminStatus": value}, rules=InterfaceRuleMatcher(())
+        )
         html = str(_interface_table().render_enabled(value, record))
 
         assert "Disabled" in html
@@ -1105,12 +1112,14 @@ class TestInterfaceTableFields:
 
         def _row(iface):
             # port_id is the column accessor, so the rendered value and the row carry the same id.
-            return {
-                "port_id": 42,
-                "exists_in_netbox": True,
-                "netbox_interface": iface,
-                "synced_name": "Ethernet1",
-            }
+            return stamp_rule_decision(
+                {
+                    "port_id": 42,
+                    "exists_in_netbox": True,
+                    "netbox_interface": iface,
+                    "synced_name": "Ethernet1",
+                }
+            )
 
         missing = str(table.render_librenms_id(42, _row(interface)))
         set_librenms_device_id(interface, 99, "default")
@@ -1132,23 +1141,23 @@ class TestInterfaceTypeMappings:
     def test_exact_mapping_wins_over_type_only_fallback(self):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
-        fallback = InterfaceTypeMapping.objects.create(
-            librenms_type="ethernetCsmacd",
-            librenms_speed=None,
-            netbox_type="virtual",
-        )
-        exact = InterfaceTypeMapping.objects.create(
+        InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", librenms_speed=None, netbox_type="virtual")
+        InterfaceTypeMapping.objects.create(
             librenms_type="ethernetCsmacd",
             librenms_speed=1_000_000,
             netbox_type="1000base-t",
         )
         table = _interface_table()
 
-        assert table.get_interface_mapping("ethernetCsmacd", 1_000_000) == exact
-        assert table.get_interface_mapping("ethernetCsmacd", 10_000) == fallback
-        assert table.get_interface_mapping("other", 1_000_000) is None
+        def _type_cell(**port):
+            record = stamp_rule_decision(_port(exists_in_netbox=False, **port))
+            return str(table.render_type(record["ifType"], record))
 
-    def test_mapping_rows_are_snapshotted_once(self, django_assert_num_queries):
+        assert "1000base-t" in _type_cell(ifSpeed=1_000_000_000)
+        assert "virtual" in _type_cell(ifSpeed=10_000_000)
+        assert "mdi-link-variant-off" in _type_cell(ifType="other", ifSpeed=1_000_000_000)
+
+    def test_the_type_column_reads_the_stamped_decision_and_queries_nothing(self, django_assert_num_queries):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
         InterfaceTypeMapping.objects.create(
@@ -1157,10 +1166,12 @@ class TestInterfaceTypeMappings:
             netbox_type="virtual",
         )
         table = _interface_table()
+        rules = InterfaceRuleMatcher.load()
+        records = [stamp_rule_decision(_port(ifSpeed=speed), rules=rules) for speed in range(5)]
 
-        with django_assert_num_queries(1):
-            for speed in range(5):
-                table.get_interface_mapping("ethernetCsmacd", speed)
+        with django_assert_num_queries(0):
+            for record in records:
+                table.render_type(record["ifType"], record)
 
     def test_mapping_tooltips_use_real_mapping_data(self):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -1171,14 +1182,17 @@ class TestInterfaceTypeMappings:
             netbox_type="1000base-t",
         )
         table = _interface_table()
+        mapped = stamp_rule_decision(_port(ifSpeed=1000))
+        unmapped = stamp_rule_decision(_port(ifType="other", ifSpeed=1000))
 
-        display, linked_icon = table.render_mapping_tooltip("ethernetCsmacd", 1000, mapping)
-        raw_display, unlinked_icon = table.render_mapping_tooltip("other", 1000, None)
+        linked = str(table.render_type(mapped["ifType"], mapped))
+        unlinked = str(table.render_type(unmapped["ifType"], unmapped))
 
-        assert display == "1000base-t"
-        assert "mdi-link-variant" in str(linked_icon)
-        assert raw_display == "other"
-        assert "mdi-link-variant-off" in str(unlinked_icon)
+        assert "1000base-t" in linked
+        assert "mdi-link-variant" in linked
+        assert f"Set by interface rule {mapping.pk} ({mapping})" in unescape(linked)
+        assert "mdi-link-variant-off" in unlinked
+        assert "No interface rule sets a type for ifType other" in unlinked
 
 
 @pytest.mark.django_db
@@ -1473,6 +1487,8 @@ class TestInterfaceFormatting:
         assert oob["netbox_interface"] is None
         assert oob["exists_in_netbox"] is False
         assert set(main_result) == {
+            "selection",
+            "rule_state",
             "name",
             "type",
             "speed",

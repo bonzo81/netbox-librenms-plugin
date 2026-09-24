@@ -8,7 +8,8 @@ runs the real writer against every row shape and asserts the row state predicted
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
 
 SERVER_KEY = "default"
 
@@ -71,19 +72,18 @@ def _row(interface=None, **overrides):
     row.setdefault("synced_name", row["ifName"])
     row["netbox_interface"] = interface
     row["exists_in_netbox"] = interface is not None
-    return row
+    return stamp_rule_decision(row)
 
 
 def _state(row, *, vlan_context=None):
     """Compute one row's sync state the way the table does."""
     from netbox_librenms_plugin.interface_diff import compute_row_sync_state
-    from netbox_librenms_plugin.interface_sync import get_netbox_interface_type
 
     return compute_row_sync_state(
         row,
         interface_name_field="ifName",
         server_key=SERVER_KEY,
-        netbox_type=get_netbox_interface_type(row),
+        decision=row["rule_decision"],
         vlan_context=vlan_context,
     )
 
@@ -133,7 +133,7 @@ class TestTheDiffMatchesTheWriter:
     )
     def test_the_row_state_predicts_whether_a_sync_writes(self, label, port_overrides, interface_overrides, writes):
         from netbox_librenms_plugin.interface_diff import ROW_DIFFERS
-        from netbox_librenms_plugin.interface_sync import get_netbox_interface_type, update_interface_from_port
+        from netbox_librenms_plugin.interface_sync import update_interface_from_port
 
         slug = label.replace(" ", "-")[:40]
         _device, interface = _synced_interface(f"diff-{abs(hash(slug)) % 10000}", **interface_overrides)
@@ -148,7 +148,7 @@ class TestTheDiffMatchesTheWriter:
             synced_name=row["ifName"],
             server_key=SERVER_KEY,
             interface_name_field="ifName",
-            netbox_type=get_netbox_interface_type(row),
+            rules=InterfaceRuleMatcher.load(),
         )
 
         assert predicted == changed == writes, f"{label}: predicted={predicted} actual={changed}"

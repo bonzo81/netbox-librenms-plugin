@@ -13,6 +13,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
 )
 
+# The port keys an interface write needs, for rows whose test does not care about their values.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
+
 # Window a competing thread must NOT get through while the row lock is held. A negative wait
 # proves only that nothing happened inside it, so keep the four sites on one name and raise it
 # here (or via the environment) when a loaded runner needs more headroom.
@@ -56,6 +59,7 @@ def test_selected_vc_target_is_locked_through_interface_sync():
     release_sync = Event()
 
     port = {
+        **_PORT_KEYS_UNSET,
         "ifName": "Gi0/1",
         "ifType": "ethernetCsmacd",
         "ifSpeed": 1_000_000_000,
@@ -266,6 +270,7 @@ def test_auto_selected_owner_is_revalidated_after_vc_position_changes():
         count=3,
     )
     port = {
+        **_PORT_KEYS_UNSET,
         "port_id": 10,
         "ifName": "Ethernet2/1",
         "ifType": "ethernetCsmacd",
@@ -479,6 +484,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution():
 
             view._resolve_vm_interface = pause_after_resolution
             port = {
+                **_PORT_KEYS_UNSET,
                 "port_id": port_id,
                 "ifName": f"Ethernet{port_id}",
                 "ifDescr": "Ethernet",
@@ -541,8 +547,8 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
         cache_key,
         {
             "ports": [
-                {"port_id": 10, "ifName": member.name},
-                {"port_id": 20, "ifName": aggregate.name},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": aggregate.name},
             ],
             "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
         },
@@ -735,8 +741,8 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
         cache_key,
         {
             "ports": [
-                {"port_id": 10, "ifName": child.name},
-                {"port_id": 20, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
             ],
             "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
         },
@@ -882,9 +888,9 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
     user = make_superuser("bulk-targeted-edge-user")
     relationship_finished = Event()
     ports = [
-        {"port_id": 10, "ifName": child.name},
-        {"port_id": 20, "ifName": parent.name},
-        {"port_id": 30, "ifName": unrelated.name},
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": unrelated.name},
     ]
 
     def apply_relationships():

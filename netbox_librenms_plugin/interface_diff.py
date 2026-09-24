@@ -15,6 +15,7 @@ from dcim.fields import MACAddressField
 from django.core.exceptions import ValidationError
 
 from netbox_librenms_plugin.constants import INTERFACE_SYNC_EXTRA_FIELDS, INTERFACE_SYNC_FIELD_PAIRS
+from netbox_librenms_plugin.interface_rules import RuleDecisionKind
 from netbox_librenms_plugin.utils import (
     bounded_interface_text,
     check_vlan_group_matches,
@@ -25,15 +26,28 @@ from netbox_librenms_plugin.utils import (
     normalize_librenms_port_id,
 )
 
-# Per-field verdicts.
+# Per-field verdicts. NOT_SYNCED marks every field of a row that no sync may write.
 ABSENT = "absent"
 DIFFERS = "differs"
 MATCHES = "matches"
+NOT_SYNCED = "not_synced"
 
 # Row states.
 ROW_ABSENT = "absent"
 ROW_DIFFERS = "differs"
 ROW_IN_SYNC = "in_sync"
+ROW_IGNORED = "ignored"
+ROW_AMBIGUOUS = "ambiguous"
+ROW_OWNER_UNRESOLVED = "owner_unresolved"
+ROW_INCOMPLETE = "incomplete"
+
+# Rows that offer no sync action: the interface write check or the missing owner blocks every write.
+BLOCKED_ROW_STATES = frozenset({ROW_IGNORED, ROW_AMBIGUOUS, ROW_INCOMPLETE, ROW_OWNER_UNRESOLVED})
+_BLOCKED_ROW_STATE_BY_KIND = {
+    RuleDecisionKind.IGNORE: ROW_IGNORED,
+    RuleDecisionKind.AMBIGUOUS: ROW_AMBIGUOUS,
+    RuleDecisionKind.INCOMPLETE: ROW_INCOMPLETE,
+}
 
 # Every field one sync writes, in the order the table shows them.
 SYNC_FIELDS = tuple(netbox_field for _, netbox_field in INTERFACE_SYNC_FIELD_PAIRS) + INTERFACE_SYNC_EXTRA_FIELDS
@@ -253,7 +267,7 @@ _RULES = {
 }
 
 
-def compute_row_sync_state(port, *, interface_name_field, server_key, netbox_type=None, vlan_context=None):
+def compute_row_sync_state(port, *, interface_name_field, server_key, decision, vlan_context=None):
     """
     Return the sync state of one LibreNMS row against the NetBox interface it resolved to.
 
@@ -261,8 +275,9 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, netbox_typ
         port (dict): The interface table row, carrying ``netbox_interface`` and ``exists_in_netbox``.
         interface_name_field (str): The LibreNMS port field currently acting as the interface name.
         server_key (str): The LibreNMS server the row's port_id belongs to.
-        netbox_type (str | None): The NetBox type the sync would write, or None when the row's
-            ifType has no mapping and the sync therefore holds no opinion.
+        decision (RuleDecision | None): The interface write check for the row's owner
+            (``check_interface_write``), or None when the row's owner is unresolved. Its
+            ``netbox_type`` is the type the writer writes.
         vlan_context: The row's VLAN evidence bundled with the NetBox assignment it is compared
             against, or None to leave VLANs out of the comparison.
 
@@ -270,6 +285,11 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, netbox_typ
         RowSyncState: The row state and each field's verdict.
 
     """
+    # A blocked row is decided before absence: no sync may create it either.
+    blocked_state = ROW_OWNER_UNRESOLVED if decision is None else _BLOCKED_ROW_STATE_BY_KIND.get(decision.kind)
+    if blocked_state is not None:
+        return RowSyncState(blocked_state, dict.fromkeys(SYNC_FIELDS, NOT_SYNCED))
+
     interface = port.get("netbox_interface")
     if not port.get("exists_in_netbox") or interface is None:
         return RowSyncState(ROW_ABSENT, dict.fromkeys(SYNC_FIELDS, ABSENT))
@@ -277,7 +297,7 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, netbox_typ
     context = DiffContext(
         interface_name_field=interface_name_field,
         server_key=server_key,
-        netbox_type=netbox_type,
+        netbox_type=decision.netbox_type,
         vlan_context=vlan_context,
     )
     fields = {}

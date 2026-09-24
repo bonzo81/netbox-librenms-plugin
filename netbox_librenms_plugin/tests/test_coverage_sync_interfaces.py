@@ -31,6 +31,9 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     post as _post,
 )
 
+# The port keys an interface write needs, for rows whose test does not care about their values.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
+
 # The views here are built with real requests and real users, so the whole file needs the DB.
 pytestmark = pytest.mark.django_db
 
@@ -138,9 +141,9 @@ def _cache_relationship(view, obj, relation_field, source_id, related_id, source
     cache_key = view.get_cache_key(cache_obj, "ports", "default")
     relationships = {"lag_members": {}, "sub_interfaces": {}}
     relationships[relation_field][source_id] = related_id
-    ports = [{"port_id": source_id, "ifName": source_name or f"port-{source_id}"}]
+    ports = [{**_PORT_KEYS_UNSET, "port_id": source_id, "ifName": source_name or f"port-{source_id}"}]
     if related_id != source_id:
-        ports.append({"port_id": related_id, "ifName": related_name or f"port-{related_id}"})
+        ports.append({**_PORT_KEYS_UNSET, "port_id": related_id, "ifName": related_name or f"port-{related_id}"})
     cache.set(
         cache_key,
         {
@@ -925,8 +928,8 @@ class TestInterfaceContextOOBRows:
         parent.save()
         snapshot = {
             "ports": [
-                {"port_id": 11, "ifName": "Ethernet1.100", "ifType": "l2vlan"},
-                {"port_id": 20, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
+                {**_PORT_KEYS_UNSET, "port_id": 11, "ifName": "Ethernet1.100", "ifType": "l2vlan"},
+                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
             ],
             "port_stack_relationships": {
                 "lag_members": {},
@@ -998,10 +1001,10 @@ class TestInterfaceContextOOBRows:
             interface.save()
         snapshot = {
             "ports": [
-                {"port_id": 10, "ifName": child.name, "ifType": "l2vlan"},
-                {"port_id": 20, "ifName": parent.name, "ifType": "ethernetCsmacd"},
-                {"port_id": 30, "ifName": "unrelated-a", "ifType": "ethernetCsmacd"},
-                {"port_id": "030", "ifName": "unrelated-b", "ifType": "ethernetCsmacd"},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name, "ifType": "l2vlan"},
+                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name, "ifType": "ethernetCsmacd"},
+                {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": "unrelated-a", "ifType": "ethernetCsmacd"},
+                {**_PORT_KEYS_UNSET, "port_id": "030", "ifName": "unrelated-b", "ifType": "ethernetCsmacd"},
             ],
             "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
         }
@@ -2147,6 +2150,7 @@ class TestInterfaceContextVirtualChassisOwner:
         snapshot = {
             "ports": [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": "0010",
                     "ifName": "Ethernet2",
                     "ifType": "ethernetCsmacd",
@@ -2532,12 +2536,14 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": member.name,
                         "ifType": "ethernetCsmacd",
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 20,
                         "ifName": aggregate.name,
                         "ifType": "ieee8023adLag",
@@ -2592,12 +2598,14 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 11,
                         "ifName": child.name,
                         "ifType": "l2vlan",
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": parent.name,
                         "ifType": "ethernetCsmacd",
@@ -2667,6 +2675,7 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": "Ethernet1",
                         "ifType": "ethernetCsmacd",
@@ -2675,6 +2684,7 @@ class TestSyncInterfacesViewPost:
                         "tagged_vlans": [],
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 11,
                         "ifName": "Ethernet1.100",
                         "ifType": "l2vlan",
@@ -2752,12 +2762,14 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": "Ethernet2",
                         "ifType": "ethernetCsmacd",
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 100,
                         "ifName": "Port-Channel1",
                         "ifType": "ieee8023adLag",
@@ -2820,6 +2832,7 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": physical_ifname,
                         "ifDescr": "uplink",
@@ -2827,6 +2840,7 @@ class TestSyncInterfacesViewPost:
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 100,
                         "ifName": "Port-Channel1",
                         "ifDescr": aggregate.name,
@@ -2889,12 +2903,14 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": "Ethernet2",
                         "ifType": "ethernetCsmacd",
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 100,
                         "ifName": "Port-Channel1",
                         "ifType": "ieee8023adLag",
@@ -2958,12 +2974,14 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": "Ethernet2",
                         "ifType": "ethernetCsmacd",
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 11,
                         "ifName": "Ethernet2.100",
                         "ifType": "l2vlan",
@@ -3096,12 +3114,14 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": "Ethernet1",
                         "ifType": "l3ipvlan",
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 11,
                         "ifName": "Ethernet1.100",
                         "ifType": "l2vlan",
@@ -3223,18 +3243,21 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": "Ethernet1",
                         "ifType": "nestedPhysical",
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 11,
                         "ifName": "Ethernet1.100",
                         "ifType": "nestedVirtual",
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 12,
                         "ifName": "Ethernet1.100.200",
                         "ifType": "nestedVirtual",
@@ -3348,7 +3371,7 @@ class TestSyncInterfacesViewPost:
         cache.set(
             cache_key,
             {
-                "ports": [{"port_id": 100, "ifName": "Port-Channel1", "ifAdminStatus": "up"}],
+                "ports": [{**_PORT_KEYS_UNSET, "port_id": 100, "ifName": "Port-Channel1", "ifAdminStatus": "up"}],
                 "port_stack_relationships": {
                     "lag_members": {10: []},
                     "sub_interfaces": {},
@@ -3405,6 +3428,7 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 10,
                         "ifName": "Ethernet1",
                         "ifDescr": "Ethernet",
@@ -3412,6 +3436,7 @@ class TestSyncInterfacesViewPost:
                         "ifAdminStatus": "up",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": 11,
                         "ifName": "Ethernet2",
                         "ifDescr": "Ethernet",
@@ -3689,6 +3714,7 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "ifName": "eth0",
                         "port_id": 99,
                         "ifAdminStatus": "up",
@@ -3746,8 +3772,14 @@ class TestSyncInterfacesViewPost:
             cache_key,
             {
                 "ports": [
-                    {"ifName": "eth0", "port_id": 9401, "ifType": "ethernetCsmacd"},
-                    {"ifName": "eth0", "port_id": 9402, "ifType": "ethernetCsmacd", "_source": "oob"},
+                    {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 9401, "ifType": "ethernetCsmacd"},
+                    {
+                        **_PORT_KEYS_UNSET,
+                        "ifName": "eth0",
+                        "port_id": 9402,
+                        "ifType": "ethernetCsmacd",
+                        "_source": "oob",
+                    },
                 ]
             },
         )
@@ -3903,12 +3935,14 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "ifName": "lom0",
                         "port_id": 99,
                         "ifAdminStatus": "up",
                         "_source": "host",
                     },
                     {
+                        **_PORT_KEYS_UNSET,
                         "ifName": "lom0",
                         "port_id": 98,
                         "ifAdminStatus": "up",
@@ -3967,6 +4001,7 @@ class TestSyncInterfacesViewPost:
                 "ports": [
                     {"ifName": "lom0", "port_id": 99, "ifAdminStatus": "up", "_source": "host"},
                     {
+                        **_PORT_KEYS_UNSET,
                         "ifName": "lom0",
                         "port_id": 98,
                         "ifAdminStatus": "up",
@@ -4027,8 +4062,8 @@ class TestSyncInterfacesViewPost:
             cache_key,
             {
                 "ports": [
-                    {"ifName": "eth0", "port_id": 8501, "ifAdminStatus": "up"},
-                    {"ifName": "eth0", "port_id": 8502, "ifAdminStatus": "up", "_source": "oob"},
+                    {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 8501, "ifAdminStatus": "up"},
+                    {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 8502, "ifAdminStatus": "up", "_source": "oob"},
                 ]
             },
         )
@@ -4072,8 +4107,8 @@ class TestSyncInterfacesViewPost:
             cache_key,
             {
                 "ports": [
-                    {"ifName": "mgmt0", "port_id": 8601, "ifAdminStatus": "up"},
-                    {"ifName": "mgmt0", "port_id": 8602, "ifAdminStatus": "up", "_source": "oob"},
+                    {**_PORT_KEYS_UNSET, "ifName": "mgmt0", "port_id": 8601, "ifAdminStatus": "up"},
+                    {**_PORT_KEYS_UNSET, "ifName": "mgmt0", "port_id": 8602, "ifAdminStatus": "up", "_source": "oob"},
                 ]
             },
         )
@@ -4103,8 +4138,8 @@ class TestSyncInterfacesViewPost:
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
         ports = [
-            {"ifName": "eth1", "port_id": 8701, "ifAdminStatus": "up"},
-            {"ifName": "eth1", "port_id": 8702, "ifAdminStatus": "up", "_source": "oob"},
+            {**_PORT_KEYS_UNSET, "ifName": "eth1", "port_id": 8701, "ifAdminStatus": "up"},
+            {**_PORT_KEYS_UNSET, "ifName": "eth1", "port_id": 8702, "ifAdminStatus": "up", "_source": "oob"},
         ]
 
         def _sync(selected):
@@ -4168,8 +4203,9 @@ class TestSyncInterfacesViewPost:
             cache_key,
             {
                 "ports": [
-                    {"ifName": "swp1", "port_id": 8801, "ifAdminStatus": "up"},
+                    {**_PORT_KEYS_UNSET, "ifName": "swp1", "port_id": 8801, "ifAdminStatus": "up"},
                     {
+                        **_PORT_KEYS_UNSET,
                         "ifName": "lom1",
                         "port_id": 8802,
                         "ifAdminStatus": "up",
@@ -4232,7 +4268,11 @@ class TestSyncInterfacesViewPost:
         # Only the OOB row remains; the host port is gone from LibreNMS.
         cache.set(
             cache_key,
-            {"ports": [{"ifName": "eno1", "port_id": 8902, "ifAdminStatus": "up", "_source": "oob"}]},
+            {
+                "ports": [
+                    {**_PORT_KEYS_UNSET, "ifName": "eno1", "port_id": 8902, "ifAdminStatus": "up", "_source": "oob"}
+                ]
+            },
         )
 
         try:
@@ -4385,6 +4425,7 @@ class TestSyncInterfacesViewPost:
             {
                 "ports": [
                     {
+                        **_PORT_KEYS_UNSET,
                         "port_id": "0010",
                         "ifName": "newname",
                         "ifAdminStatus": "up",
@@ -4454,6 +4495,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view = self._make_view(_make_request())
         dev = make_device("oob-sync-host")
         oob_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "iDRAC-NIC",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 1000000000,
@@ -4479,6 +4521,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view = self._make_view()
         dev = make_device("sync-create")
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 1000000000,
@@ -4516,6 +4559,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         other_iface.save()
 
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 1000000000,
@@ -4546,7 +4590,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         _vc, (host, sibling) = make_virtual_chassis_members("selvalid")
         view = self._make_view(_make_request(post_data={"device_selection_10": str(sibling.pk)}))
 
-        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
+        view.sync_interface(host, {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
 
         assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=host, name="Gi0/1").exists()
@@ -4616,6 +4660,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         iface.save()
 
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 1000000000,
@@ -4650,6 +4695,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         other_iface.save()
 
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 1000000000,
@@ -4672,7 +4718,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         view = _sync_view()
         view._lookup_maps = {}
 
-        view.sync_interface(vm, {"ifName": "eth0", "port_id": None}, ["vlans"], "ifName", "eth0")
+        view.sync_interface(vm, {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": None}, ["vlans"], "ifName", "eth0")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
 
@@ -4686,7 +4732,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         matched.save()
         view = _sync_view()
         view._lookup_maps = {}
-        librenms_port = {"ifName": "renamed-in-librenms", "port_id": 55}
+        librenms_port = {**_PORT_KEYS_UNSET, "ifName": "renamed-in-librenms", "port_id": 55}
 
         view.sync_interface(vm, librenms_port, ["vlans"], "ifName", "renamed-in-librenms")
 
@@ -4713,10 +4759,13 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         """Real Interface: the LibreNMS→NetBox field mapping is applied and persisted; the real convert_speed_to_kbps runs (bps→kbps)."""
         from dcim.models import Interface
 
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
+
         view = self._make_view()
         dev = make_device("intf-attrs")
         interface = make_interface(dev, "Gi0/0")
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 1000000000,
@@ -4726,7 +4775,9 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, "1000base-t", [], "ifName", "Gi0/1")
+        InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
+
+        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1")
 
         reloaded = Interface.objects.get(pk=interface.pk)
         assert reloaded.name == "Gi0/1"
@@ -4747,6 +4798,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         interface.description = "keep-me"
         interface.save()
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 0,
@@ -4759,7 +4811,6 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         view.update_interface_attributes(
             interface,
             librenms_port,
-            "other",
             ["name", "type", "speed", "description", "mtu", "enabled", "mac_address"],
             "ifName",
             "Gi0/1",
@@ -4779,6 +4830,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         dev = make_device("intf-down")
         interface = make_interface(dev, "Gi0/0")
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": None,
             "ifSpeed": None,
@@ -4790,9 +4842,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "down",
         }
 
-        # netbox_type "other" (the real get_netbox_interface_type fallback); passing None would
-        # set the NOT-NULL type column to NULL — another real-save constraint the mock hid.
-        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1")
 
         assert Interface.objects.get(pk=interface.pk).enabled is False
 
@@ -4804,6 +4854,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         view = self._make_view()
         interface = make_interface(make_device("port-id-write"), "Gi0/0")
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": None,
@@ -4813,7 +4864,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1")
 
         interface = Interface.objects.get(pk=interface.pk)
         assert get_librenms_device_id(interface, "default", auto_save=False) == 42
@@ -4829,6 +4880,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         conflicting_owner.save(update_fields=["custom_field_data"])
         interface = make_interface(make_device("port-id-target"), "Gi0/0")
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": None,
@@ -4838,7 +4890,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1")
 
         interface = Interface.objects.get(pk=interface.pk)
         assert get_librenms_device_id(interface, "default", auto_save=False) is None
@@ -4849,6 +4901,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         view = _sync_view()
         interface = make_interface(make_device("ifalias-same-as-name"), "Gi0/1")
         librenms_port = {
+            **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": None,
@@ -4858,7 +4911,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, "other", ["mac_address"], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, ["mac_address"], "ifName", "Gi0/1")
 
         interface.refresh_from_db()
         assert interface.description == ""
@@ -4977,8 +5030,8 @@ class TestSyncLagAndParentRelationships:
         parent = self._vm_iface(vm, "eth0", 10)
         child = self._vm_iface(vm, "eth0.100", 11)
         ports_data = [
-            {"ifName": "eth0", "ifDescr": "eth0", "port_id": 10},
-            {"ifName": "eth0.100", "ifDescr": "eth0.100", "port_id": 11},
+            {**_PORT_KEYS_UNSET, "ifName": "eth0", "ifDescr": "eth0", "port_id": 10},
+            {**_PORT_KEYS_UNSET, "ifName": "eth0.100", "ifDescr": "eth0.100", "port_id": 11},
         ]
         relationships = {"lag_members": {}, "sub_interfaces": {11: 10}}
         view = self._make_view(selected_port_ids={11})
@@ -5012,9 +5065,9 @@ class TestSyncLagAndParentRelationships:
         agg = self._iface(device, "Po1", 100, itype="lag")
 
         ports_data = [
-            {"ifDescr": "Ethernet", "ifName": "Gi0/1", "port_id": 10},
-            {"ifDescr": "Ethernet", "ifName": "Gi0/2", "port_id": 11},
-            {"ifDescr": "Po1", "ifName": "Po1", "port_id": 100},
+            {**_PORT_KEYS_UNSET, "ifDescr": "Ethernet", "ifName": "Gi0/1", "port_id": 10},
+            {**_PORT_KEYS_UNSET, "ifDescr": "Ethernet", "ifName": "Gi0/2", "port_id": 11},
+            {**_PORT_KEYS_UNSET, "ifDescr": "Po1", "ifName": "Po1", "port_id": 100},
         ]
         relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
 
@@ -5063,8 +5116,8 @@ class TestSyncLagAndParentRelationships:
         agg = self._iface(device, "Po1", 100, itype="lag")
 
         ports_data = [
-            {"ifName": "Gi0/2", "port_id": 11},
-            {"ifName": "Po1", "port_id": 100},
+            {**_PORT_KEYS_UNSET, "ifName": "Gi0/2", "port_id": 11},
+            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100},
         ]
         relationships = {"lag_members": {11: 100}, "sub_interfaces": {}}
 
@@ -5080,8 +5133,8 @@ class TestSyncLagAndParentRelationships:
         member = self._iface(device, "Gi0/3", 12)
         agg = self._iface(device, "Po2", 101, itype="lag")
         ports_data = [
-            {"ifName": "Gi0/3", "port_id": "0012"},
-            {"ifName": "Po2", "port_id": 101},
+            {**_PORT_KEYS_UNSET, "ifName": "Gi0/3", "port_id": "0012"},
+            {**_PORT_KEYS_UNSET, "ifName": "Po2", "port_id": 101},
         ]
         relationships = {"lag_members": {12: 101}, "sub_interfaces": {}}
 
@@ -5157,9 +5210,9 @@ class TestSyncLagAndParentRelationships:
         agg = self._iface(device, "Po1", 100, itype="1000base-t")  # not yet a LAG
 
         ports_data = [
-            {"ifName": "virt0", "port_id": 10},
-            {"ifName": "Gi0/2", "port_id": 11},
-            {"ifName": "Po1", "port_id": 100},
+            {**_PORT_KEYS_UNSET, "ifName": "virt0", "port_id": 10},
+            {**_PORT_KEYS_UNSET, "ifName": "Gi0/2", "port_id": 11},
+            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100},
         ]
         relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
 
@@ -5326,6 +5379,8 @@ class TestSyncLagAndParentRelationships:
 
     def test_cross_page_parent_resolves_to_port_keyed_member_override(self, db):
         """A cross-page parent's stable target override pins it to that member."""
+        from django.http import QueryDict
+
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
 
         page_dev = make_device("vc-page-master")
@@ -5335,12 +5390,12 @@ class TestSyncLagAndParentRelationships:
         view = self._make_view()
         # The JS submits the off-page parent's member (from the child row's live .vc-member-select)
         # keyed by the parent's stable port_id.
-        view.request.POST = {"device_selection_100": str(member2.id)}
+        view.request.POST = QueryDict(f"device_selection_100={member2.id}")
 
         # Port-keyed override wins → the parent resolves onto member2.
         assert view._resolve_row_target_device(page_dev, port_id="100").id == member2.id
-        # No override for this port and no name selection → the page device (unchanged default).
-        assert view._resolve_row_target_device(page_dev, port_id="999").id == page_dev.id
+        # No override and no inferred member: the chassis row has no owner, never the page device.
+        assert view._resolve_row_target_device(page_dev, port_id="999") is None
 
     def test_oob_row_excluded_from_relationship_sync(self, db):
         """An OOB-controller row sharing a selected host display name must not contribute its port_id, or the LAG pass would link the hidden controller interface instead of the host."""
@@ -6356,8 +6411,8 @@ def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
         cache_key,
         {
             "ports": [
-                {"port_id": 10, "ifName": member.name},
-                {"port_id": 20, "ifName": aggregate.name},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": aggregate.name},
             ],
             "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
         },

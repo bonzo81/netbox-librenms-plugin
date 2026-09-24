@@ -1,3 +1,4 @@
+import json
 import logging
 
 from django.contrib import messages
@@ -12,6 +13,7 @@ from netbox_librenms_plugin.constants import (
     REPORTED_NAME_PORT_COLLISION_REASON,
 )
 from netbox_librenms_plugin.interface_diff import interface_enabled_from_port
+from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, interface_rules_for_request
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
@@ -579,6 +581,9 @@ class BaseInterfaceTableView(
         ports_data = []
         table = None
         netbox_only_interfaces = []
+        ignored_count = 0
+        blocked_port_ids = []
+        show_ignored = "1" in (request.GET.get("interfaces_show_ignored"), request.POST.get("interfaces_show_ignored"))
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
@@ -791,6 +796,7 @@ class BaseInterfaceTableView(
                 can_write=can_write_relationships,
             )
 
+            rules = interface_rules_for_request(request)
             target_device_ids = {}
             for port in ports_data:
                 port_id = normalize_librenms_port_id(port.get("port_id"))
@@ -870,16 +876,26 @@ class BaseInterfaceTableView(
                 port["enabled"] = interface_enabled_from_port(port)
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    chassis_member = resolve_interface_row_device(
+                    # The rules read the owner's platform, so an unresolved host row decides nothing.
+                    # An OOB row belongs to the page device, as the writer holds.
+                    rule_owner = resolve_interface_row_device(
                         obj,
                         port,
                         interface_name_field,
                         interfaces_by_port_id=interfaces_by_port_id,
                         members_by_position=members_by_position,
                         members_by_id=members_by_id,
-                    )
+                        return_device_on_failure=False,
+                    ) or (obj if port.get("_source") == OOB_INVENTORY_SOURCE else None)
+                    chassis_member = rule_owner or obj
                 else:
-                    chassis_member = obj
+                    rule_owner = chassis_member = obj
+                # The writer's own check, so a row never offers a sync the writer refuses.
+                port["rule_decision"] = (
+                    rules.check_interface_write(port, platform_id=rule_owner.platform_id)
+                    if rule_owner is not None
+                    else None
+                )
 
                 netbox_interface = resolve_relationship_row(
                     relationship_context,
@@ -918,7 +934,25 @@ class BaseInterfaceTableView(
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, row_lookup_maps)
 
-            table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
+            # Every port above fed the matching and naming. Only now are ignored rows left out, and
+            # before pagination, so the page counts only the rows it shows.
+            ignored = [
+                port["rule_decision"] is not None and port["rule_decision"].kind is RuleDecisionKind.IGNORE
+                for port in ports_data
+            ]
+            ignored_count = sum(ignored)
+            table_rows = (
+                ports_data
+                if show_ignored
+                else [port for port, is_ignored in zip(ports_data, ignored, strict=True) if not is_ignored]
+            )
+            # Every row the write check refuses, or that has no owner: the browser walk skips them.
+            blocked_port_ids = [
+                normalize_librenms_port_id(port.get("port_id"))
+                for port in ports_data
+                if port["rule_decision"] is None or decision_reason(port["rule_decision"]) is not None
+            ]
+            table = self.get_table(table_rows, obj, interface_name_field, vlan_groups=vlan_groups)
             table.allowed_vc_member_ids = actionable_owner_ids
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
             # buttons (the bulk form is already hidden by the template; the row buttons POST
@@ -987,4 +1021,8 @@ class BaseInterfaceTableView(
             "relationship_diagnostics": relationship_diagnostics,
             "hidden_ipam_permissions": hidden_ipam_permissions,
             "vlan_scope_incomplete": vlan_scope_incomplete,
+            "show_ignored": show_ignored,
+            "ignored_count": ignored_count,
+            # The browser's related-row walk skips these, on this page and on every other.
+            "blocked_port_ids_json": json.dumps([str(port_id) for port_id in blocked_port_ids if port_id is not None]),
         }

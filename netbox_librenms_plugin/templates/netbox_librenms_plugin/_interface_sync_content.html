@@ -28,7 +28,7 @@
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}
-<div data-interface-origin-device-id="{{ interface_sync.object.pk }}">
+<div data-interface-origin-device-id="{{ interface_sync.object.pk }}" data-blocked-port-ids="{{ interface_sync.blocked_port_ids_json }}">
     {% comment %}
     No POST form in migrated mode, but the interface table still renders interactive
     relationship/VC-member dropdowns whose verify-interface POST reads the token via
@@ -53,6 +53,7 @@
 {# htmx swaps the tab in place, so the page, page size and scroll position survive; method/action stay as the no-JS fallback. #}
 <form method="post"
     data-interface-origin-device-id="{{ interface_sync.object.pk }}"
+    data-blocked-port-ids="{{ interface_sync.blocked_port_ids_json }}"
     action="{{ sync_url }}?interface_name_field={{ interface_name_field }}"
     hx-post="{{ sync_url }}?interface_name_field={{ interface_name_field }}"
     hx-target="#interface-sync-content" hx-swap="innerHTML" hx-sync="#interface-sync-content:drop">
@@ -63,6 +64,7 @@
     <input type="hidden" name="{{ table.prefix }}page" value="{{ table.page.number }}">
     <input type="hidden" name="{{ table.prefix }}per_page" value="{{ table.paginator.per_page }}">
     {% endif %}{% endwith %}
+    {% if interface_sync.show_ignored %}<input type="hidden" name="interfaces_show_ignored" value="1">{% endif %}
 {% endif %}
     {% endwith %}
     {% block table_actions %}
@@ -181,6 +183,15 @@
                         Bulk Edit VC Member
                     </button>
                     {% endif %}
+                    {% if interface_sync.ignored_count or interface_sync.show_ignored %}
+                    {# The toggle starts again at page 1: the page count changes with it. #}
+                    <a href="?tab=interfaces{% if interface_sync.server_key %}&server_key={{ interface_sync.server_key|urlencode }}{% endif %}&interfaces_per_page={{ interface_sync.table.paginator.per_page }}&interface_name_field={{ interface_name_field }}{% if not interface_sync.show_ignored %}&interfaces_show_ignored=1{% endif %}"
+                        class="btn btn-sm btn-outline-secondary ms-2{% if interface_sync.show_ignored %} active{% endif %}"
+                        id="interfaces-show-ignored-toggle" aria-pressed="{% if interface_sync.show_ignored %}true{% else %}false{% endif %}"
+                        title="{% if interface_sync.show_ignored %}Hide the ports that interface rules ignore{% else %}Show the ports that interface rules ignore{% endif %}">
+                        <i class="mdi mdi-eye-off-outline me-1"></i>{{ interface_sync.ignored_count }} ignored
+                    </a>
+                    {% endif %}
                     {% if interface_sync.netbox_only_interfaces %}
                     <a href="#" class="ms-2 text-warning text-decoration-none netbox-only-link" data-bs-toggle="modal"
                         data-bs-target="#netboxOnlyInterfacesModal"
@@ -241,6 +252,12 @@
                     max-width: 100%;
                 }
 
+                /* A row the interface rules ignore is shown greyed, and only on request. */
+                #librenms-interface-table tr[data-rule-state="ignored"] > td,
+                #librenms-interface-table-vm tr[data-rule-state="ignored"] > td {
+                    opacity: 0.55;
+                }
+
                 /* NetBox-only interfaces link styling */
                 .netbox-only-link {
                     cursor: pointer;
@@ -254,9 +271,9 @@
             </style>
 
             <div class="card">
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table show_ignored=interface_sync.show_ignored %}
                 {% include 'inc/table.html' with table=interface_sync.table %}
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table show_ignored=interface_sync.show_ignored %}
             </div>
         </div>
     </div>

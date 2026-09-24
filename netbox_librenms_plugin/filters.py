@@ -1,5 +1,5 @@
 import django_filters
-from dcim.models import Manufacturer
+from dcim.models import Manufacturer, Platform
 from django.db.models import Q
 
 from .models import (
@@ -25,12 +25,29 @@ class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
     # but the filter form submits librenms_type — causing silent filter failures.
     librenms_type = django_filters.CharFilter(lookup_expr="icontains")
     description = django_filters.CharFilter(lookup_expr="icontains")
+    # Searches the stored pattern text; it never runs the regex.
+    name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    platform_id = django_filters.ModelChoiceFilter(
+        field_name="platform",
+        queryset=Platform.objects.all(),
+        label="Platform",
+    )
+    platform__isnull = django_filters.BooleanFilter(field_name="platform", lookup_expr="isnull")
 
     class Meta:
         """Meta options for InterfaceTypeMappingFilterSet."""
 
         model = InterfaceTypeMapping
-        fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
+        fields = [
+            "action",
+            "platform_id",
+            "platform__isnull",
+            "name_pattern",
+            "librenms_type",
+            "librenms_speed",
+            "netbox_type",
+            "description",
+        ]
 
 
 class DeviceTypeMappingFilterSet(django_filters.FilterSet):

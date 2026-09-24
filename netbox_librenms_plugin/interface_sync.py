@@ -14,7 +14,6 @@ from netbox_librenms_plugin.interface_diff import (
     syncable_mac_address,
     synced_description,
 )
-from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     coerce_interface_mtu,
@@ -24,7 +23,6 @@ from netbox_librenms_plugin.utils import (
     interface_name_fallback_matches_port,
     interface_name_rejection_reason,
     normalize_librenms_port_id,
-    select_interface_type_mapping,
     set_librenms_device_id,
 )
 
@@ -49,14 +47,10 @@ def _bound_interface_name_is_occupied(interface, synced_name, port_id, server_ke
     return type(interface).objects.filter(**owner_filter, name=synced_name).exclude(pk=interface.pk).exists()
 
 
-def get_netbox_interface_type(librenms_interface, *, speed_converter=convert_speed_to_kbps):
-    """Return the NetBox interface type for one LibreNMS port, or None when nothing maps it."""
-    speed = speed_converter(librenms_interface.get("ifSpeed"))
-    # One type's rows are a handful at most, and resolving them in Python keeps this and the
-    # interface table on the same rule.
-    mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface.get("ifType"))
-    mapping = select_interface_type_mapping(mappings, speed)
-    return mapping.netbox_type if mapping else None
+def interface_owner_platform_id(interface):
+    """Return the platform of the Device or VirtualMachine that owns an interface."""
+    owner = interface.device if isinstance(interface, Interface) else interface.virtual_machine
+    return owner.platform_id
 
 
 def assign_interface_mac(interface, mac_address):
@@ -93,20 +87,26 @@ def update_interface_from_port(  # noqa: C901
     interface,
     librenms_interface,
     *,
+    rules,
     synced_name,
     server_key,
     interface_name_field,
     exclude_columns=(),
-    netbox_type=None,
     speed_converter=convert_speed_to_kbps,
     port_owner=LOOK_UP_PORT_OWNER,
 ):
     """
     Update one Interface or VMInterface and return whether NetBox changed.
 
+    ``rules`` decides the port for the interface's owner before anything is written, so an
+    ignored or ambiguous port, or an incomplete port record, raises ``PortSyncBlocked``.
+
     Pass ``port_owner`` only when the caller already looked the port up with
     ``find_interface_by_librenms_port_id`` for this row, so the row reads its owner once.
     """
+    netbox_type = rules.decide_interface_write(
+        librenms_interface, platform_id=interface_owner_platform_id(interface)
+    ).netbox_type
     is_device_interface = isinstance(interface, Interface)
     tracked_fields = (
         "name",
@@ -204,13 +204,21 @@ def resolve_or_create_interface_from_port(  # noqa: C901
     owner,
     librenms_interface,
     *,
+    rules,
     server_key,
     interface_name_field,
     changeable_queryset,
     viewable_queryset,
     speed_converter=convert_speed_to_kbps,
 ):
-    """Resolve or create one interface from an unambiguous LibreNMS port row."""
+    """
+    Resolve or create one interface from an unambiguous LibreNMS port row.
+
+    Raises:
+        PortSyncBlocked: Before any lookup or write, when ``rules`` block the port for ``owner``.
+        ValueError: When the port cannot be resolved to one interface safely.
+
+    """
     if isinstance(owner, Device):
         model = Interface
         owner_filter = {"device": owner}
@@ -221,6 +229,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         owner_id_field = "virtual_machine_id"
     else:
         raise ValueError("Unsupported interface owner type.")
+    rules.decide_interface_write(librenms_interface, platform_id=owner.platform_id)
 
     rejection = interface_name_rejection_reason(librenms_interface, interface_name_field, model)
     if rejection is not None:
@@ -277,14 +286,13 @@ def resolve_or_create_interface_from_port(  # noqa: C901
             elif not changeable_queryset.filter(pk=interface.pk).exists():
                 raise ValueError("The new NetBox interface is outside your change scope.")
 
-    netbox_type = get_netbox_interface_type(librenms_interface, speed_converter=speed_converter)
     update_interface_from_port(
         interface,
         librenms_interface,
+        rules=rules,
         synced_name=interface_name,
         server_key=server_key,
         interface_name_field=interface_name_field,
-        netbox_type=netbox_type,
         speed_converter=speed_converter,
         port_owner=by_id,
     )

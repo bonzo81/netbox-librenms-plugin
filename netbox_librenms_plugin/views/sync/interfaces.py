@@ -29,10 +29,17 @@ from netbox_librenms_plugin.interface_relationships import (
     relationship_candidate_q,
     resolve_interface_by_port_id,
 )
+from netbox_librenms_plugin.interface_rules import (
+    PortSyncBlocked,
+    RuleDecisionKind,
+    decision_reason,
+    interface_rules_for_request,
+    rule_names,
+)
 from netbox_librenms_plugin.interface_sync import (
     LOOK_UP_PORT_OWNER,
     assign_interface_mac,
-    get_netbox_interface_type,
+    interface_owner_platform_id,
     update_interface_from_port,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -44,6 +51,7 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     build_migrated_context,
+    coerce_model_pk,
     convert_speed_to_kbps,
     find_interface_by_librenms_port_id,
     get_interface_name_field,
@@ -73,6 +81,38 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ConflictingRowTargetError(Exception):
+    """A sync POST names more than one Virtual Chassis member for one row."""
+
+
+class _DuplicatedSelectionError(Exception):
+    """The related-row walk reached a port ID the cached snapshot holds more than once."""
+
+
+_DUPLICATED_SELECTION_MESSAGE = (
+    "Selected LibreNMS port IDs are duplicated in the cached interface data. "
+    "Refresh LibreNMS data and resolve the duplicate IDs before syncing."
+)
+
+
+def _duplicated_port_ids(ports_data):
+    """Return the port IDs the snapshot holds more than once, or on both the host and the OOB side."""
+    host_port_id_counts = {}
+    port_id_sources = {}
+    for port in ports_data:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is not None:
+            is_oob = port.get("_source") == OOB_INVENTORY_SOURCE
+            port_id_sources.setdefault(port_id, set()).add(is_oob)
+            if not is_oob:
+                host_port_id_counts[port_id] = host_port_id_counts.get(port_id, 0) + 1
+    return {
+        port_id
+        for port_id, sources in port_id_sources.items()
+        if host_port_id_counts.get(port_id, 0) > 1 or len(sources) > 1
+    }
 
 
 @dataclass(frozen=True)
@@ -125,7 +165,7 @@ class SyncInterfacesView(
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
-    def post(self, request, object_type, object_id):  # noqa: C901
+    def post(self, request, object_type, object_id):
         """Sync selected interfaces from LibreNMS into NetBox."""
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
@@ -150,62 +190,29 @@ class SyncInterfacesView(
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return self._tab_response(request, object_type, obj, interface_name_field, None)
+            return self._tab_response(request, object_type, interface_name_field, None)
         self._post_server_key = server_key
         selected_port_ids = self.get_selected_port_ids(request)
         exclude_columns = request.POST.getlist("exclude_columns")
 
         if selected_port_ids is None:
-            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         visible_port_ids = selected_port_ids
         self._selected_port_ids = set(visible_port_ids)
         self._auto_selected_port_ids = set()
 
         ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
-            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
 
         relationships = self._get_cached_relationships(obj, server_key)
-        lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
-        if request.POST.get("auto_select_lag_members"):
-            while True:
-                related_rows = {
-                    member_id
-                    for member_id, aggregate_id in lag_members.items()
-                    if aggregate_id in self._selected_port_ids
-                }
-                related_rows.update(
-                    parent_id for child_id, parent_id in sub_interfaces.items() if child_id in self._selected_port_ids
-                )
-                related_rows.update(
-                    bridge_id for member_id, bridge_id in bridge_members.items() if member_id in self._selected_port_ids
-                )
-                added = related_rows - self._selected_port_ids
-                if not added:
-                    break
-                self._selected_port_ids.update(added)
-                self._auto_selected_port_ids.update(added - visible_port_ids)
-        host_port_id_counts = {}
-        port_id_sources = {}
-        for port in ports_data:
-            port_id = normalize_librenms_port_id(port.get("port_id"))
-            if port_id is not None:
-                is_oob = port.get("_source") == OOB_INVENTORY_SOURCE
-                port_id_sources.setdefault(port_id, set()).add(is_oob)
-                if not is_oob:
-                    host_port_id_counts[port_id] = host_port_id_counts.get(port_id, 0) + 1
-        duplicated_selected_ids = sorted(
-            port_id
-            for port_id in self._selected_port_ids
-            if host_port_id_counts.get(port_id, 0) > 1 or len(port_id_sources.get(port_id, ())) > 1
+        # The related-row walk runs under the owner locks (_lock_sync_scope), with the writer's state.
+        self._related_walk = (
+            normalize_relationship_maps(relationships) if request.POST.get("auto_select_lag_members") else None
         )
-        if duplicated_selected_ids:
-            messages.warning(
-                request,
-                "Selected LibreNMS port IDs are duplicated in the cached interface data. "
-                "Refresh LibreNMS data and resolve the duplicate IDs before syncing.",
-            )
-            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
+        if self._selected_port_ids & _duplicated_port_ids(ports_data):
+            messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         # Resolve inferred off-page owners only after the chassis and its members are locked.
         # A pre-lock position guess can become stale if membership positions change concurrently.
         self._auto_selected_target_ids = {}
@@ -240,6 +247,10 @@ class SyncInterfacesView(
                     )
                 finally:
                     self.__dict__.pop("_locked_target_devices", None)
+        except _DuplicatedSelectionError:
+            # The walk reached a duplicated port before anything was written; the atomic block rolled back.
+            messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         except IntegrityError:
             # This block is the outermost transaction, and Postgres validates Django's DEFERRABLE
             # INITIALLY DEFERRED foreign keys at its COMMIT. A related row deleted mid-sync
@@ -250,7 +261,7 @@ class SyncInterfacesView(
                 "The sync was rolled back by a concurrent change to a related interface. "
                 "Refresh the LibreNMS data and try again.",
             )
-            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
 
         if self._skipped_conflicts:
             skipped = ", ".join(self._skipped_conflicts)
@@ -284,20 +295,21 @@ class SyncInterfacesView(
         else:
             cache_transition = None
         return apply_transition_to_response(
-            request, self._tab_response(request, object_type, obj, interface_name_field, server_key), cache_transition
+            request, self._tab_response(request, object_type, interface_name_field, server_key), cache_transition
         )
 
-    def _tab_response(self, request, object_type, obj, interface_name_field, server_key):
+    def _tab_response(self, request, object_type, interface_name_field, server_key):
         """
         Return the interfaces tab after a sync or rebind POST.
 
         An htmx submit gets the ``#interface-sync-content`` fragment in place, so the page, the page
-        size and the scroll position survive. A plain submit gets a redirect to the tab.
+        size and the scroll position survive. A plain submit gets a redirect to the tab. The tab is
+        rendered from ``self.object``: the page object as the sync locked and decided it, so the
+        render reads the platform the writer read.
 
         Args:
             request (HttpRequest): The sync or rebind request.
             object_type (str): ``device`` or ``virtualmachine``.
-            obj (Device | VirtualMachine): The page object.
             interface_name_field (str): Port field that contains the interface name.
             server_key (str | None): The validated POSTed server key, or None when it names no server.
 
@@ -305,6 +317,7 @@ class SyncInterfacesView(
             HttpResponse: The fragment, or a redirect to the interfaces tab.
 
         """
+        obj = self.object
         if request.headers.get("HX-Request") != "true":
             url_name = (
                 "dcim:device_librenms_sync"
@@ -461,6 +474,75 @@ class SyncInterfacesView(
             if target is not None:
                 targets[port_id] = target.pk
         return targets
+
+    def _expand_related_rows(self, obj, ports_data, interface_name_field, *, inferred_ids, device_for):
+        """
+        Add the related rows the walk reaches to the selection, deciding each one as the writer will.
+
+        The caller holds the owner locks and passes their state. A row is added, and walked through,
+        only when ``_row_owner`` gives it an owner and ``check_interface_write`` allows the write.
+        A related row it refuses is reported with the writer's reason.
+
+        Args:
+            obj (Device | VirtualMachine): The locked page object.
+            ports_data (list[dict]): The cached snapshot rows.
+            interface_name_field (str): Port field that contains the selected interface name.
+            inferred_ids (dict[int, int]): Member IDs inferred under the lock, by port ID.
+            device_for (callable | None): Returns the locked member Device for an ID.
+
+        Raises:
+            _DuplicatedSelectionError: The walk reaches a port the snapshot holds more than once.
+
+        """
+        if getattr(self, "_related_walk", None) is None:
+            return
+        lag_members, sub_interfaces, bridge_members = self._related_walk
+        rules = interface_rules_for_request(self.request)
+        duplicated = _duplicated_port_ids(ports_data)
+        ports_by_id = {
+            port_id: port
+            for port in ports_data
+            if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
+        }
+        oob_port_ids = getattr(self, "_oob_port_ids", set())
+        host_inferred = {port_id: target for port_id, target in inferred_ids.items() if port_id not in oob_port_ids}
+        visible_port_ids = set(self._selected_port_ids)
+
+        def refusal(port_id, *, auto_added):
+            port = ports_by_id.get(port_id)
+            if port is None:
+                return "not in the cached LibreNMS data; refresh the data"
+            owner = self._row_owner(
+                obj,
+                port_id,
+                auto_added=auto_added,
+                inferred_ids=inferred_ids if auto_added else host_inferred,
+                oob_port_ids=oob_port_ids,
+                device_for=device_for,
+            )
+            if owner is None:
+                return "selected target unavailable"
+            return decision_reason(rules.check_interface_write(port, platform_id=owner.platform_id))
+
+        frontier = {port_id for port_id in visible_port_ids if refusal(port_id, auto_added=False) is None}
+        refused = set()
+        while frontier:
+            related_rows = {member_id for member_id, aggregate_id in lag_members.items() if aggregate_id in frontier}
+            related_rows.update(parent_id for child_id, parent_id in sub_interfaces.items() if child_id in frontier)
+            related_rows.update(bridge_id for member_id, bridge_id in bridge_members.items() if member_id in frontier)
+            frontier = set()
+            for port_id in related_rows - self._selected_port_ids - refused:
+                if port_id in duplicated:
+                    raise _DuplicatedSelectionError(port_id)
+                reason = refusal(port_id, auto_added=True)
+                if reason is None:
+                    frontier.add(port_id)
+                    continue
+                refused.add(port_id)
+                name = (ports_by_id.get(port_id) or {}).get(interface_name_field) or port_id
+                self._skipped_conflicts.append(f"related row {name} not synced: {reason}")
+            self._selected_port_ids.update(frontier)
+            self._auto_selected_port_ids.update(frontier)
 
     def _get_cached_relationships(self, obj, server_key):
         """Return port_stack_relationships from the cached port data, or empty dict."""
@@ -685,6 +767,14 @@ class SyncInterfacesView(
         )
         if member is None or (member.lag_id == aggregate.pk and not _lag_aggregate_needs_promotion(aggregate)):
             return
+        decisions = self._bulk_edge_decisions(context, "LAG", (port_id, member), (raw_lag, aggregate))
+        if decisions is None:
+            return
+        if _lag_aggregate_needs_promotion(aggregate) and (conflict := _promotion_conflict(decisions[1], "lag")):
+            self._record_skipped_conflict(
+                member.name, f"LAG link to {aggregate.name} not synced; {aggregate.name}: {conflict}"
+            )
+            return
         if aggregate.type != "lag" and "type" in context.excluded_columns:
             logger.warning(
                 "Bulk sync: skipping LAG link %s -> %s because interface type is excluded",
@@ -710,6 +800,12 @@ class SyncInterfacesView(
             return
         child, parent = self._resolve_bulk_relationship(context, port_id, raw_parent, expected_owner, "parent")
         if child is None or (child.parent_id == parent.pk and not _parent_child_needs_promotion(child)):
+            return
+        decisions = self._bulk_edge_decisions(context, "parent", (port_id, child), (raw_parent, parent))
+        if decisions is None:
+            return
+        if _parent_child_needs_promotion(child) and (conflict := _promotion_conflict(decisions[0], "virtual")):
+            self._record_skipped_conflict(child.name, f"parent link to {parent.name} not synced; {conflict}")
             return
         if _parent_child_needs_promotion(child) and "type" in context.excluded_columns:
             logger.warning(
@@ -737,16 +833,46 @@ class SyncInterfacesView(
         member, bridge = self._resolve_bulk_relationship(context, port_id, raw_bridge, expected_owner, "bridge")
         if member is None or member.bridge_id == bridge.pk:
             return
+        if self._bulk_edge_decisions(context, "bridge", (port_id, member), (raw_bridge, bridge)) is None:
+            return
         if self._apply_relationship_edge(member, "bridge", bridge, None, "bridge"):
             self._mutated = True
+
+    def _bulk_edge_decisions(self, context, label, source, related):
+        """
+        Decide both ends of one bulk edge; a blocked end skips the edge and keeps the current link.
+
+        A blocked source row already reported its own skip, so only a blocked related end is reported.
+
+        Args:
+            context (_BulkRelationshipContext): The locked bulk pass inputs.
+            label (str): The relationship label for the message.
+            source (tuple): The source ``(port_id, interface)``.
+            related (tuple): The related ``(port_id, interface)``.
+
+        Returns:
+            tuple[RuleDecision, RuleDecision] | None: Both decisions, or None when the edge is skipped.
+
+        """
+        (source_port_id, source_iface), (related_port_id, related_iface) = source, related
+        decisions, blocked_end, reason = _relationship_decisions(
+            interface_rules_for_request(self.request),
+            (context.port_by_id.get(str(normalize_librenms_port_id(source_port_id))), source_iface),
+            (context.port_by_id.get(str(normalize_librenms_port_id(related_port_id))), related_iface),
+        )
+        if reason is not None and blocked_end is related_iface:
+            self._record_skipped_conflict(
+                source_iface.name, f"{label} link to {related_iface.name} not synced; {related_iface.name}: {reason}"
+            )
+        return decisions
 
     @staticmethod
     def _prepare_bulk_lag_aggregate(agg_iface):
         """
         LAG-pass hook: promote the aggregate to type=lag and return ``(persist, restore)`` or None.
 
-        member_iface.clean() only accepts the link when the aggregate is type=lag, so it
-        is bumped in memory before validation. The aggregate object is reused across rows via
+        NetBox's Interface.clean() does not check the aggregate's type, so the plugin promotes it
+        to keep a member off a non-LAG aggregate. The aggregate object is reused across rows via
         the shared interface index, so a member whose link later fails validation must restore
         the in-memory type. Otherwise, a subsequent valid member sharing this aggregate would
         skip the save() and leave the aggregate's type stale in the DB. The restore path is why
@@ -1042,11 +1168,11 @@ class SyncInterfacesView(
             Device | VirtualMachine | None: The locked page object, or None when it is unavailable.
 
         """
-        selected_port_ids = getattr(self, "_selected_port_ids", set())
         if isinstance(obj, VirtualMachine):
             obj = self.restricted_queryset(VirtualMachine).select_for_update(of=("self",)).filter(pk=obj.pk).first()
             if obj is not None:
                 self.object = obj
+                self._expand_related_rows(obj, ports_data, interface_name_field, inferred_ids={}, device_for=None)
             return obj
         if not isinstance(obj, Device):
             return obj
@@ -1073,6 +1199,12 @@ class SyncInterfacesView(
             if port.get("_source") != OOB_INVENTORY_SOURCE
             and (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
         }
+        self._oob_port_ids = snapshot_port_ids - host_port_ids
+        # Decided from the locked rows, so the walk and the writer read one owner and platform.
+        self._expand_related_rows(
+            obj, ports_data, interface_name_field, inferred_ids=self._snapshot_target_ids, device_for=locked_targets.get
+        )
+        selected_port_ids = getattr(self, "_selected_port_ids", set())
         self._auto_selected_target_ids = {
             port_id: target_id
             for port_id, target_id in self._snapshot_target_ids.items()
@@ -1259,15 +1391,75 @@ class SyncInterfacesView(
             }
         return locked
 
-    def _selected_row_target_id(self, port_id):
-        """Return the target override keyed by the stable LibreNMS port ID."""
-        port_id = normalize_librenms_port_id(port_id)
-        if port_id is None:
+    def _posted_row_target(self, port_id):
+        """
+        Return the one member the POST selects for a row, or None when it selects none.
+
+        Raises:
+            _ConflictingRowTargetError: The POST names more than one member for the row.
+
+        """
+        posted = self.request.POST.getlist(f"device_selection_{port_id}")
+        if len(posted) > 1:
+            raise _ConflictingRowTargetError(port_id)
+        return posted[0] if posted else None
+
+    def _row_owner(self, obj, port_id, *, auto_added, inferred_ids, oob_port_ids, device_for):
+        """
+        Return the device one row writes to, under the writer's owner rule, or None when it has none.
+
+        The writer and the related-row walk both call this, so the walk cannot decide a row with
+        another owner than the writer uses.
+
+        Args:
+            obj (Device | VirtualMachine): The page object; a VM owns every row.
+            port_id (int): The row's normalized LibreNMS port ID.
+            auto_added (bool): The walk added the row: only its inferred member counts, never a
+                posted member value.
+            inferred_ids (dict[int, int]): Inferred member IDs by port ID.
+            oob_port_ids (set[int]): OOB rows, which belong to the page device.
+            device_for (callable | None): Returns the chassis member Device the caller may target
+                for an ID, or None.
+
+        Returns:
+            Device | VirtualMachine | None: The owner, or None when the row has no valid owner.
+
+        """
+        if not isinstance(obj, Device):
+            return obj
+        if auto_added:
+            selected_device_id = inferred_ids.get(port_id)
+            if selected_device_id is None:
+                return None
+        else:
+            try:
+                selected_device_id = self._posted_row_target(port_id) or inferred_ids.get(port_id)
+            except _ConflictingRowTargetError:
+                return None
+        if not selected_device_id:
+            # An OOB row belongs to the page device. A host row of a chassis with no selected or
+            # inferred member has no owner: the interface rules would read the wrong platform.
+            return obj if obj.virtual_chassis_id is None or port_id in oob_port_ids else None
+        target_device = device_for(coerce_model_pk(selected_device_id)) if device_for else None
+        if target_device is None:
             return None
-        auto_targets = getattr(self, "_auto_selected_target_ids", {})
-        if port_id in getattr(self, "_auto_selected_port_ids", set()):
-            return auto_targets.get(port_id)
-        return self.request.POST.get(f"device_selection_{port_id}") or auto_targets.get(port_id)
+        # Re-check that the selected device is the page device or stays in the same virtual chassis.
+        if target_device.id != obj.id and (
+            obj.virtual_chassis_id is None or target_device.virtual_chassis_id != obj.virtual_chassis_id
+        ):
+            return None
+        return target_device
+
+    def _target_device_for(self, device_id):
+        """Return the locked target Device for an ID, or the caller's scoped Device before the lock."""
+        if device_id is None:
+            return None
+        locked_targets = getattr(self, "_locked_target_devices", None)
+        if locked_targets is not None:
+            return locked_targets.get(device_id)
+        # Scoped: the id comes from the POST, and VC membership proves where the device sits,
+        # not that the caller's grant covers it.
+        return self.restricted_queryset(Device).filter(pk=device_id).first()
 
     def _resolve_row_target_device(self, obj, port_id=None):
         """
@@ -1282,37 +1474,20 @@ class SyncInterfacesView(
             port_id: The row's stable LibreNMS port_id, when known (keys the override).
 
         Returns:
-            The selected VC member Device when valid, *obj* when no target was selected,
-            or None when an explicit target is invalid or inaccessible.
+            The selected or inferred VC member Device when valid, *obj* for a Device outside a
+            chassis or an OOB row, or None when a chassis host row has no member or an explicit
+            target is invalid or inaccessible.
 
         """
-        if not isinstance(obj, Device):
-            return obj
         normalized_port_id = normalize_librenms_port_id(port_id)
-        if normalized_port_id in getattr(self, "_auto_selected_port_ids", set()) and normalized_port_id not in getattr(
-            self, "_auto_selected_target_ids", {}
-        ):
-            return None
-        selected_device_id = self._selected_row_target_id(port_id)
-        if not selected_device_id:
-            return obj
-        try:
-            # Scoped: the id comes from the POST, and VC membership proves where the device
-            # sits, not that the caller's grant covers it.
-            locked_targets = getattr(self, "_locked_target_devices", None)
-            if locked_targets is None:
-                target_device = self.restricted_queryset(Device).get(id=selected_device_id)
-            else:
-                target_device = locked_targets[int(selected_device_id)]
-        except (Device.DoesNotExist, KeyError, ValueError, TypeError):
-            return None
-        # Both rows are current and locked in the HTTP sync path. Re-check that the
-        # selected device is the page device or remains in the same virtual chassis.
-        if target_device.id != obj.id and (
-            obj.virtual_chassis_id is None or target_device.virtual_chassis_id != obj.virtual_chassis_id
-        ):
-            return None
-        return target_device
+        return self._row_owner(
+            obj,
+            normalized_port_id,
+            auto_added=normalized_port_id in getattr(self, "_auto_selected_port_ids", set()),
+            inferred_ids=getattr(self, "_auto_selected_target_ids", {}),
+            oob_port_ids=getattr(self, "_oob_port_ids", set()),
+            device_for=self._target_device_for,
+        )
 
     def sync_interface(
         self,
@@ -1338,10 +1513,19 @@ class SyncInterfacesView(
         if isinstance(obj, Device):
             target_device = self._resolve_row_target_device(obj, port_id=port_id)
             if target_device is None:
-                # The user explicitly selected a target. If it is stale or outside the
-                # caller's grant, do not silently sync the row onto the page device.
-                self._record_skipped_conflict(interface_name, "selected target unavailable")
+                # Never sync the row onto the page device instead: a stale or out-of-scope choice,
+                # or no member at all, leaves the row without an owner.
+                self._record_skipped_conflict(interface_name, self._missing_target_reason(port_id))
                 return
+        # The rules decide the port for its owner before the resolvers below can create anything.
+        owner = target_device if target_device is not None else obj
+        try:
+            interface_rules_for_request(self.request).decide_interface_write(
+                librenms_interface, platform_id=owner.platform_id
+            )
+        except PortSyncBlocked as blocked:
+            self._record_skipped_conflict(interface_name or librenms_interface.get(interface_name_field), str(blocked))
+            return
         # One ownership check serves the resolver and the field writer for this row.
         try:
             port_owner = find_interface_by_librenms_port_id(port_id, server_key) if port_id is not None else None
@@ -1391,17 +1575,12 @@ class SyncInterfacesView(
         if getattr(self, "_synced_count", None) is not None:
             self._synced_count += 1
 
-        netbox_type = None
-        if isinstance(obj, Device):
-            netbox_type = self.get_netbox_interface_type(librenms_interface)
-
         current_name = interface.name
         changed = bool(getattr(interface, "_librenms_sync_created", False))
         changed = (
             self.update_interface_attributes(
                 interface,
                 librenms_interface,
-                netbox_type,
                 exclude_columns,
                 interface_name_field,
                 synced_name,
@@ -1419,6 +1598,18 @@ class SyncInterfacesView(
             changed = self._sync_interface_vlans(interface, librenms_interface) or changed
         if changed and getattr(self, "_mutated", None) is not None:
             self._mutated = True
+
+    def _missing_target_reason(self, port_id):
+        """Return why a row resolved to no target device."""
+        if port_id in getattr(self, "_auto_selected_port_ids", set()):
+            return "selected target unavailable"
+        try:
+            posted = self._posted_row_target(port_id)
+        except _ConflictingRowTargetError:
+            return "the request names more than one Virtual Chassis member for it"
+        if not posted and port_id not in getattr(self, "_auto_selected_target_ids", {}):
+            return "select the Virtual Chassis member that owns it"
+        return "selected target unavailable"
 
     def _record_skipped_conflict(self, interface_name, reason):
         """Record a row that cannot be synced to its requested target."""
@@ -1537,10 +1728,6 @@ class SyncInterfacesView(
             interface._librenms_sync_created = True
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
-    def get_netbox_interface_type(self, librenms_interface):
-        """Return the NetBox type mapped from LibreNMS type and speed, or None when unmapped."""
-        return get_netbox_interface_type(librenms_interface, speed_converter=convert_speed_to_kbps)
-
     def handle_mac_address(self, interface, ifPhysAddress):
         """Assign or create the MAC address for the given interface."""
         assign_interface_mac(interface, ifPhysAddress)
@@ -1549,7 +1736,6 @@ class SyncInterfacesView(
         self,
         interface,
         librenms_interface,
-        netbox_type,
         exclude_columns,
         interface_name_field,
         synced_name,
@@ -1561,11 +1747,11 @@ class SyncInterfacesView(
         return update_interface_from_port(
             interface,
             librenms_interface,
+            rules=interface_rules_for_request(self.request),
             synced_name=synced_name,
             server_key=server_key,
             interface_name_field=interface_name_field,
             exclude_columns=exclude_columns,
-            netbox_type=netbox_type,
             speed_converter=convert_speed_to_kbps,
             port_owner=port_owner,
         )
@@ -1674,28 +1860,28 @@ class RebindInterfacePortView(SyncInterfacesView):
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return self._tab_response(request, object_type, obj, interface_name_field, None)
+            return self._tab_response(request, object_type, interface_name_field, None)
         if isinstance(obj, Device) and build_migrated_context(obj, server_key).get("migrated_to_marker"):
             messages.error(request, "This LibreNMS source has been migrated and is read-only.")
-            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         port_id = normalize_librenms_port_id(request.POST.get("rebind_one"))
         expected_port_id = normalize_librenms_port_id(request.POST.get(f"rebind_expected_port_{port_id}"))
         if port_id is None or expected_port_id is None:
             messages.error(request, "The Rebind request is incomplete. Refresh the page and try again.")
-            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
 
         self._post_server_key = server_key
         self._selected_port_ids = {port_id}
         self._auto_selected_port_ids = set()
         ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
-            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         try:
             with transaction.atomic():
                 interface = self._rebind(obj, ports_data, port_id, expected_port_id, interface_name_field, server_key)
         except _RebindRefusedError as refusal:
             messages.error(request, str(refusal))
-            return self._tab_response(request, object_type, obj, interface_name_field, server_key)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         finally:
             self.__dict__.pop("_locked_target_devices", None)
 
@@ -1706,7 +1892,7 @@ class RebindInterfacePortView(SyncInterfacesView):
         )
         transition = schedule_request_cache_mutation(request, obj, SyncTab.INTERFACES, server_key)
         return apply_transition_to_response(
-            request, self._tab_response(request, object_type, obj, interface_name_field, server_key), transition
+            request, self._tab_response(request, object_type, interface_name_field, server_key), transition
         )
 
     def _rebind(self, obj, ports_data, port_id, expected_port_id, interface_name_field, server_key):
@@ -1741,10 +1927,17 @@ class RebindInterfacePortView(SyncInterfacesView):
             locked_obj, ports_data, interface_name_field, writer_model, server_key
         )
         target_id = decisions.target_device_ids.get(port_id)
-        if isinstance(locked_obj, Device) and get_migrated_to_marker(
-            self._locked_target_devices.get(target_id), server_key
-        ):
+        target = self._locked_target_devices.get(target_id) if isinstance(locked_obj, Device) else locked_obj
+        if target is None:
+            raise _RebindRefusedError(f"LibreNMS port {port_id} has no interface owner. Select one and try again.")
+        if isinstance(locked_obj, Device) and get_migrated_to_marker(target, server_key):
             raise _RebindRefusedError("The row's device has been migrated and is read-only.")
+        # A rebind writes the interface's binding, so the rules decide the port first.
+        rule_refusal = decision_reason(
+            interface_rules_for_request(self.request).check_interface_write(rows[0], platform_id=target.platform_id)
+        )
+        if rule_refusal is not None:
+            raise _RebindRefusedError(f"Rebind is refused for LibreNMS port {port_id}: {rule_refusal}.")
         owner = decisions.owners.get(port_id)
         if owner is None or decisions.rejected.get(port_id) != REPORTED_NAME_PORT_COLLISION_REASON:
             raise _RebindRefusedError(
@@ -1990,6 +2183,39 @@ def _build_locked_relationship_indexes(
     return catalog_index, source_index, related_index, changeable_ids
 
 
+def _relationship_decisions(rules, *ends):
+    """
+    Decide each ``(port, interface)`` end of a relationship edge for an interface write.
+
+    Each end reads the platform of the object that owns its interface.
+
+    Args:
+        rules (InterfaceRuleMatcher): The request's rule snapshot.
+        *ends (tuple): ``(port record or None, interface)`` per end.
+
+    Returns:
+        tuple: The decisions (None when an end is blocked), the first blocked interface, and why.
+
+    """
+    decisions = []
+    for port, interface in ends:
+        if port is None:
+            return None, interface, "not in the cached LibreNMS data; refresh the data"
+        decision = rules.check_interface_write(port, platform_id=interface_owner_platform_id(interface))
+        reason = decision_reason(decision)
+        if reason is not None:
+            return None, interface, reason
+        decisions.append(decision)
+    return tuple(decisions), None, None
+
+
+def _promotion_conflict(decision, target_type):
+    """Return why promoting an end to *target_type* would override its Set type rule, or None."""
+    if decision.kind is RuleDecisionKind.SET_TYPE and decision.netbox_type != target_type:
+        return f"interface {rule_names(decision.rules)} sets type {decision.netbox_type}, not {target_type}"
+    return None
+
+
 def _lag_aggregate_needs_promotion(agg):
     """Return whether *agg* is an Interface that is not yet ``type=lag``."""
     return isinstance(agg, Interface) and agg.type != "lag"
@@ -1997,7 +2223,7 @@ def _lag_aggregate_needs_promotion(agg):
 
 def _promote_lag_aggregate(agg, *, with_restore):
     """
-    Bump a LAG aggregate to ``type=lag`` in memory so a member's ``clean()`` accepts the link.
+    Bump a LAG aggregate to ``type=lag`` in memory; NetBox's ``clean()`` does not require it.
 
     Single home for the "promote aggregate to type=lag, persist only that column" rule shared by the
     bulk LAG pass (``SyncInterfacesView._prepare_bulk_lag_aggregate``) and the single-row LAG
@@ -2274,6 +2500,10 @@ class _BaseRelationshipSyncView(
         """Return whether source preparation must repair an existing relationship."""
         return False
 
+    def _promotion_conflict(self, source_iface, related_iface, decisions):
+        """Return ``(interface, reason)`` when a needed promotion would override a Set type rule."""
+        return None
+
     def _get_current_edge(self, obj, server_key, request, port_id, related_port_id):
         """Return the current cached edge rows and safe name hints, or ``None`` when stale."""
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
@@ -2435,6 +2665,21 @@ class _BaseRelationshipSyncView(
                 )
                 if err:
                     return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
+                decisions, blocked_end, reason = _relationship_decisions(
+                    interface_rules_for_request(request), (source_port, source_iface), (related_port, related_iface)
+                )
+                if reason is None and (conflict := self._promotion_conflict(source_iface, related_iface, decisions)):
+                    blocked_end, reason = conflict
+                if reason is not None:
+                    return JsonResponse(
+                        {
+                            "error": (
+                                f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}. "
+                                f"{blocked_end.name}: {reason}."
+                            )
+                        },
+                        status=409,
+                    )
                 if (
                     self.relation_field == "lag"
                     and related_iface.type != "lag"
@@ -2536,13 +2781,18 @@ class SyncInterfaceLagView(_BaseRelationshipSyncView):
     supports_vm = False  # VMInterface has no `lag` field
 
     def _prepare_related(self, related_iface):
-        """Promote the aggregate to type=lag so member_iface.clean() accepts the link."""
+        """Promote the aggregate to type=lag; NetBox's clean() accepts a link to any type."""
         # Single-row endpoint: no aggregate reuse across rows, so no restore needed.
         return _promote_lag_aggregate(related_iface, with_restore=False)
 
     def _related_needs_preparation(self, related_iface):
         """Check whether the aggregate needs promotion back to a LAG type."""
         return _lag_aggregate_needs_promotion(related_iface)
+
+    def _promotion_conflict(self, source_iface, related_iface, decisions):
+        """Refuse a promotion to LAG that a Set type rule on the aggregate contradicts."""
+        conflict = _promotion_conflict(decisions[1], "lag") if _lag_aggregate_needs_promotion(related_iface) else None
+        return (related_iface, conflict) if conflict else None
 
 
 class SyncInterfaceParentView(_BaseRelationshipSyncView):
@@ -2564,6 +2814,11 @@ class SyncInterfaceParentView(_BaseRelationshipSyncView):
     def _source_needs_preparation(self, source_iface):
         """Repair a parent child that was edited back to a physical type."""
         return _parent_child_needs_promotion(source_iface)
+
+    def _promotion_conflict(self, source_iface, related_iface, decisions):
+        """Refuse a promotion to virtual that a Set type rule on the child contradicts."""
+        conflict = _promotion_conflict(decisions[0], "virtual") if _parent_child_needs_promotion(source_iface) else None
+        return (source_iface, conflict) if conflict else None
 
 
 class SyncInterfaceBridgeView(_BaseRelationshipSyncView):

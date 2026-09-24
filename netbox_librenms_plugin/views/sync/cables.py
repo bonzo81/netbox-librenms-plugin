@@ -20,7 +20,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     SERIAL_INVENTORY_SOURCE,
 )
-from netbox_librenms_plugin.interface_sync import get_netbox_interface_type
+from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, interface_rules_for_request
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -1317,10 +1317,23 @@ class CableRemoteCreateView(SyncCablesView):
         if local_interface.cable_id is not None:
             return None, HttpResponse("The local interface is already connected. Refresh the Cables tab.", status=409)
         port = self._remote_port_record(row)
+        if port is None:
+            return None, HttpResponse(
+                "LibreNMS returned no record for the remote port. Refresh the cable data and try again.", status=409
+            )
+        # The far end is an interface create, so the rules decide the port for the remote device.
+        decision = interface_rules_for_request(request).check_interface_write(
+            port, platform_id=remote_device.platform_id
+        )
+        refusal = decision_reason(decision)
+        if refusal is not None:
+            # Plain text: the rule labels are operator text, and the modal shows the body as text.
+            return None, HttpResponse(
+                f"The remote port is not created: {refusal}.", status=409, content_type="text/plain"
+            )
         name = self._proposed_interface_name(request, obj, row, port)
         if not name:
             return None, HttpResponse("LibreNMS reports no usable name for the remote port.", status=400)
-        netbox_type = get_netbox_interface_type(port) if port else None
         return {
             "object": obj,
             "row": row,
@@ -1329,10 +1342,10 @@ class CableRemoteCreateView(SyncCablesView):
             "local_interface": local_interface,
             "librenms_port": port,
             "proposed_name": name,
-            # An unmapped ifType is written as "other" only because this IS a create; the same
+            # An unmapped port is written as "other" only because this IS a create; the same
             # rule the interface sync follows (issue #179 item 1).
-            "proposed_type": netbox_type or "other",
-            "type_is_unmapped": port is not None and netbox_type is None,
+            "proposed_type": decision.netbox_type or "other",
+            "type_is_unmapped": decision.kind is RuleDecisionKind.UNMAPPED,
             # Truthiness only: the template must not be handed an unscoped object to render.
             "existing_interface": Interface.objects.filter(device=remote_device, name=name).exists(),
             "post_url": reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk]),
@@ -1351,11 +1364,10 @@ class CableRemoteCreateView(SyncCablesView):
     @staticmethod
     def _proposed_interface_name(request, obj, row, port):
         """Name the new interface from the port record's displayed field, else what was advertised."""
-        if isinstance(port, dict):
-            field = get_interface_name_field(request, obj)
-            for candidate in (port.get(field), *(port.get(other) for other in sorted(INTERFACE_NAME_FIELDS))):
-                if isinstance(candidate, str) and candidate.strip():
-                    return candidate.strip()
+        field = get_interface_name_field(request, obj)
+        for candidate in (port.get(field), *(port.get(other) for other in sorted(INTERFACE_NAME_FIELDS))):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
         advertised = row.get("remote_port")
         return advertised.strip() if isinstance(advertised, str) else ""
 

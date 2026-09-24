@@ -82,7 +82,7 @@ class InterfaceTypeMappingViewSet(NetBoxModelViewSet):
     permission_classes = [LibreNMSPluginPermission]
     filterset_class = InterfaceTypeMappingFilterSet
 
-    queryset = InterfaceTypeMapping.objects.all()
+    queryset = InterfaceTypeMapping.objects.select_related("platform")
     serializer_class = InterfaceTypeMappingSerializer
 
 

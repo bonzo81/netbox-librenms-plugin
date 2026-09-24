@@ -48,6 +48,9 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
+# The port keys an interface write needs, for rows whose test does not care about their values.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
+
 
 def test_browser_contract_serializes_states_from_the_domain_enum():
     """The server contract must expose every state that a status response can emit."""
@@ -491,6 +494,7 @@ def test_an_attribute_only_interface_change_schedules_the_cache_transition(
         {
             "ports": [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 7009,
                     "ifName": "Ethernet1/9",
                     "ifDescr": "Ethernet1/9",
@@ -546,6 +550,7 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     source_payload = {
         "ports": [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": 7001,
                 "ifName": "Ethernet1/1",
                 "ifDescr": "Ethernet1/1",
@@ -670,6 +675,7 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     ports_payload = {
         "ports": [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": 7481,
                 "ifName": local.name,
                 "ifDescr": local.name,
@@ -946,8 +952,8 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
     child.save(update_fields=["custom_field_data"])
     ports_payload = {
         "ports": [
-            {"port_id": 7111, "ifName": parent.name},
-            {"port_id": 7112, "ifName": child.name},
+            {**_PORT_KEYS_UNSET, "port_id": 7111, "ifName": parent.name},
+            {**_PORT_KEYS_UNSET, "port_id": 7112, "ifName": child.name},
         ],
         "port_stack_relationships": {
             "lag_members": {},
@@ -1753,8 +1759,8 @@ def test_inline_relationship_noop_preserves_other_snapshots(
     child.save(update_fields=["custom_field_data", "parent"])
     ports_payload = {
         "ports": [
-            {"port_id": 7441, "ifName": parent.name},
-            {"port_id": 7442, "ifName": child.name},
+            {**_PORT_KEYS_UNSET, "port_id": 7441, "ifName": parent.name},
+            {**_PORT_KEYS_UNSET, "port_id": 7442, "ifName": child.name},
         ],
         "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {7442: 7441}},
     }
@@ -2721,6 +2727,7 @@ def test_source_snapshot_expiry_before_commit_callback_is_not_reversed(
     ports_payload = {
         "ports": [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": 7361,
                 "ifName": "Ethernet1",
                 "ifDescr": "Ethernet1",
@@ -2853,6 +2860,7 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
         # reaches the post-commit cleanup this test counts.
         "ports": [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": 7101,
                 "ifName": interface.name,
                 "ifDescr": interface.name,

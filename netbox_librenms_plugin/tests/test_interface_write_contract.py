@@ -6,6 +6,7 @@ value it accepts reaches the column as-is.
 
 import pytest
 
+from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
 
@@ -39,7 +40,7 @@ class TestInterfaceMacContract:
             synced_name="Ethernet1",
             server_key="default",
             interface_name_field="ifName",
-            netbox_type="1000base-t",
+            rules=InterfaceRuleMatcher.load(),
         )
         interface.refresh_from_db()
         return interface
@@ -91,7 +92,7 @@ class TestInterfaceMtuContract:
             synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
-            netbox_type="1000base-t",
+            rules=InterfaceRuleMatcher.load(),
         )
         # The contract is about what reaches the column, so read the row back rather than
         # asserting on the attribute the writer just assigned in memory.
@@ -124,7 +125,7 @@ class TestInterfaceAliasContract:
             synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
-            netbox_type="1000base-t",
+            rules=InterfaceRuleMatcher.load(),
         )
         # The contract is about what reaches the column, so read the row back rather than
         # asserting on the attribute the writer just assigned in memory.
@@ -218,7 +219,7 @@ class TestInterfaceStringLengthContract:
             synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
-            netbox_type="1000base-t",
+            rules=InterfaceRuleMatcher.load(),
         )
         interface.refresh_from_db()
         return interface
@@ -273,5 +274,5 @@ class TestInterfaceStringLengthContract:
                 synced_name="E" * (self._max_length("name") + 1),
                 server_key="default",
                 interface_name_field="ifName",
-                netbox_type="1000base-t",
+                rules=InterfaceRuleMatcher.load(),
             )

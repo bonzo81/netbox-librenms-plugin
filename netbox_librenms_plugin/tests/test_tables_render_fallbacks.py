@@ -7,7 +7,12 @@ own file so they do not collide at that shared file's tail when the stack is res
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_interface,
+    make_virtual_chassis,
+    stamp_rule_decision,
+)
 
 
 def _port(port_id=42, **overrides):
@@ -29,7 +34,7 @@ def _port(port_id=42, **overrides):
     }
     record.update(overrides)
     record.setdefault("synced_name", record["ifName"])
-    return record
+    return stamp_rule_decision(record)
 
 
 def _interface_table(device=None, *, data=None, server_key="default"):

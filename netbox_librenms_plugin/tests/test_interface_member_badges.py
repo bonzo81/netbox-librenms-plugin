@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
 from netbox_librenms_plugin.utils import set_librenms_device_id
 
 SERVER_KEY = "default"
@@ -73,6 +73,7 @@ def _enriched_rows(cached_data=None, interface_name_field="ifName"):
         row["netbox_interface"] = None
         row["exists_in_netbox"] = False
         enrich_port_relationships(row, maps, interface_name_field, SERVER_KEY)
+        stamp_rule_decision(row)
     return rows
 
 

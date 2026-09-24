@@ -9,6 +9,9 @@
       <table class="table table-hover attr-table">
         <thead>
           <tr>
+            <th>Action</th>
+            <th>Platform</th>
+            <th>Name Pattern</th>
             <th>LibreNMS Type</th>
             <th>LibreNMS Speed (Kbps)</th>
             <th>NetBox Type</th>
@@ -17,9 +20,12 @@
         </thead>
         <tbody>
           <tr>
-            <td>{{ object.librenms_type }}</td>
-            <td>{{ object.librenms_speed }}</td>
-            <td>{{ object.get_netbox_type_display }}</td>
+            <td>{{ object.get_action_display }}</td>
+            <td>{% if object.platform %}{{ object.platform|linkify }}{% else %}All platforms{% endif %}</td>
+            <td>{% if object.name_pattern %}<code>{{ object.name_pattern }}</code>{% else %}{{ ""|placeholder }}{% endif %}</td>
+            <td>{{ object.librenms_type|placeholder }}</td>
+            <td>{{ object.librenms_speed|default_if_none:"—" }}</td>
+            <td>{{ object.get_netbox_type_display|placeholder }}</td>
             <td>{{ object.description|default:"—" }}</td>
           </tr>
         </tbody>

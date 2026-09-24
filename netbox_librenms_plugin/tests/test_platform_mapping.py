@@ -214,11 +214,7 @@ class TestToYamlOnAllMappingModels:
 
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
-        mapping = InterfaceTypeMapping.__new__(InterfaceTypeMapping)
-        mapping.librenms_type = "ether"
-        mapping.librenms_speed = 1000000
-        mapping.netbox_type = "1000base-t"
-        mapping.description = ""
+        mapping = InterfaceTypeMapping(librenms_type="ether", librenms_speed=1000000, netbox_type="1000base-t")
 
         result = mapping.to_yaml()
         assert isinstance(result, str)

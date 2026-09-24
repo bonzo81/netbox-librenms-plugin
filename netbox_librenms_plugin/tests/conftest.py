@@ -561,6 +561,20 @@ def make_interface(device, name, *, iface_type="other"):
     return Interface.objects.create(device=device, name=name, type=iface_type)
 
 
+def stamp_rule_decision(record, *, platform_id=None, rules=None):
+    """
+    Give a hand-built interface row the rule decision the interfaces tab view stamps on it.
+
+    ``rules`` is an ``InterfaceRuleMatcher``; without it the stored rules are loaded, which needs
+    the database. Pass ``InterfaceRuleMatcher(())`` for a row that no rule matches.
+    """
+    from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+
+    matcher = InterfaceRuleMatcher.load() if rules is None else rules
+    record["rule_decision"] = matcher.decide(record, platform_id=platform_id)
+    return record
+
+
 def make_ip(address, *, assigned_object=None, status="active"):
     """Create a real IPAddress, optionally assigned to an interface/object."""
     from ipam.models import IPAddress

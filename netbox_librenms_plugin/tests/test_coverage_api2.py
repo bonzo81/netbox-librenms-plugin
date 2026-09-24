@@ -297,4 +297,5 @@ class TestInterfaceTypeMappingModel:
             "plugins:netbox_librenms_plugin:interfacetypemapping_detail",
             args=[mapping.pk],
         )
-        assert str(mapping) == f"integration-{speed} + {speed} -> other"
+        speed_part = "" if speed is None else f", >= {speed} Kbps"
+        assert str(mapping) == f"integration-{speed}{speed_part} -> other"

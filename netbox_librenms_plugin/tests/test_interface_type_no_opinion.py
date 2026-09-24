@@ -1,13 +1,14 @@
 """An unmapped LibreNMS ifType must leave the NetBox interface type alone.
 
-``get_netbox_interface_type`` used to return the literal ``"other"`` when no
-``InterfaceTypeMapping`` matched, and the writer wrote it unconditionally, so a correct type
-(``lag`` above all) was flattened by a sync that simply had no mapping for the port.
+The type selector used to return the literal ``"other"`` when no ``InterfaceTypeMapping``
+matched, and the writer wrote it unconditionally, so a correct type (``lag`` above all) was
+flattened by a sync that simply had no mapping for the port.
 """
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher, RuleDecisionKind
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
 
 
 def _port(**overrides):
@@ -34,6 +35,7 @@ def _sync(device, port):
     interface = resolve_or_create_interface_from_port(
         device,
         port,
+        rules=InterfaceRuleMatcher.load(),
         server_key="default",
         interface_name_field="ifName",
         changeable_queryset=Interface.objects.all(),
@@ -58,11 +60,11 @@ class TestUnmappedTypeIsNoOpinion:
     """No mapping means no opinion, not ``other``."""
 
     def test_an_unmapped_iftype_returns_no_opinion(self):
-        from netbox_librenms_plugin.interface_sync import get_netbox_interface_type
-
         _mapping("ethernetCsmacd", "1000base-t")
 
-        assert get_netbox_interface_type({"ifType": "someVendorType", "ifSpeed": None}) is None
+        decision = InterfaceRuleMatcher.load().decide(_port(ifType="someVendorType", ifSpeed=None), platform_id=None)
+
+        assert (decision.kind, decision.netbox_type) == (RuleDecisionKind.UNMAPPED, None)
 
     def test_an_unmapped_iftype_keeps_the_existing_netbox_type(self):
         """The defect: a correct ``lag`` type was overwritten with ``other``."""
@@ -146,39 +148,49 @@ class TestTableAgreesWithTheWriter:
             server_key="default",
         )
 
+    def _type_cell(self, **port):
+        record = stamp_rule_decision({**_port(**port), "exists_in_netbox": False, "netbox_interface": None})
+        return str(self._table().render_type(record["ifType"], record))
+
     def test_the_table_applies_the_writers_speed_rule(self):
         """A speed row at or below the port speed applies; the table used to need an exact hit."""
-        from netbox_librenms_plugin.interface_sync import get_netbox_interface_type
+        from dcim.models import Interface
 
         _mapping("ethernetCsmacd", "1000base-t", speed=1_000_000)
+        device = make_device("table-agrees-speed")
 
-        written = get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 10_000_000_000})
-        shown = self._table().get_interface_mapping("ethernetCsmacd", 10_000_000)
+        written = _sync(device, _port(ifSpeed=10_000_000_000)).type
 
-        assert written == "1000base-t"
-        assert shown is not None and shown.netbox_type == written
+        assert written == Interface.objects.get(device=device).type == "1000base-t"
+        assert written in self._type_cell(ifSpeed=10_000_000_000)
 
     def test_a_speed_row_above_the_port_speed_does_not_apply(self):
         """The other side of the same rule, so the test above cannot pass for the wrong reason."""
         _mapping("ethernetCsmacd", "10gbase-x-sfpp", speed=10_000_000)
 
-        assert self._table().get_interface_mapping("ethernetCsmacd", 1_000_000) is None
+        cell = self._type_cell(ifSpeed=1_000_000_000)
+
+        assert "10gbase-x-sfpp" not in cell
+        assert "mdi-link-variant-off" in cell
 
     def test_the_missing_mapping_tooltip_names_the_iftype(self):
         """The gap is only fixable if the row says which ifType has no mapping."""
-        display, icon = self._table().render_mapping_tooltip("someVendorType", 1_000_000, None)
+        cell = self._type_cell(ifType="someVendorType", ifSpeed=1_000_000_000)
 
-        assert display == "someVendorType"
-        assert "someVendorType" in str(icon)
+        assert "No interface rule sets a type for ifType someVendorType" in cell
 
-    def test_the_mapping_snapshot_is_still_taken_once(self, django_assert_num_queries):
-        """The shared resolver must not reintroduce a query per row."""
+    def test_the_type_column_queries_no_rules(self, django_assert_num_queries):
+        """The view stamps one decision per row, so the column must not reintroduce a query per row."""
         _mapping("ethernetCsmacd", "1000base-t", speed=1_000_000)
+        rules = InterfaceRuleMatcher.load()
+        records = [
+            stamp_rule_decision({**_port(ifSpeed=speed), "exists_in_netbox": False}, rules=rules) for speed in range(5)
+        ]
         table = self._table()
 
-        with django_assert_num_queries(1):
-            for speed in range(5):
-                table.get_interface_mapping("ethernetCsmacd", speed)
+        with django_assert_num_queries(0):
+            for record in records:
+                table.render_type(record["ifType"], record)
 
 
 @pytest.mark.django_db

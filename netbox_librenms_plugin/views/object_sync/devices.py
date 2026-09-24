@@ -9,6 +9,7 @@ from ipam.models import VLAN, VLANGroup
 from utilities.views import ViewTab, register_model_view
 
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN, is_supported_interface_name_field
+from netbox_librenms_plugin.interface_rules import interface_rules_for_request
 from netbox_librenms_plugin.interface_relationships import (
     build_candidate_relationship_context,
     build_relationship_maps,
@@ -322,6 +323,10 @@ class SingleInterfaceVerifyView(
                     relationship_maps,
                 )
                 port_data["synced_name"] = port_data.get(interface_name_field)
+                # The selected member owns the row now, so the rules read its platform.
+                port_data["rule_decision"] = interface_rules_for_request(request).check_interface_write(
+                    port_data, platform_id=selected_device.platform_id
+                )
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})
 

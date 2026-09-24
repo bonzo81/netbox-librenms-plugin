@@ -108,10 +108,17 @@ def _selection_row_markup(row):
     )
     # A port id is not always usable as a DOM id, so a row can name its own checkbox.
     dom_id = row.get("dom_id", row["port_id"])
+    # The table renders an ignored row without a checkbox.
+    checkbox = (
+        ""
+        if row.get("ignored")
+        else f'<input type="checkbox" name="select" value="{esc(row["port_id"])}" id="cb-{esc(dom_id)}">'
+    )
+    if row.get("ignored"):
+        attrs.append('data-rule-state="ignored"')
     return (
         f"<tr {' '.join(attrs)}>"
-        f'<td data-col="selection"><input type="checkbox" name="select" value="{esc(row["port_id"])}"'
-        f' id="cb-{esc(dom_id)}"></td>'
+        f'<td data-col="selection">{checkbox}</td>'
         f"<td>{row['name']}{companion}{hidden_fields}</td></tr>"
     )
 
@@ -122,13 +129,15 @@ def _selection_page_html(
     auto_select=True,
     table_id="librenms-interface-table",
     selection_snapshot="",
+    blocked_port_ids=(),
 ):
     checked = "checked" if auto_select else ""
     body = "".join(_selection_row_markup(row) for row in rows)
     snapshot_attr = f' data-selection-snapshot="{escape(selection_snapshot)}"' if selection_snapshot else ""
+    blocked_attr = escape(json.dumps(list(blocked_port_ids)))
     return f"""<!doctype html><html><body>
         <input type="checkbox" id="autoSelectLagMembers" {checked}>
-        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit" data-blocked-port-ids="{blocked_attr}">
           <input type="hidden" name="server_key" value="production">
           <table id="{escape(table_id)}"{snapshot_attr}>
             <thead><tr><th><input type="checkbox" class="toggle"></th><th>Name</th></tr></thead>
@@ -147,6 +156,7 @@ def _load_selection_page(
     auto_select=True,
     table_id="librenms-interface-table",
     selection_snapshot="",
+    blocked_port_ids=(),
 ):
     """Serve the fixture page from a real origin so sessionStorage behaves as it does in NetBox."""
     html = _selection_page_html(
@@ -154,6 +164,7 @@ def _load_selection_page(
         auto_select=auto_select,
         table_id=table_id,
         selection_snapshot=selection_snapshot,
+        blocked_port_ids=blocked_port_ids,
     )
     page.route(
         f"{SELECTION_PAGE_URL}**",
@@ -168,6 +179,404 @@ def _checked_values(page):
     return set(page.evaluate("Array.from(document.querySelectorAll('input[name=select]:checked')).map(cb => cb.value)"))
 
 
+VERIFY_CELLS = (
+    "name",
+    "type",
+    "speed",
+    "mac_address",
+    "mtu",
+    "enabled",
+    "description",
+    "vlans",
+    "librenms_id",
+    "parent",
+)
+
+
+def _checkbox_markup(port_id):
+    """The selection cell's checkbox, as the table renders it for a row a sync may write."""
+    return f'<input type="checkbox" name="select" value="{escape(port_id)}" id="cb-{escape(port_id)}">'
+
+
+def _verify_row_markup(row):
+    esc = escape
+    rule_state = row.get("rule_state", "ignored" if row.get("ignored") else "")
+    attrs = [f'data-port-id="{esc(row["port_id"])}"', f'data-rule-state="{rule_state}"']
+    for key, data_attr in (("parent", "data-parent-port-id"), ("lag", "data-member-of-lag")):
+        if row.get(key):
+            attrs.append(f'{data_attr}="{esc(row[key])}"')
+    options = "".join(
+        f'<option value="{member}"{" selected" if member == row["member"] else ""}>m{member}</option>'
+        for member in ("1", "2")
+    )
+    cells = "".join(f'<td data-col="{col}"></td>' for col in VERIFY_CELLS)
+    # The table renders no checkbox on a row the write check refuses; an unresolved owner keeps one.
+    checkbox = "" if rule_state in ("ignored", "ambiguous", "incomplete") else _checkbox_markup(row["port_id"])
+    return (
+        f"<tr {' '.join(attrs)}>"
+        f'<td data-col="selection">{checkbox}</td>'
+        f'<td><select name="device_selection_{esc(row["port_id"])}" class="vc-member-select"'
+        f' data-interface="{esc(row["name"])}">{options}</select></td>{cells}</tr>'
+    )
+
+
+def _serve_verify(page, formatted_rows):
+    """Answer the verify endpoint per posted port ID with that row's repaint."""
+
+    def _answer(route):
+        port_id = str(json.loads(route.request.post_data)["port_id"])
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "success", "formatted_row": formatted_rows[port_id]}),
+        )
+
+    page.route("**/plugins/librenms_plugin/verify-interface/", _answer)
+
+
+def _verify_form_markup(rows):
+    """Render the interface tab's sync form around *rows*, as the server renders it."""
+    body = "".join(_verify_row_markup(row) for row in rows)
+    blocked = escape(json.dumps([row["port_id"] for row in rows if row.get("ignored") or row.get("rule_state")]))
+    return f"""<form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit"
+              data-interface-origin-device-id="1" data-blocked-port-ids="{blocked}">
+          <input type="hidden" name="csrfmiddlewaretoken" value="test-token">
+          <input type="hidden" name="server_key" value="production">
+          <table id="librenms-interface-table"><tbody>{body}</tbody></table>
+          <button type="submit" id="do-sync">Sync</button>
+        </form>"""
+
+
+def _load_verify_page(page, rows, *, url=SELECTION_PAGE_URL, verify=None, bulk=False):
+    """Serve a chassis interface tab whose rows the verify endpoint can repaint."""
+    bulk_markup = (
+        '<select id="bulk-vc-member-select"><option value="2">m2</option></select>'
+        '<button type="button" id="apply-bulk-vc-member">Apply</button>'
+        if bulk
+        else ""
+    )
+    html = f"""<!doctype html><html><body>
+        <input type="checkbox" id="autoSelectLagMembers" checked>
+        <input type="radio" name="interface_name_field" value="ifName" checked>
+        {bulk_markup}
+        <div id="interface-sync-content">{_verify_form_markup(rows)}</div>
+        </body></html>"""
+    page.route(
+        f"{SELECTION_PAGE_URL}**",
+        lambda route: route.fulfill(status=200, content_type="text/html", body=html),
+    )
+    if verify is not None:
+        _serve_verify(page, verify)
+    page.goto(url)
+    _add_page_scripts(page)
+    if bulk:
+        # NetBox wraps the member selects in TomSelect; this stands in for its setValue contract.
+        page.evaluate(
+            """() => document.querySelectorAll('.vc-member-select').forEach((select) => {
+                select.tomselect = {setValue(value, silent) {
+                    select.value = value;
+                    if (!silent) handleInterfaceChange(select, value);
+                }};
+            })"""
+        )
+        page.evaluate("initializeBulkEditApply()")
+    page.evaluate("initializeCheckboxes()")
+
+
+def _verified_row(*, rule_state, selection, lag=None, parent=None):
+    """Return the verify endpoint's repaint for one row."""
+    row = {col: "" for col in VERIFY_CELLS}
+    row.update(
+        {
+            "selection": selection,
+            "rule_state": rule_state,
+            "librenms_lag_port_id": lag,
+            "librenms_lag_name": None,
+            "librenms_parent_port_id": parent,
+            "librenms_parent_name": None,
+            "librenms_bridge_port_id": None,
+            "librenms_bridge_name": None,
+        }
+    )
+    return row
+
+
+def _wait_for_verified_member(page, port_id, member):
+    """Wait until the row's verify has settled on *member*."""
+    page.wait_for_function(
+        """([portId, member]) => {
+            const select = document.querySelector(`tr[data-port-id="${portId}"] .vc-member-select`);
+            return select && select._lastVerifiedMember === member;
+        }""",
+        arg=[port_id, member],
+    )
+
+
+def _verify_row(page, port_id, member, formatted_row):
+    """Switch one row to another chassis member and wait for the verify repaint."""
+    _serve_verify(page, {port_id: formatted_row})
+    page.evaluate(
+        """([portId, member]) => {
+            const select = document.querySelector(`tr[data-port-id="${portId}"] .vc-member-select`);
+            select.value = member;
+            handleInterfaceChange(select, member);
+        }""",
+        [port_id, member],
+    )
+    _wait_for_verified_member(page, port_id, member)
+
+
+def _submitted_selects(page):
+    """Submit the sync form and return the posted row selections."""
+    with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+        page.click("#do-sync")
+    return sorted(value for key, value in _selection_form_pairs(request_info.value.post_data) if key == "select")
+
+
+# A (10) is an aggregate, I (20) is its member, and C (30) is a unit of I.
+CHAIN_ROWS = [
+    {"port_id": "10", "name": "ae0", "member": "1"},
+    {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10"},
+    {"port_id": "30", "name": "et-0/0/0.0", "member": "1", "parent": "20"},
+]
+OTHER_PAGE_ROWS = [{"port_id": "40", "name": "et-0/0/9", "member": "1"}]
+
+
+class TestTheWalkSkipsEveryBlockedRow:
+    """The browser walk reads one blocked set: every row the writer's check refuses."""
+
+    @pytest.mark.parametrize("rule_state", ["ambiguous", "incomplete", "owner_unresolved"])
+    def test_a_blocked_middle_row_is_neither_selected_nor_walked_through(self, page, rule_state):
+        rows = [dict(row, rule_state=rule_state) if row["port_id"] == "20" else row for row in CHAIN_ROWS]
+        _load_verify_page(page, rows)
+
+        page.check("#cb-30")
+
+        assert _checked_values(page) == {"30"}
+
+    def test_an_aggregate_never_pulls_in_a_blocked_member(self, page):
+        rows = [
+            {"port_id": "10", "name": "ae0", "member": "1"},
+            {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10", "rule_state": "owner_unresolved"},
+            {"port_id": "30", "name": "et-0/0/1", "member": "1", "lag": "10"},
+        ]
+        _load_verify_page(page, rows)
+
+        page.check("#cb-10")
+
+        # The unresolved-owner member keeps its checkbox for the bulk member action, yet no cascade selects it.
+        assert _checked_values(page) == {"10", "30"}
+
+    def test_a_blocked_aggregate_never_pulls_in_its_members(self, page):
+        rows = [
+            {"port_id": "10", "name": "ae0", "member": "1", "rule_state": "owner_unresolved"},
+            {"port_id": "20", "name": "Gi1/0/1", "member": "1", "lag": "10"},
+        ]
+        _load_verify_page(page, rows)
+        errors = []
+        page.on("pageerror", lambda error: errors.append(error))
+
+        page.check("#cb-10")
+
+        # The server refuses the aggregate and expands nothing from it, so the browser starts no cascade from it.
+        assert _checked_values(page) == {"10"}
+        assert "20" not in _stored_selection(page)
+
+        page.uncheck("#cb-10")
+
+        assert _checked_values(page) == set()
+        assert _stored_selection(page) == {}
+        assert errors == []
+
+    def test_a_member_pulled_in_before_the_aggregate_was_blocked_is_released(self, page):
+        rows = [
+            {"port_id": "10", "name": "ae0", "member": "1"},
+            {"port_id": "20", "name": "Gi1/0/1", "member": "1", "lag": "10"},
+        ]
+        _load_verify_page(page, rows)
+        page.check("#cb-10")
+        _verify_row(page, "10", "2", _verified_row(rule_state="owner_unresolved", selection=_checkbox_markup("10")))
+        assert page.evaluate("() => _blockedPortIds().has('10')")
+
+        page.uncheck("#cb-10")
+
+        assert _checked_values(page) == set()
+        assert _stored_selection(page) == {}
+
+    def test_a_row_the_verify_makes_ambiguous_joins_the_blocked_set(self, page):
+        _load_verify_page(page, CHAIN_ROWS)
+
+        _verify_row(page, "20", "2", _verified_row(rule_state="ambiguous", selection="", lag="10"))
+        page.check("#cb-30")
+
+        assert _checked_values(page) == {"30"}
+
+
+def _store_member_choice(page, port_id, member):
+    """Leave a stored selection of one row on another member, as an earlier visit does."""
+    page.evaluate(
+        """([portId, member]) => writeStoredSelection(
+            document.getElementById('librenms-interface-table'),
+            {[portId]: {inputs: {[`device_selection_${portId}`]: member}, auto: ''}},
+        )""",
+        [port_id, member],
+    )
+
+
+def _hold_verify(page):
+    """Hold every verify request until the test answers it; return the held routes."""
+    held = []
+
+    def _hold(route):
+        held.append(route)
+
+    page.route("**/plugins/librenms_plugin/verify-interface/", _hold)
+    return held
+
+
+def _answer(route, formatted_row):
+    route.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"status": "success", "formatted_row": formatted_row}),
+    )
+
+
+def _stored_selection(page):
+    """Return the interface table's stored selection."""
+    return page.evaluate("() => readStoredSelection(document.getElementById('librenms-interface-table'))")
+
+
+class TestAMovedMemberIsNotRestored:
+    """A stored selection for another member than the page renders is cleared, never verified or restored."""
+
+    ROW = [{"port_id": "10", "name": "et-0/0/0", "member": "1"}]
+
+    def _restore(self, page, member):
+        verify_requests = []
+        page.on("request", lambda request: "verify-interface" in request.url and verify_requests.append(request))
+        _load_verify_page(page, OTHER_PAGE_ROWS)
+        _store_member_choice(page, "10", member)
+        _load_verify_page(page, self.ROW)
+        return verify_requests
+
+    def test_a_differing_member_is_cleared_with_a_notice_and_no_verify(self, page):
+        verify_requests = self._restore(page, "2")
+
+        expect(page.locator("#librenms-interface-table-cleared-selections")).to_have_text(
+            "1 saved selection(s) on another Virtual Chassis member were cleared; select them again."
+        )
+        assert verify_requests == []
+        assert _checked_values(page) == set()
+        assert page.locator("tr[data-port-id='10'] .vc-member-select").input_value() == "1"
+        assert "10" not in _stored_selection(page)
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+        assert ("select", "10") not in pairs
+        assert [value for key, value in pairs if key == "device_selection_10"] == ["1"]
+
+    def test_an_equal_member_restores(self, page):
+        verify_requests = self._restore(page, "1")
+
+        assert verify_requests == []
+        assert _checked_values(page) == {"10"}
+        assert page.locator("#librenms-interface-table-cleared-selections").count() == 0
+
+    def test_an_off_page_selection_still_submits_with_its_member(self, page):
+        _load_verify_page(page, OTHER_PAGE_ROWS)
+        _store_member_choice(page, "10", "2")
+        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
+
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+
+        assert ("select", "10") in pairs
+        assert ("device_selection_10", "2") in pairs
+
+
+class TestADetachedVerifyChangesNothing:
+    """A verify answer for a row the tab swap replaced must not touch the new page or storage."""
+
+    def test_an_old_answer_after_a_tab_swap_changes_neither_storage_nor_the_blocked_set(self, page):
+        rows = [
+            {"port_id": "10", "name": "et-0/0/0", "member": "1"},
+            {"port_id": "20", "name": "et-0/0/1", "member": "1"},
+        ]
+        _load_verify_page(page, rows)
+        page.check("#cb-20")
+        held = _hold_verify(page)
+        page.evaluate(
+            """() => {
+                const select = document.querySelector('tr[data-port-id="10"] .vc-member-select');
+                select.value = '2';
+                handleInterfaceChange(select, '2');
+            }"""
+        )
+        expect(page.locator("tr[data-port-id='10'] .vc-member-select")).to_have_value("2")
+
+        # The sync swaps the tab in, and the user then clears the row the swap restored.
+        page.evaluate(
+            """(markup) => {
+                document.getElementById('interface-sync-content').innerHTML = markup;
+                initializeCheckboxes();
+            }""",
+            _verify_form_markup(rows),
+        )
+        page.uncheck("#cb-20")
+        _answer(held[0], _verified_row(rule_state="ignored", selection=""))
+        page.wait_for_timeout(300)
+
+        assert _stored_selection(page) == {}
+        assert page.evaluate("() => document.querySelector('[data-blocked-port-ids]').dataset.blockedPortIds") == "[]"
+
+
+class TestTheOrderedSelectionCommit:
+    """A member, eligibility or checkbox change ends in one order: eligibility, closure, then storage."""
+
+    def test_a_row_the_verify_ignores_releases_its_chain_in_storage_too(self, page):
+        _load_verify_page(page, CHAIN_ROWS)
+        page.check("#cb-30")
+        assert _checked_values(page) == {"10", "20", "30"}
+
+        _verify_row(page, "20", "2", _verified_row(rule_state="ignored", selection="", lag="10"))
+        assert _checked_values(page) == {"30"}
+        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
+
+        # A was held only for I, so once I is ignored the stored selection must not submit it.
+        assert _submitted_selects(page) == ["30"]
+
+    def test_a_member_switch_keeps_the_row_a_requirement(self, page):
+        rows = [{"port_id": "10", "name": "et-0/0/0", "member": "1"}, CHAIN_ROWS[2] | {"parent": "10"}]
+        _load_verify_page(page, rows)
+        page.check("#cb-30")
+        assert _checked_values(page) == {"10", "30"}
+
+        _verify_row(page, "10", "2", _verified_row(rule_state="", selection=_checkbox_markup("10")))
+        page.uncheck("#cb-30")
+
+        # The row was held for C, so it is released with C, not kept as a choice of the user's.
+        assert _checked_values(page) == set()
+
+    def test_the_bulk_member_apply_commits_every_verified_row(self, page):
+        verify = {
+            "10": _verified_row(rule_state="", selection=_checkbox_markup("10")),
+            "20": _verified_row(rule_state="ignored", selection="", lag="10"),
+            "30": _verified_row(rule_state="", selection=_checkbox_markup("30"), parent="20"),
+        }
+        _load_verify_page(page, CHAIN_ROWS, verify=verify, bulk=True)
+        page.check("#cb-30")
+
+        page.click("#apply-bulk-vc-member")
+        for port_id in ("10", "30"):
+            _wait_for_verified_member(page, port_id, "2")
+        expect(page.locator("tr[data-port-id='20']")).to_have_attribute("data-rule-state", "ignored")
+        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
+
+        assert _submitted_selects(page) == ["30"]
+
+
 class TestRequirementCascade:
     """Selecting a row must select everything that row depends on, all the way up."""
 
@@ -179,6 +588,50 @@ class TestRequirementCascade:
         # et-0/0/6.0 needs et-0/0/6, which needs ae2. Stopping at the parent leaves the
         # aggregate unsynced, and the LAG assignment is then silently dropped.
         assert _checked_values(page) == {"4302", "4301", "4303"}
+
+    def test_an_ignored_parent_is_neither_selected_nor_walked_through(self, page):
+        rows = [dict(row, ignored=True) if row["port_id"] == "4301" else row for row in JUNOS_ROWS]
+        _load_selection_page(page, rows, blocked_port_ids=["4301"])
+
+        page.check("#cb-4302")
+
+        # et-0/0/6 is ignored, so neither it nor ae2 behind it is selected.
+        assert _checked_values(page) == {"4302"}
+
+    def test_an_ignored_parent_on_another_page_raises_no_notice(self, page):
+        _load_selection_page(page, [JUNOS_ROWS[3]], blocked_port_ids=["4301"])
+
+        page.check("#cb-4302")
+
+        assert _checked_values(page) == {"4302"}
+        assert page.locator("#parent-cross-page-notices").count() == 0
+
+    def test_a_row_the_verify_makes_ignored_leaves_the_selection_and_its_member_choice(self, page):
+        _load_verify_page(page, [{"port_id": "10", "name": "Vlan10", "member": "1"}])
+        page.check("#cb-10")
+
+        _verify_row(page, "10", "2", _verified_row(rule_state="ignored", selection=""))
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+
+        # The ignored row is not submitted, and member 1 never follows member 2's visible choice.
+        assert ("select", "10") not in pairs
+        assert [value for key, value in pairs if key == "device_selection_10"] == ["2"]
+
+    def test_a_parent_the_verify_makes_ignored_is_not_walked_through(self, page):
+        # C (30) is a unit of I (20), and I is a member of A (10).
+        rows = [
+            {"port_id": "10", "name": "ae0", "member": "1"},
+            {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10"},
+            {"port_id": "30", "name": "et-0/0/0.0", "member": "1", "parent": "20"},
+        ]
+        _load_verify_page(page, rows)
+
+        _verify_row(page, "20", "2", _verified_row(rule_state="ignored", selection="", lag="10"))
+        page.check("#cb-30")
+
+        assert _checked_values(page) == {"30"}
 
     def test_aggregate_unit_pulls_in_its_aggregate(self, page):
         _load_selection_page(page, JUNOS_ROWS)
