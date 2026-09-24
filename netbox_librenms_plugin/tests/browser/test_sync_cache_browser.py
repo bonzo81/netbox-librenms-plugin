@@ -1507,18 +1507,34 @@ def test_an_htmx_submit_carries_the_off_page_selection(page, table_id):
     assert sorted(value for key, value in _selection_form_pairs(bodies[0]) if key == "select") == ["101", "201"]
 
 
-@pytest.mark.parametrize("failure", ["status", "transport"])
+# The shape of the lock-conflict middleware's answer: a 200 that swaps nothing, a toast, and the failure event.
+TRY_AGAIN_TEXT = "Try again."
+TRY_AGAIN_BODY = (
+    '<div id="django-messages" hx-swap-oob="true"><div class="toast">'
+    f'<div class="toast-body">{TRY_AGAIN_TEXT}</div></div></div>'
+)
+
+
+def _fail(route, failure):
+    """Answer a sync submit with one kind of failure."""
+    if failure == "status":
+        route.fulfill(status=500, content_type="text/html", body="Server error")
+    elif failure == "try-again":
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            headers={"HX-Reswap": "none", "HX-Trigger": '{"librenmsRequestFailed":null}'},
+            body=TRY_AGAIN_BODY,
+        )
+    else:
+        route.abort()
+
+
+@pytest.mark.parametrize("failure", ["status", "transport", "try-again"])
 def test_a_failed_htmx_submit_gives_the_button_back(page, failure):
     """A failed htmx submit swaps nothing, so a button left disabled would look dead."""
-
-    def answer(route):
-        if failure == "status":
-            route.fulfill(status=500, content_type="text/html", body="Server error")
-        else:
-            route.abort()
-
-    page.route(HTMX_SYNC_URL, answer)
-    page.set_content(_htmx_sync_form())
+    page.route(HTMX_SYNC_URL, lambda route: _fail(route, failure))
+    page.set_content('<div id="django-messages"></div>' + _htmx_sync_form())
     _add_page_scripts(page)
     page.evaluate("initializeSyncFormSpinners()")
 
@@ -1527,21 +1543,24 @@ def test_a_failed_htmx_submit_gives_the_button_back(page, failure):
     expect(page.locator("#bulk-submit")).to_be_enabled()
     expect(page.locator("#sync-spinner")).to_have_class(re.compile(r"\bd-none\b"))
     assert page.locator("#sync-form").count() == 1
+    if failure == "try-again":
+        expect(page.locator("#django-messages .toast-body")).to_have_text(TRY_AGAIN_TEXT)
 
 
-def test_a_retry_after_a_failed_htmx_submit_still_carries_the_off_page_selection(page):
+@pytest.mark.parametrize("failure", ["status", "try-again"])
+def test_a_retry_after_a_failed_htmx_submit_still_carries_the_off_page_selection(page, failure):
     """A failed submit gives the off-page rows back, so the notice shows them and a retry posts them."""
     bodies = []
 
     def answer(route):
         bodies.append(route.request.post_data)
         if len(bodies) == 1:
-            route.fulfill(status=500, content_type="text/html", body="Server error")
+            _fail(route, failure)
         else:
             route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
 
     page.route(HTMX_SYNC_URL, answer)
-    page.set_content(_htmx_sync_form())
+    page.set_content('<div id="django-messages"></div>' + _htmx_sync_form())
     _add_page_scripts(page)
     page.evaluate("initializeSyncFormSpinners()")
     page.evaluate(

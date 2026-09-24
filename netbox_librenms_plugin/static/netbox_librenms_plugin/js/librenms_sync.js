@@ -1527,8 +1527,11 @@ document.addEventListener('change', function (e) {
  * row and re-submitted alongside it.
  */
 
-/** The htmx events that mean a request got no usable answer. */
-const HTMX_FAILURE_EVENTS = ['htmx:responseError', 'htmx:sendError', 'htmx:timeout'];
+/**
+ * The events that mean a request got no usable answer. The last one comes from the server's
+ * `HX-Trigger` on its "try again" answer: a 200 that swaps nothing, so htmx raises no error event.
+ */
+const HTMX_FAILURE_EVENTS = ['htmx:responseError', 'htmx:sendError', 'htmx:timeout', 'librenmsRequestFailed'];
 
 /** The off-page rows each form's last submit consumed, by table id, so a failed submit can give them back. */
 const consumedOffPageSelections = new WeakMap();
