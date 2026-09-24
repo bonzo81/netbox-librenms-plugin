@@ -62,6 +62,20 @@ class LibreNMSSyncConfig(PluginConfig):
 
         cache_signals.connect()
 
+        # The late write of an interface row locks the row and checks its version just before the UPDATE.
+        from dcim.models import Interface
+        from django.db.models.signals import pre_save
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.transactions import lock_row_at_version
+
+        for model in (Interface, VMInterface):
+            pre_save.connect(
+                lock_row_at_version,
+                sender=model,
+                dispatch_uid=f"netbox_librenms_plugin_row_version_{model._meta.label_lower}",
+            )
+
     def _validate_multi_server_config(self, servers_config):
         """Validate multi-server configuration."""
         from netbox_librenms_plugin.server_mappings import require_server_key

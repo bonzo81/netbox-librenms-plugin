@@ -6,12 +6,21 @@ available). The plugin cannot prevent these: NetBox takes its own locks in order
 not control. ``run_transaction`` rolls the whole attempt back and runs it once more. A second
 conflict raises ``TransactionConflict``, which the HTTP adapter (``middleware.py``) shows as a
 "try again" answer. The runner needs no request, so a background job can use it too.
+
+A write of a row that another operation changed after the read is a conflict of the same kind.
+``save_at_version`` saves a row only when its PostgreSQL row version (``xmin``) is still the one
+that the read returned. It locks the row in ``pre_save``, at the point and in the mode of the
+``UPDATE`` that follows, so the check adds no lock wait that the ``UPDATE`` does not have.
 """
 
 import logging
+from contextvars import ContextVar
+from functools import cache
 
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, connections, transaction
+from django.db.models import UniqueConstraint
+from django.db.models.expressions import RawSQL
 from django.db.transaction import TransactionManagementError
 from netbox.context import events_queue
 from utilities.exceptions import AbortRequest
@@ -20,6 +29,12 @@ logger = logging.getLogger(__name__)
 
 CONFLICT_SQLSTATES = frozenset({"40P01", "55P03"})
 _ATTEMPTS = 2
+# The recorder of the attempt that runs now, so a row-version check can record a conflict that the work swallows.
+_active_recorder = ContextVar("librenms_conflict_recorder", default=None)
+# The instance attribute that tells the pre_save check which row version and lock mode a save expects.
+_VERSIONED_SAVE = "_librenms_versioned_save"
+# The annotation that carries the row version of a read.
+_ROW_VERSION = "_librenms_row_version"
 
 
 class TransactionConflict(Exception):
@@ -35,7 +50,7 @@ class CommittedFollowUpError(Exception):
 
 
 class _SwallowedConflict(Exception):
-    """The work returned normally, but one of its statements met a lock conflict."""
+    """The work returned normally, but it caught a lock conflict or a stale row version."""
 
 
 def database_error_sqlstate(exc):
@@ -85,17 +100,17 @@ def classify_conflict(exc):
 
 
 class _ConflictRecorder:
-    """Record the lock conflict of every statement, also one that the work catches later; then re-raise."""
+    """Record every lock conflict and stale row of an attempt, also one that the work catches later."""
 
     def __init__(self):
-        self.sqlstates = []
+        self.conflicts = []
 
     def __call__(self, execute, sql, params, many, context):
         try:
             return execute(sql, params, many, context)
         except DatabaseError as exc:
             if (sqlstate := database_error_sqlstate(exc)) in CONFLICT_SQLSTATES:
-                self.sqlstates.append(sqlstate)
+                self.conflicts.append(sqlstate)
             raise
 
 
@@ -107,8 +122,9 @@ def run_transaction(work):
 
     1. ``work`` raised: that exception decides alone (``classify_conflict``). A conflict starts the
        next attempt; any other exception propagates unchanged.
-    2. ``work`` returned, but a statement met a conflict that the work caught, or the deferred
-       constraint check met one: the attempt rolls back and the next attempt starts.
+    2. ``work`` returned, but it caught a lock conflict of a statement or a stale row version
+       (``row_changed``), or the deferred constraint check met a lock conflict: the attempt rolls
+       back and the next attempt starts.
     3. ``work`` returned with no conflict: the attempt commits, and its return value is returned.
 
     ``work`` must build its own state on each call and must not publish anything (messages,
@@ -153,6 +169,7 @@ def _run_attempt(work, connection):
         committed = True
 
     recorder = _ConflictRecorder()
+    recorder_token = _active_recorder.set(recorder)
     queue_token = events_queue.set({})
     try:
         # durable: Django refuses an enclosing atomic block, except a test case's own block.
@@ -160,8 +177,8 @@ def _run_attempt(work, connection):
             transaction.on_commit(mark_committed)
             with connection.execute_wrapper(recorder):
                 result = work()
-                if recorder.sqlstates:
-                    raise _SwallowedConflict(", ".join(recorder.sqlstates))
+                if recorder.conflicts:
+                    raise _SwallowedConflict("; ".join(recorder.conflicts))
                 # Checks deferred foreign keys now, so their lock conflicts pass the recorder too.
                 connection.check_constraints()
         return result
@@ -170,6 +187,7 @@ def _run_attempt(work, connection):
             raise CommittedFollowUpError("The transaction committed, but a commit callback failed.") from exc
         raise
     finally:
+        _active_recorder.reset(recorder_token)
         attempt_events = events_queue.get()
         events_queue.reset(queue_token)
         if committed:
@@ -187,3 +205,125 @@ def _keep_events(attempt_events):
             number += 1
             kept_key = f"{key}#{number}"
         queue[kept_key] = event
+
+
+def _row_version_sql(table):
+    """Return the SQL expression of the row version of *table* (a quoted name): PostgreSQL's ``xmin``."""
+    return f"{table}.xmin::text"
+
+
+def first_at_version(queryset):
+    """
+    Return the first row of *queryset* and the row version that the read returned.
+
+    Returns:
+        tuple: ``(instance, version)``, or ``(None, None)`` when *queryset* has no row.
+
+    """
+    table = connections[queryset.db].ops.quote_name(queryset.model._meta.db_table)
+    row = queryset.annotate(**{_ROW_VERSION: RawSQL(_row_version_sql(table), ())}).first()
+    if row is None:
+        return None, None
+    return row, row.__dict__.pop(_ROW_VERSION)
+
+
+def row_changed(name):
+    """
+    Return the conflict for interface *name*, changed by another operation after the read.
+
+    The conflict is also recorded for the attempt that runs now, so the runner retries the attempt
+    even when a broad handler in the work catches the exception. Outside the runner it is not recorded.
+
+    Args:
+        name (str): The interface name that the caller read. Never a name read after the caller's
+            permission check: another operation can change it.
+
+    Returns:
+        ConcurrentRowChange: The exception for the caller to raise.
+
+    """
+    conflict = ConcurrentRowChange(f"NetBox interface {name} was changed by another operation. Refresh and try again.")
+    if (recorder := _active_recorder.get()) is not None:
+        recorder.conflicts.append(str(conflict))
+    return conflict
+
+
+@cache
+def key_columns(model):
+    """
+    Return the columns of *model* that PostgreSQL treats as key columns in its row locks.
+
+    A key column is in a unique index that a foreign key can reference: a unique field (a
+    ``OneToOneField`` too), a ``unique_together`` set, or a ``UniqueConstraint`` of plain fields
+    with no condition. An ``UPDATE`` that changes a key column locks the row ``FOR UPDATE``; any
+    other ``UPDATE`` locks it ``FOR NO KEY UPDATE``.
+
+    Args:
+        model (type[Model]): The model.
+
+    Returns:
+        frozenset[str]: The database column names.
+
+    """
+    meta = model._meta
+    field_sets = [(field.name,) for field in meta.concrete_fields if field.unique]
+    field_sets += [tuple(fields) for fields in meta.unique_together]
+    field_sets += [
+        constraint.fields
+        for constraint in meta.constraints
+        if isinstance(constraint, UniqueConstraint)
+        and constraint.fields
+        and constraint.condition is None
+        and not constraint.expressions
+    ]
+    return frozenset(meta.get_field(name).column for fields in field_sets for name in fields)
+
+
+def save_at_version(instance, *, version, changed_columns, name):
+    """
+    Save *instance* with a full ``save()``, but only when its row still has row *version*.
+
+    The ``pre_save`` receiver ``lock_row_at_version`` locks the row and compares the version. It
+    locks ``FOR UPDATE`` when a key column changes, else ``FOR NO KEY UPDATE``: the mode of the
+    ``UPDATE`` that follows. A row with another version raises ``ConcurrentRowChange``. Then the
+    caller must discard *instance*.
+
+    Args:
+        instance (Interface | VMInterface): The instance that ``first_at_version`` read, with its new values.
+        version (str): The row version that the read returned.
+        changed_columns (set[str]): The columns whose values the save changes.
+        name (str): The interface name that the caller read, for the conflict message.
+
+    Raises:
+        ConcurrentRowChange: Another operation changed or deleted the row after the read.
+        RuntimeError: No ``pre_save`` receiver checked the version, so the save was not checked.
+
+    """
+    lock_mode = "UPDATE" if changed_columns & key_columns(type(instance)) else "NO KEY UPDATE"
+    instance.__dict__[_VERSIONED_SAVE] = (version, lock_mode, name)
+    try:
+        instance.save()
+    finally:
+        unchecked = instance.__dict__.pop(_VERSIONED_SAVE, None)
+    if unchecked is not None:
+        raise RuntimeError(f"No row-version check is connected for {type(instance).__name__}.")
+
+
+def lock_row_at_version(sender, instance, using, **kwargs):
+    """``pre_save`` receiver: lock the row of a ``save_at_version`` save and refuse a changed row."""
+    # pop: the check is for one save only, so a later save of the instance is not checked again.
+    expected = instance.__dict__.pop(_VERSIONED_SAVE, None)
+    if expected is None:
+        return
+    version, lock_mode, name = expected
+    database = connections[using]
+    table = database.ops.quote_name(sender._meta.db_table)
+    with database.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {_row_version_sql(table)} FROM {table} "
+            f"WHERE {database.ops.quote_name(sender._meta.pk.column)} = %s FOR {lock_mode}",
+            [instance.pk],
+        )
+        current = cursor.fetchone()
+    if current is None or current[0] != version:
+        raise row_changed(name)
