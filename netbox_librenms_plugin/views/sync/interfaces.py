@@ -1654,23 +1654,21 @@ class SyncInterfacesView(
         if getattr(self, "_synced_count", None) is not None:
             self._synced_count += 1
 
-        current_name = interface.name
         created = bool(getattr(interface, "_librenms_sync_created", False))
-        changed = (
-            self.update_interface_attributes(
-                interface,
-                librenms_interface,
-                exclude_columns,
-                interface_name_field,
-                synced_name,
-                created=created,
-            )
-            or created
+        interface, changed = self.update_interface_attributes(
+            interface,
+            librenms_interface,
+            exclude_columns,
+            interface_name_field,
+            synced_name,
+            created=created,
         )
+        changed = changed or created
+        # The writer kept the stored name, so the written row still carries it.
         if "name" not in exclude_columns and interface.name != synced_name:
             kept_names = getattr(self, "_kept_name_conflicts", None)
             if kept_names is not None:
-                kept_names.append((current_name, synced_name, name_conflict_reason))
+                kept_names.append((interface.name, synced_name, name_conflict_reason))
 
         # Sync VLANs if not excluded, and never when the caller cannot read the whole VLAN scope.
         if "vlans" not in exclude_columns and not getattr(self, "_vlan_scope_incomplete", False):
@@ -1779,7 +1777,7 @@ class SyncInterfacesView(
         *,
         created,
     ):
-        """Update interface fields from LibreNMS data, respecting excluded columns (``created`` as in the writer)."""
+        """Update interface fields from LibreNMS data, respecting excluded columns (``created`` and the result as in the writer)."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         return update_interface_from_port(
             interface,

@@ -150,7 +150,7 @@ class TestTheDiffMatchesTheWriter:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
-        )
+        ).changed
 
         assert predicted == changed == writes, f"{label}: predicted={predicted} actual={changed}"
 

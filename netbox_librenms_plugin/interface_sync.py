@@ -2,6 +2,7 @@
 
 import logging
 from copy import deepcopy
+from typing import NamedTuple
 
 from dcim.models import Device, Interface, MACAddress
 from django.db import transaction
@@ -27,8 +28,71 @@ from netbox_librenms_plugin.utils import (
     normalize_librenms_port_id,
     set_librenms_device_id,
 )
+from netbox_librenms_plugin.transactions import first_at_version, row_changed, save_at_version
 
 logger = logging.getLogger(__name__)
+
+
+class InterfaceWrite(NamedTuple):
+    """The result of a write of one interface row."""
+
+    # The instance that holds the row as written; the caller continues with it.
+    interface: Interface | VMInterface
+    # Whether NetBox changed: the row, or a MAC address that the write attached.
+    changed: bool
+
+
+def _owner_filter(interface):
+    """Return the lookup of the owner of *interface*: its Device or its VirtualMachine."""
+    if isinstance(interface, Interface):
+        return {"device_id": interface.device_id}
+    return {"virtual_machine_id": interface.virtual_machine_id}
+
+
+def _column_values(interface):
+    """Return a copy of the value of each column of *interface*, by column name."""
+    return deepcopy({field.column: getattr(interface, field.attname) for field in interface._meta.concrete_fields})
+
+
+def write_interface_row(interface, apply, *, created=False):
+    """
+    Write the values that *apply* sets to the current row of *interface*, and only when a column changes.
+
+    A row that this sync did not create is read again, with its row version, from its pk and its
+    owner. The change log's before-state comes from that fresh read. Then ``apply(row)`` sets the
+    values on the fresh instance. With no changed column, nothing is locked and nothing is written.
+    With a changed column, the row is saved only when no other operation changed it since the fresh
+    read (``save_at_version``). A row that this sync created is private to its transaction, so it
+    is written without a fresh read.
+
+    Args:
+        interface (Interface | VMInterface): The interface as the caller read it.
+        apply (Callable[[Interface | VMInterface], bool]): Sets the values on the row to write, and
+            returns whether it changed NetBox outside the row's columns.
+        created (bool): Whether this sync created the interface.
+
+    Returns:
+        InterfaceWrite: The instance that holds the row as written, and whether NetBox changed.
+
+    Raises:
+        ConcurrentRowChange: The row left its owner, or another operation changed it after the fresh read.
+
+    """
+    if created:
+        row, version = interface, None
+    else:
+        row, version = first_at_version(type(interface).objects.filter(pk=interface.pk, **_owner_filter(interface)))
+        if row is None:
+            raise row_changed(interface.name)
+        row.snapshot()
+    before = _column_values(row)
+    changed_elsewhere = apply(row)
+    changed_columns = {column for column, value in _column_values(row).items() if value != before[column]}
+    if changed_columns and created:
+        row.save()
+    elif changed_columns:
+        save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
+    return InterfaceWrite(row, bool(changed_columns) or changed_elsewhere)
 
 
 def _bound_interface_name_is_occupied(interface, synced_name, port_id, server_key):
@@ -38,12 +102,9 @@ def _bound_interface_name_is_occupied(interface, synced_name, port_id, server_ke
     stored_port_id = normalize_librenms_port_id(get_librenms_device_id(interface, server_key, auto_save=False))
     if port_id is None or stored_port_id != port_id:
         return False
-    owner_filter = (
-        {"device_id": interface.device_id}
-        if isinstance(interface, Interface)
-        else {"virtual_machine_id": interface.virtual_machine_id}
+    return (
+        type(interface).objects.filter(**_owner_filter(interface), name=synced_name).exclude(pk=interface.pk).exists()
     )
-    return type(interface).objects.filter(**owner_filter, name=synced_name).exclude(pk=interface.pk).exists()
 
 
 def interface_owner_platform_id(interface):
@@ -97,7 +158,7 @@ def update_interface_from_port(  # noqa: C901
     speed_converter=convert_speed_to_kbps,
 ):
     """
-    Update one Interface or VMInterface and return whether NetBox changed.
+    Update one Interface or VMInterface from its LibreNMS port through ``write_interface_row``.
 
     ``rules`` decides the port for the interface's owner before anything is written, so an
     ignored or ambiguous port, or an incomplete port record, raises ``PortSyncBlocked``.
@@ -105,6 +166,14 @@ def update_interface_from_port(  # noqa: C901
     one case where the planned type is written without a check against its links.
 
     Claim and re-read the cross-model port identity before changing any field.
+
+    Returns:
+        InterfaceWrite: The instance that holds the row as written, and whether NetBox changed.
+            The caller continues with that instance, not with *interface*.
+
+    Raises:
+        ConcurrentRowChange: Another operation changed the row after the write read it.
+
     """
     decision = rules.decide_interface_write(librenms_interface, platform_id=interface_owner_platform_id(interface))
     port_id = normalize_librenms_port_id(librenms_interface.get("port_id"))
@@ -116,25 +185,12 @@ def update_interface_from_port(  # noqa: C901
             raise LibreNMSPortBindingConflict("The LibreNMS port ID matches multiple NetBox interfaces.") from None
         if existing_owner is not None and existing_owner != interface:
             raise LibreNMSPortBindingConflict("The LibreNMS port ID is already assigned to another NetBox interface.")
-    planned_type = None
-    # Planned before any field changes, from the same state the row diff reads.
-    if isinstance(interface, Interface) and "type" not in exclude_columns:
-        planned_type = planned_interface_type(interface, decision, created=created)
-        if planned_type.kept is not None:
-            logger.warning("Interface %s (%s): %s", interface.pk, interface.name, planned_type.kept.log_note)
-    tracked_fields = (
-        "name",
-        "type",
-        "speed",
-        "description",
-        "mtu",
-        "enabled",
-        "primary_mac_address_id",
-    )
-    before_fields = {
-        field_name: getattr(interface, field_name) for field_name in tracked_fields if hasattr(interface, field_name)
-    }
-    before_custom_fields = deepcopy(interface.custom_field_data)
+    if "name" not in exclude_columns:
+        rejection = interface_name_rejection_reason(
+            {interface_name_field: synced_name}, interface_name_field, type(interface)
+        )
+        if rejection is not None:
+            raise ValueError(f"The LibreNMS {rejection}.")
     # Built from the shared schema the row diff reads, so the table cannot paint a field this
     # loop leaves alone, or miss one it writes.
     field_mapping = {
@@ -143,55 +199,46 @@ def update_interface_from_port(  # noqa: C901
     }
     port_id = normalize_librenms_port_id(librenms_interface.get("port_id"))
 
-    if "name" not in exclude_columns:
-        rejection = interface_name_rejection_reason(
-            {interface_name_field: synced_name}, interface_name_field, type(interface)
-        )
-        if rejection is not None:
-            raise ValueError(f"The LibreNMS {rejection}.")
+    def apply_port(row):
+        planned_type = None
+        # Planned from the fresh row before any field changes, the same state the row diff reads.
+        if isinstance(row, Interface) and "type" not in exclude_columns:
+            planned_type = planned_interface_type(row, decision, created=created)
+            if planned_type.kept is not None:
+                logger.warning("Interface %s (%s): %s", row.pk, row.name, planned_type.kept.log_note)
 
-    for librenms_key, netbox_key in field_mapping.items():
-        if netbox_key in exclude_columns:
-            continue
-        if librenms_key == "ifSpeed":
-            setattr(interface, netbox_key, speed_converter(librenms_interface.get(librenms_key)))
-        elif librenms_key == "ifType":
-            if planned_type is not None:
-                interface.type = planned_type.value
-        elif librenms_key == "ifAlias":
-            # Same rule the interface table renders: an alias echoing either canonical name is
-            # not a description. Writing "" rather than skipping keeps the row and the table
-            # agreeing after a sync.
-            setattr(interface, netbox_key, synced_description(librenms_interface, type(interface)))
-        elif librenms_key == "ifMtu":
-            setattr(interface, netbox_key, coerce_interface_mtu(librenms_interface.get(librenms_key)))
-        elif netbox_key == "name" and _bound_interface_name_is_occupied(
-            interface,
-            synced_name,
-            port_id,
-            server_key,
-        ):
-            continue
-        else:
-            value = synced_name if netbox_key == "name" else librenms_interface.get(librenms_key)
-            setattr(interface, netbox_key, value)
+        for librenms_key, netbox_key in field_mapping.items():
+            if netbox_key in exclude_columns:
+                continue
+            if librenms_key == "ifSpeed":
+                setattr(row, netbox_key, speed_converter(librenms_interface.get(librenms_key)))
+            elif librenms_key == "ifType":
+                if planned_type is not None:
+                    row.type = planned_type.value
+            elif librenms_key == "ifAlias":
+                # Same rule the interface table renders: an alias echoing either canonical name is
+                # not a description. Writing "" rather than skipping keeps the row and the table
+                # agreeing after a sync.
+                setattr(row, netbox_key, synced_description(librenms_interface, type(row)))
+            elif librenms_key == "ifMtu":
+                setattr(row, netbox_key, coerce_interface_mtu(librenms_interface.get(librenms_key)))
+            elif netbox_key == "name" and _bound_interface_name_is_occupied(row, synced_name, port_id, server_key):
+                continue
+            else:
+                value = synced_name if netbox_key == "name" else librenms_interface.get(librenms_key)
+                setattr(row, netbox_key, value)
 
-    if port_id is not None:
-        set_librenms_device_id(interface, port_id, server_key)
+        if port_id is not None:
+            set_librenms_device_id(row, port_id, server_key)
 
-    if "enabled" not in exclude_columns:
-        interface.enabled = interface_enabled_from_port(librenms_interface)
+        if "enabled" not in exclude_columns:
+            row.enabled = interface_enabled_from_port(librenms_interface)
 
-    mac_changed = False
-    if "mac_address" not in exclude_columns:
-        mac_changed = assign_interface_mac(interface, librenms_interface.get("ifPhysAddress"))
+        if "mac_address" in exclude_columns:
+            return False
+        return assign_interface_mac(row, librenms_interface.get("ifPhysAddress"))
 
-    fields_changed = before_custom_fields != interface.custom_field_data or any(
-        getattr(interface, field_name) != value for field_name, value in before_fields.items()
-    )
-    if fields_changed:
-        interface.save()
-    return fields_changed or mac_changed
+    return write_interface_row(interface, apply_port, created=created)
 
 
 @transaction.atomic
@@ -283,7 +330,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
             elif not changeable_queryset.filter(pk=interface.pk).exists():
                 raise ValueError("The new NetBox interface is outside your change scope.")
 
-    update_interface_from_port(
+    interface = update_interface_from_port(
         interface,
         librenms_interface,
         rules=rules,
@@ -292,7 +339,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         interface_name_field=interface_name_field,
         created=created,
         speed_converter=speed_converter,
-    )
+    ).interface
     if not viewable_queryset.filter(pk=interface.pk).exists():
         raise ValueError("The synchronized NetBox interface is outside your view scope.")
     return interface

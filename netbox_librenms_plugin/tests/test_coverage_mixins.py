@@ -1254,7 +1254,8 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
         )
 
-        assert set(result) == {"mode_set", "untagged_set", "tagged_set", "missing_vlans", "changed"}
+        assert set(result) == {"interface", "mode_set", "untagged_set", "tagged_set", "missing_vlans", "changed"}
+        assert result["interface"].pk == interface.pk
 
 
 class TestRenderServerKeyDegradation:

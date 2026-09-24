@@ -32,6 +32,17 @@ def lock_row(other, model, pk):
         assert cursor.fetchone() is not None, f"{model.__name__} {pk} is not visible to the second connection"
 
 
+def commit_row_change(other, model, pk, values):
+    """Update one row's *values* (column to value) on *other* and commit; a lock wait fails after two seconds."""
+    assignments = ", ".join(f'"{column}" = %s' for column in values)
+    with other.cursor() as cursor:
+        # A test that commits from inside the sync's own thread must fail, not hang, on a lock the sync holds.
+        cursor.execute("SET lock_timeout = '2s'")
+        cursor.execute(f'UPDATE "{model._meta.db_table}" SET {assignments} WHERE id = %s', [*values.values(), pk])
+        assert cursor.rowcount == 1, f"{model.__name__} {pk} is not visible to the second connection"
+    other.commit()
+
+
 def lock_row_nowait(model, pk):
     """Lock one row on the test's connection with ``NOWAIT``: a row another session holds raises ``55P03``."""
     return model.objects.select_for_update(nowait=True).filter(pk=pk).first()
@@ -55,6 +66,22 @@ def wait_for_lock_wait(observer, pid, timeout=5.0):
                 return
         time.sleep(0.02)
     raise AssertionError(f"backend {pid} did not wait for a lock within {timeout}s")
+
+
+@contextmanager
+def raised_sqlstates():
+    """Yield the list of SQLSTATEs that statements on the test's connection raise inside the block."""
+    sqlstates = []
+
+    def record(execute, sql, params, many, context):
+        try:
+            return execute(sql, params, many, context)
+        except DatabaseError as exc:
+            sqlstates.append(getattr(exc.__cause__, "sqlstate", None))
+            raise
+
+    with connection.execute_wrapper(record):
+        yield sqlstates
 
 
 @contextmanager
