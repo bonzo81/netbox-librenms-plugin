@@ -954,7 +954,7 @@ def cable_path_reaches(
     return False
 
 
-def object_is_visible(obj, user, cache=None) -> bool:
+def _object_is_visible(obj, user, cache=None) -> bool:
     """
     Return whether *user* may view one concrete NetBox object.
 
@@ -996,8 +996,8 @@ def _termination_label(terminations, user=None, cache=None) -> str:
     labels = []
     for term in terminations or []:
         device = getattr(term, "device", None)
-        if not object_is_visible(term, user, cache) or (
-            device is not None and not object_is_visible(device, user, cache)
+        if not _object_is_visible(term, user, cache) or (
+            device is not None and not _object_is_visible(device, user, cache)
         ):
             labels.append("Restricted")
             continue
@@ -1012,10 +1012,10 @@ def _cable_label(segment_cable, user=None, cache=None) -> Optional[str]:
         return None
     if isinstance(segment_cable, (list, tuple)):
         joined = ", ".join(
-            f"#{c.pk}" if object_is_visible(c, user, cache) else "Restricted" for c in segment_cable if c is not None
+            f"#{c.pk}" if _object_is_visible(c, user, cache) else "Restricted" for c in segment_cable if c is not None
         )
         return joined or None
-    return f"#{segment_cable.pk}" if object_is_visible(segment_cable, user, cache) else "Restricted"
+    return f"#{segment_cable.pk}" if _object_is_visible(segment_cable, user, cache) else "Restricted"
 
 
 def render_cable_trace(cable, user=None) -> list:
@@ -4049,7 +4049,7 @@ class PortDisclosure:
         return [] if owner is None else [(type(owner), owner.pk)]
 
     def _visible_pks(self, model, pks) -> set:
-        """Return the subset of *pks* the user may view, with the same checks as :func:`object_is_visible`."""
+        """Return the subset of *pks* the user may view, with the same checks as :func:`_object_is_visible`."""
         user = self._user
         if user is None or not getattr(user, "is_authenticated", False):
             return set()

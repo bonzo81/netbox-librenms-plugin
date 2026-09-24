@@ -211,14 +211,12 @@ class TestTheDiffMatchesTheWriter:
 
     def test_the_type_check_keeps_field_validation(self):
         """The type is validated as a field too, so a value NetBox has no choice for is refused."""
-        from netbox_librenms_plugin.interface_diff import type_change_refusal
+        from netbox_librenms_plugin.interface_diff import TypeRefusal, type_change_refusal
 
         _device, interface = _synced_interface("diff-type-choice")
 
-        assert type_change_refusal(interface, "no-such-type") == (
-            "Value 'no-such-type' is not a valid choice.",
-            "type",
-            (),
+        assert type_change_refusal(interface, "no-such-type") == TypeRefusal(
+            "Value 'no-such-type' is not a valid choice.", "type"
         )
         assert type_change_refusal(interface, "virtual") is None
 

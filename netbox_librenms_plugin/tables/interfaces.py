@@ -141,7 +141,7 @@ class LibreNMSInterfaceTable(tables.Table):
     ):
         """Initialize table with device context and interface name field."""
         self.device = device
-        # The viewer decides which NetBox refusal messages a cell may show; None shows none that name an object.
+        # The viewer decides whether a cell shows NetBox's refusal message (TypeRefusal.text_for); None never does.
         self.user = user
         self.interface_name_field = interface_name_field or get_interface_name_field()
         self.vlan_groups = vlan_groups or []

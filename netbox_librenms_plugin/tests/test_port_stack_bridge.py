@@ -602,7 +602,7 @@ class TestNetBox440ParentChassisFault:
             f"The selected parent interface (bond0) belongs to {parent_device}, which is not part of virtual "
             f"chassis {chassis}."
         )
-        assert (refusal.field, refusal.named_objects) == ("parent", (child.parent, parent_device, chassis))
+        assert refusal.field == "parent"
 
     def test_the_retry_without_the_parent_still_refuses_a_virtual_lag_member(self):
         from netbox_librenms_plugin.interface_diff import type_change_refusal

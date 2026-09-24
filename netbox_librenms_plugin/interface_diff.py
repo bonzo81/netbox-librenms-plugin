@@ -16,7 +16,6 @@ from dcim.choices import InterfaceTypeChoices
 from dcim.fields import MACAddressField
 from dcim.models import Interface
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
-from netbox.config import get_config
 
 from netbox_librenms_plugin.constants import INTERFACE_SYNC_EXTRA_FIELDS, INTERFACE_SYNC_FIELD_PAIRS
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, rule_names
@@ -29,7 +28,6 @@ from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     netbox_interface_clean,
     normalize_librenms_port_id,
-    object_is_visible,
 )
 
 # Per-field verdicts. NOT_SYNCED marks every field of a row that no sync may write.
@@ -166,45 +164,25 @@ def syncable_mac_address(mac_address):
     return mac_address
 
 
-# Interface.clean() fields whose NetBox messages name no object.
-_FIELDS_THAT_NAME_NO_OBJECT = frozenset(
-    {
-        "type",
-        "mark_connected",
-        "channels",
-        "channel_id",
-        "cable_end",
-        "cable_connector",
-        "cable_positions",
-        "rf_channel",
-        "rf_channel_frequency",
-        "rf_channel_width",
-        "qinq_svlan",
-        "device",
-    }
-)
-
-
 class TypeRefusal(NamedTuple):
-    """Why a saved interface cannot take a type: the first message, its ValidationError field, and what it names."""
+    """Why a saved interface cannot take a type: the first message, and its ValidationError field."""
 
     message: str
     field: str
-    # The objects the message can name, or None when they are not known (see _first_refusal).
-    named_objects: tuple | None
+    # The plugin's own rule has fixed text that names no object, so every viewer gets it.
+    plugin_rule: bool = False
 
     def text_for(self, user):
-        """Return the message when *user* may view every object it can name, else a reason that names no object."""
-        if self.named_objects is None:
-            # An unknown field can name any object, so only a user who may view all objects gets its message.
-            shown = getattr(user, "is_authenticated", False) and getattr(user, "is_superuser", False)
-        else:
-            visibility = {}
-            shown = all(object_is_visible(obj, user, visibility) for obj in self.named_objects)
-        if shown:
+        """Return the message for the plugin's rule or a superuser, else a reason that names no object."""
+        # NetBox's message (and an admin validator's or another plugin's) can name any object.
+        if self.plugin_rule or (
+            getattr(user, "is_authenticated", False)
+            and getattr(user, "is_active", False)
+            and getattr(user, "is_superuser", False)
+        ):
             return self.message
         subject = "the interface" if self.field == NON_FIELD_ERRORS else f"the {self.field} field"
-        return f"NetBox refuses {subject} (the message is hidden: it can name an object that you cannot view)"
+        return f"NetBox refuses {subject} (only a superuser sees the message)"
 
 
 class KeptType(NamedTuple):
@@ -234,45 +212,13 @@ class PlannedType(NamedTuple):
     kept: KeptType | None
 
 
-def _named_objects(candidate, field):
-    """Return the objects a NetBox ``clean()`` message for *field* can name on *candidate*, or None when unknown."""
-    if field in _FIELDS_THAT_NAME_NO_OBJECT:
-        return ()
-    if field == "untagged_vlan":
-        named = [candidate.untagged_vlan]
-    elif field in ("parent", "bridge", "lag"):
-        link = getattr(candidate, field)
-        # Only the parent has a message that names a link on the same device.
-        named = [link] if field == "parent" else []
-        if link is not None and link.device_id != candidate.device_id:
-            named = [link, link.device, candidate.device.virtual_chassis]
-    else:
-        return None
-    return tuple(obj for obj in named if obj is not None)
-
-
-def _netbox_runs_custom_interface_validators():
-    """Return whether NetBox's ``clean()`` runs an admin ``CUSTOM_VALIDATORS`` entry for an interface."""
-    # NetBox 4.4.0 matches the model label exactly and 4.7 without case; a match without case covers both.
-    return any(
-        key.lower() == Interface._meta.label_lower and validators
-        for key, validators in get_config().CUSTOM_VALIDATORS.items()
-    )
-
-
-def _first_refusal(exc, candidate):
-    """
-    Return the first message of NetBox's *exc*, with its field and the objects it can name.
-
-    An admin validator can put any text under any field, so while one applies to interfaces, no
-    NetBox message has known objects.
-    """
+def _first_refusal(exc):
+    """Return the first message of NetBox's *exc*, with its field."""
     if hasattr(exc, "error_dict"):
         field, messages = next(iter(exc.message_dict.items()))
     else:
         field, messages = NON_FIELD_ERRORS, exc.messages
-    named_objects = None if _netbox_runs_custom_interface_validators() else _named_objects(candidate, field)
-    return TypeRefusal(messages[0], field, named_objects)
+    return TypeRefusal(messages[0], field)
 
 
 def type_change_refusal(interface, new_type):
@@ -281,7 +227,7 @@ def type_change_refusal(interface, new_type):
 
     NetBox judges an in-memory copy that has the new type. The plugin adds one rule NetBox does
     not have: an aggregate with LAG members stays ``lag``. The first failure is the reason. NetBox's
-    message can name linked objects, so a page shows it through ``TypeRefusal.text_for``.
+    message can name any object, so a page shows it through ``TypeRefusal.text_for``.
 
     Args:
         interface (Interface): The saved interface, with its current links.
@@ -296,13 +242,13 @@ def type_change_refusal(interface, new_type):
     try:
         candidate.clean_fields(exclude=[field.name for field in candidate._meta.fields if field.name != "type"])
     except ValidationError as exc:
-        return _first_refusal(exc, candidate)
+        return _first_refusal(exc)
     if new_type != InterfaceTypeChoices.TYPE_LAG and Interface.objects.filter(lag=interface).exists():
-        return TypeRefusal("An interface with LAG members must keep type lag.", "type", ())
+        return TypeRefusal("An interface with LAG members must keep type lag.", "type", plugin_rule=True)
     try:
         netbox_interface_clean(candidate)
     except ValidationError as exc:
-        return _first_refusal(exc, candidate)
+        return _first_refusal(exc)
     return None
 
 

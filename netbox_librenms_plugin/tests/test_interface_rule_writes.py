@@ -752,11 +752,12 @@ class _TypeRuleThatNamesTheBridge(CustomValidator):
 
 
 @pytest.mark.django_db
-class TestAKeptNoteNamesOnlyWhatTheViewerMayView:
-    """The kept note shows NetBox's message only to a viewer who may view every object that message can name."""
+class TestAKeptNoteShowsNetBoxsMessageOnlyToASuperuser:
+    """NetBox's refusal can name any object, so only a superuser gets it; the plugin's own rule shows to every viewer."""
 
     @pytest.mark.parametrize("sees_peer", [False, True], ids=["peer-hidden", "peer-visible"])
-    def test_a_link_to_another_device_is_named_only_to_its_viewers(self, client, settings, sees_peer):
+    def test_a_restricted_viewer_gets_the_field_not_the_message(self, client, settings, sees_peer):
+        """A viewer who may view every object the message names still gets only the field."""
         configure_default_librenms_server(settings)
         tag = f"keptnote{int(sees_peer)}"
         device, interface, peer, bridge, rule = _stale_cross_device_bridge(tag)
@@ -767,13 +768,11 @@ class TestAKeptNoteNamesOnlyWhatTheViewerMayView:
         row = _tab_row(client, device, 10)
         repaint = _verify_row(client, device, 10)
 
-        note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: "
-        shown = netbox_message if sees_peer else "NetBox refuses the bridge field"
+        note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: NetBox refuses the bridge field"
         for cell in (_type_cell(row), repaint["type"]):
-            assert note + shown in cell, cell
-        if not sees_peer:
-            for rendered in (row, *repaint.values()):
-                assert peer.name not in str(rendered) and bridge.name not in str(rendered), rendered
+            assert note in cell, cell
+        for rendered in (row, *repaint.values()):
+            assert peer.name not in str(rendered) and bridge.name not in str(rendered), rendered
 
     def test_a_superuser_is_shown_netboxs_message(self, superuser_client):
         device, interface, _peer, _bridge, rule = _stale_cross_device_bridge("keptnotesuper")
@@ -794,8 +793,8 @@ class TestAKeptNoteNamesOnlyWhatTheViewerMayView:
         for cell in _kept_cells(client, device, 10):
             assert note in cell, cell
 
-    def test_a_refusal_the_plugin_cannot_read_is_withheld_from_a_restricted_viewer(self, client, settings):
-        """A message outside the known fields can name any object, so only a viewer who may view all objects gets it."""
+    def test_a_non_field_refusal_is_named_as_the_interface(self, client, settings):
+        """A NetBox error with no field says that NetBox refuses the interface, and hides the message."""
         from netbox_librenms_plugin.tests.conftest import make_required_interface_custom_field
 
         configure_default_librenms_server(settings)

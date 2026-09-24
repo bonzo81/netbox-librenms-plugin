@@ -825,7 +825,7 @@ class TestApplyModuleInterfaceTypes:
         assert response.status_code == 302
         assert interface.type == "1000base-t"
         assert message_texts(request, "warning") == [
-            "Skipped TenGigabitEthernet2/1/1 because Virtual interfaces cannot have a parent LAG interface."
+            "Skipped TenGigabitEthernet2/1/1 because NetBox refuses the lag field (only a superuser sees the message)."
         ]
 
     def test_validation_refusal_does_not_roll_back_a_valid_interface(self, settings):
@@ -878,7 +878,7 @@ class TestApplyModuleInterfaceTypes:
         assert invalid_interface.type == "1000base-t"
         assert message_texts(request, "success") == ["Updated the type of 1 interface from its module template."]
         assert message_texts(request, "warning") == [
-            "Skipped TenGigabitEthernet2/1/2 because Virtual interfaces cannot have a parent LAG interface."
+            "Skipped TenGigabitEthernet2/1/2 because NetBox refuses the lag field (only a superuser sees the message)."
         ]
 
     def test_a_non_lag_template_type_is_refused_on_an_aggregate_with_members(self, settings):
@@ -908,27 +908,33 @@ class TestApplyModuleInterfaceTypes:
             "Skipped TenGigabitEthernet2/1/1 because An interface with LAG members must keep type lag."
         ]
 
-    def test_a_refusal_that_names_an_object_the_user_cannot_view_is_withheld(self, settings):
+    @pytest.mark.parametrize("superuser", [False, True], ids=["restricted", "superuser"])
+    def test_netboxs_refusal_is_shown_only_to_a_superuser(self, settings, superuser):
         from dcim.models import Device, Interface, Module
 
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        page_device, member, module, interface = _vc_member_type_mismatch("type-apply-hidden-bridge")
-        bridge = make_interface(make_device("type-apply-secret-peer"), "br-type-apply-secret", iface_type="bridge")
+        tag = f"type-apply-hidden-bridge-{int(superuser)}"
+        page_device, member, module, interface = _vc_member_type_mismatch(tag)
+        bridge = make_interface(make_device(f"{tag}-secret-peer"), f"br-{tag}", iface_type="bridge")
         Interface.objects.filter(pk=interface.pk).update(bridge_id=bridge.pk)
-        user = make_user_with_perms(
-            "type-apply-hidden-bridge-user",
-            [("view", Device), ("view", Module), ("change", Interface)],
-        )
+        if superuser:
+            user = make_superuser(f"{tag}-user")
+        else:
+            user = make_user_with_perms(f"{tag}-user", [("view", Device), ("view", Module), ("change", Interface)])
 
         request, _response = self._post(settings, user, page_device, member, module, interface)
 
         interface.refresh_from_db()
         assert interface.type == "1000base-t"
         [warning] = message_texts(request, "warning")
-        assert warning.startswith("Skipped TenGigabitEthernet2/1/1 because NetBox refuses the bridge field")
-        assert bridge.name not in warning and "type-apply-secret-peer" not in warning
+        if superuser:
+            assert bridge.name in warning and f"{tag}-secret-peer" in warning, warning
+        else:
+            assert warning == (
+                "Skipped TenGigabitEthernet2/1/1 because NetBox refuses the bridge field (only a superuser sees the message)."
+            )
 
     def test_interface_bound_to_another_module_is_skipped(self, settings):
         from dcim.models import Device, Interface, InterfaceTemplate, Module
