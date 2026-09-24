@@ -6,43 +6,83 @@ Open **LibreNMS → Mappings** and use the tabs at the top of the page to switch
 
 ## Interface Type Mappings
 
-Interface Type Mappings translate a LibreNMS interface type and speed into a NetBox interface type during Interface Sync.
+Interface Type Mappings are interface rules. A rule selects LibreNMS ports, then sets a NetBox interface type for them or ignores them. Open them at **LibreNMS → Mappings → Interface Mappings**.
 
-LibreNMS reports interface speed in bits per second. The plugin converts that value to kilobits per second (Kbps) before selecting a mapping. For a matching LibreNMS type, it uses the highest configured speed that is less than or equal to the reported speed. A mapping with no speed is used as a fallback for that type. If no mapping matches, the NetBox interface type is set to **Other**.
+### Fields
 
-LibreNMS interface type matching is case-sensitive. Copy the value, such as `ethernetCsmacd`, from the device's Interface Sync table to avoid capitalization differences.
+| Field | Meaning |
+|---|---|
+| `action` | `set_type` (the default) gives matching ports a NetBox type. `ignore` keeps matching ports out of the sync. |
+| `platform` | The NetBox platform of the object that owns the interface: the device, the virtual chassis member, or the virtual machine. Blank means every platform. In an import, use the platform slug. |
+| `name_pattern` | A Python regular expression. It is searched in `ifName` and in `ifDescr`, and a match in either counts. It is case-sensitive; use `(?i)` to ignore case. Blank means any name. |
+| `librenms_type` | The LibreNMS `ifType`, matched exactly and case-sensitive, for example `ethernetCsmacd`. Blank means any type. |
+| `librenms_speed` | The minimum port speed in Kbps. It needs a `librenms_type`. An Ignore rule has no speed. |
+| `netbox_type` | The NetBox interface type a Set type rule writes. An Ignore rule has none. |
 
-For example:
+A rule needs at least one of `platform`, `name_pattern` and `librenms_type`. All selectors of a rule must match. Two rules cannot have the same `platform`, `name_pattern`, `librenms_type` and `librenms_speed`, whatever their action.
+
+LibreNMS reports speed in bits per second. The plugin converts it to Kbps before it compares it with `librenms_speed`.
+
+### Which rule applies
+
+1. An Ignore rule that matches always wins.
+2. Otherwise the most specific Set type rule wins. A rule with a platform comes first, then a rule with a name pattern, then a rule with a type, then the rule with the highest speed at or below the port speed.
+3. Two Set type rules of equal rank make the port ambiguous. The plugin does not create or update the interface, and the Interface Sync table names both rules.
+4. When no rule matches, a new interface gets the type **Other**, and an existing interface keeps its type.
+
+The Type column of the Interface Sync table shows :material-link-variant: and the rule when a rule sets the type, and :material-link-variant-off: when no rule does.
+
+Rules with only a type and a speed keep their old result. For example:
 
 ```text
 ethernetCsmacd + 10000000 -> 10GBASE-T (10GE)
 ethernetCsmacd + 1000000  -> 1000BASE-T (1GE)
-ethernetCsmacd + 100000   -> 100BASE-TX (10/100ME)
 ethernetCsmacd + no speed -> fallback for other speeds
+platform EOS + ^Et        -> wins over all three on an EOS device
 ```
 
-The Interface Sync table shows :material-link-variant: when a mapping is available and :material-link-variant-off: when no mapping is available.
+### What Ignore blocks
 
-**YAML format:**
+An Ignore rule never deletes or changes an object that exists in NetBox. For an ignored port the plugin does not:
+
+- create, update, rebind or link the interface in Interface Sync. The table hides ignored ports; the **N ignored** toggle shows them greyed out, with the rule and no checkbox.
+- create the interface from the IP Addresses tab, or assign an address to an interface when the address's port or the port bound to that interface is ignored. This includes a confirmed reassignment and the primary IP. The row shows **Ignored** and the rule.
+- create, tag or replace a cable in Cable Sync when the port is at either end of the row, is bound to an endpoint (a remote end you picked too), or is at the far end of a cable the replacement removes. The row shows **Ignored** and the rule, and the whole cable change is skipped.
+
+An ambiguous port blocks only interface writes. It does not block an IP assignment or a cable, because they write no interface type.
+
+Each port is decided with the platform of the NetBox device that owns it. For a cable, the port the neighbour advertised belongs to the neighbour device, also when you pick a remote end on another device. When no NetBox device owns the advertised port (the neighbour is not in NetBox, or its chassis member is not known), the port has no platform, so only rules without a platform can match it. A remote end you pick is checked on its own: the port bound to the picked interface uses the picked device's platform.
+
+A message names the refused port and the rule only when you can view the device that owns the port and the interface bound to it. Otherwise, and when no NetBox device owns the port, the change is still refused, but the message does not name the port or the rule.
+
+The IP and cable checks need the LibreNMS port record. When the record is missing and an Ignore rule could apply to the platform, the row asks you to refresh the data. When no Ignore rule could apply, the change goes ahead.
+
+### Examples
 
 ```yaml
+# Keep VLAN interfaces of every Arista EOS device out of the sync.
+- action: ignore
+  platform: arista-eos
+  name_pattern: "^Vlan"
+  description: "EOS SVIs"
+
+# 10G ports named Te on Cisco IOS devices are SFP+.
+- action: set_type
+  platform: cisco-ios
+  name_pattern: "^Te"
+  netbox_type: 10gbase-x-sfpp
+
+# Any Ethernet port at 1 Gbps or more is 1000BASE-T, unless a more specific rule matches.
 - librenms_type: ethernetCsmacd
   librenms_speed: 1000000
   netbox_type: 1000base-t
-  description: "Standard Gigabit Ethernet ports"
-
-- librenms_type: ethernetCsmacd
-  librenms_speed: null
-  netbox_type: 1000base-t
-  description: "Fallback for Ethernet interfaces"
 
 - librenms_type: ieee8023adLag
-  librenms_speed: null
   netbox_type: lag
   description: "Link aggregation groups"
 ```
 
-The combination of `librenms_type` and `librenms_speed` must be unique. Only one no-speed fallback can exist for each LibreNMS type.
+Import rules with a `name_pattern` as YAML or JSON. NetBox's CSV import removes the spaces at the start and end of each cell, so the plugin refuses a CSV import that has a `name_pattern` column. A pattern that does not compile is refused when you save the rule.
 
 ## Device Type Mappings
 

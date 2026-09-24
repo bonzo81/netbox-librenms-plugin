@@ -366,6 +366,19 @@ def normalize_librenms_port_id(value) -> int | None:
     return coerce_librenms_id(value)
 
 
+def ip_row_port_record(ports_by_id, port_id):
+    """Return the one cached port record whose canonical id matches an IP row, else None."""
+    normalized_id = normalize_librenms_port_id(port_id)
+    if normalized_id is None or not isinstance(ports_by_id, dict):
+        return None
+    matches = [
+        port
+        for raw_id, port in ports_by_id.items()
+        if normalize_librenms_port_id(raw_id) == normalized_id and isinstance(port, dict)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):
     """Index one owner scope with identical ambiguity rules for reads and writes."""
     by_librenms_id = {}
@@ -3306,6 +3319,36 @@ def oob_badge_html(record, leading_space=False):
     return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
 
 
+def rule_block_html(rule_block):
+    """
+    Return the pill that says why the interface rules refuse a row's write.
+
+    Shared by the IP and cable tables and the cable-verify formatter. It uses the badge language
+    of the interfaces table's rule pill.
+
+    Args:
+        rule_block (dict): The row data from ``interface_rules.row_rule_block``.
+
+    Returns:
+        SafeString: The pill markup.
+
+    """
+    from netbox_librenms_plugin.interface_rules import RuleDecisionKind  # interface_rules imports utils
+
+    if rule_block["kind"] == RuleDecisionKind.IGNORE.value:
+        color, icon, label = "secondary", "mdi-eye-off", "Ignored"
+    else:
+        color, icon, label = "warning", "mdi-refresh", "Refresh needed"
+    return format_html(
+        '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="Not synced: {}">'
+        '<i class="mdi {}"></i>{}</span>',
+        color,
+        rule_block["reason"],
+        icon,
+        label,
+    )
+
+
 def remote_port_html(value, record):
     """
     Return one cable row's remote-port cell: the port name, its link, and its badges.
@@ -3927,6 +3970,94 @@ def find_interface_by_librenms_port_id(port_id, server_key: str):
             f"LibreNMS port {port_id!r} is bound to both an Interface and a VMInterface on server {server_key!r}"
         )
     return owners[0] if owners else None
+
+
+class PortDisclosure:
+    """
+    The one rule that decides whether a refusal or a pill may name a LibreNMS port.
+
+    A port's id, name and refusing rule may be shown only when the port's owner is in the user's
+    view scope. When an interface is bound to the port on this server, that interface and its own
+    owner (read from the binding) must be in view scope, and the owner a caller passes does not
+    count. For an unbound port the caller's owner counts; None is never visible. An ambiguous
+    binding is never visible.
+
+    A table calls :meth:`preload` once with every ``(port_id, owner)`` it may ask about, so the
+    rule costs a fixed number of queries per render. A writer may ask one port at a time. The
+    cable and IP tables and writers all use it.
+    """
+
+    def __init__(self, user, server_key: str):
+        """Bind the rule to one user and one LibreNMS server; nothing is read yet."""
+        self._user = user
+        self._server_key = server_key
+        self._bindings = {}
+        self._visible = {}
+
+    def preload(self, ports) -> None:
+        """
+        Read the bindings and the view scope for these ``(port_id, owner)`` pairs.
+
+        It costs one query per interface model for the bindings, and one per model for the view
+        scope, whatever the number of ports.
+        """
+        from virtualization.models import VMInterface
+
+        ports = list(ports)
+        new_ids = {port_id for port_id, _owner in ports if port_id not in self._bindings}
+        if new_ids:
+            match = Q(pk__in=[])
+            for port_id in new_ids:
+                host_q, oob_q = build_librenms_id_qs(self._server_key, port_id)
+                match |= host_q | oob_q
+            for model in (Interface, VMInterface):
+                for interface in model.objects.filter(match):
+                    port_id = get_librenms_device_id(interface, self._server_key, auto_save=False)
+                    if port_id in new_ids:
+                        self._bindings.setdefault(port_id, []).append(interface)
+            for port_id in new_ids:
+                self._bindings.setdefault(port_id, [])
+        wanted = {}
+        for port_id, owner in ports:
+            for model, pk in self._evidence(port_id, owner):
+                wanted.setdefault(model, set()).add(pk)
+        for model, pks in wanted.items():
+            pks -= {pk for (known_model, pk) in self._visible if known_model is model}
+            if not pks:
+                continue
+            visible = self._visible_pks(model, pks)
+            self._visible.update({(model, pk): pk in visible for pk in pks})
+
+    def __call__(self, port_id, owner) -> bool:
+        """Return whether a refusal may name *port_id*; reads what :meth:`preload` did not."""
+        self.preload([(port_id, owner)])
+        evidence = self._evidence(port_id, owner)
+        return bool(evidence) and all(self._visible[key] for key in evidence)
+
+    def _evidence(self, port_id, owner) -> list:
+        """Return the ``(model, pk)`` objects that must be visible, or ``[]`` when none can be."""
+        from virtualization.models import VirtualMachine, VMInterface
+
+        bound = self._bindings.get(port_id, [])
+        if len(bound) > 1:
+            return []
+        if bound:
+            interface = bound[0]
+            if isinstance(interface, VMInterface):
+                return [(VMInterface, interface.pk), (VirtualMachine, interface.virtual_machine_id)]
+            return [(Interface, interface.pk), (Device, interface.device_id)]
+        return [] if owner is None else [(type(owner), owner.pk)]
+
+    def _visible_pks(self, model, pks) -> set:
+        """Return the subset of *pks* the user may view, with the same checks as :func:`_object_is_visible`."""
+        user = self._user
+        if user is None or not getattr(user, "is_authenticated", False):
+            return set()
+        if getattr(user, "is_superuser", False):
+            return set(pks)
+        if not user.has_perm(f"{model._meta.app_label}.view_{model._meta.model_name}"):
+            return set()
+        return set(model.objects.restrict(user, "view").filter(pk__in=pks).values_list("pk", flat=True))
 
 
 def lock_librenms_id_assignment(librenms_id, server_key: str, *, owner_queryset=None, owner_pk=None):

@@ -12,9 +12,10 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 from ipam.models import VRF, IPAddress
-from virtualization.models import VirtualMachine
+from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE, is_supported_interface_name_field
+from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
@@ -22,11 +23,15 @@ from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
+    get_librenms_device_id,
     get_virtual_chassis_members,
     identify_ip_sync_rows,
     index_ip_source_interfaces,
     index_ip_sync_rows,
+    ip_row_port_record,
     normalize_ip_sync_row_id,
+    normalize_librenms_port_id,
+    PortDisclosure,
     resolve_create_missing_interfaces,
     resolve_ip_source_interface,
     resolve_set_primary_ip,
@@ -45,6 +50,64 @@ logger = logging.getLogger(__name__)
 def _port_key(port_id):
     """Return the one key form the port map uses; LibreNMS types an id as int here and str there."""
     return str(port_id)
+
+
+def ip_interface_scope(view, obj):
+    """
+    Return the owners and interfaces the IP tab resolves rows against, for the table and the sync alike.
+
+    Both are view-scoped: the object and the chassis members the caller may view, and their
+    interfaces the caller may view. The sync locks the same owners, so the two never disagree.
+
+    Args:
+        view: A view with ``restricted_queryset`` bound to the request.
+        obj (Device | VirtualMachine): The object whose IP rows are resolved.
+
+    Returns:
+        tuple[list, list]: The owners, and their interfaces.
+
+    """
+    if isinstance(obj, Device):
+        member_ids = [member.pk for member in get_virtual_chassis_members(obj)]
+        owners = list(view.restricted_queryset(Device).filter(pk__in=member_ids))
+        return owners, list(view.restricted_queryset(Interface).filter(device__in=owners))
+    return [obj], list(view.restricted_queryset(VMInterface).filter(virtual_machine=obj))
+
+
+def ip_assignment_ports(ports_by_id, bound_ports_by_id, source_port_id, interface, server_key, owner):
+    """
+    Return the ports an IP assignment to an existing interface touches, for the sync and the table alike.
+
+    The assignment touches the IP row's source port and the port bound to the interface on this
+    server. A name match can pick an interface bound to another port, so both are decided, each
+    with the record the snapshot holds for it. Decide them with
+    ``InterfaceRuleMatcher.first_blocked_port`` and a ``PortDisclosure``.
+
+    Args:
+        ports_by_id (dict): The snapshot's records of the ports the IP rows name.
+        bound_ports_by_id (dict): The snapshot's records of the ports bound to interfaces in scope.
+        source_port_id: The IP row's LibreNMS port id.
+        interface (Interface | VMInterface): The target interface (the locked row in the sync).
+        server_key (str): The LibreNMS server whose binding counts.
+        owner (Device | VirtualMachine): The interface's owner (the locked row in the sync).
+
+    Returns:
+        list[tuple]: ``(port_id, record, platform_id, owner)`` for each port.
+
+    """
+    port_ids = {
+        normalize_librenms_port_id(source_port_id),
+        get_librenms_device_id(interface, server_key, auto_save=False),
+    } - {None}
+    return [
+        (
+            port_id,
+            ip_row_port_record(ports_by_id, port_id) or ip_row_port_record(bound_ports_by_id, port_id),
+            owner.platform_id,
+            owner,
+        )
+        for port_id in port_ids
+    ]
 
 
 def _valid_librenms_vrf_identity(value):
@@ -89,6 +152,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         server_key=None,
         port_data_cache=None,
         fetch_vrf_identities=True,
+        bound_port_cache=None,
     ):
         """
         Enrich IP data with NetBox information in a more efficient manner.
@@ -109,6 +173,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             port_data_cache: Optional pre-populated port map (see :func:`_port_key`) so a
                 cached render reads the interface names without a live call.
             fetch_vrf_identities: Whether to read current VRF identities from LibreNMS.
+            bound_port_cache: Optional map, filled in place when the ports are read, of the
+                records of the ports bound to the interfaces in scope. It is evidence for the
+                rules only, never an IP row or a name candidate.
 
         Returns:
             list: The enriched IP entries.
@@ -141,7 +208,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             rekeyed = {_port_key(key): value for key, value in port_data_cache.items()}
             port_data_cache.clear()
             port_data_cache.update(rekeyed)
-        self._load_port_names(port_data_cache, ip_data)
+        if bound_port_cache is None:
+            bound_port_cache = {}
+        self._load_port_names(
+            port_data_cache,
+            ip_data,
+            bound_evidence=(bound_port_cache, set(prefetched_data["interfaces_by_librenms_id"])),
+        )
         vrf_identities = self._resolve_vrf_identities(port_data_cache, ip_data, fetch_vrf_identities)
         # Every VRF decides a match, so a VRF the user cannot view still blocks a create; only a
         # viewable one is ever suggested or listed.
@@ -153,6 +226,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         )
 
         enriched_data = []
+        assignments = []
 
         # Process each IP address from LibreNMS
         for ip_entry in ip_data:
@@ -212,12 +286,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 enriched_ip["status"] = "update" if ip_matches else "sync"
 
             # Add interface information (regardless of IP status)
-            self._add_interface_info_to_ip(
+            interface = self._add_interface_info_to_ip(
                 enriched_ip,
                 ip_entry["port_id"],
                 librenms_interface_name,
                 prefetched_data,
             )
+            if interface is not None:
+                assignments.append((enriched_ip, interface))
 
             self._add_vrf_suggestion(
                 enriched_ip,
@@ -230,6 +306,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
             enriched_data.append(enriched_ip)
 
+        self._add_rule_blocks(
+            assignments,
+            (port_data_cache, bound_port_cache),
+            server_key or self._render_server_key(),
+            prefetched_data,
+        )
         self._flag_management_ip(enriched_data, mgmt_ip)
         return identify_ip_sync_rows(enriched_data)
 
@@ -294,12 +376,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         Returns:
             dict: The interface, IP, and VRF lookup maps used during enrichment.
         """
-        if isinstance(obj, Device):
-            all_interfaces = list(Interface.objects.filter(device__in=get_virtual_chassis_members(obj)))
-            obj_device_id = obj.pk
-        else:
-            all_interfaces = list(obj.interfaces.all())
-            obj_device_id = None
+        owners, all_interfaces = ip_interface_scope(self, obj)
+        obj_device_id = obj.pk if isinstance(obj, Device) else None
         server_key = server_key or self._render_server_key()
         interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk = index_ip_source_interfaces(
             all_interfaces, server_key, obj_device_id
@@ -326,13 +404,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # Carries the rename-safe interface_url fallback in resolve_ip_source_interface().
             "interfaces_by_pk": interfaces_by_pk,
             "all_interfaces": all_interfaces,
+            "owner_by_id": {owner.pk: owner for owner in owners},
             "device": obj,
             "ip_addresses_map": ip_addresses_map,
             "vrfs": vrfs,
             "all_vrfs": all_vrfs,
         }
 
-    def _load_port_names(self, port_data_cache, ip_data):
+    def _load_port_names(self, port_data_cache, ip_data, *, bound_evidence=None):
         """
         Fill *port_data_cache* with the device's ports, in one read.
 
@@ -346,9 +425,15 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         sync view, which scans it to decide whether an interface name is ambiguous, so widening it
         to every port on the device would change that verdict rather than just the fetch.
 
+        With *bound_evidence*, the same read also keeps the records of the ports bound to the
+        interfaces in scope. A name match can pick such an interface, and the interface rules need
+        its port. They stay out of *port_data_cache*, so they never change a name verdict.
+
         Args:
             port_data_cache (dict): Port rows keyed by :func:`_port_key`; filled in place.
             ip_data (list): The LibreNMS IP rows about to be enriched.
+            bound_evidence (tuple[dict, set[str]] | None): The bound port rows to fill in place,
+                and the :func:`_port_key` of each port bound to an interface in scope.
 
         """
         wanted = {_port_key(row["port_id"]) for row in ip_data if isinstance(row, dict) and "port_id" in row}
@@ -369,6 +454,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             key = _port_key(port["port_id"])
             if key in wanted:
                 port_data_cache.setdefault(key, port)
+            elif bound_evidence is not None and key in bound_evidence[1]:
+                bound_evidence[0].setdefault(key, port)
         # Record a port the read did not return, or a failed read, as absent: the rows render
         # unnamed, and warm and cache-only renders do not re-fetch. A manual refresh retries.
         for key in wanted:
@@ -583,7 +670,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             enriched_ip["interface_url"] = interface.get_absolute_url()
 
     def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
-        """Add the same scoped interface that the sync writer will resolve."""
+        """Add the same scoped interface that the sync writer will resolve, and return it."""
         interface = self._resolve_ip_row_interface(port_id, librenms_interface_name, enriched_ip, prefetched_data)
         if interface is not None:
             enriched_ip["interface_name"] = interface.name
@@ -592,6 +679,48 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # The cached URL is an input to resolution, not an answer. Scoped resolution just
             # rejected it, so the row must not keep linking to a deleted or out-of-scope pk.
             enriched_ip.pop("interface_url", None)
+        return interface
+
+    def _add_rule_blocks(self, assignments, port_caches, server_key, prefetched_data):
+        """
+        Stamp, on every row, the decision the IP sync makes before it assigns the address.
+
+        One ``PortDisclosure`` is preloaded for every row, so the check costs a fixed number of
+        queries per render.
+
+        Args:
+            assignments (list[tuple[dict, Interface | VMInterface]]): Each row and its target.
+            port_caches (tuple[dict, dict]): The snapshot's row and bound port records.
+            server_key (str): The LibreNMS server whose bindings count.
+            prefetched_data (dict): The owners from :meth:`_prefetch_netbox_data`.
+
+        """
+        if not assignments:
+            return
+        decided = [
+            (
+                enriched_ip,
+                ip_assignment_ports(
+                    *port_caches,
+                    enriched_ip["port_id"],
+                    interface,
+                    server_key,
+                    prefetched_data["owner_by_id"][self._interface_owner_id(interface)],
+                ),
+            )
+            for enriched_ip, interface in assignments
+        ]
+        rules = interface_rules_for_request(self.request)
+        disclose = PortDisclosure(self.request.user, server_key)
+        disclose.preload((port_id, owner) for _row, ports in decided for port_id, _record, _platform, owner in ports)
+        for enriched_ip, ports in decided:
+            if (blocked := rules.first_blocked_port(ports, disclose)) is not None:
+                enriched_ip["rule_block"] = row_rule_block(*blocked)
+
+    @staticmethod
+    def _interface_owner_id(interface):
+        """Return the pk of the Device or VirtualMachine that owns *interface*."""
+        return interface.device_id if isinstance(interface, Interface) else interface.virtual_machine_id
 
     def get_table(self, data, obj, request, server_key=None):
         """Get the table instance for the view."""
@@ -654,9 +783,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # Resolve the management IP once here (live LibreNMS call) and cache it
             # below so cached renders don't re-hit the API.
             mgmt_ip = self._resolve_management_ip()
-            # Enrichment fills this from one device-ports read; it is cached below so warm
+            # Enrichment fills these from one device-ports read; they are cached below so warm
             # renders enrich without any live call.
             port_data_cache = {}
+            bound_port_cache = {}
         else:
             cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
             cached_ip_data = cache.get(cache_key)
@@ -675,11 +805,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # (e.g. a list) would raise in dict(...) below; a non-str mgmt_ip would break the
             # cached["mgmt_ip"] deref. Purge and treat as a miss instead of 500-ing the tab.
             cached_ports_by_id = cached_ip_data.get("ports_by_id")
+            cached_bound_ports_by_id = cached_ip_data.get("bound_ports_by_id")
             cached_interface_name_field = cached_ip_data.get("interface_name_field")
             if (
                 any(not _valid_ip_row(item) for item in cached_ip_data["ip_addresses"])
                 or ("mgmt_ip" in cached_ip_data and not isinstance(cached_ip_data["mgmt_ip"], str))
                 or (cached_ports_by_id is not None and not isinstance(cached_ports_by_id, dict))
+                or (cached_bound_ports_by_id is not None and not isinstance(cached_bound_ports_by_id, dict))
                 or (
                     cached_interface_name_field is not None
                     and not is_supported_interface_name_field(cached_interface_name_field)
@@ -719,6 +851,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # Pre-populate the port map from cache so the cached render reads only
             # cache + NetBox and never re-hits LibreNMS (resilient when it's down).
             port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
+            bound_port_cache = dict(cached_bound_ports_by_id or {})
             # An entry without a port map (pre-upgrade, or {} from an older failed read) backfills below.
             cached_had_ports_by_id = bool(cached_ip_data.get("ports_by_id"))
             cached_matches_interface_name_field = cached_interface_name_field == interface_name_field
@@ -734,6 +867,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             server_key=server_key,
             port_data_cache=port_data_cache,
             fetch_vrf_identities=fetch_fresh,
+            bound_port_cache=bound_port_cache,
         )
 
         if fetch_fresh:
@@ -745,6 +879,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                     "ip_addresses": ip_data,
                     "mgmt_ip": mgmt_ip,
                     "ports_by_id": port_data_cache,
+                    "bound_ports_by_id": bound_port_cache,
                     "interface_name_field": interface_name_field,
                 },
                 timeout=self.librenms_api.cache_timeout,
@@ -769,6 +904,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                         "ip_addresses": ip_data,
                         "mgmt_ip": mgmt_ip,
                         "ports_by_id": port_data_cache,
+                        "bound_ports_by_id": bound_port_cache,
                         "interface_name_field": interface_name_field,
                     },
                     timeout=remaining_ttl,

@@ -20,6 +20,9 @@ _REQUEST_CACHE_ATTRIBUTE = "_librenms_interface_rules"
 # The port keys a decision reads. An interface write refuses a record that lacks one (None is a value).
 PORT_RECORD_KEYS = ("ifName", "ifDescr", "ifType", "ifSpeed")
 
+# The reason for a blocking port the caller may not view: no port id, name or rule.
+HIDDEN_PORT_REASON = "an interface rule refuses a port on an interface or device you cannot view"
+
 
 class RuleConfigurationError(Exception):
     """A stored rule cannot be applied, so no decision from this rule set is safe."""
@@ -32,7 +35,7 @@ class RuleDecisionKind(enum.Enum):
     SET_TYPE = "set_type"
     IGNORE = "ignore"
     AMBIGUOUS = "ambiguous"
-    # Only an interface write check gives this: the port record lacks a key a decision reads.
+    # Only a write check gives this: the port record lacks a key a decision reads.
     INCOMPLETE = "incomplete"
 
 
@@ -100,6 +103,8 @@ def decision_reason(decision: RuleDecision) -> str | None:
         return f"ignored by interface {rule_names(decision.rules)}"
     if decision.kind is RuleDecisionKind.AMBIGUOUS:
         return f"interface {rule_names(decision.rules)} match with equal rank"
+    if decision.kind is RuleDecisionKind.INCOMPLETE and decision.missing_keys == PORT_RECORD_KEYS:
+        return "no LibreNMS port record is cached for it; refresh the data"
     if decision.kind is RuleDecisionKind.INCOMPLETE:
         return f"the cached LibreNMS port record has no {', '.join(decision.missing_keys)}; refresh the data"
     return None
@@ -112,9 +117,9 @@ class PortSyncBlocked(Exception):
     ``decision`` is the blocking decision: IGNORE, AMBIGUOUS or INCOMPLETE.
     """
 
-    def __init__(self, decision: RuleDecision):
-        """Keep the decision for callers and use its reason as the message."""
-        super().__init__(decision_reason(decision))
+    def __init__(self, decision: RuleDecision, reason: str | None = None):
+        """Keep the decision for callers; the message is *reason*, or the decision's own reason."""
+        super().__init__(reason or decision_reason(decision))
         self.decision = decision
 
 
@@ -225,9 +230,76 @@ class InterfaceRuleMatcher:
             raise PortSyncBlocked(decision)
         return decision
 
+    @property
+    def ignores_any_port(self) -> bool:
+        """Return whether the snapshot has any Ignore rule."""
+        return bool(self._ignore_rules)
+
     def may_ignore(self, platform_id: int | None) -> bool:
         """Return whether any Ignore rule could apply to a port on *platform_id*."""
         return any(rule.platform_id is None or rule.platform_id == platform_id for rule in self._ignore_rules)
+
+    def check_existing_interface_write(self, port: dict | None, *, platform_id: int | None) -> RuleDecision | None:
+        """
+        Return the decision that blocks a write on an existing interface, or None when it may go ahead.
+
+        An IP assignment and a cable write set no interface type, so only Ignore blocks them. A
+        port with no complete record is blocked (INCOMPLETE) only when an Ignore rule could apply
+        to *platform_id*.
+
+        Args:
+            port (dict | None): The LibreNMS port record, or None when there is none.
+            platform_id (int | None): The platform of the port's owner; None matches only global
+                rules.
+
+        Returns:
+            RuleDecision | None: The IGNORE or INCOMPLETE decision, or None.
+
+        """
+        missing = (
+            PORT_RECORD_KEYS if not isinstance(port, dict) else tuple(k for k in PORT_RECORD_KEYS if k not in port)
+        )
+        if missing:
+            if not self.may_ignore(platform_id):
+                return None
+            return RuleDecision(RuleDecisionKind.INCOMPLETE, None, (), missing)
+        decision = self.decide(port, platform_id=platform_id)
+        return decision if decision.kind is RuleDecisionKind.IGNORE else None
+
+    def first_blocked_port(self, ports, disclose) -> tuple[RuleDecision, str] | None:
+        """
+        Decide a write that touches several existing interfaces, in port id order.
+
+        Every port is decided. Only a blocking port that *disclose* allows is named; when no
+        blocking port may be named, the reason is ``HIDDEN_PORT_REASON``.
+
+        Args:
+            ports: ``(port_id, record, platform_id, owner)`` for each LibreNMS port the write
+                touches; *owner* is the device or VM that owns the port, or None.
+            disclose: A ``utils.PortDisclosure``, asked only for a blocking port.
+
+        Returns:
+            tuple[RuleDecision, str] | None: The blocking decision and its reason, or None when
+                the write may go ahead.
+
+        """
+        hidden_block = None
+        for port_id, record, platform_id, owner in sorted(ports, key=lambda port: port[0]):
+            block = self.check_existing_interface_write(record, platform_id=platform_id)
+            if block is None:
+                continue
+            if not disclose(port_id, owner):
+                hidden_block = hidden_block or block
+                continue
+            name = record.get("ifName") if isinstance(record, dict) else None
+            label = f"{port_id} ({name})" if isinstance(name, str) and name else str(port_id)
+            return block, f"LibreNMS port {label}: {decision_reason(block)}"
+        return None if hidden_block is None else (hidden_block, HIDDEN_PORT_REASON)
+
+
+def row_rule_block(decision: RuleDecision, reason: str) -> dict:
+    """Return the plain row data a table renders for a write the rules block (it survives the cache)."""
+    return {"kind": decision.kind.value, "reason": reason}
 
 
 def interface_rules_for_request(request: HttpRequest) -> InterfaceRuleMatcher:

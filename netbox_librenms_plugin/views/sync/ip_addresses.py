@@ -32,12 +32,13 @@ from netbox_librenms_plugin.utils import (
     build_migrated_context,
     get_librenms_device_id,
     get_migrated_to_marker,
-    get_virtual_chassis_members,
     index_ip_source_interfaces,
     index_ip_sync_rows,
     ip_family,
+    ip_row_port_record,
     normalize_ip_sync_row_id,
     normalize_librenms_port_id,
+    PortDisclosure,
     resolve_create_missing_interfaces,
     resolve_interface_row_device,
     resolve_ip_source_interface,
@@ -45,6 +46,7 @@ from netbox_librenms_plugin.utils import (
     same_host,
     syncable_interface_name,
 )
+from netbox_librenms_plugin.views.base.ip_addresses_view import ip_assignment_ports, ip_interface_scope
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -273,6 +275,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 object_type,
                 force_intents=force_intents,
                 cached_ports_by_id=cached_snapshot.get("ports_by_id") or {},
+                bound_ports_by_id=cached_snapshot.get("bound_ports_by_id") or {},
                 interface_name_field=cached_snapshot.get("interface_name_field"),
             )
         except LibreNMSIDConflictError as exc:
@@ -436,16 +439,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 cached ``interface_url`` (which survives a rename) can still resolve the target.
 
         """
-        if isinstance(obj, Device):
-            # Route member expansion through the shared helper (returns [obj] when not in a VC)
-            # so this can't drift from the VC member set used by the interface-sync path.
-            member_devices = get_virtual_chassis_members(obj)
-            interfaces = list(self.restricted_queryset(Interface).filter(device__in=member_devices))
-            obj_device_id = obj.pk
-        else:
-            interfaces = list(self.restricted_queryset(VMInterface).filter(virtual_machine=obj))
-            obj_device_id = None
-        return index_ip_source_interfaces(interfaces, server_key, obj_device_id)
+        _owners, interfaces = ip_interface_scope(self, obj)
+        return index_ip_source_interfaces(interfaces, server_key, obj.pk if isinstance(obj, Device) else None)
 
     @staticmethod
     def _match_interface(ip_data, by_librenms_id, by_name, by_pk=None):
@@ -529,19 +524,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     state["interfaces_by_port_id"].setdefault(bound_id, []).append(interface)
         return state
 
-    @staticmethod
-    def _cached_port(cached_ports_by_id, port_id):
-        """Return one cached port whose canonical ID matches the IP row."""
-        normalized_id = normalize_librenms_port_id(port_id)
-        if normalized_id is None or not isinstance(cached_ports_by_id, dict):
-            return None
-        matches = [
-            port
-            for raw_id, port in cached_ports_by_id.items()
-            if normalize_librenms_port_id(raw_id) == normalized_id and isinstance(port, dict)
-        ]
-        return matches[0] if len(matches) == 1 else None
-
     def _create_interface_for_ip(
         self,
         obj,
@@ -555,7 +537,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """Create one missing interface from the cached port that owns an IP row."""
         if not is_supported_interface_name_field(interface_name_field):
             raise ValueError("The cached interface naming field is missing or invalid. Refresh the IP data.")
-        port = self._cached_port(cached_ports_by_id, ip_data.get("port_id"))
+        port = ip_row_port_record(cached_ports_by_id, ip_data.get("port_id"))
         if port is None or port.get("_source") == OOB_INVENTORY_SOURCE:
             raise ValueError("The cached LibreNMS port is missing or ambiguous. Refresh the IP data.")
         if normalize_librenms_port_id(port.get("port_id")) != normalize_librenms_port_id(ip_data.get("port_id")):
@@ -613,17 +595,24 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return interface, interface_creation_state
 
     def _lock_target_interface(self, obj, interface, interface_creation_state=None):
-        """Lock and recheck the current interface owner before an IP assignment."""
+        """
+        Lock and recheck the current interface owner before an IP assignment.
+
+        Returns:
+            tuple: ``(locked_interface, locked_owner)``, or ``(None, None)`` when the interface
+                left the owner scope.
+
+        """
         if interface_creation_state is None:
             locked_obj, locked_owners = self._lock_interface_owner_scope(obj)
         else:
             locked_obj = interface_creation_state["locked_obj"]
             locked_owners = interface_creation_state["locked_members"]
         if locked_obj is None:
-            return None
+            return None, None
         if isinstance(locked_obj, Device):
             if not isinstance(interface, Interface):
-                return None
+                return None, None
             allowed_owner_ids = {owner.pk for owner in locked_owners}
             locked_interface = (
                 self.restricted_queryset(Interface, "view")
@@ -632,16 +621,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 .first()
             )
             if locked_interface is None or locked_interface.device_id not in allowed_owner_ids:
-                return None
-            owner_by_id = {owner.pk: owner for owner in locked_owners}
+                return None, None
+            owner = {owner.pk: owner for owner in locked_owners}[locked_interface.device_id]
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            if get_migrated_to_marker(locked_obj, server_key) or get_migrated_to_marker(
-                owner_by_id[locked_interface.device_id], server_key
-            ):
+            if get_migrated_to_marker(locked_obj, server_key) or get_migrated_to_marker(owner, server_key):
                 raise ValueError("The interface owner is read-only because it was migrated.")
-            return locked_interface
+            return locked_interface, owner
         if not isinstance(interface, VMInterface):
-            return None
+            return None, None
         locked_interface = (
             self.restricted_queryset(VMInterface, "view")
             .select_for_update(of=("self",))
@@ -649,8 +636,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             .first()
         )
         if locked_interface is None or locked_interface.virtual_machine_id != locked_obj.pk:
-            return None
-        return locked_interface
+            return None, None
+        return locked_interface, locked_obj
 
     @staticmethod
     def _set_primary_ip(obj, ip_obj):
@@ -1014,6 +1001,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         force_intents=None,
         cached_ports_by_id=None,
         interface_name_field=None,
+        bound_ports_by_id=None,
     ):
         """Sync selected IP rows in one transaction with per-row savepoints."""
         with transaction.atomic():
@@ -1026,6 +1014,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 force_intents=force_intents,
                 cached_ports_by_id=cached_ports_by_id,
                 interface_name_field=interface_name_field,
+                bound_ports_by_id=bound_ports_by_id,
             )
 
     def _process_ip_sync(  # noqa: C901
@@ -1038,6 +1027,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         force_intents=None,
         cached_ports_by_id=None,
         interface_name_field=None,
+        bound_ports_by_id=None,
     ):
         """
         Create or update IP addresses in NetBox from cached LibreNMS data.
@@ -1055,6 +1045,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             force_intents (dict[str, dict] | None): Confirmed IP changes indexed by canonical row identifier.
             cached_ports_by_id (dict[str, dict] | None): Cached LibreNMS ports indexed by stable port ID.
             interface_name_field (str | None): The configured LibreNMS interface name field.
+            bound_ports_by_id (dict[str, dict] | None): Cached records of the ports bound to
+                interfaces in scope; evidence for the interface rules only.
 
         Returns:
             dict: The per-outcome row lists, errors, conflicts, and batch mutation state.
@@ -1164,13 +1156,27 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         row_mutations.add(row_id)
 
                     if interface is not None:
-                        locked_interface = self._lock_target_interface(obj, interface, interface_creation_state)
+                        locked_interface, owner = self._lock_target_interface(obj, interface, interface_creation_state)
                         if locked_interface is None:
                             raise ValueError(
                                 "The matched NetBox interface is no longer available in your view scope. "
                                 "Refresh the IP data and try again."
                             )
                         interface = locked_interface
+                        # The binding and the owner's platform are read under the lock.
+                        blocked = interface_rules_for_request(request).first_blocked_port(
+                            ip_assignment_ports(
+                                cached_ports_by_id,
+                                bound_ports_by_id or {},
+                                ip_data.get("port_id"),
+                                locked_interface,
+                                server_key,
+                                owner,
+                            ),
+                            PortDisclosure(request.user, server_key),
+                        )
+                        if blocked is not None:
+                            raise PortSyncBlocked(*blocked)
 
                     # This row ends in obj.save() (primary_ip) when it matches the management
                     # address, so it takes BOTH an ipam_ipaddress and a dcim_device row lock.

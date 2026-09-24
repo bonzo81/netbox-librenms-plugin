@@ -3,7 +3,7 @@ from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_sync_rows
+from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_sync_rows, rule_block_html
 
 
 class IPAddressTable(tables.Table):
@@ -115,6 +115,8 @@ class IPAddressTable(tables.Table):
         row_id = record.get("row_id", record.get("ip_with_mask"))
         if row_id is None:
             return "Ambiguous source row"
+        if record.get("rule_block") and value != "matched":
+            return rule_block_html(record["rule_block"])
         if value == "update":
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}">'

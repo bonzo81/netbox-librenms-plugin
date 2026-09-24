@@ -548,6 +548,58 @@ withdrawn. r5-2 is replaced.
    deselect-all, htmx swap, navigation). Off-page selections still submit with their stored member,
    and the server decides.
 3. **Increment 3:** IP tab and cables tab gates (r3-1, r3-2).
+   *Implemented (uncommitted).* Decisions made during implementation:
+   - One check for writes on existing interfaces: `matcher.check_existing_interface_write`
+     returns the blocking IGNORE or INCOMPLETE decision, or None. The IP writer, the IP table, the
+     cable gate and the cable table all call it.
+   - IP: the assignment touches the IP row's source port and the port bound to the target
+     interface, re-read from the locked row (a name match can reach an interface bound to another
+     port). Both are decided with the platform of the owner that `_lock_target_interface` locked.
+     The IP table uses the same port list (`ip_assignment_ports`) with the snapshot records. Both
+     resolve rows against one scope (`ip_interface_scope`): the object and the chassis members
+     the caller may view, and their interfaces the caller may view. The sync locks the same
+     owners, so the table and the sync agree, and neither reaches a hidden member.
+   - The IP snapshot keeps `bound_ports_by_id`: the records of the ports bound to the interfaces
+     in scope, read from the same device-ports payload. They are evidence for the rules only and
+     never become IP rows or name candidates (`ports_by_id` is unchanged).
+   - One disclosure rule for every refusal and pill that can name a port (`utils.PortDisclosure`,
+     used by the cable table and writer and the IP table and writer): a port's id, name and rule
+     label are shown only when its owner is in the caller's view scope. For a port bound on this
+     server, the owner is the bound interface's own device or VM, read from the binding, and the
+     interface must be visible too; the owner a caller passes counts only for an unbound port.
+     An owner that did not resolve is not visible, an ambiguous binding is not visible, and no
+     port is visible by default, the row's own ports included. A port that is not visible still
+     blocks, with `HIDDEN_PORT_REASON`, which names no port, name or rule.
+   - A table preloads the rule once for every port it may ask about (one binding query per
+     interface model, one view-scope query per model), so a render costs the same queries for
+     2 or for 20 blocking rows. A writer asks one row at a time through the same rule.
+   - Cables: the snapshot keeps `local_port_record` (from the device ports payload) and
+     `remote_port_record` (from the neighbour's port index, now cached under a new key so an entry
+     without records is never read). The row's remote port is `remote_port_key`, and also
+     `remote_port_id` when it differs. Each port is decided with its own owner's platform
+     (`port_owner_id`): the local port with the local owner, and a bound port with its
+     interface's device. The advertised remote port uses the resolved neighbour (its chassis
+     member for a VC); a manual pick onto another device never changes that. The gate locks these
+     owners with the others.
+   - *Operator decision (2026-09-24):* when the advertised port's owner does not resolve, the port
+     is decided with no platform (`platform_id=None`), so only global rules match it, as for a
+     device with no platform (r1). A manual pick does not change this; the picked interface's own
+     bound port is decided separately with the picked device's platform. A missing record follows
+     r3-1 with no platform, so only a global Ignore rule refuses it.
+   - The far ends of the cables on both endpoints are candidate evidence before the lock. Their
+     interfaces and owners are locked in the same statements as the endpoints and owners, so the
+     lock order does not change. A removed cable that ends on an interface the lock did not take
+     makes the row stale.
+   - Records are fetched by id before the row's transaction, and only when the snapshot has an
+     Ignore rule. The table decides only the ports whose records the snapshot holds (a render
+     makes no LibreNMS call); the sync gate decides every touched port. A blocked row loses Sync
+     Cable and the far-end create, and shows the rule.
+   *Known limitation (increment-3 review round 5):* `PortDisclosure` finds bindings through
+   `build_librenms_id_qs`, which matches only ASCII-digit ids. A row whose stored `librenms_id`
+   is a reader-only form (for example `"7_101"`, accepted by `get_librenms_device_id`) is not
+   found, so its port counts as unbound and its refusal can be named. Every guard built on
+   `find_by_librenms_id` shares this split. It is deliberate (narrowing the reader wipes mappings);
+   the only lossless fix is a heal path that normalises such values. That is an open follow-up.
 4. After the core is implemented: file follow-ups for type-vs-links validation (findings 2.4 to
    5.3) and module port binding.
 
