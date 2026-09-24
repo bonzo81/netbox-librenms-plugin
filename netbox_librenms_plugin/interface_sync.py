@@ -138,9 +138,8 @@ def assign_interface_mac(interface, mac_address):
     if changed:
         mac_obj = MACAddress.objects.create(mac_address=mac_address)
         interface.mac_addresses.add(mac_obj)
-    if hasattr(interface, "primary_mac_address"):
-        changed = changed or interface.primary_mac_address_id != mac_obj.pk
-        interface.primary_mac_address = mac_obj
+    changed = changed or interface.primary_mac_address_id != mac_obj.pk
+    interface.primary_mac_address = mac_obj
     return changed
 
 

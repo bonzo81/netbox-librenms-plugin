@@ -37,7 +37,6 @@ from netbox_librenms_plugin.interface_rules import (
     rule_names,
 )
 from netbox_librenms_plugin.interface_sync import (
-    assign_interface_mac,
     interface_owner_platform_id,
     update_interface_from_port,
 )
@@ -1762,10 +1761,6 @@ class SyncInterfacesView(
         if created:
             interface._librenms_sync_created = True
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
-
-    def handle_mac_address(self, interface, ifPhysAddress):
-        """Assign or create the MAC address for the given interface."""
-        assign_interface_mac(interface, ifPhysAddress)
 
     def update_interface_attributes(
         self,

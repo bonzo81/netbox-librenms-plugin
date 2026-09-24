@@ -2,6 +2,7 @@
 
 import pytest
 
+from netbox_librenms_plugin.interface_sync import assign_interface_mac
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
 from netbox_librenms_plugin.tests.view_test_helpers import make_view
 
@@ -88,31 +89,22 @@ class TestUpdateInterfaceAttributes:
 
 
 @pytest.mark.django_db
-class TestHandleMacAddress:
+class TestAssignInterfaceMac:
     """
-    handle_mac_address() must work for both Interface and VMInterface. Both carry
+    assign_interface_mac() must work for both Interface and VMInterface. Both carry
     primary_mac_address in the NetBox versions this plugin supports."""
 
-    @pytest.fixture
-    def view(self):
-        """The real SyncInterfacesView; only the LibreNMS client is stubbed."""
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        v = make_view(SyncInterfacesView)
-        v._lookup_maps = {}
-        return v
-
-    def test_creates_new_mac_and_adds_to_interface(self, view):
+    def test_creates_new_mac_and_adds_to_interface(self):
         from dcim.models import MACAddress
 
         iface = make_interface(make_device("mac-create"), "Gi0/1")
 
-        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        assign_interface_mac(iface, "aa:bb:cc:dd:ee:ff")
 
         mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
         assert list(iface.mac_addresses.all()) == [mac]
 
-    def test_reuses_existing_mac(self, view):
+    def test_reuses_existing_mac(self):
         """The already-attached MAC is reused AND promoted to primary, not re-created."""
         from dcim.models import Interface, MACAddress
 
@@ -121,7 +113,7 @@ class TestHandleMacAddress:
         iface.mac_addresses.add(existing)
         assert iface.primary_mac_address is None  # the branch has done nothing yet
 
-        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        assign_interface_mac(iface, "aa:bb:cc:dd:ee:ff")
         iface.save()
 
         assert MACAddress.objects.filter(mac_address="aa:bb:cc:dd:ee:ff").count() == 1
@@ -129,23 +121,23 @@ class TestHandleMacAddress:
         # Without this the test would pass on an early return: the m2m link predates the call.
         assert Interface.objects.get(pk=iface.pk).primary_mac_address == existing
 
-    def test_sets_primary_mac_when_attribute_present(self, view):
+    def test_sets_primary_mac_when_attribute_present(self):
         from dcim.models import Interface, MACAddress
 
         iface = make_interface(make_device("mac-primary"), "Gi0/1")
 
-        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        assign_interface_mac(iface, "aa:bb:cc:dd:ee:ff")
         iface.save()
 
         mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
         assert Interface.objects.get(pk=iface.pk).primary_mac_address == mac
 
-    def test_vm_interface_also_gets_its_primary_mac_set(self, view):
+    def test_vm_interface_also_gets_its_primary_mac_set(self):
         """VMInterface carries primary_mac_address in this NetBox version, same as Interface.
 
         The old mock built the VM interface with ``spec=["mac_addresses"]``, fabricating an
         absence NetBox no longer has, so it pinned a fact that had stopped being true. The
-        ``hasattr`` guard in handle_mac_address is now dead for both interface models.
+        writer no longer checks for the attribute.
         """
         from dcim.models import MACAddress
         from virtualization.models import VMInterface
@@ -153,20 +145,20 @@ class TestHandleMacAddress:
         vm = make_vm("mac-vm")
         vmiface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
 
-        view.handle_mac_address(vmiface, "aa:bb:cc:dd:ee:ff")
+        assign_interface_mac(vmiface, "aa:bb:cc:dd:ee:ff")
         vmiface.save()
 
         mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
         assert list(vmiface.mac_addresses.all()) == [mac]
         assert VMInterface.objects.get(pk=vmiface.pk).primary_mac_address == mac
 
-    def test_noop_when_mac_address_is_falsy(self, view):
+    def test_noop_when_mac_address_is_falsy(self):
         from dcim.models import MACAddress
 
         iface = make_interface(make_device("mac-falsy"), "Gi0/1")
 
-        view.handle_mac_address(iface, "")
-        view.handle_mac_address(iface, None)
+        assign_interface_mac(iface, "")
+        assign_interface_mac(iface, None)
 
         assert not MACAddress.objects.exists()
         assert not iface.mac_addresses.exists()
