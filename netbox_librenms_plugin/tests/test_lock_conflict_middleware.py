@@ -1,6 +1,9 @@
 """A lock conflict that escapes a plugin view is a visible "try again" answer, never a 500; anything else propagates."""
 
+import ast
 import json
+import re
+from pathlib import Path
 
 import pytest
 from dcim.models import Device
@@ -53,6 +56,17 @@ def test_a_lock_conflict_in_a_view_without_the_runner_is_not_a_500(client, setti
         assert response.status_code == 302
         assert response["Location"] == referer
         assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+
+
+SYNC_SCRIPT = Path(__file__).parents[1] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
+
+
+def test_the_sync_forms_script_treats_the_try_again_event_as_a_failure():
+    """The script gives the form back only on its failure events; the answer's HX-Trigger must be one of them."""
+    match = re.search(r"^const HTMX_FAILURE_EVENTS = (\[[^\]]*\]);$", SYNC_SCRIPT.read_text(), re.MULTILINE)
+    assert match, "librenms_sync.js no longer declares HTMX_FAILURE_EVENTS as one array literal"
+
+    assert REQUEST_FAILED_EVENT in ast.literal_eval(match.group(1))
 
 
 def _process(path, exception):
