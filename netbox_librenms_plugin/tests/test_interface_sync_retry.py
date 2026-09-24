@@ -292,3 +292,27 @@ def test_an_integrity_error_after_a_swallowed_conflict_reaches_the_sync_handler(
         )
     ]
     assert not Interface.objects.filter(device=device).exists()
+
+
+def test_only_the_steps_outside_the_transaction_add_messages():
+    """A message added inside the transaction is published once per attempt; the attempt reports through its outcome."""
+    import ast
+    import inspect
+
+    from netbox_librenms_plugin.views.sync import interfaces
+
+    module = ast.parse(inspect.getsource(interfaces))
+    view = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "SyncInterfacesView")
+    adders = {
+        method.name
+        for method in view.body
+        if isinstance(method, ast.FunctionDef)
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "messages"
+    }
+
+    # post() adds messages before run_transaction() and after it returns; the other two run before it.
+    assert adders == {"post", "get_selected_port_ids", "get_cached_ports_data"}
