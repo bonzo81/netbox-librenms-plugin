@@ -61,7 +61,7 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     interface_name_fallback_matches_port,
     is_list_of_dicts,
-    netbox_clean_reads_parent_virtual_chassis,
+    netbox_interface_clean,
     normalize_librenms_port_id,
     normalize_relationship_maps,
     reported_name_owners,
@@ -1576,7 +1576,7 @@ class SyncInterfacesView(
             self._synced_count += 1
 
         current_name = interface.name
-        changed = bool(getattr(interface, "_librenms_sync_created", False))
+        created = bool(getattr(interface, "_librenms_sync_created", False))
         changed = (
             self.update_interface_attributes(
                 interface,
@@ -1584,9 +1584,10 @@ class SyncInterfacesView(
                 exclude_columns,
                 interface_name_field,
                 synced_name,
+                created=created,
                 port_owner=port_owner,
             )
-            or changed
+            or created
         )
         if "name" not in exclude_columns and interface.name != synced_name:
             kept_names = getattr(self, "_kept_name_conflicts", None)
@@ -1740,9 +1741,10 @@ class SyncInterfacesView(
         interface_name_field,
         synced_name,
         *,
+        created,
         port_owner=LOOK_UP_PORT_OWNER,
     ):
-        """Update interface fields from LibreNMS data, respecting excluded columns."""
+        """Update interface fields from LibreNMS data, respecting excluded columns (``created`` as in the writer)."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         return update_interface_from_port(
             interface,
@@ -1751,6 +1753,7 @@ class SyncInterfacesView(
             synced_name=synced_name,
             server_key=server_key,
             interface_name_field=interface_name_field,
+            created=created,
             exclude_columns=exclude_columns,
             speed_converter=convert_speed_to_kbps,
             port_owner=port_owner,
@@ -2286,59 +2289,6 @@ def _promote_parent_child(child, *, with_restore):
     return _persist
 
 
-def _validate_relationship(source_iface, relation_field):
-    """
-    Run NetBox's model validation for the new relationship FK.
-
-    NetBox 4.4.x reads ``self.parent.virtual_chassis`` when the parent sits on another device.
-    ``Interface`` has no such attribute (4.4.1 fixed the dereference), so the validation NetBox
-    means to run raises AttributeError instead. Work around it only when the
-    source has that exact cross-member parent state and the failure really is that attribute.
-    The failing parent check also runs when this call validates a different relationship, such
-    as adding the same sub-interface to a bridge. After proving the parent is valid, rerun
-    validation without it so NetBox still checks the relationship being written.
-
-    Args:
-        source_iface: The interface whose FK was set.
-        relation_field: The FK attribute that changed (``"lag"`` | ``"parent"`` | ``"bridge"``).
-
-    Raises:
-        ValidationError: when NetBox rejects the relationship.
-        AttributeError: any failure that is not the 4.4.x cross-chassis parent bug.
-
-    """
-    try:
-        source_iface.clean()
-    except AttributeError as exc:
-        source_device = getattr(source_iface, "device", None)
-        parent_iface = getattr(source_iface, "parent", None)
-        parent_device = getattr(parent_iface, "device", None)
-        source_chassis = getattr(source_device, "virtual_chassis_id", None)
-        parent_chassis = getattr(parent_device, "virtual_chassis_id", None)
-        if not (
-            # exc.name is the attribute the failed access asked for (Python 3.10+), so this
-            # matches the one dereference rather than any message mentioning it.
-            getattr(exc, "name", None) == "virtual_chassis"
-            and getattr(source_iface, "device_id", None) != getattr(parent_iface, "device_id", None)
-            and source_chassis is not None
-            and source_chassis == parent_chassis
-            and netbox_clean_reads_parent_virtual_chassis()
-        ):
-            raise
-        source_iface.parent_id = None
-        try:
-            source_iface.clean()
-        finally:
-            source_iface.parent = parent_iface
-        logger.debug(
-            "Interface %s: this NetBox cannot validate its parent on another chassis member; "
-            "both interfaces belong to virtual chassis %s, so the %s edge is accepted.",
-            source_iface.name,
-            source_chassis,
-            relation_field,
-        )
-
-
 def _apply_interface_relationship(
     source_iface,
     relation_field,
@@ -2395,7 +2345,7 @@ def _apply_interface_relationship(
         # NetBox's model clean() contains the cross-owner/type/self-link rules that matter here.
         # Running full_clean() would revalidate every unchanged FK and uniqueness constraint,
         # adding several SELECTs per edge while all relationship rows remain locked.
-        _validate_relationship(source_iface, relation_field)
+        netbox_interface_clean(source_iface)
         if persist_related:
             persist_related()
         if persist_source:

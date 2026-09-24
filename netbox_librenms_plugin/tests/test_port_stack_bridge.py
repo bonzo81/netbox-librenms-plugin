@@ -4,7 +4,7 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision, typed_maps
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-from netbox_librenms_plugin.utils import normalize_relationship_maps
+from netbox_librenms_plugin.utils import _get_netbox_version_tuple, normalize_relationship_maps
 
 # The port keys an interface write needs, for rows whose test does not care about their values.
 _PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
@@ -490,6 +490,123 @@ def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch
     child.refresh_from_db()
     assert child.parent_id == parent.pk
     assert child.bridge_id == bridge.pk
+
+
+def test_inline_bridge_sync_refuses_a_parent_on_another_chassis_on_netbox_44(monkeypatch, caplog):
+    """The 4.4.0 fault stands in for the refusal NetBox means, so the edge gets that refusal, not a crash."""
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from dcim.models import Interface
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import utils
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
+
+    child_chassis, (child_device, _member) = make_virtual_chassis_members("bridge-other-chassis-child")
+    _parent_chassis, (parent_device,) = make_virtual_chassis_members("bridge-other-chassis-parent", count=1)
+    parent = make_interface(parent_device, "bond0", iface_type="lag")
+    child = make_interface(child_device, "bond0.110", iface_type="virtual")
+    child.parent = parent
+    child.save(update_fields=["parent"])
+    bridge = make_interface(child_device, "vmbr0", iface_type="virtual")
+    for interface, port_id in ((child, 102), (bridge, 100)):
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save()
+
+    view = SyncInterfaceBridgeView()
+    view._librenms_api = SimpleNamespace(server_key="default")
+    cache.set(
+        view.get_cache_key(child_device, "ports", "default"),
+        {
+            "ports": [
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
+            ],
+            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {102: 100}},
+        },
+    )
+
+    original_clean = Interface.clean
+
+    def netbox_44_clean(interface):
+        if interface.parent_id is not None and interface.parent.device_id != interface.device_id:
+            raise AttributeError("'Interface' object has no attribute 'virtual_chassis'", name="virtual_chassis")
+        return original_clean(interface)
+
+    monkeypatch.setattr(Interface, "clean", netbox_44_clean)
+
+    with (
+        patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)),
+        caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.views.sync.interfaces"),
+    ):
+        response = post(
+            view,
+            make_request("post", {"port_id": "102", "bridge_port_id": "100", "interface_name_field": "ifName"}),
+            object_type="device",
+            object_id=child_device.pk,
+        )
+
+    assert response.status_code == 409, response.content
+    child.refresh_from_db()
+    assert (child.parent_id, child.bridge_id) == (parent.pk, None)
+    assert any(
+        f"belongs to {parent_device}, which is not part of virtual chassis {child_chassis}" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+@pytest.mark.skipif(
+    _get_netbox_version_tuple() != (4, 4, 0),
+    reason="runs NetBox 4.4.0's own Interface.clean(), which reads parent.virtual_chassis; CI has a v4.4.0 leg",
+)
+class TestNetBox440ParentChassisFault:
+    """The type check on the real 4.4.0 clean(): the fault never raises, and the retry keeps the later rules."""
+
+    @staticmethod
+    def _child_of(parent_chassis_tag, *, same_chassis, with_lag=False):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        chassis, (child_device, member) = make_virtual_chassis_members(parent_chassis_tag)
+        if same_chassis:
+            parent_device = member
+        else:
+            _other, (parent_device,) = make_virtual_chassis_members(f"{parent_chassis_tag}-other", count=1)
+        parent = make_interface(parent_device, "bond0", iface_type="1000base-t")
+        # Stored without clean(): a physical child, so the planned virtual type is a real type change.
+        child = make_interface(child_device, "bond0.110", iface_type="other")
+        child.parent = parent
+        if with_lag:
+            child.lag = make_interface(child_device, "Port-Channel1", iface_type="lag")
+        child.save()
+        return chassis, parent_device, child
+
+    def test_a_parent_on_the_same_chassis_accepts_the_type(self):
+        from netbox_librenms_plugin.interface_diff import type_change_refusal
+
+        _chassis, _parent_device, child = self._child_of("nb440-same", same_chassis=True)
+
+        assert type_change_refusal(child, "virtual") is None
+
+    def test_a_parent_on_another_chassis_refuses_with_the_message_netbox_means(self):
+        from netbox_librenms_plugin.interface_diff import type_change_refusal
+
+        chassis, parent_device, child = self._child_of("nb440-other", same_chassis=False)
+
+        assert type_change_refusal(child, "virtual") == (
+            f"The selected parent interface (bond0) belongs to {parent_device}, which is not part of virtual "
+            f"chassis {chassis}."
+        )
+
+    def test_the_retry_without_the_parent_still_refuses_a_virtual_lag_member(self):
+        from netbox_librenms_plugin.interface_diff import type_change_refusal
+
+        _chassis, _parent_device, child = self._child_of("nb440-lag", same_chassis=True, with_lag=True)
+
+        assert type_change_refusal(child, "virtual") == "Virtual interfaces cannot have a parent LAG interface."
 
 
 def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monkeypatch):

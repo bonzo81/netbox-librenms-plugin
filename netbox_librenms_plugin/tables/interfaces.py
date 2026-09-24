@@ -1093,7 +1093,14 @@ class LibreNMSInterfaceTable(tables.Table):
                 value,
                 decision_reason(decision),
             )
-        if decision.kind is RuleDecisionKind.SET_TYPE:
+        if state.type_kept_reason is not None:
+            # The sync keeps the NetBox type, so the cell names that type and says why.
+            display = format_html(
+                '{} <i class="mdi mdi-lock-outline" title="{}"></i>',
+                record["netbox_interface"].type,
+                state.type_kept_reason,
+            )
+        elif decision.kind is RuleDecisionKind.SET_TYPE:
             display = format_html(
                 '{} <i class="mdi mdi-link-variant" title="Set by interface {} from LibreNMS type {}"></i>',
                 decision.netbox_type,

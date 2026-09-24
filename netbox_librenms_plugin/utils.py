@@ -4407,6 +4407,59 @@ def netbox_clean_reads_parent_virtual_chassis():
     return version == _PARENT_CHASSIS_CLEAN_BUG_VERSION
 
 
+def netbox_interface_clean(interface):
+    """
+    Run NetBox's ``clean()`` on an interface, with the 4.4.0 parent-chassis defect handled.
+
+    NetBox 4.4.0 reads ``self.parent.virtual_chassis`` for a parent on another device, so the
+    chassis check it means to run raises AttributeError. Its type rule for a parent runs before
+    that check. On the same chassis the parent is valid, so validation runs again without it and
+    the later rules still apply. On another chassis (or none), the error NetBox means is raised.
+
+    Args:
+        interface: The Interface or VMInterface to validate.
+
+    Raises:
+        ValidationError: NetBox refuses the interface.
+        AttributeError: Any failure that is not the 4.4.0 parent-chassis defect.
+
+    """
+    try:
+        interface.clean()
+    except AttributeError as exc:
+        parent = getattr(interface, "parent", None)
+        source_chassis = getattr(getattr(interface, "device", None), "virtual_chassis_id", None)
+        if not (
+            # exc.name is the attribute the failed access asked for, so this matches the one dereference.
+            getattr(exc, "name", None) == "virtual_chassis"
+            and parent is not None
+            and getattr(interface, "device_id", None) != getattr(parent, "device_id", None)
+            and source_chassis is not None
+            and netbox_clean_reads_parent_virtual_chassis()
+        ):
+            raise
+        if parent.device.virtual_chassis_id != source_chassis:
+            raise ValidationError(
+                {
+                    "parent": (
+                        f"The selected parent interface ({parent}) belongs to {parent.device}, which is not part "
+                        f"of virtual chassis {interface.device.virtual_chassis}."
+                    )
+                }
+            ) from exc
+        interface.parent_id = None
+        try:
+            interface.clean()
+        finally:
+            interface.parent = parent
+        logger.debug(
+            "Interface %s: this NetBox cannot validate its parent on another chassis member; both interfaces "
+            "belong to virtual chassis %s, so the parent is accepted.",
+            interface.name,
+            source_chassis,
+        )
+
+
 def netbox_allows_standalone_vm_host():
     """
     Return whether NetBox allows a VM to use a host without a cluster.

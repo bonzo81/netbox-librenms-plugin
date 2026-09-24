@@ -147,6 +147,7 @@ class TestTheSyncWriter:
             synced_name="eth0",
             server_key=SERVER_KEY,
             interface_name_field="ifName",
+            created=False,
         )
 
         assert _binding(interface) is None

@@ -16,6 +16,7 @@ from django.urls import reverse
 from django.views import View
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.interface_diff import type_change_refusal
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -2513,13 +2514,10 @@ def _apply_module_interface_type(interface, template_type, current_type, offered
     if not template_type or interface.type == template_type:
         return "not_different", None
 
-    original_type = interface.type
+    refusal = type_change_refusal(interface, template_type)
+    if refusal is not None:
+        return "validation_failed", refusal
     interface.type = template_type
-    try:
-        interface.full_clean(exclude={field.name for field in interface._meta.fields if field.name != "type"})
-    except ValidationError as exc:
-        interface.type = original_type
-        return "validation_failed", "; ".join(exc.messages)
     interface.save(update_fields=["type"])
     return "updated", None
 

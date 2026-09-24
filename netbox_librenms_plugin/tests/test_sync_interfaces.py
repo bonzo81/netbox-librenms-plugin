@@ -41,6 +41,7 @@ class TestUpdateInterfaceAttributes:
             set(),
             "ifName",
             "eth0",
+            created=False,
         )
 
         interface.refresh_from_db()
@@ -77,6 +78,7 @@ class TestUpdateInterfaceAttributes:
             {"name", "type", "speed", "description", "mtu", "enabled", "mac_address"},
             "ifName",
             "new-name",
+            created=False,
         )
 
         interface.refresh_from_db()
@@ -271,6 +273,7 @@ def test_interface_update_ignores_non_string_mac(mac):
         synced_name="eth0",
         server_key="default",
         interface_name_field="ifName",
+        created=False,
     )
     interface.refresh_from_db()
     assert interface.description == "updated description"

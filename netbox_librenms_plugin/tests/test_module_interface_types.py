@@ -881,6 +881,33 @@ class TestApplyModuleInterfaceTypes:
             "Skipped TenGigabitEthernet2/1/2 because Virtual interfaces cannot have a parent LAG interface."
         ]
 
+    def test_a_non_lag_template_type_is_refused_on_an_aggregate_with_members(self, settings):
+        """NetBox has no rule for it, so the members check refuses what full_clean() would accept."""
+        from dcim.models import Device, Interface, Module
+
+        from netbox_librenms_plugin.tests.conftest import make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        page_device, member, module, interface = _vc_member_type_mismatch("type-apply-aggregate")
+        Interface.objects.filter(pk=interface.pk).update(type="lag")
+        lag_member = make_interface(member, "GigabitEthernet9/9", iface_type="1000base-t")
+        lag_member.lag = interface
+        lag_member.save(update_fields=["lag"])
+        user = make_user_with_perms(
+            "type-apply-aggregate-user",
+            [("view", Device), ("view", Module), ("change", Interface)],
+        )
+
+        request, response = self._post(settings, user, page_device, member, module, interface, current_type="lag")
+
+        interface.refresh_from_db()
+        lag_member.refresh_from_db()
+        assert response.status_code == 302
+        assert (interface.type, lag_member.lag_id) == ("lag", interface.pk)
+        assert message_texts(request, "warning") == [
+            "Skipped TenGigabitEthernet2/1/1 because An interface with LAG members must keep type lag."
+        ]
+
     def test_interface_bound_to_another_module_is_skipped(self, settings):
         from dcim.models import Device, Interface, InterfaceTemplate, Module
 

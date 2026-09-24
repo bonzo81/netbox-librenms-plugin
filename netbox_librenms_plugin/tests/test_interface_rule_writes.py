@@ -8,6 +8,7 @@ guard that keeps rule selection in ``interface_rules``.
 """
 
 import ast
+import json
 import re
 from html import unescape
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 from dcim.models import Interface, Platform
 from django.contrib.messages import get_messages
+from django.core.exceptions import ValidationError
 from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -585,6 +587,124 @@ class TestPromotionFollowsTheSetType:
             assert (source.parent_id, source.type) == (target.pk, "virtual")
 
 
+def _verify_row(client, device, port_id):
+    """Return the cells the verify repaint renders for one row."""
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_interface"),
+        json.dumps(
+            {"device_id": device.pk, "port_id": port_id, "interface_name_field": "ifName", "server_key": SERVER_KEY}
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 200, response.content
+    return {column: unescape(str(cell)) for column, cell in response.json()["formatted_row"].items()}
+
+
+def _planning_rule(tag, platform, name, rule, netbox_type):
+    """Plan *netbox_type* on port *name*: a legacy ifType mapping, or a platform Set type rule on its name."""
+    if rule == "legacy":
+        return InterfaceTypeMapping.objects.create(librenms_type=f"{tag}Type", netbox_type=netbox_type)
+    return InterfaceTypeMapping.objects.create(
+        platform=platform, name_pattern=f"^{re.escape(name)}$", netbox_type=netbox_type
+    )
+
+
+# link: (planned port name, its type, the type the rule plans, its partner name, the partner's type, NetBox's refusal)
+_KEPT_LINKS = {
+    "aggregate": ("Po1", "lag", "1000base-t", "Gi0/1", "1000base-t", "with LAG members"),
+    "lag-member": ("Gi0/1", "1000base-t", "virtual", "Po1", "lag", "cannot have a parent LAG interface"),
+    "child": ("Gi0/1.10", "virtual", "1000base-t", "Gi0/1", "1000base-t", "assigned to a parent interface"),
+}
+
+
+def _kept_link_scenario(tag, link, rule):
+    """A linked pair in NetBox, and a rule that plans a type the link refuses on port 10."""
+    planned_name, planned_type, rule_type, partner_name, partner_type, _refusal = _KEPT_LINKS[link]
+    platform = _platform(tag)
+    device = _device(tag, platform)
+    planned = _bound(device, planned_name, 10, iface_type=planned_type)
+    partner = _bound(device, partner_name, 20, iface_type=partner_type)
+    if link == "aggregate":
+        partner.lag = planned
+        partner.save()
+        relationships = {"lag_members": {20: 10}, "sub_interfaces": {}, "bridge_members": {}}
+    elif link == "lag-member":
+        planned.lag = partner
+        planned.save()
+        relationships = {"lag_members": {10: 20}, "sub_interfaces": {}, "bridge_members": {}}
+    else:
+        planned.parent = partner
+        planned.save()
+        relationships = {"lag_members": {}, "sub_interfaces": {10: 20}, "bridge_members": {}}
+    created = _planning_rule(tag, platform, planned_name, rule, rule_type)
+    _seed(device, [_port(10, planned_name, if_type=f"{tag}Type"), _port(20, partner_name)], relationships)
+    return device, planned, partner, created
+
+
+@pytest.mark.django_db
+class TestATypeTheLinksRefuseIsKept:
+    """A planned type that breaks a persisted LAG or parent link is kept, the same way in the table and the sync."""
+
+    @pytest.mark.parametrize("rule", ["legacy", "set"], ids=["legacy-mapping", "set-type-rule"])
+    @pytest.mark.parametrize("link", list(_KEPT_LINKS))
+    def test_the_table_the_sync_and_the_repaint_keep_the_type(self, superuser_client, link, rule):
+        tag = f"kept{link.replace('-', '')}{rule}"
+        device, planned, partner, created_rule = _kept_link_scenario(tag, link, rule)
+        planned_type, rule_type, refusal = _KEPT_LINKS[link][1], _KEPT_LINKS[link][2], _KEPT_LINKS[link][5]
+        before_links = (_state(planned), _state(partner))
+        note = f"type kept: interface rule {created_rule.pk} ({created_rule}) sets {rule_type}: "
+
+        before = _tab_row(superuser_client, device, 10)
+        _sync(superuser_client, device, select=[10, 20])
+        after = _tab_row(superuser_client, device, 10)
+        repaint = _verify_row(superuser_client, device, 10)
+
+        planned_after, partner_after = _state(planned), _state(partner)
+        assert planned_after["type"] == planned_type
+        for field in ("lag_id", "parent_id"):
+            assert (planned_after[field], partner_after[field]) == (before_links[0][field], before_links[1][field])
+        for cell in (_type_cell(before), _type_cell(after), repaint["type"]):
+            assert note in cell and refusal in cell, cell
+        assert _shown_type(after) == planned_type
+        # A kept type is not a difference: the synced row is in sync, in the tab and in the repaint.
+        assert "text-success" in _type_cell(after)
+        assert 'name="sync_one"' not in after
+        assert 'name="sync_one"' not in repaint["actions"]
+
+    def test_an_unrelated_netbox_error_holds_the_type_change(self, superuser_client):
+        from netbox_librenms_plugin.tests.conftest import make_required_interface_custom_field
+
+        platform = _platform("kept-unrelated")
+        device = _device("kept-unrelated", platform)
+        interface = _bound(device, "Gi0/1", 10, iface_type="other")
+        custom_field = make_required_interface_custom_field("kept_unrelated_code")
+        InterfaceTypeMapping.objects.create(librenms_type="keptUnrelatedType", netbox_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1", if_type="keptUnrelatedType")])
+
+        _sync(superuser_client, device, select=[10])
+        cell = _type_cell(_tab_row(superuser_client, device, 10))
+
+        assert _state(interface)["type"] == "other"
+        # NetBox words the custom field error differently per release, so read its own message.
+        with pytest.raises(ValidationError) as refused:
+            Interface.objects.get(pk=interface.pk).clean()
+        assert f"'{custom_field.name}'" in refused.value.messages[0]
+        assert f"sets 1000base-t: {refused.value.messages[0]}" in cell
+
+    def test_a_created_interface_takes_the_planned_type_unchecked(self, superuser_client):
+        """A new row has no links, so NetBox's clean() is not asked; an unrelated error must not hold its type."""
+        from netbox_librenms_plugin.tests.conftest import make_required_interface_custom_field
+
+        device = _device("kept-created", _platform("kept-created"))
+        make_required_interface_custom_field("kept_created_code")
+        InterfaceTypeMapping.objects.create(librenms_type="keptCreatedType", netbox_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1", if_type="keptCreatedType")])
+
+        _sync(superuser_client, device, select=[10])
+
+        assert Interface.objects.get(device=device, name="Gi0/1").type == "1000base-t"
+
+
 @pytest.mark.django_db
 def test_the_walk_decides_with_the_platform_read_under_the_lock():
     """A platform change after the request read the device, and before the lock, must not split the walk and the writer."""
@@ -801,6 +921,66 @@ def test_a_sync_post_and_the_tab_it_renders_read_the_rules_once(superuser_client
     assert "Showing 1-10 of 10" in response.content.decode()
     assert sum(RULE_TABLE in query["sql"] for query in queries.captured_queries) == 1
     assert Interface.objects.filter(device=device).count() == 2
+
+
+# The only production functions that assign a ``.type`` attribute, and why each one may.
+_TYPE_WRITERS = {
+    ("interface_sync.py", "update_interface_from_port"): "the writer; the value comes from planned_interface_type",
+    ("interface_diff.py", "type_change_refusal"): "the unsaved copy that NetBox validates",
+    ("views/sync/modules.py", "_apply_module_interface_type"): "module apply, after type_change_refusal",
+    ("views/sync/interfaces.py", "_promote_lag_aggregate"): "the ratified LAG promotion and its restore",
+    ("views/sync/interfaces.py", "_promote_parent_child"): "the ratified parent promotion and its restore",
+    ("__init__.py", "_ensure_librenms_id_custom_field"): "a CustomField, not an interface",
+}
+
+
+def _type_writes(source):
+    """Return ``(function, line, value)`` for each ``x.type = value`` or ``setattr(x, "type", value)`` in *source*."""
+    found = []
+
+    def visit(node, function):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child.name)
+                continue
+            if isinstance(child, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+                elements = [e for t in targets for e in (t.elts if isinstance(t, ast.Tuple) else [t])]
+                if any(isinstance(e, ast.Attribute) and e.attr == "type" for e in elements):
+                    found.append((function, child.lineno, ast.unparse(child.value)))
+            elif (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "setattr"
+                and len(child.args) == 3
+                and isinstance(child.args[1], ast.Constant)
+                and child.args[1].value == "type"
+            ):
+                found.append((function, child.lineno, ast.unparse(child.args[2])))
+            visit(child, function)
+
+    visit(ast.parse(source), None)
+    return found
+
+
+def test_the_type_guard_finds_both_write_forms():
+    source = "def f(i):\n    i.type = 'lag'\n    g = lambda: setattr(i, 'type', old)\n"
+
+    assert _type_writes(source) == [("f", 2, "'lag'"), ("f", 3, "old")]
+
+
+def test_only_the_planned_writers_assign_an_interface_type():
+    """A new type write must go through planned_interface_type or type_change_refusal, or be listed with a reason."""
+    sites = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        relative = path.relative_to(PACKAGE).as_posix()
+        if relative.startswith(("tests/", "migrations/")):
+            continue
+        for function, _line, value in _type_writes(path.read_text()):
+            sites.setdefault((relative, function), set()).add(value)
+
+    assert set(sites) == set(_TYPE_WRITERS), sites
+    assert sites[("interface_sync.py", "update_interface_from_port")] == {"planned_type.value"}
 
 
 # Modules allowed to read InterfaceTypeMapping rows: the matcher, and the rule management surfaces.

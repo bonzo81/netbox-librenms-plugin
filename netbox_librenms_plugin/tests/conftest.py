@@ -561,6 +561,17 @@ def make_interface(device, name, *, iface_type="other"):
     return Interface.objects.create(device=device, name=name, type=iface_type)
 
 
+def make_required_interface_custom_field(name):
+    """Create a required text custom field on Interface, so NetBox's clean() refuses an interface without it."""
+    from core.models import ObjectType
+    from dcim.models import Interface
+    from extras.models import CustomField
+
+    custom_field = CustomField.objects.create(name=name, type="text", required=True)
+    custom_field.object_types.set([ObjectType.objects.get_for_model(Interface)])
+    return custom_field
+
+
 def stamp_rule_decision(record, *, platform_id=None, rules=None):
     """
     Give a hand-built interface row the rule decision the interfaces tab view stamps on it.

@@ -4777,7 +4777,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
         InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
 
-        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
 
         reloaded = Interface.objects.get(pk=interface.pk)
         assert reloaded.name == "Gi0/1"
@@ -4814,6 +4814,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             ["name", "type", "speed", "description", "mtu", "enabled", "mac_address"],
             "ifName",
             "Gi0/1",
+            created=False,
         )
 
         # Excluded attributes keep their pre-update values.
@@ -4842,7 +4843,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "down",
         }
 
-        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
 
         assert Interface.objects.get(pk=interface.pk).enabled is False
 
@@ -4864,7 +4865,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
 
         interface = Interface.objects.get(pk=interface.pk)
         assert get_librenms_device_id(interface, "default", auto_save=False) == 42
@@ -4890,7 +4891,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
 
         interface = Interface.objects.get(pk=interface.pk)
         assert get_librenms_device_id(interface, "default", auto_save=False) is None
@@ -4911,7 +4912,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, ["mac_address"], "ifName", "Gi0/1")
+        view.update_interface_attributes(interface, librenms_port, ["mac_address"], "ifName", "Gi0/1", created=False)
 
         interface.refresh_from_db()
         assert interface.description == ""

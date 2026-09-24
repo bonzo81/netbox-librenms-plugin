@@ -148,6 +148,7 @@ class TestTheDiffMatchesTheWriter:
             synced_name=row["ifName"],
             server_key=SERVER_KEY,
             interface_name_field="ifName",
+            created=False,
             rules=InterfaceRuleMatcher.load(),
         )
 
@@ -193,6 +194,29 @@ class TestTheDiffMatchesTheWriter:
         assert state.verdict("speed") == MATCHES
         assert "type" not in state.differing_fields
         assert "speed" not in state.differing_fields
+
+    def test_a_row_whose_type_matches_is_compared_with_no_query(self, django_assert_num_queries):
+        """Only a type change asks NetBox's clean() and the LAG members, so a matching row stays query-free."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.interface_diff import ROW_IN_SYNC
+
+        _device, interface = _synced_interface("diff-type-no-query")
+        row = _row(Interface.objects.prefetch_related("mac_addresses").get(pk=interface.pk))
+
+        with django_assert_num_queries(0):
+            state = _state(row)
+
+        assert state.state == ROW_IN_SYNC
+
+    def test_the_type_check_keeps_field_validation(self):
+        """The type is validated as a field too, so a value NetBox has no choice for is refused."""
+        from netbox_librenms_plugin.interface_diff import type_change_refusal
+
+        _device, interface = _synced_interface("diff-type-choice")
+
+        assert type_change_refusal(interface, "no-such-type") == "Value 'no-such-type' is not a valid choice."
+        assert type_change_refusal(interface, "virtual") is None
 
     def test_an_interface_with_no_stored_id_differs_on_librenms_id(self):
         _device, interface = _synced_interface("diff-no-id")

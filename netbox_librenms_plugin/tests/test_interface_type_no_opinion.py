@@ -6,6 +6,7 @@ flattened by a sync that simply had no mapping for the port.
 """
 
 import pytest
+from dcim.choices import InterfaceTypeChoices
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher, RuleDecisionKind
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
@@ -102,6 +103,45 @@ class TestUnmappedTypeIsNoOpinion:
         synced = _sync(device, _port(port_id=9104))
 
         assert synced.type == "1000base-t"
+
+
+@pytest.mark.django_db
+class TestOnlyACreatedInterfaceSkipsTheTypeCheck:
+    """The interface a sync creates takes the mapped type; a row that already existed is checked, even with no type."""
+
+    def test_a_created_interface_is_not_held_by_an_unrelated_netbox_error(self):
+        from netbox_librenms_plugin.tests.conftest import make_required_interface_custom_field
+
+        device = make_device("created-unchecked")
+        make_required_interface_custom_field("created_unchecked_code")
+        _mapping("ethernetCsmacd", "1000base-t")
+
+        assert _sync(device, _port(ifName="Ethernet7", port_id=9107)).type == "1000base-t"
+
+    @pytest.mark.skipif(
+        not hasattr(InterfaceTypeChoices, "TYPE_CHANNEL"),
+        reason="this NetBox has no channel interface type",
+    )
+    def test_a_created_interface_takes_a_type_its_empty_row_cannot_pass(self):
+        """NetBox's clean() needs a channel ID for a channel interface, which a new row cannot have yet."""
+        device = make_device("created-channel")
+        _mapping("ethernetCsmacd", "channel")
+
+        assert _sync(device, _port(ifName="Ethernet8", port_id=9108)).type == "channel"
+
+    def test_an_existing_row_with_no_type_is_checked(self):
+        """A type-less row that is a child of a parent keeps its type: NetBox refuses a physical child."""
+        device = make_device("typeless-checked")
+        parent = make_interface(device, "Ethernet9", iface_type="1000base-t")
+        child = make_interface(device, "Ethernet9.10", iface_type="")
+        child.parent = parent
+        child.save()
+        _mapping("ethernetCsmacd", "1000base-t")
+
+        synced = _sync(device, _port(ifName="Ethernet9.10", ifDescr="Ethernet9.10", port_id=9109))
+
+        assert synced.pk == child.pk
+        assert (synced.type, synced.parent_id) == ("", parent.pk)
 
 
 @pytest.mark.django_db

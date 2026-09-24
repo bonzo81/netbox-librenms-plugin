@@ -40,6 +40,7 @@ class TestInterfaceMacContract:
             synced_name="Ethernet1",
             server_key="default",
             interface_name_field="ifName",
+            created=False,
             rules=InterfaceRuleMatcher.load(),
         )
         interface.refresh_from_db()
@@ -76,6 +77,29 @@ class TestInterfaceMacContract:
         assert interface.mac_addresses.count() == 1
         assert str(interface.mac_addresses.first().mac_address) == "00:11:22:33:44:55"
 
+    @pytest.mark.parametrize("primary", [True, False], ids=["attached-and-primary", "attached-only"])
+    def test_an_attached_mac_is_not_attached_again(self, primary):
+        """The MAC row already points at the interface, so no UPDATE is sent; only the primary pointer can change."""
+        from dcim.models import MACAddress
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.interface_sync import assign_interface_mac
+
+        device = make_device(f"mac-attached-{int(primary)}")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        mac = MACAddress.objects.create(mac_address="00:11:22:33:44:55", assigned_object=interface)
+        if primary:
+            interface.primary_mac_address = mac
+            interface.save()
+
+        with CaptureQueriesContext(connection) as queries:
+            changed = assign_interface_mac(interface, "00:11:22:33:44:55")
+
+        assert changed is not primary
+        assert interface.primary_mac_address_id == mac.pk
+        assert [query["sql"] for query in queries.captured_queries if query["sql"].startswith("UPDATE")] == []
+
 
 @pytest.mark.django_db
 class TestInterfaceMtuContract:
@@ -92,6 +116,7 @@ class TestInterfaceMtuContract:
             synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
+            created=False,
             rules=InterfaceRuleMatcher.load(),
         )
         # The contract is about what reaches the column, so read the row back rather than
@@ -125,6 +150,7 @@ class TestInterfaceAliasContract:
             synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
+            created=False,
             rules=InterfaceRuleMatcher.load(),
         )
         # The contract is about what reaches the column, so read the row back rather than
@@ -219,6 +245,7 @@ class TestInterfaceStringLengthContract:
             synced_name=overrides.get("ifName", "Ethernet1"),
             server_key="default",
             interface_name_field="ifName",
+            created=False,
             rules=InterfaceRuleMatcher.load(),
         )
         interface.refresh_from_db()
@@ -274,5 +301,6 @@ class TestInterfaceStringLengthContract:
                 synced_name="E" * (self._max_length("name") + 1),
                 server_key="default",
                 interface_name_field="ifName",
+                created=False,
                 rules=InterfaceRuleMatcher.load(),
             )
