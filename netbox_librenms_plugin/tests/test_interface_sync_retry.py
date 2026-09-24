@@ -1,9 +1,10 @@
 """
 The interface sync POST runs as one retried transaction and publishes only what its committed attempt reports.
 
-Every conflict here is a real PostgreSQL conflict with a second connection. The only patch is a
-counting wrapper around the owner lock, which each attempt calls once, so a test can count attempts
-and release the second connection's lock between them.
+Every conflict here is a real PostgreSQL conflict with a second connection. The patches only
+observe and call through: a counting wrapper around the owner lock (each attempt calls it once, so
+a test counts attempts and releases the second connection's lock between them), a recorder of the
+outcome the committed attempt returns to ``post()``, and a counter of relationship passes.
 """
 
 import json
@@ -36,7 +37,8 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, messages_on
 from netbox_librenms_plugin.utils import set_librenms_device_id
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
+from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView, _InterfaceSyncOutcome
 
 SERVER_KEY = "default"
 # Long enough for a blocked statement to be a real lock wait, short enough for two attempts.
@@ -45,23 +47,42 @@ SYNCED = "Selected interfaces synced successfully."
 PLAIN_AND_HTMX = pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
 
 
-def _port(port_id, name, *, alias=""):
+def _port(port_id, name, *, alias="", mac="", if_type="ethernetCsmacd"):
     return {
         "port_id": port_id,
         "ifName": name,
         "ifDescr": name,
-        "ifType": "ethernetCsmacd",
+        "ifType": if_type,
         "ifAdminStatus": "up",
         "ifSpeed": 1_000_000_000,
         "ifMtu": 1500,
-        "ifPhysAddress": "",
+        "ifPhysAddress": mac,
         "ifAlias": alias,
     }
 
 
-def _seed(device, ports):
-    payload = {"ports": ports, "port_stack_relationships": {}}
+def _seed(device, ports, *, lag_members=None):
+    relationships = {"lag_members": lag_members or {}, "sub_interfaces": {}, "bridge_members": {}}
+    payload = {"ports": ports, "port_stack_relationships": relationships}
     cache.set(SyncInterfacesView().get_cache_key(device, "ports", SERVER_KEY), payload, timeout=300)
+
+
+def _bound_interface(device, name, port_id, *, iface_type="other"):
+    interface = make_interface(device, name, iface_type=iface_type)
+    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    interface.save()
+    return interface
+
+
+def _outcome(*, synced_count, skipped_conflicts=(), kept_name_conflicts=(), warnings=()):
+    """The outcome of a committed attempt that changed NetBox."""
+    return _InterfaceSyncOutcome(
+        skipped_conflicts=skipped_conflicts,
+        kept_name_conflicts=kept_name_conflicts,
+        synced_count=synced_count,
+        mutated=True,
+        warnings=warnings,
+    )
 
 
 def _sync_page(device):
@@ -108,6 +129,21 @@ def attempts(monkeypatch):
     return state
 
 
+@pytest.fixture
+def committed_outcomes(monkeypatch):
+    """Record the outcome that the committed attempt of each sync returns to ``post()``."""
+    real_run = interfaces_view.run_transaction
+    outcomes = []
+
+    def recording_run(work):
+        outcome = real_run(work)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(interfaces_view, "run_transaction", recording_run)
+    return outcomes
+
+
 def _assert_try_again_answer(response, device, htmx, message):
     """Assert the one visible answer the middleware gives for a lock conflict."""
     if htmx:
@@ -124,7 +160,7 @@ def _assert_try_again_answer(response, device, htmx, message):
 
 @transactional_db_with_all_apps()
 @PLAIN_AND_HTMX
-def test_a_lock_conflict_on_the_first_attempt_is_retried_once(client, attempts, htmx):
+def test_a_lock_conflict_on_the_first_attempt_is_retried_once(client, attempts, committed_outcomes, htmx):
     device = make_device(f"sync-retry-once-{htmx}", librenms_cf={SERVER_KEY: {"id": 91}})
     _seed(device, [_port(10, "eth10")])
     client.force_login(make_superuser("sync-retry-once-user"))
@@ -136,6 +172,7 @@ def test_a_lock_conflict_on_the_first_attempt_is_retried_once(client, attempts, 
             response = _post(client, device, [10], htmx=htmx)
 
     assert attempts.count == 2
+    assert committed_outcomes == [_outcome(synced_count=1)]
     assert response.status_code == (200 if htmx else 302)
     assert Interface.objects.filter(device=device, name="eth10").exists()
     assert [text for level, text in messages_on(response.wsgi_request) if level == "success"] == [SYNCED]
@@ -159,12 +196,10 @@ def test_conflicts_on_both_attempts_give_one_try_again_answer_and_change_nothing
 
 
 @transactional_db_with_all_apps()
-def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts):
+def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts, committed_outcomes):
     """The sync holds its Device and waits for an interface; the other session holds that interface and waits for the Device."""
     device = make_device("sync-deadlock", librenms_cf={SERVER_KEY: {"id": 96}})
-    interface = make_interface(device, "eth10")
-    set_librenms_device_id(interface, 10, SERVER_KEY)
-    interface.save()
+    interface = _bound_interface(device, "eth10", 10)
     _seed(device, [_port(10, "eth10", alias="uplink")])
     client.force_login(make_superuser("sync-deadlock-user"))
     sync_pid = backend_pid(connection)
@@ -188,6 +223,7 @@ def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts):
         holder.result(timeout=10)
 
     assert attempts.count == 2
+    assert committed_outcomes == [_outcome(synced_count=1)]
     assert response.status_code == 302
     assert [text for level, text in messages_on(response.wsgi_request) if level == "success"] == [SYNCED]
     interface.refresh_from_db()
@@ -195,40 +231,155 @@ def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts):
 
 
 @transactional_db_with_all_apps()
-def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, attempts):
-    """The attempt that conflicts has already warned, skipped a row and counted a sync; none of it is published."""
+def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, attempts, committed_outcomes):
+    """The attempt that conflicts has already warned, skipped a row, kept a name and counted syncs; none of it is published."""
     from ipam.models import VLAN
 
     device = make_device("sync-retry-report", librenms_cf={SERVER_KEY: {"id": 93}})
-    interface = make_interface(device, "eth10")
-    set_librenms_device_id(interface, 10, SERVER_KEY)
-    interface.save()
+    interface = _bound_interface(device, "eth10", 10)
+    # Port 11 reports the name of another interface on the device, so its bound interface keeps its name.
+    _bound_interface(device, "old11", 11)
+    make_interface(device, "eth12")
     # Port 7 is bound to another device's interface, so every attempt skips its row.
-    elsewhere = make_interface(make_device("sync-retry-report-elsewhere"), "eth7")
-    set_librenms_device_id(elsewhere, 7, SERVER_KEY)
-    elsewhere.save()
+    _bound_interface(make_device("sync-retry-report-elsewhere"), "eth7", 7)
     # A VLAN the user cannot view, so every attempt warns that the VLAN scope is incomplete.
     VLAN.objects.create(vid=812, name="sync-retry-report-hidden")
-    user = make_user_with_perms("sync-retry-report-user", [("view", Device), ("add", Interface), ("change", Interface)])
+    user = make_user_with_perms(
+        "sync-retry-report-user", [("view", Device), ("view", Interface), ("add", Interface), ("change", Interface)]
+    )
     client.force_login(user)
-    _seed(device, [_port(7, "eth7"), _port(10, "eth10", alias="uplink")])
+    _seed(device, [_port(7, "eth7"), _port(11, "eth12", alias="kept"), _port(10, "eth10", alias="uplink")])
 
     with second_connection() as other:
-        # The first attempt warns and skips, then waits for this row at its write.
+        # The first attempt warns, skips and keeps a name, then waits for this row at its write.
         lock_row(other, Interface, interface.pk)
         attempts.before_retry = other.rollback
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = _post(client, device, [7, 10], htmx=False, exclude_columns=("mac_address",))
+            response = _post(client, device, [7, 11, 10], htmx=False, exclude_columns=("mac_address",))
 
-    reported = messages_on(response.wsgi_request)
+    vlan_warning = (
+        "VLANs were not synced for the selected interfaces: your account is missing ipam.view_vlan. "
+        "Existing VLAN assignments were left unchanged."
+    )
     assert attempts.count == 2
-    assert len([text for _level, text in reported if text.startswith("VLANs were not synced")]) == 1, reported
-    assert [text for _level, text in reported if "skipped" in text] == [
-        "1 interface(s) skipped: eth7 (port already mapped elsewhere or ambiguous)."
+    assert committed_outcomes == [
+        _outcome(
+            synced_count=2,
+            skipped_conflicts=("eth7 (port already mapped elsewhere or ambiguous)",),
+            kept_name_conflicts=(("old11", "eth12", None),),
+            warnings=(vlan_warning,),
+        )
     ]
-    assert [text for level, text in reported if level == "success"] == [SYNCED]
+    assert messages_on(response.wsgi_request) == [
+        ("warning", vlan_warning),
+        ("warning", "1 interface(s) skipped: eth7 (port already mapped elsewhere or ambiguous)."),
+        (
+            "warning",
+            "Interface 'old11' kept its current name because the reported name is in use on the same "
+            "interface owner: 'eth12'.",
+        ),
+        ("success", SYNCED),
+    ]
     interface.refresh_from_db()
     assert interface.description == "uplink"
+
+
+def _seed_relationship_sync(device, base, mac, elsewhere):
+    """Seed one device for a sync whose attribute pass writes every row before the relationship pass runs."""
+    aggregate = _bound_interface(device, "Po1", base + 100, iface_type="lag")
+    _bound_interface(device, "old11", base + 11)
+    make_interface(device, "eth12")
+    _bound_interface(elsewhere, f"x{base + 7}", base + 7)
+    ports = [
+        _port(base + 7, "eth7"),
+        _port(base + 11, "eth12", alias="kept"),
+        _port(base + 1, "eth1", mac=mac),
+        _port(base + 100, "Po1", if_type="ieee8023adLag"),
+    ]
+    _seed(device, ports, lag_members={base + 1: base + 100})
+    return aggregate, [base + 7, base + 11, base + 1]
+
+
+def _one_sync_result(device, aggregate):
+    """Return what one sync left on the member interface: its LAG, MAC rows and change records."""
+    from core.models import ObjectChange
+    from dcim.models import MACAddress
+
+    member = Interface.objects.get(device=device, name="eth1")
+    interface_type = ContentType.objects.get_for_model(Interface)
+    changes = ObjectChange.objects.filter(changed_object_type=interface_type, changed_object_id=member.pk)
+    return {
+        "lag": member.lag_id == aggregate.pk,
+        "macs": MACAddress.objects.filter(assigned_object_type=interface_type, assigned_object_id=member.pk).count(),
+        "primary_mac": str(member.primary_mac_address.mac_address).lower(),
+        "changes": sorted(changes.values_list("action", flat=True)),
+    }
+
+
+@transactional_db_with_all_apps()
+def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_result(
+    client, attempts, committed_outcomes, monkeypatch
+):
+    """Attempt one writes every row, then its relationship pass meets a lock; the result equals one clean sync."""
+    from django.test import Client
+
+    user = make_superuser("sync-relationship-retry-user")
+    client.force_login(user)
+    # Its own session, so the control's messages do not carry over into the retried sync's messages.
+    control_client = Client()
+    control_client.force_login(user)
+    elsewhere = make_device("sync-relationship-retry-elsewhere")
+    control = make_device("sync-relationship-control", librenms_cf={SERVER_KEY: {"id": 97}})
+    control_aggregate, control_ports = _seed_relationship_sync(control, 1000, "00:11:22:33:44:01", elsewhere)
+    device = make_device("sync-relationship-retry", librenms_cf={SERVER_KEY: {"id": 98}})
+    aggregate, ports = _seed_relationship_sync(device, 2000, "00:11:22:33:44:01", elsewhere)
+    real_relationships = SyncInterfacesView._sync_interface_relationships
+    relationship_passes = []
+
+    def counting_relationships(self, *args, **kwargs):
+        relationship_passes.append(Interface.objects.filter(device=self.object, name="eth1").exists())
+        return real_relationships(self, *args, **kwargs)
+
+    monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", counting_relationships)
+    control_response = _post(control_client, control, control_ports, htmx=False, exclude_columns=("vlans",))
+    assert (attempts.count, relationship_passes) == (1, [True]), "precondition: the control sync is one clean attempt"
+    attempts.count = 0
+    relationship_passes.clear()
+
+    with second_connection() as other:
+        # Only the relationship pass locks the aggregate: the attribute pass does not write it.
+        lock_row(other, Interface, aggregate.pk)
+        attempts.before_retry = other.rollback
+        with lock_timeout(LOCK_TIMEOUT_MS):
+            response = _post(client, device, ports, htmx=False, exclude_columns=("vlans",))
+
+    assert attempts.count == 2
+    assert relationship_passes == [True, True], "each attempt wrote the member before its relationship pass"
+    assert (
+        committed_outcomes[1]
+        == committed_outcomes[0]
+        == _outcome(
+            synced_count=2,
+            skipped_conflicts=("eth7 (port already mapped elsewhere or ambiguous)",),
+            kept_name_conflicts=(("old11", "eth12", None),),
+        )
+    )
+    assert _one_sync_result(device, aggregate) == _one_sync_result(control, control_aggregate)
+    assert _one_sync_result(device, aggregate)["lag"] is True
+    assert _one_sync_result(device, aggregate)["macs"] == 1
+    assert (
+        messages_on(response.wsgi_request)
+        == messages_on(control_response.wsgi_request)
+        == [
+            ("warning", "1 interface(s) skipped: eth7 (port already mapped elsewhere or ambiguous)."),
+            (
+                "warning",
+                "Interface 'old11' kept its current name because the reported name is in use on the same "
+                "interface owner: 'eth12'.",
+            ),
+            ("success", SYNCED),
+        ]
+    )
 
 
 @transactional_db_with_all_apps()
