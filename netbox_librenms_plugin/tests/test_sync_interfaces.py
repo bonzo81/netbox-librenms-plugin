@@ -4,32 +4,39 @@ import pytest
 from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_sync import assign_interface_mac
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
-from netbox_librenms_plugin.tests.view_test_helpers import make_view
+from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
+    make_device,
+    make_interface,
+    make_superuser,
+    make_vm,
+)
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface, post_interface_sync, seed_ports
+
+
+def _post_sync(client, settings, device, port, *, exclude_columns):
+    """Seed *port* for *device* and post the sync of that one row through the real URL, as a superuser."""
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser(f"{device.name}-user"))
+    seed_ports(device, [port])
+    return post_interface_sync(client, device, [port["port_id"]], htmx=False, exclude_columns=exclude_columns)
 
 
 @pytest.mark.django_db
 class TestUpdateInterfaceAttributes:
     """The interface writer must persist the real NetBox model state."""
 
-    @pytest.fixture
-    def view(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = make_view(SyncInterfacesView)
-        view._post_server_key = "default"
-        return view
-
-    def test_updates_fields_and_stable_port_identity(self, view):
+    def test_updates_fields_and_stable_port_identity(self, client, settings):
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        from netbox_librenms_plugin.models import InterfaceTypeMapping
-
-        interface = make_interface(make_device("interface-fields"), "old-name")
+        interface = bound_interface(make_device("interface-fields"), "old-name", 77)
         InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
 
-        view.update_interface_attributes(
-            interface,
+        _post_sync(
+            client,
+            settings,
+            interface.device,
             {
                 "ifName": "eth0",
                 "ifDescr": "eth0",
@@ -40,10 +47,7 @@ class TestUpdateInterfaceAttributes:
                 "ifAdminStatus": "down",
                 "port_id": 77,
             },
-            set(),
-            "ifName",
-            "eth0",
-            created=False,
+            exclude_columns=("vlans",),
         )
 
         interface.refresh_from_db()
@@ -55,18 +59,20 @@ class TestUpdateInterfaceAttributes:
         assert interface.enabled is False
         assert get_librenms_device_id(interface, "default", auto_save=False) == 77
 
-    def test_excluded_fields_and_mac_remain_unchanged(self, view):
+    def test_excluded_fields_and_mac_remain_unchanged(self, client, settings):
         from dcim.models import MACAddress
 
-        interface = make_interface(make_device("interface-exclusions"), "keep-name", iface_type="1000base-t")
+        interface = bound_interface(make_device("interface-exclusions"), "keep-name", 1, iface_type="1000base-t")
         interface.speed = 1000
         interface.description = "keep-description"
         interface.mtu = 9000
         interface.enabled = True
         interface.save()
 
-        view.update_interface_attributes(
-            interface,
+        _post_sync(
+            client,
+            settings,
+            interface.device,
             {
                 "ifName": "new-name",
                 "ifDescr": "new-name",
@@ -76,11 +82,9 @@ class TestUpdateInterfaceAttributes:
                 "ifMtu": 1500,
                 "ifAdminStatus": "down",
                 "ifPhysAddress": "aa:bb:cc:dd:ee:ff",
+                "port_id": 1,
             },
-            {"name", "type", "speed", "description", "mtu", "enabled", "mac_address"},
-            "ifName",
-            "new-name",
-            created=False,
+            exclude_columns=("name", "type", "speed", "description", "mtu", "enabled", "mac_address", "vlans"),
         )
 
         interface.refresh_from_db()

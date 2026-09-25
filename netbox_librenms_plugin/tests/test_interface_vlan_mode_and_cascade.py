@@ -126,27 +126,26 @@ class TestReportedModeIsAuthoritative:
 class TestTheViewPassesTheReportedMode:
     """The mode is on every enriched row; the sync view has to hand it to the writer."""
 
-    def test_the_row_mode_reaches_netbox(self):
+    def test_the_row_mode_reaches_netbox(self, client, settings):
         """A writer-only fix would pass while the view still dropped the reported mode."""
         from ipam.models import VLAN
 
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_default_librenms_server,
+            make_device,
+            make_interface,
+            make_superuser,
+        )
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
 
         device = make_device("vlan-mode-view")
         interface = make_interface(device, "Ethernet1")
         vlan = VLAN.objects.create(vid=100, name="VLAN-MODE-VIEW-100", status="active")
-        view = object.__new__(SyncInterfacesView)
-        view.request = make_request("post", {})
-        view._lookup_maps = view._index_vlans([vlan])
-        view._lookup_maps_by_owner = None
-        view._vlan_owners_by_id = {}
+        configure_default_librenms_server(settings)
+        client.force_login(make_superuser("vlan-mode-view-user"))
+        seed_ports(device, [sync_port(10, "Ethernet1", mode="tagged", untagged_vlan=100, tagged_vlans=[])])
 
-        view._sync_interface_vlans(
-            interface,
-            {"port_id": 10, "mode": "tagged", "untagged_vlan": 100, "tagged_vlans": []},
-        )
+        post_interface_sync(client, device, [10], htmx=False, exclude_columns=("mac_address",))
 
         interface.refresh_from_db()
         assert interface.mode == "tagged"

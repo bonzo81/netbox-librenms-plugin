@@ -51,12 +51,12 @@ def _make_iv(request=None):
     return v
 
 
-def _post_sync(client, settings, user, owner, port):
+def _post_sync(client, settings, user, owner, port, *, extra=None):
     """Seed *port* for *owner* and post the sync of that one row through the real URL, as *user*."""
     configure_default_librenms_server(settings)
     client.force_login(user)
     seed_ports(owner, [port])
-    return post_interface_sync(client, owner, [port["port_id"]], htmx=False)
+    return post_interface_sync(client, owner, [port["port_id"]], htmx=False, extra=extra)
 
 
 def _make_dv(request=None):
@@ -144,68 +144,29 @@ class TestSyncInterfacesGetObject:
 class TestSyncInterface:
     """Verify which real device or virtual chassis member receives each LibreNMS interface row."""
 
-    def _v(self, request=None):
-        v = _make_iv(request)
-        v._lookup_maps = {}
-        v._skipped_conflicts = []
-        return v
-
-    def test_device_vc_target_not_in_valid_ids_is_skipped(self):
+    def test_device_vc_target_not_in_valid_ids_is_skipped(self, client, settings):
         """An explicit device outside the chassis is refused without a fallback write."""
         from dcim.models import Interface
 
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+
         _vc, (host, _sibling) = make_virtual_chassis_members("sync-vc-outsider")
         outsider = make_device("sync-vc-outsider-x")
-        req = make_request("post", {"device_selection_10": str(outsider.pk)})
-        v = self._v(req)
 
-        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
+        response = _post_sync(
+            client,
+            settings,
+            make_superuser("sync-vc-outsider-user"),
+            host,
+            _record(ifName="eth0", port_id=10),
+            extra={"device_selection_10": str(outsider.pk)},
+        )
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=outsider, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
-
-    def test_device_no_vc_wrong_selection_is_skipped(self):
-        from dcim.models import Interface
-
-        dev = make_device("sync-novc-self")
-        other = make_device("sync-novc-other")
-        req = make_request("post", {"device_selection_10": str(other.pk)})
-        v = self._v(req)
-
-        v.sync_interface(dev, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
-
-        assert not Interface.objects.filter(device=dev, name="eth0").exists()
-        assert not Interface.objects.filter(device=other, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
-
-    def test_device_selection_does_not_exist_is_skipped(self):
-        from dcim.models import Device, Interface
-
-        dev = make_device("sync-gone")
-        absent_pk = missing_pk(Device)
-        req = make_request("post", {"device_selection_10": str(absent_pk)})
-        v = self._v(req)
-
-        v.sync_interface(dev, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
-
-        assert not Interface.objects.filter(device=dev, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
-
-    def test_device_selection_outside_the_grant_is_skipped(self):
-        """The posted id is client-supplied, so a constrained grant must not reach the sibling."""
-        from dcim.models import Device, Interface
-
-        _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-scoped")
-        user = make_user_with_perms("sync-scoped", [("view", Device)], constraints={"name": "sync-vc-scoped-m1"})
-        req = make_request("post", {"device_selection_10": str(sibling.pk)}, user=user)
-        v = self._v(req)
-
-        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
-
-        assert not Interface.objects.filter(device=host, name="eth0").exists()
-        assert not Interface.objects.filter(device=sibling, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: eth0 (selected target unavailable)."
+        ]
 
     def test_existing_interface_outside_the_change_grant_is_skipped(self, client, settings):
         """A natural-key match must not bypass the caller's constrained change grant."""

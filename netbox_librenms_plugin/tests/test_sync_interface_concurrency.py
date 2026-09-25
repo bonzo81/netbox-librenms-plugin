@@ -44,17 +44,28 @@ def restore_librenms_id_custom_field():
     _ensure_librenms_id_custom_field(sender=None, using="default")
 
 
-def test_selected_vc_target_is_locked_through_interface_sync():
+def _post_from_this_thread(user_pk, owner, port_ids, **post_kwargs):
+    """Post the interface sync with a client of this thread's connection; return the message texts."""
+    from django.contrib.auth import get_user_model
+    from django.test import Client
+
+    from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+    client = Client()
+    client.force_login(get_user_model().objects.get(pk=user_pk))
+    response = post_interface_sync(client, owner, port_ids, htmx=False, **post_kwargs)
+    return message_texts(response.wsgi_request)
+
+
+def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypatch):
     """A membership update must wait until target validation and sync commit."""
     from dcim.models import Device, Interface
-    from django.contrib.auth import get_user_model
     from django.db import OperationalError, close_old_connections, connection
 
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-    server_key = configured_server_key()
-
+    configure_default_librenms_server(settings)
     _vc, (page_device, target_device) = make_virtual_chassis_members("sync-target-lock")
     user = make_superuser("sync-target-lock-user")
     validation_done = Event()
@@ -70,6 +81,15 @@ def test_selected_vc_target_is_locked_through_interface_sync():
         "ifAdminStatus": "up",
         "port_id": 101,
     }
+    seed_ports(page_device, [port])
+    real_resolve = SyncInterfacesView._resolve_device_interface
+
+    def pause_after_validation(self, *args, **kwargs):
+        validation_done.set()
+        assert release_sync.wait(5), "test did not release the sync transaction"
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(SyncInterfacesView, "_resolve_device_interface", pause_after_validation)
 
     def sync_interface():
         close_old_connections()
@@ -77,26 +97,9 @@ def test_selected_vc_target_is_locked_through_interface_sync():
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
-            page = Device.objects.get(pk=page_device.pk)
-            thread_user = get_user_model().objects.get(pk=user.pk)
-            request = make_request(
-                "post",
-                {"device_selection_101": str(target_device.pk)},
-                user=thread_user,
+            return _post_from_this_thread(
+                user.pk, page_device, [101], extra={"device_selection_101": str(target_device.pk)}
             )
-            view = make_view(SyncInterfacesView, request)
-            view._post_server_key = server_key
-            view._selected_port_ids = {101}
-            view._auto_selected_port_ids = set()
-            real_resolve = view._resolve_device_interface
-
-            def pause_after_validation(*args, **kwargs):
-                validation_done.set()
-                assert release_sync.wait(5), "test did not release the sync transaction"
-                return real_resolve(*args, **kwargs)
-
-            view._resolve_device_interface = pause_after_validation
-            view.sync_selected_interfaces(page, [port], ["vlans"], "ifName")
         finally:
             close_old_connections()
 
@@ -119,8 +122,9 @@ def test_selected_vc_target_is_locked_through_interface_sync():
                 move_future.result(timeout=5)
         finally:
             release_sync.set()
-        sync_future.result(timeout=10)
+        texts = sync_future.result(timeout=10)
 
+    assert texts == [SYNCED]
     assert Interface.objects.filter(device=target_device, name="Gi0/1").exists()
 
 
@@ -258,15 +262,13 @@ def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked(settings):
     assert list(interface.tagged_vlans.all()) == []
 
 
-def test_auto_selected_owner_is_revalidated_after_vc_position_changes():
-    """An owner guessed before locking must not survive a later chassis-position change."""
+def test_auto_selected_owner_is_revalidated_after_vc_position_changes(client, settings):
+    """The owner of a row with no posted member comes from the chassis positions read under the lock."""
     from dcim.models import Device, Interface
 
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
-    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
-    server_key = configured_server_key()
-
+    configure_default_librenms_server(settings)
     _vc, (page_device, old_position_two, new_position_two) = make_virtual_chassis_members(
         "sync-auto-position",
         count=3,
@@ -281,40 +283,33 @@ def test_auto_selected_owner_is_revalidated_after_vc_position_changes():
         "ifMtu": 1500,
         "ifAdminStatus": "up",
     }
-    request = make_request("post", user=make_superuser("sync-auto-position-user"))
-    view = make_view(SyncInterfacesView, request)
-    view._post_server_key = server_key
-    view._selected_port_ids = {10}
-    view._auto_selected_port_ids = {10}
-    view._auto_selected_target_ids = {10: old_position_two.pk}
-
+    # The page was rendered while old_position_two held position 2; the chassis changed since.
+    seed_ports(page_device, [port])
     Device.objects.filter(pk=old_position_two.pk).update(vc_position=None)
     Device.objects.filter(pk=new_position_two.pk).update(vc_position=2)
     Device.objects.filter(pk=old_position_two.pk).update(vc_position=3)
+    client.force_login(make_superuser("sync-auto-position-user"))
 
-    view.sync_selected_interfaces(page_device, [port], [], "ifName")
+    post_interface_sync(client, page_device, [10], htmx=False, exclude_columns=())
 
     assert Interface.objects.filter(device=new_position_two, name="Ethernet2/1").exists()
     assert not Interface.objects.filter(device=old_position_two, name="Ethernet2/1").exists()
 
 
-def test_inaccessible_selected_target_is_not_locked():
+def test_inaccessible_selected_target_is_not_locked(settings):
     """A forged inaccessible target must not block work on that Device."""
-    from dcim.models import Device
-    from django.contrib.auth import get_user_model
+    from dcim.models import Device, Interface
     from django.db import close_old_connections, connection, transaction
 
     from netbox_librenms_plugin.tests.conftest import make_device
-    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
-    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-    server_key = configured_server_key()
-
+    configure_default_librenms_server(settings)
     page_device = make_device("restricted-target-page")
     inaccessible_target = make_device("restricted-target-hidden")
-    user = make_user_with_perms("restricted-target-user", [])
+    user = make_user_with_perms("restricted-target-user", [("add", Interface), ("change", Interface)])
     user = grant(user, "view", Device, constraints={"id": page_device.pk})
-    sync_finished = Event()
+    seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}])
 
     def sync_forged_target():
         close_old_connections()
@@ -324,27 +319,13 @@ def test_inaccessible_selected_target_is_not_locked():
                 # IS locked, the lock timeout must fire first so the failure names the real cause.
                 cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
-            thread_page = Device.objects.get(pk=page_device.pk)
-            thread_user = get_user_model().objects.get(pk=user.pk)
-            request = make_request(
-                "post",
-                {"device_selection_10": str(inaccessible_target.pk)},
-                user=thread_user,
+            return _post_from_this_thread(
+                user.pk,
+                page_device,
+                [10],
+                extra={"device_selection_10": str(inaccessible_target.pk)},
+                exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
             )
-            view = make_view(SyncInterfacesView, request)
-            view._post_server_key = server_key
-            view._selected_port_ids = {10}
-            view._auto_selected_port_ids = set()
-            view._auto_selected_target_ids = {}
-            view._skipped_conflicts = []
-            view._synced_count = 0
-            view.sync_selected_interfaces(
-                thread_page,
-                [{"port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}],
-                ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-                "ifName",
-            )
-            sync_finished.set()
         finally:
             close_old_connections()
 
@@ -352,55 +333,41 @@ def test_inaccessible_selected_target_is_not_locked():
         with transaction.atomic():
             Device.objects.select_for_update().get(pk=inaccessible_target.pk)
             future = executor.submit(sync_forged_target)
-            future.result(timeout=5)
+            texts = future.result(timeout=5)
 
-    assert sync_finished.is_set()
+    # The row is refused without a wait on the target: the sync ran, not the lock-conflict answer.
+    assert texts == ["1 interface(s) skipped: Ethernet1 (selected target unavailable)."]
 
 
-def test_viewable_outside_selected_target_is_not_locked():
+def test_viewable_outside_selected_target_is_not_locked(settings):
     """A target outside the page Device scope must not be locked."""
     from dcim.models import Device
-    from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
 
     from netbox_librenms_plugin.tests.conftest import make_device
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
-    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
-    server_key = configured_server_key()
-
+    configure_default_librenms_server(settings)
     page_device = make_device("outside-target-page")
     outside_target = make_device("outside-target-device")
     user = make_superuser("outside-target-user")
-    sync_finished = Event()
+    seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}])
 
     def sync_forged_target():
         close_old_connections()
         try:
             with connection.cursor() as cursor:
+                # Below the caller's future.result(timeout=5): if this test regresses and the row
+                # IS locked, the lock timeout must fire first so the failure names the real cause.
                 cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
-            thread_page = Device.objects.get(pk=page_device.pk)
-            thread_user = get_user_model().objects.get(pk=user.pk)
-            request = make_request(
-                "post",
-                {"device_selection_10": str(outside_target.pk)},
-                user=thread_user,
+            return _post_from_this_thread(
+                user.pk,
+                page_device,
+                [10],
+                extra={"device_selection_10": str(outside_target.pk)},
+                exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
             )
-            view = make_view(SyncInterfacesView, request)
-            view._post_server_key = server_key
-            view._selected_port_ids = {10}
-            view._auto_selected_port_ids = set()
-            view._auto_selected_target_ids = {}
-            view._skipped_conflicts = []
-            view._synced_count = 0
-            view.sync_selected_interfaces(
-                thread_page,
-                [{"port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}],
-                ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-                "ifName",
-            )
-            sync_finished.set()
         finally:
             close_old_connections()
 
@@ -408,25 +375,22 @@ def test_viewable_outside_selected_target_is_not_locked():
         with transaction.atomic():
             Device.objects.select_for_update().get(pk=outside_target.pk)
             future = executor.submit(sync_forged_target)
-            future.result(timeout=5)
+            texts = future.result(timeout=5)
 
-    assert sync_finished.is_set()
+    # The row is refused without a wait on the target: the sync ran, not the lock-conflict answer.
+    assert texts == ["1 interface(s) skipped: Ethernet1 (selected target unavailable)."]
 
 
-def test_selected_vc_targets_lock_chassis_before_devices():
+def test_selected_vc_targets_lock_chassis_before_devices(client, settings):
     """Bulk sync must use the same chassis-first lock order as relationship sync."""
-    from django.db import connection, transaction
+    from django.db import connection
 
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
-    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
+    configure_default_librenms_server(settings)
     _virtual_chassis, (page_device, target_device) = make_virtual_chassis_members("bulk-lock-order")
-    request = make_request(
-        "post",
-        {"device_selection_10": str(target_device.pk)},
-        user=make_superuser("bulk-lock-order-user"),
-    )
-    view = make_view(SyncInterfacesView, request)
+    seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1"}])
+    client.force_login(make_superuser("bulk-lock-order-user"))
     locked_selects = []
 
     def record_locked_select(execute, sql, params, many, context):
@@ -434,57 +398,56 @@ def test_selected_vc_targets_lock_chassis_before_devices():
             locked_selects.append(sql.lower())
         return execute(sql, params, many, context)
 
-    with transaction.atomic(), connection.execute_wrapper(record_locked_select):
-        view._lock_selected_device_targets(page_device)
+    with connection.execute_wrapper(record_locked_select):
+        post_interface_sync(client, page_device, [10], htmx=False, extra={"device_selection_10": str(target_device.pk)})
 
     chassis_lock = next(index for index, sql in enumerate(locked_selects) if "dcim_virtualchassis" in sql)
     device_lock = next(index for index, sql in enumerate(locked_selects) if '"dcim_device"' in sql)
     assert chassis_lock < device_lock
 
 
-def test_vm_sync_serializes_duplicate_display_name_resolution():
+def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypatch):
     """A second VM sync must not resolve the same unbound natural-key row concurrently."""
-    from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection
-    from virtualization.models import VirtualMachine, VMInterface
+    from virtualization.models import VMInterface
 
     from netbox_librenms_plugin.tests.conftest import make_vm
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
     from netbox_librenms_plugin.utils import get_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-    server_key = configured_server_key()
-
+    server_key = configure_default_librenms_server(settings)
     vm = make_vm("vm-duplicate-name-lock")
     VMInterface.objects.create(virtual_machine=vm, name="Ethernet")
     user = make_superuser("vm-duplicate-name-lock-user")
-    first_resolved = Event()
-    second_resolved = Event()
+    resolved = {10: Event(), 11: Event()}
+    second_attempt_started = Event()
     release_first = Event()
+    real_resolve = SyncInterfacesView._resolve_vm_interface
+    real_attempt = SyncInterfacesView._sync_attempt
 
-    def sync_port(port_id, resolved_event, wait_for_release):
+    def pause_after_resolution(self, vm, interface_name, port_id, *args, **kwargs):
+        interface = real_resolve(self, vm, interface_name, port_id, *args, **kwargs)
+        resolved[port_id].set()
+        if port_id == 10:
+            assert release_first.wait(5), "test did not release the first VM sync"
+        return interface
+
+    def observed_attempt(self, visible_port_ids, *args, **kwargs):
+        # The second post read its snapshot before it starts the attempt.
+        if 11 in visible_port_ids:
+            second_attempt_started.set()
+        return real_attempt(self, visible_port_ids, *args, **kwargs)
+
+    monkeypatch.setattr(SyncInterfacesView, "_resolve_vm_interface", pause_after_resolution)
+    monkeypatch.setattr(SyncInterfacesView, "_sync_attempt", observed_attempt)
+
+    def sync_port(port_id):
         close_old_connections()
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '5s'")
                 cursor.execute("SET statement_timeout = '5s'")
-            thread_vm = VirtualMachine.objects.get(pk=vm.pk)
-            thread_user = get_user_model().objects.get(pk=user.pk)
-            request = make_request("post", {}, user=thread_user)
-            view = make_view(SyncInterfacesView, request)
-            view._post_server_key = server_key
-            view._selected_port_ids = {port_id}
-            view._skipped_conflicts = []
-            real_resolve = view._resolve_vm_interface
-
-            def pause_after_resolution(*args, **kwargs):
-                interface = real_resolve(*args, **kwargs)
-                resolved_event.set()
-                if wait_for_release:
-                    assert release_first.wait(5), "test did not release the first VM sync"
-                return interface
-
-            view._resolve_vm_interface = pause_after_resolution
             port = {
                 **_PORT_KEYS_UNSET,
                 "port_id": port_id,
@@ -492,31 +455,34 @@ def test_vm_sync_serializes_duplicate_display_name_resolution():
                 "ifDescr": "Ethernet",
                 "ifAdminStatus": "up",
             }
-            view.sync_selected_interfaces(
-                thread_vm,
-                [port],
-                ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-                "ifDescr",
+            # Each sync reads its own snapshot, as two refreshes of the page would give.
+            seed_ports(vm, [port])
+            return _post_from_this_thread(
+                user.pk,
+                vm,
+                [port_id],
+                interface_name_field="ifDescr",
+                exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
             )
-            return list(view._skipped_conflicts)
         finally:
             close_old_connections()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first_future = executor.submit(sync_port, 10, first_resolved, True)
-        assert first_resolved.wait(5), "first VM sync did not resolve the interface"
-        second_future = executor.submit(sync_port, 11, second_resolved, False)
-        resolved_during_first = second_resolved.wait(BLOCKED_WAIT_SECONDS)
+        first_future = executor.submit(sync_port, 10)
+        assert resolved[10].wait(5), "first VM sync did not resolve the interface"
+        second_future = executor.submit(sync_port, 11)
+        assert second_attempt_started.wait(5), "second VM sync did not start its attempt"
+        resolved_during_first = resolved[11].wait(BLOCKED_WAIT_SECONDS)
         release_first.set()
-        first_skips = first_future.result(timeout=10)
-        second_skips = second_future.result(timeout=10)
+        first_texts = first_future.result(timeout=10)
+        second_texts = second_future.result(timeout=10)
 
     interface = VMInterface.objects.get(virtual_machine=vm, name="Ethernet")
     assert not resolved_during_first
     assert get_librenms_device_id(interface, server_key) == 10, (
         interface.custom_field_data,
-        first_skips,
-        second_skips,
+        first_texts,
+        second_texts,
     )
 
 
@@ -809,18 +775,16 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
     assert unrelated.description == "updated concurrently"
 
 
-def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges():
-    """An unrelated cached edge must not serialize a selected access port."""
-    from django.contrib.auth import get_user_model
-    from django.db import close_old_connections, connection, transaction
+def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges(client, settings, monkeypatch):
+    """An unrelated cached edge must not make the relationship pass take the scope locks for a selected access port."""
+    from django.db import connection
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
     from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-    server_key = configured_server_key()
-
+    server_key = configure_default_librenms_server(settings)
     device = make_device("bulk-unrelated-edge")
     selected = make_interface(device, "Ethernet1")
     child = make_interface(device, "Ethernet2.100", iface_type="virtual")
@@ -828,58 +792,44 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges():
     for interface, port_id in ((selected, 10), (child, 20), (parent, 30)):
         set_librenms_device_id(interface, port_id, server_key)
         interface.save()
-    user = make_superuser("bulk-unrelated-edge-user")
-    relationship_finished = Event()
     ports = [
-        {"port_id": 10, "ifName": selected.name},
-        {"port_id": 20, "ifName": child.name},
-        {"port_id": 30, "ifName": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": selected.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": parent.name},
     ]
+    seed_ports(device, ports, sub_interfaces={20: 30})
+    client.force_login(make_superuser("bulk-unrelated-edge-user"))
+    pass_locks = []
+    real_pass = SyncInterfacesView._sync_interface_relationships
 
-    def apply_relationships():
-        close_old_connections()
-        try:
-            with connection.cursor() as cursor:
-                # Below the caller's future.result(timeout=5), as in sync_forged_target above.
-                cursor.execute("SET lock_timeout = '500ms'")
-                cursor.execute("SET statement_timeout = '5s'")
-            thread_device = type(device).objects.get(pk=device.pk)
-            thread_user = get_user_model().objects.get(pk=user.pk)
-            request = make_request("post", {}, user=thread_user)
-            view = make_view(SyncInterfacesView, request)
-            view.interface_name_field = "ifName"
-            view._selected_port_ids = {10}
-            view._sync_interface_relationships(
-                thread_device,
-                ports,
-                {"lag_members": {}, "sub_interfaces": {20: 30}},
-                server_key,
-            )
-            relationship_finished.set()
-        finally:
-            close_old_connections()
+    def record_locked_select(execute, sql, params, many, context):
+        if "FOR UPDATE" in sql.upper():
+            pass_locks.append(sql)
+        return execute(sql, params, many, context)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        with transaction.atomic():
-            type(device).objects.select_for_update().get(pk=device.pk)
-            future = executor.submit(apply_relationships)
-            future.result(timeout=5)
+    def observed_pass(self, *args, **kwargs):
+        # The real attempt calls the pass with its own selection; this only records the locks of the pass.
+        with connection.execute_wrapper(record_locked_select):
+            return real_pass(self, *args, **kwargs)
 
-    assert relationship_finished.is_set()
+    monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", observed_pass)
+
+    post_interface_sync(client, device, [10], htmx=False)
+
+    assert pass_locks == []
+    child.refresh_from_db()
+    assert child.parent_id is None
 
 
 def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
     """A selected parent edge must lock only its source and related candidates."""
-    from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
-    from django.test import Client
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser, message_texts
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
     from netbox_librenms_plugin.utils import set_librenms_device_id
 
-    configure_default_librenms_server(settings)
-    server_key = configured_server_key()
+    server_key = configure_default_librenms_server(settings)
 
     device = make_device("bulk-targeted-edge")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
@@ -902,10 +852,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
-            client = Client()
-            client.force_login(get_user_model().objects.get(pk=user.pk))
-            response = post_interface_sync(client, device, [10], htmx=False)
-            return message_texts(response.wsgi_request)
+            return _post_from_this_thread(user.pk, device, [10])
         finally:
             close_old_connections()
 

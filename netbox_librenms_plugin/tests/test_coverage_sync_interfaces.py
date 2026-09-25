@@ -52,42 +52,43 @@ def _make_request(post_data=None, get_data=None, user=None):
     return request
 
 
-def test_an_unreadable_vlan_scope_skips_the_vlan_write_instead_of_clearing_it(settings):
+def _vlan_row(port_id, interface):
+    """Return a cached row for *interface* that reports no VLANs."""
+    return {**_PORT_KEYS_UNSET, "port_id": port_id, "ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []}
+
+
+def test_an_unreadable_vlan_scope_skips_the_vlan_write_instead_of_clearing_it(client, settings):
     """A hidden VLAN reads as absent, so syncing it would destroy an assignment we cannot see."""
     from dcim.models import Interface
     from ipam.models import VLAN
 
-    configure_default_librenms_server(settings)
     device = make_device("vlan-scope-hidden-device")
     vlan = VLAN.objects.create(vid=812, name="hidden-scope-vlan")
     interface = make_interface(device, "GigabitEthernet0/1")
     interface.mode = "access"
     interface.untagged_vlan = vlan
     interface.save()
-    # Interface change without any IPAM view grant: exactly the caller the guard is for.
-    user = make_user_with_perms("vlan-scope-hidden-user", [("view", type(device)), ("change", Interface)])
-    view = _sync_view(_make_request(user=user))
+    # Interface add and change without any IPAM view grant: exactly the caller the guard is for.
+    user = make_user_with_perms(
+        "vlan-scope-hidden-user", [("view", type(device)), ("add", Interface), ("change", Interface)]
+    )
 
-    view._prepare_vlan_lookup_maps([device])
-    assert view._vlan_scope_incomplete, "precondition: the VLAN scope must read as incomplete"
-    view.sync_interface(
-        device,
-        {"ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []},
-        exclude_columns=set(),
-        interface_name_field="ifName",
-        synced_name=interface.name,
+    response = _post_sync(
+        client, settings, device, [_vlan_row(1, interface)], [1], user=user, exclude_columns=("mac_address",)
     )
 
     interface.refresh_from_db()
     assert interface.untagged_vlan_id == vlan.pk, "the hidden VLAN assignment was cleared"
+    warnings = message_texts(response.wsgi_request, "warning")
+    assert len(warnings) == 1
+    assert warnings[0].startswith("VLANs were not synced for the selected interfaces: your account is missing ")
 
 
-def test_a_constrained_vlan_grant_also_skips_the_vlan_write(settings):
+def test_a_constrained_vlan_grant_also_skips_the_vlan_write(client, settings):
     """A constrained grant passes the model-level permission check while still hiding VLANs."""
     from dcim.models import Interface
-    from ipam.models import VLAN
+    from ipam.models import VLAN, VLANGroup
 
-    configure_default_librenms_server(settings)
     device = make_device("vlan-constrained-device")
     visible = VLAN.objects.create(vid=901, name="constrained-visible-vlan")
     hidden = VLAN.objects.create(vid=902, name="constrained-hidden-vlan")
@@ -95,31 +96,25 @@ def test_a_constrained_vlan_grant_also_skips_the_vlan_write(settings):
     interface.mode = "access"
     interface.untagged_vlan = hidden
     interface.save()
-    # VLAN view IS granted, so hidden_vlan_permissions() reports nothing missing, but the
+    # VLAN view IS granted, so the permission-name check reports nothing missing, but the
     # constraint still hides the VLAN this interface actually uses.
-    user = make_user_with_perms("vlan-constrained-user", [("view", type(device)), ("change", Interface)])
-    user = grant(user, "view", VLAN, constraints={"pk": visible.pk}, name="vlan-constrained-visible-only")
-    view = _sync_view(_make_request(user=user))
-
-    warning = view._prepare_vlan_lookup_maps([device])
-    assert not view.hidden_vlan_permissions([device], user), (
-        "precondition: the model-level permission check must pass, or this repeats the other test"
+    user = make_user_with_perms(
+        "vlan-constrained-user",
+        [("view", type(device)), ("add", Interface), ("change", Interface), ("view", VLANGroup)],
     )
-    assert view._vlan_scope_incomplete, "a constrained grant still hides VLANs, so the scope is incomplete"
-    view.sync_interface(
-        device,
-        {"ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []},
-        exclude_columns=set(),
-        interface_name_field="ifName",
-        synced_name=interface.name,
+    user = grant(user, "view", VLAN, constraints={"pk": visible.pk}, name="vlan-constrained-visible-only")
+
+    response = _post_sync(
+        client, settings, device, [_vlan_row(1, interface)], [1], user=user, exclude_columns=("mac_address",)
     )
 
     interface.refresh_from_db()
     assert interface.untagged_vlan_id == hidden.pk, "the constrained-hidden VLAN assignment was cleared"
-    # The skip must be explained: the permission-name check reports nothing missing for this user.
-    assert "cannot view every VLAN in scope" in (warning or ""), (
-        "a silently skipped VLAN sync leaves the user with no way to tell why"
-    )
+    # The skip must be explained, and by the constrained branch: this user is missing no permission.
+    assert message_texts(response.wsgi_request, "warning") == [
+        "VLANs were not synced for the selected interfaces: your account cannot view every "
+        "VLAN in scope for this device. Existing VLAN assignments were left unchanged."
+    ], "a silently skipped VLAN sync leaves the user with no way to tell why"
 
 
 def _sync_view(request=None):
@@ -139,6 +134,20 @@ def _post_sync(client, settings, owner, ports, port_ids, *, user=None, relations
     client.force_login(user or make_superuser(f"{owner.name}-user"))
     seed_ports(owner, ports, **(relationships or {}))
     return post_interface_sync(client, owner, port_ids, htmx=False, **post_kwargs)
+
+
+def _post_raw_snapshot(client, settings, owner, ports, relationships, port_ids):
+    """Cache *ports* with *relationships* stored as given, as a corrupt cache entry holds them, and post the sync."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser(f"{owner.name}-user"))
+    payload = {"ports": ports, "port_stack_relationships": relationships}
+    cache.set(SyncInterfacesView().get_cache_key(owner, "ports", "default"), payload, timeout=300)
+    return post_interface_sync(client, owner, port_ids, htmx=False)
 
 
 def _cache_relationship(view, obj, relation_field, source_id, related_id, source_name="", related_name=""):
@@ -4495,8 +4504,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view.interface_name_field = "ifName"
         return view
 
-    @pytest.mark.django_db
-    def test_an_oob_controller_port_syncs_onto_the_host_device(self):
+    def test_an_oob_controller_port_syncs_onto_the_host_device(self, client, settings):
         """A server and its BMC are two LibreNMS devices but ONE device in NetBox.
 
         The OOB controller's ports have to be modellable as interfaces on the host device, the
@@ -4507,7 +4515,6 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
         from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 
-        view = self._make_view(_make_request())
         dev = make_device("oob-sync-host")
         oob_port = {
             **_PORT_KEYS_UNSET,
@@ -4520,11 +4527,8 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifAdminStatus": "up",
             "_source": OOB_INVENTORY_SOURCE,
         }
-        view._selected_port_ids = {9301}
-        view._auto_selected_port_ids = set()
-        view._auto_selected_target_ids = {}
 
-        view.sync_selected_interfaces(dev, [oob_port], ["vlans"], "ifName")
+        _post_sync(client, settings, dev, [oob_port], [9301])
 
         iface = Interface.objects.get(device=dev, name="iDRAC-NIC")
         assert iface.description == "BMC dedicated"
@@ -4619,55 +4623,53 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=host, name="Gi0/1").exists()
 
-    def test_device_selection_invalid_is_skipped(self):
+    def test_device_selection_invalid_is_skipped(self, client, settings):
         """A device that is neither the page device nor a VC sibling is refused."""
         from dcim.models import Interface
 
         dev = make_device("selinvalid-page")
         other = make_device("selinvalid-other")
-        view = self._make_view(_make_request(post_data={"device_selection_10": str(other.pk)}))
-        view._skipped_conflicts = []
+        port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
 
-        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
+        response = _post_sync(client, settings, dev, [port], [10], extra={"device_selection_10": str(other.pk)})
 
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=other, name="Gi0/1").exists()
-        assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: Gi0/1 (selected target unavailable)."
+        ]
 
-    def test_device_selection_does_not_exist_is_skipped(self):
+    def test_device_selection_does_not_exist_is_skipped(self, client, settings):
         from dcim.models import Device, Interface
 
         dev = make_device("selgone-page")
         absent_pk = missing_pk(Device)
-        view = self._make_view(_make_request(post_data={"device_selection_10": str(absent_pk)}))
-        view._skipped_conflicts = []
+        port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
 
-        view.sync_interface(dev, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
+        response = _post_sync(client, settings, dev, [port], [10], extra={"device_selection_10": str(absent_pk)})
 
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
-        assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: Gi0/1 (selected target unavailable)."
+        ]
 
-    def test_explicit_vc_member_outside_grant_is_skipped(self):
+    def test_explicit_vc_member_outside_grant_is_skipped(self, client, settings):
         """A hidden posted target must not silently sync the row onto the page device."""
         from dcim.models import Device, Interface
 
         _vc, (host, sibling) = make_virtual_chassis_members("selhidden")
-        user = make_user_with_perms(
-            "selhidden-user",
-            [("view", Device)],
-            constraints={"pk": host.pk},
-        )
-        request = _make_request(
-            post_data={"device_selection_10": str(sibling.pk)},
-            user=user,
-        )
-        view = self._make_view(request)
-        view._skipped_conflicts = []
+        user = make_user_with_perms("selhidden-user", [("add", Interface), ("change", Interface)])
+        user = grant(user, "view", Device, constraints={"pk": host.pk})
+        port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
 
-        view.sync_interface(host, {"ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
+        response = _post_sync(
+            client, settings, host, [port], [10], user=user, extra={"device_selection_10": str(sibling.pk)}
+        )
 
         assert not Interface.objects.filter(name="Gi0/1").exists()
-        assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: Gi0/1 (selected target unavailable)."
+        ]
 
     @pytest.mark.django_db
     def test_device_port_id_prefers_existing_librenms_id_match(self, client, settings):
@@ -4755,120 +4757,15 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         matched.refresh_from_db()
         assert matched.name == "renamed-in-librenms"
 
-    def test_invalid_obj_raises_value_error(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        view.request = _make_request()
-        librenms_port = {"ifName": "eth0"}
-
-        with pytest.raises(ValueError):
-            view.sync_interface(object(), librenms_port, [], "ifName", "eth0")
-
 
 class TestSyncInterfacesViewUpdateInterfaceAttributes:
-    def _make_view(self):
-        return _sync_view()
-
-    def test_basic_attributes_set(self):
-        """Real Interface: the LibreNMS→NetBox field mapping is applied and persisted; the real convert_speed_to_kbps runs (bps→kbps)."""
-        from dcim.models import Interface
-
-        from netbox_librenms_plugin.models import InterfaceTypeMapping
-
-        view = self._make_view()
-        dev = make_device("intf-attrs")
-        interface = make_interface(dev, "Gi0/0")
-        librenms_port = {
-            **_PORT_KEYS_UNSET,
-            "ifName": "Gi0/1",
-            "ifType": "ethernetCsmacd",
-            "ifSpeed": 1000000000,
-            "ifAlias": "uplink",
-            "ifMtu": 1500,
-            "port_id": None,
-            "ifAdminStatus": "up",
-        }
-
-        InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
-
-        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
-
-        reloaded = Interface.objects.get(pk=interface.pk)
-        assert reloaded.name == "Gi0/1"
-        assert reloaded.type == "1000base-t"
-        assert reloaded.speed == 1000000  # 1e9 bps → 1e6 kbps via the real convert_speed_to_kbps
-        assert reloaded.description == "uplink"
-        assert reloaded.mtu == 1500
-        assert reloaded.enabled is True
-
-    def test_excluded_columns_skipped(self):
-        """Excluded columns are left untouched on a real Interface (verified via reload)."""
-        from dcim.models import Interface
-
-        view = self._make_view()
-        dev = make_device("intf-excluded")
-        interface = make_interface(dev, "orig-name", iface_type="1000base-t")
-        interface.mtu = 9000
-        interface.description = "keep-me"
-        interface.save()
-        librenms_port = {
-            **_PORT_KEYS_UNSET,
-            "ifName": "Gi0/1",
-            "ifType": "ethernetCsmacd",
-            "ifSpeed": 0,
-            "ifAlias": "would-change",
-            "ifMtu": 1500,
-            "port_id": None,
-            "ifAdminStatus": None,
-        }
-
-        view.update_interface_attributes(
-            interface,
-            librenms_port,
-            ["name", "type", "speed", "description", "mtu", "enabled", "mac_address"],
-            "ifName",
-            "Gi0/1",
-            created=False,
-        )
-
-        # Excluded attributes keep their pre-update values.
-        reloaded = Interface.objects.get(pk=interface.pk)
-        assert reloaded.name == "orig-name"
-        assert reloaded.type == "1000base-t"
-        assert reloaded.mtu == 9000
-        assert reloaded.description == "keep-me"
-
-    def test_admin_status_down_sets_disabled(self):
-        from dcim.models import Interface
-
-        view = self._make_view()
-        dev = make_device("intf-down")
-        interface = make_interface(dev, "Gi0/0")
-        librenms_port = {
-            **_PORT_KEYS_UNSET,
-            "ifName": "Gi0/1",
-            "ifType": None,
-            "ifSpeed": None,
-            # ifAlias "" (not None): a None ifAlias would set description=None and trip the
-            # NOT-NULL constraint on a real save — see note. Empty string is the safe no-op.
-            "ifAlias": "",
-            "ifMtu": None,
-            "port_id": None,
-            "ifAdminStatus": "down",
-        }
-
-        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
-
-        assert Interface.objects.get(pk=interface.pk).enabled is False
-
-    def test_port_id_calls_set_librenms_device_id(self):
+    def test_port_id_calls_set_librenms_device_id(self, client, settings):
+        """An unbound interface that the row matches by name is bound to the row's port ID."""
         from dcim.models import Interface
 
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        view = self._make_view()
-        interface = make_interface(make_device("port-id-write"), "Gi0/0")
+        interface = make_interface(make_device("port-id-write"), "Gi0/1")
         librenms_port = {
             **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
@@ -4880,7 +4777,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
+        _post_sync(client, settings, interface.device, [librenms_port], [42])
 
         interface = Interface.objects.get(pk=interface.pk)
         assert get_librenms_device_id(interface, "default", auto_save=False) == 42
@@ -4890,7 +4787,8 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
         from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, set_librenms_device_id
 
-        view = self._make_view()
+        from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+        from netbox_librenms_plugin.interface_sync import update_interface_from_port
         conflicting_owner = make_interface(make_device("port-id-owner"), "Gi0/0")
         set_librenms_device_id(conflicting_owner, 42, "default")
         conflicting_owner.save(update_fields=["custom_field_data"])
@@ -4911,16 +4809,19 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         before_holder = Interface.objects.filter(pk=conflicting_owner.pk).values().get()
         mac_count = MACAddress.objects.count()
         with pytest.raises(LibreNMSPortBindingConflict, match="already assigned to another NetBox interface"):
-            view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
+            update_interface_from_port(
+                interface, librenms_port, rules=InterfaceRuleMatcher(()), synced_name="Gi0/1",
+                server_key="default", interface_name_field="ifName", created=False,
+                fresh_read_queryset=Interface.objects.all(),
+            )
 
         assert {field: getattr(interface, field) for field in before} == before
         assert Interface.objects.filter(pk=interface.pk).values().get() == before
         assert Interface.objects.filter(pk=conflicting_owner.pk).values().get() == before_holder
         assert MACAddress.objects.count() == mac_count
 
-    def test_ifalias_not_set_when_same_as_name(self):
+    def test_ifalias_not_set_when_same_as_name(self, client, settings):
         """IfAlias should not overwrite when equal to interface name."""
-        view = _sync_view()
         interface = make_interface(make_device("ifalias-same-as-name"), "Gi0/1")
         librenms_port = {
             **_PORT_KEYS_UNSET,
@@ -4929,11 +4830,11 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifSpeed": None,
             "ifAlias": "Gi0/1",
             "ifMtu": None,
-            "port_id": None,
+            "port_id": 1,
             "ifAdminStatus": "up",
         }
 
-        view.update_interface_attributes(interface, librenms_port, ["mac_address"], "ifName", "Gi0/1", created=False)
+        _post_sync(client, settings, interface.device, [librenms_port], [1])
 
         interface.refresh_from_db()
         assert interface.description == ""
@@ -4945,46 +4846,31 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
 
 class TestSyncInterfacesViewSyncInterfaceVlans:
-    def test_missing_locked_owner_vlan_map_leaves_assignments_unchanged(self):
-        from ipam.models import VLAN
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        device = make_device("joined-vlan-owner")
-        interface = make_interface(device, "Ethernet1")
-        existing_vlan = VLAN.objects.create(vid=100, name="Existing VLAN", status="active")
-        interface.mode = "tagged"
-        interface.save()
-        interface.tagged_vlans.add(existing_vlan)
-        view = object.__new__(SyncInterfacesView)
-        view.request = _make_request()
-        view._lookup_maps = view._index_vlans([existing_vlan])
-        view._lookup_maps_by_owner = {}
-        view._vlan_owners_by_id = {}
-
-        view._sync_interface_vlans(interface, {"port_id": 10, "tagged_vlans": []})
-
-        interface.refresh_from_db()
-        assert interface.mode == "tagged"
-        assert list(interface.tagged_vlans.all()) == [existing_vlan]
-
-    def test_non_numeric_cached_vid_is_dropped_instead_of_aborting_the_sync(self):
+    def test_non_numeric_cached_vid_is_dropped_instead_of_aborting_the_sync(self, client, settings):
         """A nonnumeric cached VLAN ID is dropped without aborting the sync or a valid VLAN update."""
         from ipam.models import VLAN
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("bad-vid-owner")
         interface = make_interface(device, "Ethernet1")
         real_vlan = VLAN.objects.create(vid=100, name="Real VLAN", status="active")
-        view = object.__new__(SyncInterfacesView)
-        # The group override is keyed by port_id and VID, so post the malformed VID's key too.
-        view.request = _make_request({"vlan_group_10_not-a-vid": "1", "vlan_group_10_100": "1"})
-        view._lookup_maps = view._index_vlans([real_vlan])
-        view._lookup_maps_by_owner = None
-        view._vlan_owners_by_id = {}
+        port = {
+            **_PORT_KEYS_UNSET,
+            "port_id": 10,
+            "ifName": "Ethernet1",
+            "untagged_vlan": "not-a-vid",
+            "tagged_vlans": [100],
+        }
 
-        view._sync_interface_vlans(interface, {"port_id": 10, "untagged_vlan": "not-a-vid", "tagged_vlans": [100]})
+        # The group override is keyed by port_id and VID, so post the malformed VID's key too.
+        _post_sync(
+            client,
+            settings,
+            device,
+            [port],
+            [10],
+            exclude_columns=("mac_address",),
+            extra={"vlan_group_10_not-a-vid": "1", "vlan_group_10_100": "1"},
+        )
 
         interface.refresh_from_db()
         # The good VID still applied; only the malformed one was dropped.
@@ -5014,16 +4900,6 @@ class TestSyncLagAndParentRelationships:
         set_librenms_device_id(iface, port_id, "default")
         iface.save()
         return iface
-
-    def _make_view(self, name_field="ifName", selected_port_ids=None):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = object.__new__(SyncInterfacesView)
-        view.interface_name_field = name_field
-        view.request = make_request("post", {})
-        if selected_port_ids is not None:
-            view._selected_port_ids = set(selected_port_ids)
-        return view
 
     @staticmethod
     def _vm_iface(vm, name, port_id):
@@ -5199,18 +5075,18 @@ class TestSyncLagAndParentRelationships:
         # The pass left the rows out, so the final write check found nothing to refuse.
         assert message_texts(response.wsgi_request, "error") == []
 
-    def test_non_dict_relationships_fails_soft_not_attributeerror(self, db):
+    def test_non_dict_relationships_fails_soft_not_attributeerror(self, client, settings):
         """A truthy non-dict relationship cache value fails soft instead of raising AttributeError."""
         device = self._make_device()
         member = self._iface(device, "Gi0/2", 11)
-        ports_data = [{"ifName": "Gi0/2", "port_id": 11}]
+        ports_data = [{**_PORT_KEYS_UNSET, "ifName": "Gi0/2", "port_id": 11}]
 
-        view = self._make_view(name_field="ifName", selected_port_ids={"11"})
-        # Must NOT raise AttributeError on the non-dict relationships.
-        view._sync_interface_relationships(device, ports_data, ["garbage"], "default")
+        # Must NOT raise AttributeError on the non-dict relationships of a corrupt cache entry.
+        response = _post_raw_snapshot(client, settings, device, ports_data, ["garbage"], [11])
 
         member.refresh_from_db()
         assert member.lag_id is None  # nothing persisted from the corrupt map
+        assert message_texts(response.wsgi_request, "success") == ["Selected interfaces synced successfully."]
 
     def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self, client, settings):
         """A relationship that fails Interface.full_clean() (a self-LAG from stale/crafted port_stack data) must be skipped, not persisted."""
@@ -5405,27 +5281,7 @@ class TestSyncLagAndParentRelationships:
         assert err is None, err
         assert iface is not None and iface.pk == i1.pk
 
-    def test_cross_page_parent_resolves_to_port_keyed_member_override(self, db):
-        """A cross-page parent's stable target override pins it to that member."""
-        from django.http import QueryDict
-
-        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
-
-        page_dev = make_device("vc-page-master")
-        member2 = make_device("vc-page-m2")
-        make_virtual_chassis("vc-page", page_dev, member2)
-
-        view = self._make_view()
-        # The JS submits the off-page parent's member (from the child row's live .vc-member-select)
-        # keyed by the parent's stable port_id.
-        view.request.POST = QueryDict(f"device_selection_100={member2.id}")
-
-        # Port-keyed override wins → the parent resolves onto member2.
-        assert view._resolve_row_target_device(page_dev, port_id="100").id == member2.id
-        # No override and no inferred member: the chassis row has no owner, never the page device.
-        assert view._resolve_row_target_device(page_dev, port_id="999") is None
-
-    def test_oob_row_excluded_from_relationship_sync(self, db):
+    def test_oob_row_excluded_from_relationship_sync(self, client, settings):
         """An OOB-controller row sharing a selected host display name must not contribute its port_id, or the LAG pass would link the hidden controller interface instead of the host."""
         device = self._make_device()
         self._iface(device, "Gi0/1", 10)  # real host member sharing the name
@@ -5434,16 +5290,15 @@ class TestSyncLagAndParentRelationships:
         oob_iface = self._iface(device, "idrac0", 999)
 
         ports_data = [
-            {"ifName": "Gi0/1", "port_id": 10},
-            {"ifName": "Po1", "port_id": 100},
+            {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10},
+            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100},
             # OOB controller row merged for display; shares the selected host name "Gi0/1".
-            {"ifName": "Gi0/1", "port_id": 999, "_source": "oob"},
+            {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 999, "_source": "oob"},
         ]
         # Crafted/colliding port_stack data maps the OOB row's port_id to the aggregate.
-        relationships = {"lag_members": {"999": 100}, "sub_interfaces": {}}
+        relationships = {"lag_members": {"999": 100}}
 
-        view = self._make_view(name_field="ifName", selected_port_ids={999})
-        view._sync_interface_relationships(device, ports_data, relationships, "default")
+        _post_sync(client, settings, device, ports_data, [999], relationships=relationships)
 
         oob_iface.refresh_from_db()
         assert oob_iface.lag_id is None  # OOB row skipped → no link persisted on the controller iface
@@ -5643,16 +5498,18 @@ class TestResolveInterfaceByPortIdExpectedOwner:
 class TestBulkRelationshipRobustness:
     """Real-DB coverage for the bulk LAG/parent relationship pass robustness fixes."""
 
-    def test_non_dict_relationship_maps_do_not_crash(self, db):
+    def test_non_dict_relationship_maps_do_not_crash(self, client, settings):
         """A corrupt list-shaped lag_members/sub_interfaces in the cached relationships must be coerced to {} (fail-soft), not crash the bulk sync POST."""
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("rel-shape")
-        view = object.__new__(SyncInterfacesView)
-        # Mirrors the hardened relationship-map reader. Without the guard this raises
-        # AttributeError ('list' object has no attribute 'items').
-        view._sync_interface_relationships(device, [], {"lag_members": [1, 2], "sub_interfaces": ["x"]}, "default")
+        ports_data = [{**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 1}]
+        # Without the guard the relationship-map reader raises AttributeError ('list' object has no attribute 'items').
+        corrupt = {"lag_members": [1, 2], "sub_interfaces": ["x"]}
+
+        response = _post_raw_snapshot(client, settings, device, ports_data, corrupt, [1])
+
+        assert message_texts(response.wsgi_request, "success") == ["Selected interfaces synced successfully."]
 
     def test_relationship_candidates_cost_one_regex_per_path_and_match_exactly(self, db):
         """A full batch of port IDs builds one regex per JSON path, and each ID finds only its own row."""
