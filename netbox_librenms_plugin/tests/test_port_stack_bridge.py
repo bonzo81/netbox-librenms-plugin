@@ -9,6 +9,7 @@ from netbox_librenms_plugin.tests.conftest import (
     stamp_rule_decision,
     typed_maps,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
 from netbox_librenms_plugin.utils import _get_netbox_version_tuple, normalize_relationship_maps
 
@@ -712,6 +713,7 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface():
     view.interface_name_field = "ifName"
     view.request = make_request("post")
     view._selected_port_ids = {102}
+    select_attempt_rows(view, device)
 
     view._sync_interface_relationships(
         device,

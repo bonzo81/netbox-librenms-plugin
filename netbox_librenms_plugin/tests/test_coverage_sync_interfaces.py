@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -128,6 +129,12 @@ def _sync_view(request=None):
     view = make_view(SyncInterfacesView, request)
     view._post_server_key = "default"
     return view
+
+
+def _selection_of(view, owner):
+    """Return the row selection that a sync attempt reads for *owner*."""
+    select_attempt_rows(view, owner)
+    return view._selection
 
 
 def _cache_relationship(view, obj, relation_field, source_id, related_id, source_name="", related_name=""):
@@ -2386,6 +2393,7 @@ class TestSyncInterfacesViewPost:
                 {10},
                 "ifName",
                 "default",
+                selection=_selection_of(view, page_device),
                 members=[page_device, target_device],
             )
         finally:
@@ -2427,6 +2435,7 @@ class TestSyncInterfacesViewPost:
                 port_ids,
                 "ifName",
                 "default",
+                selection=_selection_of(view, page_device),
                 members=[page_device, target_device],
             )
 
@@ -4539,6 +4548,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         }
 
         # exclude "vlans" so the (separately tested) VLAN sub-sync isn't exercised here.
+        select_attempt_rows(view, dev)
         view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
 
         iface = Interface.objects.get(device=dev, name="Gi0/1")
@@ -4578,6 +4588,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifAdminStatus": "up",
         }
 
+        select_attempt_rows(view, dev)
         before_local = Interface.objects.filter(pk=own_iface.pk).values().get()
         before_holder = Interface.objects.filter(pk=other_iface.pk).values().get()
         view._skipped_conflicts = []
@@ -4594,6 +4605,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         _vc, (host, sibling) = make_virtual_chassis_members("selvalid")
         view = self._make_view(_make_request(post_data={"device_selection_10": str(sibling.pk)}))
 
+        select_attempt_rows(view, host)
         view.sync_interface(host, {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
 
         assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
@@ -4674,6 +4686,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifAdminStatus": "up",
         }
 
+        select_attempt_rows(view, dev)
         view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
 
         iface.refresh_from_db()
@@ -4707,6 +4720,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "port_id": 77,
             "ifAdminStatus": "up",
         }
+        select_attempt_rows(view, dev)
         view._skipped_conflicts = []
         view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
         assert view._skipped_conflicts == ["Gi0/1 (LibreNMS port ID is already assigned to another NetBox interface)"]
@@ -4721,6 +4735,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         view = _sync_view()
         view._lookup_maps = {}
 
+        select_attempt_rows(view, vm)
         view.sync_interface(vm, {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": None}, ["vlans"], "ifName", "eth0")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
@@ -4737,6 +4752,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         view._lookup_maps = {}
         librenms_port = {**_PORT_KEYS_UNSET, "ifName": "renamed-in-librenms", "port_id": 55}
 
+        select_attempt_rows(view, vm)
         view.sync_interface(vm, librenms_port, ["vlans"], "ifName", "renamed-in-librenms")
 
         assert VMInterface.objects.filter(virtual_machine=vm).count() == 1
@@ -5045,6 +5061,7 @@ class TestSyncLagAndParentRelationships:
         ]
         relationships = {"lag_members": {}, "sub_interfaces": {11: 10}}
         view = self._make_view(selected_port_ids={11})
+        select_attempt_rows(view, vm)
 
         if name_limit is None:
             view._sync_interface_relationships(vm, ports_data, relationships, "default")
@@ -5082,6 +5099,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifDescr", selected_port_ids={10})
+        select_attempt_rows(view, device)
         view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         m1.refresh_from_db()
@@ -5114,6 +5132,7 @@ class TestSyncLagAndParentRelationships:
             return execute(sql, params, many, context)
 
         with connection.execute_wrapper(capture_parameters):
+            select_attempt_rows(view, device)
             view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         assert max(parameter_counts) < 2_000
@@ -5132,6 +5151,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"11"})
+        select_attempt_rows(view, device)
         view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         member.refresh_from_db()
@@ -5149,6 +5169,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {12: 101}, "sub_interfaces": {}}
 
         view = self._make_view(selected_port_ids={"12"})
+        select_attempt_rows(view, device)
         view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         member.refresh_from_db()
@@ -5205,6 +5226,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {11: 11}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"11"})
+        select_attempt_rows(view, device)
         view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         member.refresh_from_db()
@@ -5227,6 +5249,7 @@ class TestSyncLagAndParentRelationships:
         relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
 
         view = self._make_view(name_field="ifName", selected_port_ids={"10", "11"})
+        select_attempt_rows(view, device)
         view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         member2.refresh_from_db()
@@ -5683,9 +5706,7 @@ class TestBulkRelationshipRobustness:
         Interface.objects.filter(pk=agg.pk).update(description="agg-fresh")
 
         view = object.__new__(SyncInterfacesView)
-        view._apply_relationship_edge(
-            member, "lag", agg, SyncInterfacesView._prepare_bulk_lag_aggregate, "LAG", viewable_ids=set()
-        )
+        view._apply_relationship_edge(member, "lag", agg, SyncInterfacesView._prepare_bulk_lag_aggregate, "LAG")
 
         agg.refresh_from_db()
         member.refresh_from_db()

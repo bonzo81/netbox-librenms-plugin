@@ -61,6 +61,13 @@ def synced_interface(device, name, port_id, **fields):
     return interface
 
 
+def select_attempt_rows(view, owner):
+    """Give *view* the row selection that a sync attempt reads under its owner locks, for a test that runs one pass alone."""
+    from netbox_librenms_plugin.interface_relationships import interface_queryset_for_object
+
+    view._selection = view._select_rows(interface_queryset_for_object(owner))
+
+
 def sync_page(device):
     """Return the absolute URL of the interfaces tab of *device*."""
     return "http://testserver" + reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk}) + "?tab=interfaces"

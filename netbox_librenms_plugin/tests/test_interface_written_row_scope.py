@@ -4,9 +4,14 @@ The interface sync saves only when every row that it wrote is in the user's scop
 The tests post the interface sync with real constrained object permissions. Each row that the sync
 created or changed must be in the user's change scope, and each row that it created also in the add
 scope. The check reads the rows after the last write of the sync, the relationship pass too. A row
-outside the scope refuses the whole sync: nothing is saved, and NetBox sends no event. The IP tab
-creates a missing interface with the same rule, and refuses only that address.
+outside the scope refuses the whole sync: nothing is saved, and NetBox sends no event. Every pass
+reads the rows that it may change from one selection, read before the first write, and every text
+names only a row that the user may view. The IP tab creates a missing interface with the same rule,
+and refuses only that address.
 """
+
+import ast
+import inspect
 
 import pytest
 from core.models import ObjectChange
@@ -31,10 +36,12 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     sync_port,
     synced_interface,
 )
+from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 IN_SCOPE = {"name__startswith": "eth"}
+HIDDEN = "an interface you cannot view"
 NO_LAG = {"lag__isnull": True}
 CACHE_TRANSITION_HEADER = "X-LibreNMS-Cache-Transition"
 OWNERS = pytest.mark.parametrize(
@@ -208,6 +215,31 @@ def test_a_row_that_only_the_relationship_pass_wrote_is_checked_and_named(client
     assert Interface.objects.get(device=device, name="Po1").type == "other"
 
 
+@pytest.mark.django_db
+def test_the_relationship_pass_uses_the_selection_read_at_the_start_of_the_attempt(client):
+    """After the attribute write, ``eth1`` is outside the scope until the relationship pass sets its LAG."""
+    device = make_device("written-scope-lag-final-state")
+    member = synced_interface(device, "eth1", 1, description="old")
+    aggregate = bound_interface(device, "Po1", 100, iface_type="lag")
+    seed_ports(
+        device,
+        [sync_port(1, "eth1", alias="new"), sync_port(100, "Po1", if_type="ieee8023adLag")],
+        lag_members={1: 100},
+    )
+    change = [
+        {"description": "old", "lag__isnull": True},
+        {"description": "new", "lag_id": aggregate.pk},
+        {"pk": aggregate.pk},
+    ]
+    client.force_login(_user("written-scope-lag-final-state-user", Device, Interface, change=change))
+
+    response = _post_sync(client, device, "device", [1], exclude_columns=("vlans",))
+
+    assert messages_on(response.wsgi_request) == [("success", SYNCED)]
+    member.refresh_from_db()
+    assert (member.description, member.lag_id) == ("new", aggregate.pk)
+
+
 @transactional_db_with_all_apps()
 def test_a_sync_whose_rows_are_all_in_scope_syncs_every_row(client, attempts, flushed_events):
     """The check refuses no row that is in the scope, also a row that the relationship pass wrote."""
@@ -379,6 +411,114 @@ def test_the_relationship_pass_names_a_refused_row_only_when_the_user_may_view_i
     assert Interface.objects.get(pk=aggregate.pk).type == "other"
 
 
+def _kept_name_of_a_hidden_row(device):
+    """The hidden row holds port 1, whose reported name ``eth-new`` another interface holds."""
+    bound_interface(device, "private-current", 1)
+    bound_interface(device, "eth-new", 2)
+    seed_ports(device, [sync_port(1, "eth-new")])
+    return [1], ("vlans",)
+
+
+def _ignored_hidden_aggregate(device):
+    """An ignore rule blocks the LibreNMS aggregate ``Po1``, which the hidden row holds."""
+    bound_interface(device, "eth1", 1)
+    bound_interface(device, "private-current", 100)
+    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], lag_members={1: 100})
+    InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern="^Po1$")
+    return [1], ("vlans",)
+
+
+def _hidden_aggregate_that_a_rule_keeps_off_lag(device):
+    """A Set type rule gives the hidden aggregate a type that is not ``lag``, so the pass cannot promote it."""
+    bound_interface(device, "eth1", 1)
+    bound_interface(device, "private-current", 100)
+    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], lag_members={1: 100})
+    InterfaceTypeMapping.objects.create(name_pattern="^Po1$", netbox_type="1000base-t")
+    return [1], ("vlans",)
+
+
+def _hidden_member_of_an_aggregate_whose_type_is_excluded(device):
+    """The hidden member keeps its name (the name is excluded), and the aggregate needs a type the sync may not write."""
+    bound_interface(device, "private-member", 1)
+    bound_interface(device, "eth-agg", 100)
+    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], lag_members={1: 100})
+    return [1], ("vlans", "name", "type")
+
+
+def _hidden_child_that_a_rule_keeps_physical(device):
+    """A Set type rule keeps the hidden child physical, so the pass cannot promote it under its hidden parent."""
+    bound_interface(device, "private-child", 1, iface_type="1000base-t")
+    bound_interface(device, "private-parent", 2, iface_type="1000base-t")
+    seed_ports(device, [sync_port(1, "eth1.100"), sync_port(2, "eth1")], sub_interfaces={1: 2})
+    InterfaceTypeMapping.objects.create(name_pattern="^eth1\\.100$", netbox_type="1000base-t")
+    return [1], ("vlans", "name")
+
+
+def _hidden_child_whose_type_is_excluded(device):
+    """The hidden child is physical, and the sync may not write the type that a parent link needs."""
+    bound_interface(device, "private-child", 1, iface_type="1000base-t")
+    bound_interface(device, "eth-parent", 2, iface_type="1000base-t")
+    seed_ports(device, [sync_port(1, "eth1.100"), sync_port(2, "eth1")], sub_interfaces={1: 2})
+    return [1], ("vlans", "name", "type")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        _kept_name_of_a_hidden_row,
+        _ignored_hidden_aggregate,
+        _hidden_aggregate_that_a_rule_keeps_off_lag,
+        _hidden_member_of_an_aggregate_whose_type_is_excluded,
+        _hidden_child_that_a_rule_keeps_physical,
+        _hidden_child_whose_type_is_excluded,
+    ],
+    ids=lambda scenario: scenario.__name__.strip("_"),
+)
+def test_no_text_of_the_sync_names_a_row_that_the_user_may_change_but_not_view(client, scenario):
+    """Each scenario drives one warning path of the sync to a row whose name starts with ``private``."""
+    name = scenario.__name__.strip("_")[:60]
+    device = make_device(name)
+    port_ids, exclude_columns = scenario(device)
+    user = _user(f"{name}-user", Device, Interface, view=IN_SCOPE)
+    private = Interface.objects.filter(device=device, name__startswith="private")
+    assert private.exists() and not private.restrict(user, "view").exists(), "precondition: the private rows are hidden"
+    client.force_login(user)
+
+    response = _post_sync(client, device, "device", port_ids, exclude_columns=exclude_columns, htmx=True)
+
+    texts = [text for _level, text in messages_on(response.wsgi_request)]
+    assert any(HIDDEN in text.lower() for text in texts), texts
+    assert all("private" not in text for text in texts), texts
+    assert "private" not in response.content.decode()
+
+
+def _reads_a_name(expression):
+    """Return whether *expression* reads the ``name`` attribute of an object."""
+    return any(isinstance(node, ast.Attribute) and node.attr == "name" for node in ast.walk(expression))
+
+
+def test_no_text_of_the_sync_view_takes_an_interface_name_past_the_display_rule():
+    """A cheap first check; the scenarios above prove the rule for each warning path."""
+    from netbox_librenms_plugin.views.sync import interfaces
+
+    module = ast.parse(inspect.getsource(interfaces))
+    view = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "SyncInterfacesView")
+    direct = [
+        ast.unparse(node)
+        for node in ast.walk(view)
+        if (isinstance(node, ast.FormattedValue) and _reads_a_name(node.value))
+        or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_record_skipped_conflict"
+            and _reads_a_name(node.args[0])
+        )
+    ]
+
+    assert direct == [], "an interface name reaches a text without _shown()"
+
+
 # ---------------------------------------------------------------------------
 # NetBox renames the channel children of a renamed parent after the commit
 # ---------------------------------------------------------------------------
@@ -461,19 +601,6 @@ def test_the_collection_records_a_change_of_the_tagged_vlans_from_the_vlan_side(
 
     assert (writes.written, writes.created) == ({Interface: {added.pk}}, {})
     assert clear_writes.written == {Interface: {added.pk, cleared.pk}}
-
-
-@pytest.mark.django_db
-def test_a_refused_row_that_no_write_path_named_is_a_defect():
-    """Each write path of the sync names the rows that it writes, so the message can name a refused row."""
-    from netbox_librenms_plugin.interface_sync import collect_interface_writes
-
-    device = make_device("written-scope-unnamed")
-    with collect_interface_writes(make_user_with_perms("written-scope-unnamed-user", [])) as writes:
-        make_interface(device, "eth0")
-
-    with pytest.raises(RuntimeError, match="no name"):
-        writes.outside_scope()
 
 
 # ---------------------------------------------------------------------------

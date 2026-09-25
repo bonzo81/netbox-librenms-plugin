@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface, VirtualChassis
@@ -42,7 +42,6 @@ from netbox_librenms_plugin.interface_sync import (
     copy_before_change,
     interface_owner_platform_id,
     keep_change_log_before_state,
-    name_interface_row,
     update_interface_from_port,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -95,6 +94,50 @@ class _ConflictingRowTargetError(Exception):
 
 class _DuplicatedSelectionError(Exception):
     """The related-row walk reached a port ID the cached snapshot holds more than once."""
+
+
+# The text for an interface that the user may not view: nothing identifies it.
+HIDDEN_INTERFACE = "an interface you cannot view"
+
+
+@dataclass
+class _RowSelection:
+    """
+    The existing interfaces that one sync attempt may change or name, read before its first write.
+
+    Every pass of the attempt reads the change scope here, never again from the database: a write
+    of the attempt can take a row out of the scope for a moment, and the final check decides on the
+    rows as the attempt leaves them. A row that the attempt creates may be changed, and a text names
+    it by the name that the user selected. A retry is a new attempt, so it reads a new selection.
+    """
+
+    model: type
+    changeable_ids: frozenset
+    # The name of each row in the user's view scope, read with the scope.
+    viewable_names: dict
+    created_names: dict = field(default_factory=dict)
+
+    def may_change(self, interface):
+        """Return whether the attempt may write *interface*."""
+        return type(interface) is self.model and (
+            interface.pk in self.changeable_ids or interface.pk in self.created_names
+        )
+
+    def add_created(self, interface):
+        """Record *interface*, which the attempt created with the name that the user selected."""
+        self.created_names[interface.pk] = interface.name
+
+    def permitted(self, pks):
+        """Return the rows of *pks* that the user may view and those that the attempt may change."""
+        pks = set(pks)
+        created = self.created_names.keys()
+        return pks & (self.viewable_names.keys() | created), pks & (self.changeable_ids | created)
+
+    def shown_name(self, model, pk):
+        """Return the name that a text may show for row *pk* of *model*, or None when the user may not view it."""
+        if model is not self.model:
+            return None
+        return self.created_names.get(pk, self.viewable_names.get(pk))
 
 
 class _RowsOutsideScopeError(Exception):
@@ -158,7 +201,6 @@ class _BulkRelationshipContext:
     source_index: dict
     related_index: dict
     changeable_ids: set
-    viewable_ids: set
     server_key: str
     interface_name_field: str
     unique_host_port_ids: set
@@ -292,10 +334,8 @@ class SyncInterfacesView(
                 if conflict_reason is not None
                 else "the reported name is in use on the same interface owner"
             )
-            messages.warning(
-                request,
-                f"Interface '{current_name}' kept its current name because {reason}: '{reported_name}'.",
-            )
+            subject = HIDDEN_INTERFACE.capitalize() if current_name is None else f"Interface '{current_name}'"
+            messages.warning(request, f"{subject} kept its current name because {reason}: '{reported_name}'.")
         # Only claim success when at least one interface was actually synced. Track an explicit
         # synced count rather than comparing skip-vs-selected sizes: a single selected display name
         # can be skipped after another selected port succeeds, so the explicit count remains the
@@ -331,9 +371,13 @@ class SyncInterfacesView(
         counter afresh, and it re-locks and re-reads the objects it writes, so a retry reads nothing
         that a failed attempt derived. It adds no message: ``post()`` publishes the committed outcome.
 
-        After the last write, each interface row that the attempt created or changed must be in the
-        user's change scope, and each created row also in the add scope. One row outside the scope
-        rolls the whole attempt back, as a NetBox edit view does, and the runner does not retry it.
+        Three rules decide the scope, each in one place. Selection: under its owner locks and before
+        its first write, the attempt reads which existing rows it may change and which a text may
+        name (``_RowSelection``); every pass uses that selection. Write: after the last write, each
+        interface row that the attempt created or changed must be in the user's change scope, and each
+        created row also in the add scope; one row outside the scope rolls the whole attempt back, as
+        a NetBox edit view does, and the runner does not retry it. Display: every text names a row
+        through ``_shown_name`` only. A retry is a new attempt, so it reads a new selection.
 
         Args:
             visible_port_ids (set[int]): The port IDs the user selected.
@@ -360,6 +404,8 @@ class SyncInterfacesView(
         self._synced_count = 0
         self._mutated = False
         self._attempt_warnings = []
+        # The attribute pass reads the selection under its owner locks.
+        self._selection = None
         with collect_interface_writes(self.request.user) as writes:
             try:
                 self.sync_selected_interfaces(
@@ -369,19 +415,23 @@ class SyncInterfacesView(
                     interface_name_field,
                     keep_locked_targets=True,
                 )
-                # The relationship pass reuses the locked target map of the attribute pass.
-                self._sync_interface_relationships(
-                    self.object,
-                    ports_data,
-                    relationships,
-                    server_key,
-                    excluded_columns=exclude_columns,
-                )
+                # No selection: the attribute pass found no owner to lock, so it selected and wrote no row.
+                if self._selection is not None:
+                    # The relationship pass reuses the locked target map and the selection of the attribute pass.
+                    self._sync_interface_relationships(
+                        self.object,
+                        ports_data,
+                        relationships,
+                        server_key,
+                        excluded_columns=exclude_columns,
+                    )
             finally:
                 self.__dict__.pop("_locked_target_devices", None)
-        named, hidden = writes.outside_scope()
-        if named or hidden:
-            raise _RowsOutsideScopeError(named, hidden)
+        if refused := writes.outside_scope():
+            named = sorted(
+                (name, actions) for model, pk, actions in refused if (name := self._shown_name(model, pk)) is not None
+            )
+            raise _RowsOutsideScopeError(named, len(refused) - len(named))
         return _InterfaceSyncOutcome(
             skipped_conflicts=tuple(self._skipped_conflicts),
             kept_name_conflicts=tuple(self._kept_name_conflicts),
@@ -514,9 +564,10 @@ class SyncInterfacesView(
         interface_name_field,
         server_key,
         *,
+        selection,
         members=None,
     ):
-        """Resolve snapshot rows to the Virtual Chassis members inferred by the render path."""
+        """Resolve snapshot rows to the Virtual Chassis members inferred by the render path, within *selection*."""
         if not isinstance(obj, Device) or not port_ids:
             return {}
 
@@ -541,9 +592,7 @@ class SyncInterfacesView(
         if not candidate_port_ids:
             return {}
         candidate_ids = relationship_candidate_ids(obj, server_key, candidate_port_ids, ())
-        interface_queryset = interface_queryset_for_object(obj).filter(pk__in=candidate_ids)
-        viewable_ids = set(interface_queryset.restrict(self.request.user, "view").values_list("pk", flat=True))
-        changeable_ids = set(interface_queryset.restrict(self.request.user, "change").values_list("pk", flat=True))
+        viewable_ids, changeable_ids = selection.permitted(candidate_ids)
         interface_index = build_interface_index(
             obj,
             server_key,
@@ -715,14 +764,13 @@ class SyncInterfacesView(
                     candidate_port_ids,
                     candidate_names,
                 )
-                catalog_index, source_index, related_index, changeable_ids, viewable_ids = (
-                    _build_locked_relationship_indexes(
-                        obj,
-                        server_key,
-                        self.request.user,
-                        locked_device_ids,
-                        candidate_ids=candidate_ids,
-                    )
+                # The selection of the attempt start: this pass does not read the scopes again.
+                catalog_index, source_index, related_index, changeable_ids = _build_locked_relationship_indexes(
+                    obj,
+                    server_key,
+                    locked_device_ids,
+                    self._selection.permitted,
+                    candidate_ids=candidate_ids,
                 )
                 context = _BulkRelationshipContext(
                     obj=obj,
@@ -734,7 +782,6 @@ class SyncInterfacesView(
                     source_index=source_index,
                     related_index=related_index,
                     changeable_ids=changeable_ids,
-                    viewable_ids=viewable_ids,
                     server_key=server_key,
                     interface_name_field=interface_name_field,
                     unique_host_port_ids=unique_host_port_ids,
@@ -864,9 +911,8 @@ class SyncInterfacesView(
         if decisions is None:
             return
         if _lag_aggregate_needs_promotion(aggregate) and (conflict := _promotion_conflict(decisions[1], "lag")):
-            self._record_skipped_conflict(
-                member.name, f"LAG link to {aggregate.name} not synced; {aggregate.name}: {conflict}"
-            )
+            shown = self._shown(aggregate)
+            self._record_skipped_conflict(self._shown(member), f"LAG link to {shown} not synced; {shown}: {conflict}")
             return
         if aggregate.type != "lag" and "type" in context.excluded_columns:
             logger.warning(
@@ -874,7 +920,7 @@ class SyncInterfacesView(
                 member.name,
                 aggregate.name,
             )
-            self._record_skipped_conflict(member.name, "aggregate type is excluded")
+            self._record_skipped_conflict(self._shown(member), "aggregate type is excluded")
             return
         if aggregate.type != "lag" and aggregate.pk not in context.changeable_ids:
             logger.warning(
@@ -883,9 +929,7 @@ class SyncInterfacesView(
                 aggregate.name,
             )
             return
-        if self._apply_relationship_edge(
-            member, "lag", aggregate, self._prepare_bulk_lag_aggregate, "LAG", viewable_ids=context.viewable_ids
-        ):
+        if self._apply_relationship_edge(member, "lag", aggregate, self._prepare_bulk_lag_aggregate, "LAG"):
             self._mutated = True
 
     def _apply_bulk_parent(self, context, port_id, expected_owner):
@@ -900,7 +944,9 @@ class SyncInterfacesView(
         if decisions is None:
             return
         if _parent_child_needs_promotion(child) and (conflict := _promotion_conflict(decisions[0], "virtual")):
-            self._record_skipped_conflict(child.name, f"parent link to {parent.name} not synced; {conflict}")
+            self._record_skipped_conflict(
+                self._shown(child), f"parent link to {self._shown(parent)} not synced; {conflict}"
+            )
             return
         if _parent_child_needs_promotion(child) and "type" in context.excluded_columns:
             logger.warning(
@@ -908,7 +954,7 @@ class SyncInterfacesView(
                 child.name,
                 parent.name,
             )
-            self._record_skipped_conflict(child.name, "child type is excluded")
+            self._record_skipped_conflict(self._shown(child), "child type is excluded")
             return
         if self._apply_relationship_edge(
             child,
@@ -916,7 +962,6 @@ class SyncInterfacesView(
             parent,
             None,
             "parent",
-            viewable_ids=context.viewable_ids,
             prepare_source=self._prepare_bulk_parent_child,
         ):
             self._mutated = True
@@ -931,7 +976,7 @@ class SyncInterfacesView(
             return
         if self._bulk_edge_decisions(context, "bridge", (port_id, member), (raw_bridge, bridge)) is None:
             return
-        if self._apply_relationship_edge(member, "bridge", bridge, None, "bridge", viewable_ids=context.viewable_ids):
+        if self._apply_relationship_edge(member, "bridge", bridge, None, "bridge"):
             self._mutated = True
 
     def _bulk_edge_decisions(self, context, label, source, related):
@@ -957,8 +1002,9 @@ class SyncInterfacesView(
             (context.port_by_id.get(str(normalize_librenms_port_id(related_port_id))), related_iface),
         )
         if reason is not None and blocked_end is related_iface:
+            shown = self._shown(related_iface)
             self._record_skipped_conflict(
-                source_iface.name, f"{label} link to {related_iface.name} not synced; {related_iface.name}: {reason}"
+                self._shown(source_iface), f"{label} link to {shown} not synced; {shown}: {reason}"
             )
         return decisions
 
@@ -1110,7 +1156,6 @@ class SyncInterfacesView(
         prepare_related,
         log_kind,
         *,
-        viewable_ids,
         prepare_source=None,
     ):
         """
@@ -1128,7 +1173,6 @@ class SyncInterfacesView(
             related_iface (Interface | VMInterface): The interface assigned to the relationship field.
             prepare_related (callable | None): The hook that prepares the related interface before validation.
             log_kind (str): The relationship label used in log messages.
-            viewable_ids (set[int]): The interfaces that the locked read found in the user's view scope.
             prepare_source (callable | None): The hook that prepares the source interface before
                 validation, mirroring ``prepare_related`` on the other side of the edge.
 
@@ -1136,9 +1180,6 @@ class SyncInterfacesView(
             bool: True when the relationship is saved, or False when validation or persistence fails.
 
         """
-        # A refusal names an end only when the locked read found it in the user's view scope.
-        for interface in (source_iface, related_iface):
-            name_interface_row(interface, interface.name if interface.pk in viewable_ids else None)
         try:
             # Own savepoint: an IntegrityError from the persist poisons the enclosing batch
             # transaction ("current transaction is aborted" on every later row) unless the
@@ -1272,12 +1313,14 @@ class SyncInterfacesView(
 
         Returns:
             Device | VirtualMachine | None: The locked page object, or None when it is unavailable.
+                With the owners locked, it sets ``self._selection``, before the sync writes a row.
 
         """
         if isinstance(obj, VirtualMachine):
             obj = self.restricted_queryset(VirtualMachine).select_for_update(of=("self",)).filter(pk=obj.pk).first()
             if obj is not None:
                 self.object = obj
+                self._selection = self._select_rows(VMInterface.objects.filter(virtual_machine=obj))
                 self._expand_related_rows(obj, ports_data, interface_name_field, inferred_ids={}, device_for=None)
             return obj
         if not isinstance(obj, Device):
@@ -1288,6 +1331,7 @@ class SyncInterfacesView(
             return None
         self._locked_target_devices = locked_targets
         self.object = obj
+        self._selection = self._select_rows(Interface.objects.filter(device_id__in=locked_targets))
         snapshot_port_ids = {
             port_id for port in ports_data if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
         }
@@ -1297,6 +1341,7 @@ class SyncInterfacesView(
             snapshot_port_ids,
             interface_name_field,
             self._post_server_key,
+            selection=self._selection,
             members=list(locked_targets.values()),
         )
         host_port_ids = {
@@ -1380,7 +1425,39 @@ class SyncInterfacesView(
         if owner is None:
             return None
         holder = self._name_holder_filter(writer_model, decisions.target_device_ids.get(port_id), owner.name)
-        return owner.port_id if self.restricted_queryset(writer_model, "view").filter(**holder).exists() else None
+        holder_pk = writer_model.objects.filter(**holder).values_list("pk", flat=True).first()
+        if holder_pk is None or self._shown_name(writer_model, holder_pk) is None:
+            return None
+        return owner.port_id
+
+    def _select_rows(self, interfaces):
+        """
+        Return the ``_RowSelection`` of *interfaces*, read now through the user's change and view scopes.
+
+        Args:
+            interfaces (QuerySet): The interfaces of the locked owners of the attempt.
+
+        """
+        user = self.request.user
+        return _RowSelection(
+            model=interfaces.model,
+            changeable_ids=frozenset(interfaces.restrict(user, "change").values_list("pk", flat=True)),
+            viewable_names=dict(interfaces.restrict(user, "view").values_list("pk", "name")),
+        )
+
+    def _shown_name(self, model, pk):
+        """
+        Return the name that a text of the sync may show for row *pk* of *model*, or None: the one display rule.
+
+        A text names a row only when the user could view it when the attempt selected its rows, or
+        when the attempt created it with the name that the user selected.
+        """
+        return self._selection.shown_name(model, pk)
+
+    def _shown(self, interface):
+        """Return the name of *interface* for a text, or ``HIDDEN_INTERFACE`` when the user may not view it."""
+        name = self._shown_name(type(interface), interface.pk)
+        return HIDDEN_INTERFACE if name is None else name
 
     def _reserved_name_port_ids(self, obj, server_key):
         """Return active-server port IDs bound to each target interface name."""
@@ -1698,15 +1775,7 @@ class SyncInterfacesView(
         if getattr(self, "_synced_count", None) is not None:
             self._synced_count += 1
 
-        # The name that the permission check saw; a concurrent rename can put the fresh name out of view.
-        checked_name = interface.name
         created = bool(getattr(interface, "_librenms_sync_created", False))
-        # A new row has the name that the user selected; an existing row is named only when the user may view it.
-        viewable = (
-            created
-            or self.restricted_queryset(type(interface), "view").filter(pk=interface.pk, name=checked_name).exists()
-        )
-        name_interface_row(interface, checked_name if viewable else None)
         interface, changed = self.update_interface_attributes(
             interface,
             librenms_interface,
@@ -1720,7 +1789,7 @@ class SyncInterfacesView(
         if "name" not in exclude_columns and interface.name != synced_name:
             kept_names = getattr(self, "_kept_name_conflicts", None)
             if kept_names is not None:
-                kept_names.append((checked_name, synced_name, name_conflict_reason))
+                kept_names.append((self._shown_name(type(interface), interface.pk), synced_name, name_conflict_reason))
 
         # Sync VLANs if not excluded, and never when the caller cannot read the whole VLAN scope.
         if "vlans" not in exclude_columns and not getattr(self, "_vlan_scope_incomplete", False):
@@ -1776,13 +1845,13 @@ class SyncInterfacesView(
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, port_owner, oob=False):
         """Resolve a device interface from the port's owner first, then safe name fallback."""
-        changeable = self.restricted_queryset(Interface, "change")
+        selection = self._selection
         if port_id and port_owner is not None:
             if not isinstance(port_owner, Interface) or port_owner.device_id != target_device.pk:
                 raise LibreNMSPortBindingConflict(
                     "The LibreNMS port ID is already assigned to another NetBox interface."
                 )
-            return port_owner if changeable.filter(pk=port_owner.pk).exists() else None
+            return port_owner if selection.may_change(port_owner) else None
         if interface_name is None:
             return None
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
@@ -1795,17 +1864,18 @@ class SyncInterfacesView(
             return None
         if created:
             interface._librenms_sync_created = True
-        return interface if created or changeable.filter(pk=interface.pk).exists() else None
+            selection.add_created(interface)
+        return interface if selection.may_change(interface) else None
 
     def _resolve_vm_interface(self, vm, interface_name, port_id, server_key, *, port_owner):
         """Resolve a VM interface from the port's owner first, then safe name fallback."""
-        changeable = self.restricted_queryset(VMInterface, "change")
+        selection = self._selection
         if port_id and port_owner is not None:
             if not isinstance(port_owner, VMInterface) or port_owner.virtual_machine_id != vm.pk:
                 raise LibreNMSPortBindingConflict(
                     "The LibreNMS port ID is already assigned to another NetBox interface."
                 )
-            return port_owner if changeable.filter(pk=port_owner.pk).exists() else None
+            return port_owner if selection.may_change(port_owner) else None
         if interface_name is None:
             return None
         interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
@@ -1813,7 +1883,8 @@ class SyncInterfacesView(
             return None
         if created:
             interface._librenms_sync_created = True
-        return interface if created or changeable.filter(pk=interface.pk).exists() else None
+            selection.add_created(interface)
+        return interface if selection.may_change(interface) else None
 
     def update_interface_attributes(
         self,
@@ -2225,13 +2296,18 @@ def _lock_relationship_scope(obj, owner_queryset=None):
 def _build_locked_relationship_indexes(
     obj,
     server_key,
-    user,
     locked_device_ids,
+    permitted,
     *,
     candidate_q=None,
     candidate_ids=None,
 ):
-    """Lock candidate interfaces, then derive permission indexes from their locked state."""
+    """
+    Lock candidate interfaces, then derive the permission indexes from *permitted*.
+
+    *permitted* takes a set of candidate pks and returns the pks that the user may view and the pks
+    that the user may change. It is called before the row locks and again for the locked rows.
+    """
     if candidate_ids is None:
         candidate_queryset = interface_queryset_for_object(obj).filter(candidate_q)
         candidate_ids = set(candidate_queryset.values_list("pk", flat=True))
@@ -2252,18 +2328,10 @@ def _build_locked_relationship_indexes(
         catalog_index = filter_interface_index(catalog_index, locked_ids)
         candidate_ids &= locked_ids
 
-    # A constrained grant can stop matching while this transaction waits for a candidate
-    # row lock. Lock only rows the user could act on before the wait, then evaluate the grant
-    # again from their locked state. The catalog stays unfiltered so hidden duplicate IDs and
-    # names still make resolution fail closed without locking rows that were never permitted.
-    permission_candidates = interface_queryset_for_object(obj).filter(pk__in=candidate_ids)
-    if isinstance(obj, Device):
-        actionable_owner_ids = set(
-            Device.objects.restrict(user, "view").filter(pk__in=locked_device_ids).values_list("pk", flat=True)
-        )
-        permission_candidates = permission_candidates.filter(device_id__in=actionable_owner_ids)
-    prelock_viewable_ids = set(permission_candidates.restrict(user, "view").values_list("pk", flat=True))
-    prelock_changeable_ids = set(permission_candidates.restrict(user, "change").values_list("pk", flat=True))
+    # Lock only rows the user could act on before the wait, then ask *permitted* again for their
+    # locked state. The catalog stays unfiltered so hidden duplicate IDs and names still make
+    # resolution fail closed without locking rows that were never permitted.
+    prelock_viewable_ids, prelock_changeable_ids = permitted(candidate_ids)
     prelock_permitted_ids = prelock_viewable_ids | prelock_changeable_ids
     locked_index = build_interface_index(
         obj,
@@ -2271,12 +2339,35 @@ def _build_locked_relationship_indexes(
         lock=True,
         allowed_ids=prelock_permitted_ids,
     )
-    locked_candidates = interface_queryset_for_object(obj).filter(pk__in=prelock_permitted_ids)
-    viewable_ids = set(locked_candidates.restrict(user, "view").values_list("pk", flat=True))
-    changeable_ids = set(locked_candidates.restrict(user, "change").values_list("pk", flat=True))
+    viewable_ids, changeable_ids = permitted(prelock_permitted_ids)
     related_index = filter_interface_index(locked_index, viewable_ids | changeable_ids)
     source_index = filter_interface_index(related_index, changeable_ids)
-    return catalog_index, source_index, related_index, changeable_ids, viewable_ids
+    return catalog_index, source_index, related_index, changeable_ids
+
+
+def _user_scope(obj, user, locked_device_ids):
+    """
+    Return a *permitted* function that reads the view and change scopes of *user* each time it is called.
+
+    A constrained grant can stop matching while a transaction waits for a row lock, so a view that
+    does not select its rows before its writes reads the scopes again for the locked rows.
+    """
+    actionable_owner_ids = None
+    if isinstance(obj, Device):
+        actionable_owner_ids = set(
+            Device.objects.restrict(user, "view").filter(pk__in=locked_device_ids).values_list("pk", flat=True)
+        )
+
+    def permitted(pks):
+        candidates = interface_queryset_for_object(obj).filter(pk__in=pks)
+        if actionable_owner_ids is not None:
+            candidates = candidates.filter(device_id__in=actionable_owner_ids)
+        return (
+            set(candidates.restrict(user, "view").values_list("pk", flat=True)),
+            set(candidates.restrict(user, "change").values_list("pk", flat=True)),
+        )
+
+    return permitted
 
 
 def _relationship_decisions(rules, *ends):
@@ -2668,14 +2759,12 @@ class _BaseRelationshipSyncView(
                     (source_port.get("port_id"), related_port.get("port_id")),
                     (source_name, related_name),
                 )
-                catalog_index, source_index, related_index, changeable_ids, _viewable_ids = (
-                    _build_locked_relationship_indexes(
-                        obj,
-                        server_key,
-                        request.user,
-                        locked_device_ids,
-                        candidate_q=candidate_q,
-                    )
+                catalog_index, source_index, related_index, changeable_ids = _build_locked_relationship_indexes(
+                    obj,
+                    server_key,
+                    locked_device_ids,
+                    _user_scope(obj, request.user, locked_device_ids),
+                    candidate_q=candidate_q,
                 )
 
                 _, err = resolve_interface_by_port_id(

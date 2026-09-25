@@ -15,6 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     run_in_threads,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
 
 
 # Window a competing thread must NOT get through while the row lock is held. A negative wait
@@ -908,6 +909,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
             view._selected_port_ids = {10}
             view._auto_selected_port_ids = set()
             view._auto_selected_target_ids = {}
+            select_attempt_rows(view, thread_device)
             view._sync_interface_relationships(
                 thread_device,
                 ports,

@@ -11,6 +11,7 @@ Targets:
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -141,6 +142,7 @@ class TestSyncInterface:
         dev = make_device("sync-novc")
         v = self._v()
 
+        select_attempt_rows(v, dev)
         v.sync_interface(dev, _record(ifName="eth0"), [], "ifName", "eth0")
 
         assert Interface.objects.filter(device=dev, name="eth0").exists()
@@ -153,6 +155,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(sibling.pk)})
         v = self._v(req)
 
+        select_attempt_rows(v, host)
         v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
 
         assert Interface.objects.filter(device=sibling, name="eth0").exists()
@@ -230,6 +233,7 @@ class TestSyncInterface:
         request = make_request("post", user=user)
         view = self._v(request)
 
+        select_attempt_rows(view, device)
         view.sync_interface(device, _record(ifName=hidden.name), [], "ifName", hidden.name)
 
         assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
@@ -248,6 +252,7 @@ class TestSyncInterface:
         request = make_request("post", user=user)
         view = self._v(request)
 
+        select_attempt_rows(view, device)
         view.sync_interface(device, _record(ifName=existing.name), [], "ifName", existing.name)
 
         assert view._skipped_conflicts == []
@@ -258,6 +263,7 @@ class TestSyncInterface:
         vm = make_vm("sync-vm")
         v = self._v()
 
+        select_attempt_rows(v, vm)
         v.sync_interface(vm, _record(ifName="eth0"), [], "ifName", "eth0")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()

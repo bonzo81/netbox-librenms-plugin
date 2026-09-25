@@ -86,37 +86,24 @@ class InterfaceWrites:
     The receivers ``record_interface_save`` (``post_save``) and ``record_tagged_vlan_change``
     (``m2m_changed``) record the rows, so every save and every tagged-VLAN change is recorded, also
     one that NetBox makes. ``write_interface_row`` also records the channel children that NetBox
-    renames after the commit. Each write path gives each row that it writes a name for a refusal
-    (``name_interface_row``): the name that it read while the user could view the row, or None.
+    renames after the commit.
     """
 
     def __init__(self, user):
         self.user = user
         self.written = defaultdict(set)
         self.created = defaultdict(set)
-        self.names = {}
-
-    def add_renamed_by_netbox(self, model, pks):
-        """Record the rows that NetBox renames after the commit; each is named only when the user may view it."""
-        viewable = dict(model.objects.restrict(self.user, "view").filter(pk__in=pks).values_list("pk", "name"))
-        self.written[model].update(pks)
-        for pk in pks:
-            self.names.setdefault((model, pk), viewable.get(pk))
 
     def outside_scope(self):
         """
         Return the recorded rows that are outside the user's scopes now, with one query for each model and action.
 
         Returns:
-            tuple[list[tuple[str, tuple[str, ...]]], int]: The name of each refused row that the
-                user may view and the actions whose scope it is outside, sorted; and the number of
-                refused rows that the user may not view.
-
-        Raises:
-            RuntimeError: A refused row has no name entry: a write path of the caller did not name it.
+            list[tuple[type, int, tuple[str, ...]]]: The model and pk of each refused row, and the
+                actions whose scope it is outside.
 
         """
-        named, hidden = [], 0
+        refused = []
         for model, written in self.written.items():
             outside = interface_rows_outside_scope(
                 written,
@@ -124,14 +111,8 @@ class InterfaceWrites:
                 addable_queryset=model.objects.restrict(self.user, "add"),
                 changeable_queryset=model.objects.restrict(self.user, "change"),
             )
-            for pk, actions in outside.items():
-                if (model, pk) not in self.names:
-                    raise RuntimeError(f"The sync wrote {model.__name__} {pk}, but gave it no name.")
-                if (name := self.names[(model, pk)]) is None:
-                    hidden += 1
-                else:
-                    named.append((name, actions))
-        return sorted(named), hidden
+            refused += [(model, pk, actions) for pk, actions in outside.items()]
+        return refused
 
 
 # The writes of the sync that runs now; None outside ``collect_interface_writes``.
@@ -147,18 +128,6 @@ def collect_interface_writes(user):
         yield writes
     finally:
         _active_writes.reset(token)
-
-
-def name_interface_row(interface, name):
-    """
-    Give *interface* its name for a refusal. The first name of a row stays.
-
-    *name* is the name that the caller read while the user could view the row, or None for a row
-    that the user may not view: a refusal counts that row and does not name it. Outside
-    ``collect_interface_writes`` it does nothing.
-    """
-    if (writes := _active_writes.get()) is not None:
-        writes.names.setdefault((type(interface), interface.pk), name)
 
 
 def _has_channels(model):
@@ -196,8 +165,7 @@ def _record_renamed_channel_children(row, old_name):
         for child in row.child_interfaces.filter(channel_id__isnull=False).only("pk", "name", "channel_id")
         if child.name == f"{old_name}:{child.channel_id}" and len(f"{row.name}:{child.channel_id}") <= max_length
     }
-    if children:
-        writes.add_renamed_by_netbox(type(row), children)
+    writes.written[type(row)].update(children)
 
 
 def record_interface_save(sender, instance, created, **kwargs):
