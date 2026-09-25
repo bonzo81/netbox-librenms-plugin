@@ -9,7 +9,7 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, queued_request
 
 
 def _plugin_url(view_name, *, kwargs=None):
@@ -530,6 +530,7 @@ def test_background_job_deserializes_the_same_site_placement_plan(settings):
     }
 
     ImportDevicesJob(job).run(
+        request=queued_request(job.user),
         import_plans=[
             {
                 "source_device_id": source_device_id,
@@ -599,6 +600,7 @@ def test_background_job_applies_host_placement(settings):
     }
 
     ImportDevicesJob(job).run(
+        request=queued_request(job.user),
         import_plans=[
             {
                 "source_device_id": source_device_id,

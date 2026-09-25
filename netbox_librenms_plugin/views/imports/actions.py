@@ -1417,11 +1417,14 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             from utilities.rqworker import get_workers_for_queue
 
             if get_workers_for_queue("default") > 0:
+                from utilities.request import copy_safe_request
+
                 from netbox_librenms_plugin.jobs import ImportDevicesJob
 
                 # Enqueue background job
                 job = ImportDevicesJob.enqueue(
                     user=request.user,
+                    request=copy_safe_request(request),
                     import_plans=serialize_import_plans(import_plans),
                     server_key=self.librenms_api.server_key,
                     sync_options=sync_options,

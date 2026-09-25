@@ -10,7 +10,13 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, post
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    make_request,
+    make_user_with_perms,
+    post,
+    queued_request,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -214,6 +220,7 @@ def test_background_collision_gate_uses_job_user_scope(monkeypatch):
     vm_count = VirtualMachine.objects.count()
 
     ImportDevicesJob(job_row).run(
+        request=queued_request(job_row.user),
         import_plans=[
             {
                 "source_device_id": device_id,

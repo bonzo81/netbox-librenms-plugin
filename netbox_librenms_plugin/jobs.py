@@ -5,13 +5,12 @@ This module provides background job implementations for long-running operations
 such as device filtering with Virtual Chassis detection.
 """
 
+import contextvars
 import logging
 
 from netbox.jobs import JobRunner
 
 logger = logging.getLogger(__name__)
-
-_LEGACY_IMPORT_PAYLOAD_KEYS = frozenset({"device_ids", "vm_imports", "manual_mappings_per_device"})
 
 
 def _build_job_api(server_key):
@@ -25,49 +24,16 @@ def _build_job_api(server_key):
     return LibreNMSAPI(server_key=parsed_server.server_key)
 
 
-def _partition_import_job_payload(import_plans, job_kwargs):
-    """
-    Partition a current payload or a queued pre-upgrade payload.
+def _load_job_user(job):
+    """Load the user who queued *job* from the database, so a change after the enqueue applies."""
+    from django.contrib.auth import get_user_model
+    from django.core.exceptions import PermissionDenied
 
-    Args:
-        import_plans: Serialized explicit row plans, or None for a legacy payload.
-        job_kwargs: Additional keyword arguments supplied to the job.
-
-    Returns:
-        A tuple of device IDs, manual Device mappings, and VM imports.
-
-    Raises:
-        TypeError: The payload omits fields required by its format.
-        ValueError: The payload combines the current and legacy formats.
-
-    """
-    from netbox_librenms_plugin.import_plan import (
-        VMPlacementMethod,
-        deserialize_import_plans,
-        partition_import_plans,
-    )
-
-    legacy_keys = _LEGACY_IMPORT_PAYLOAD_KEYS.intersection(job_kwargs)
-    if import_plans is not None:
-        if legacy_keys:
-            joined_keys = ", ".join(sorted(legacy_keys))
-            raise ValueError(f"Import job payload combines import_plans with legacy fields: {joined_keys}.")
-        plans = deserialize_import_plans(import_plans)
-        return partition_import_plans(plans)
-
-    missing_keys = {"device_ids", "vm_imports"}.difference(legacy_keys)
-    if missing_keys:
-        joined_keys = ", ".join(sorted(missing_keys))
-        raise TypeError(f"Legacy import job payload is missing required fields: {joined_keys}.")
-
-    legacy_vm_imports = {}
-    for device_id, mapping in job_kwargs.pop("vm_imports").items():
-        adapted_mapping = dict(mapping)
-        if "cluster_id" in adapted_mapping:
-            adapted_mapping["placement"] = VMPlacementMethod.CLUSTER.value
-        legacy_vm_imports[device_id] = adapted_mapping
-
-    return job_kwargs.pop("device_ids"), job_kwargs.pop("manual_mappings_per_device", None), legacy_vm_imports
+    # The queued job carries a copy of the user from the enqueue time.
+    user = get_user_model().objects.filter(pk=job.user_id, is_active=True).first()
+    if user is None:
+        raise PermissionDenied("The user who queued the import no longer exists or is inactive.")
+    return user
 
 
 class FilterDevicesJob(JobRunner):
@@ -218,28 +184,49 @@ class ImportDevicesJob(JobRunner):
 
         name = "LibreNMS Device Import"
 
-    def run(
-        self,
-        import_plans=None,
-        server_key=None,
-        sync_options=None,
-        libre_devices_cache=None,
-        **kwargs,
-    ):
+    def run(self, request=None, **payload):
         """
-        Execute device/VM imports in background.
+        Run the import inside the NetBox request processors, as the request that queued it.
+
+        The request processors write the change log and queue the event rules, as for a
+        synchronous import. The change log records the queued request ID and the user.
 
         Args:
-            import_plans: Serialized explicit Device and virtual-machine row plans,
-                or None for a queued pre-upgrade payload.
-            server_key: Exact configured LibreNMS server key, or None for a legacy queued job.
+            request: The ``copy_safe_request()`` copy of the request that queued the job.
+            **payload: The import arguments that ``_import`` takes.
+
+        Raises:
+            TypeError: The payload has no request. The job was queued before an upgrade.
+            PermissionDenied: The user who queued the job no longer exists or is inactive.
+
+        """
+        if request is None:
+            raise TypeError("Import job payload has no request. Submit the import again.")
+        request.user = _load_job_user(self.job)
+        # NetBox before 4.7 keeps the request bound when the body raises; a copied context drops it.
+        contextvars.copy_context().run(self._import_as_request, request, payload)
+
+    def _import_as_request(self, request, payload):
+        """Run ``_import`` inside the request processors that NetBox applies to a request."""
+        from utilities.request import apply_request_processors
+
+        with apply_request_processors(request):
+            self._import(request.user, **payload)
+
+    def _import(self, user, import_plans, server_key, sync_options=None, libre_devices_cache=None):
+        """
+        Import the planned devices and VMs and store the result in the job data.
+
+        Args:
+            user: The user who queued the job, as stored now.
+            import_plans: Serialized explicit Device and virtual-machine row plans.
+            server_key: Exact configured LibreNMS server key.
             sync_options: Dict with sync_interfaces, sync_cables,
                 use_sysname, strip_domain, and vc_detection_enabled.
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data.
-            **kwargs: Additional job parameters. A queued pre-upgrade payload supplies
-                device_ids, vm_imports, and optional manual_mappings_per_device here.
 
         """
+        from netbox_librenms_plugin.import_plan import deserialize_import_plans, partition_import_plans
         from netbox_librenms_plugin.import_utils import (
             bulk_import_devices_shared,
             classify_bulk_precheck,
@@ -249,13 +236,14 @@ class ImportDevicesJob(JobRunner):
         )
         from netbox_librenms_plugin.import_utils.bulk_import import _is_job_cancelled
 
-        device_ids, manual_mappings_per_device, vm_imports = _partition_import_job_payload(import_plans, kwargs)
+        device_ids, manual_mappings_per_device, vm_imports = partition_import_plans(
+            deserialize_import_plans(import_plans)
+        )
 
         total_count = len(device_ids) + len(vm_imports)
         self.logger.info(f"Starting LibreNMS import job for {total_count} devices/VMs")
         self.logger.info(f"Device imports: {len(device_ids)}, VM imports: {len(vm_imports)}")
-        if server_key:
-            self.logger.info(f"Using LibreNMS server: {server_key}")
+        self.logger.info(f"Using LibreNMS server: {server_key}")
 
         # Authorize BEFORE the collision pre-check: the scan below queries LibreNMS and
         # surfaces collision details (NetBox pks) in the job output, while the
@@ -265,7 +253,7 @@ class ImportDevicesJob(JobRunner):
         # here, with the same standalone helper and perm sets the import paths enforce.
         required_permissions = required_import_permissions(device_ids, vm_imports)
         if required_permissions:
-            require_permissions(self.job.user, required_permissions, "import devices and VMs")
+            require_permissions(user, required_permissions, "import devices and VMs")
 
         # Initialize API client
         api = _build_job_api(server_key)
@@ -307,7 +295,7 @@ class ImportDevicesJob(JobRunner):
                 # mode would run the serial/IP matching bulk_import_vms skips and could
                 # fabricate a collision that blocks a valid batch.
                 vm_device_ids=vm_imports,
-                user=self.job.user,
+                user=user,
             )
             if unresolved and _is_job_cancelled(self):
                 # A cancelled pre-check returns its unscanned remainder as unresolved. Cancellation
@@ -349,7 +337,7 @@ class ImportDevicesJob(JobRunner):
                             manual_mappings_per_device=manual_mappings_per_device,
                             libre_devices_cache=libre_devices_cache,
                             job=self,  # Pass job context for logging and cancellation
-                            user=self.job.user,  # Pass user for permission checks
+                            user=user,  # Pass user for permission checks
                         )
                     skipped_device_ids = [d for d in device_ids if d in skipped_id_set]
                     if skipped_device_ids:
@@ -377,7 +365,7 @@ class ImportDevicesJob(JobRunner):
                     from netbox_librenms_plugin.import_utils import bulk_import_vms
 
                     vm_result = bulk_import_vms(
-                        importable_vm_imports, api, sync_options, libre_devices_cache, job=self, user=self.job.user
+                        importable_vm_imports, api, sync_options, libre_devices_cache, job=self, user=user
                     )
                 if skipped_vm_ids:
                     self.logger.warning(precheck_outcome.skip_message)

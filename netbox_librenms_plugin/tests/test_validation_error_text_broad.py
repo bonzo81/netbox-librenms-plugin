@@ -20,7 +20,7 @@ from extras.validators import CustomValidator
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_serial_device, make_superuser
 from netbox_librenms_plugin.tests.test_background_jobs import librenms_server  # noqa: F401
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, queued_request
 
 HIDDEN = "(only a superuser sees the message)"
 
@@ -225,6 +225,7 @@ def test_a_background_import_saves_only_the_hidden_text(settings, librenms_serve
     # handle() runs the whole job lifecycle: terminate() saves the data and the log entries.
     ImportDevicesJob.handle(
         job,
+        request=queued_request(user),
         import_plans=[
             {"source_device_id": 6481, "object_type": "device", "role_id": infrastructure.role_id, "rack_id": None},
             {

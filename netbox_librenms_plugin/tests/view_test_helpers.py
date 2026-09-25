@@ -97,6 +97,17 @@ def make_request(method="post", data=None, *, user=None, path="/", **factory_kwa
     return request
 
 
+def queued_request(user):
+    """Return the ``copy_safe_request()`` copy that the import view queues with a background job."""
+    from uuid import uuid4
+
+    from utilities.request import copy_safe_request
+
+    request = make_request(user=user)
+    request.id = uuid4()
+    return copy_safe_request(request)
+
+
 def module_row_binding(target_device, action, row, *, action_target=None, server_key="default"):
     """Sign the cached module row that a rendered action form would submit."""
     from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest

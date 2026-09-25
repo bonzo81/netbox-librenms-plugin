@@ -23,7 +23,7 @@ ALLOWED = [
     ("api/views.py", "sync_job_status", "job", NO_LAST_UPDATED, "Job has no last_updated field."),
     ("api/views.py", "sync_job_status", "job", NO_LAST_UPDATED, "Job has no last_updated field."),
     ("jobs.py", "FilterDevicesJob.run", "self.job", NO_LAST_UPDATED, "Job has no last_updated field."),
-    ("jobs.py", "ImportDevicesJob.run", "self.job", NO_LAST_UPDATED, "Job has no last_updated field."),
+    ("jobs.py", "ImportDevicesJob._import", "self.job", NO_LAST_UPDATED, "Job has no last_updated field."),
     (
         "forms.py",
         "CableSyncSettingsForm.save",
