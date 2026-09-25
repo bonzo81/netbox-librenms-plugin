@@ -1753,10 +1753,8 @@ function restoreTableSelection(table) {
         const row = checkbox.closest('tr');
         if (!entry || !row) return;
         const companionInputs = (entry && entry.inputs) || {};
-        // A choice made for another member than the page renders is not restored: the row was decided
-        // for this member. The commit below drops it from storage, with its member value.
-        const member = table.id === 'librenms-interface-table' ? row.querySelector('select.vc-member-select') : null;
-        if (member && Object.hasOwn(companionInputs, member.name) && companionInputs[member.name] !== member.value) {
+        // The commit below drops a cleared row from storage, with its member value.
+        if (_storedMemberDiffers(table, row, checkbox.value, companionInputs)) {
             cleared += 1;
             return;
         }
@@ -1780,6 +1778,30 @@ function restoreTableSelection(table) {
     });
     commitSelectionChange(table);
     _showClearedSelectionNotice(table, cleared);
+}
+
+/** Tables whose rows carry a Virtual Chassis member that the row's verify request decided. */
+const MEMBER_VERIFIED_TABLE_IDS = new Set(['librenms-interface-table', 'librenms-cable-table-vc']);
+
+/**
+ * Return whether a stored row names another Virtual Chassis member than the page renders.
+ *
+ * The rendered row was decided for its rendered member. Restoring another member without its
+ * verify request would show that member with this member's state, so the restore clears the row.
+ *
+ * @param {HTMLElement} table - The table the restore pass reads.
+ * @param {HTMLTableRowElement} row - The rendered row.
+ * @param {string} rowKey - The row's selection key.
+ * @param {Object<string, string>} companionInputs - The stored companion values of the row.
+ * @returns {boolean}
+ */
+function _storedMemberDiffers(table, row, rowKey, companionInputs) {
+    if (!MEMBER_VERIFIED_TABLE_IDS.has(table.id)) return false;
+    const name = 'device_selection_' + rowKey;
+    const member = row.querySelector(
+        'select[name="' + CSS.escape(name) + '"], input[type="hidden"][name="' + CSS.escape(name) + '"]'
+    );
+    return Boolean(member) && Object.hasOwn(companionInputs, name) && companionInputs[name] !== member.value;
 }
 
 /**

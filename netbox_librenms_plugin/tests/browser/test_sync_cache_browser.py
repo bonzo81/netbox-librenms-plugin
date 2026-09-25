@@ -496,6 +496,121 @@ class TestAMovedMemberIsNotRestored:
         assert ("device_selection_10", "2") in pairs
 
 
+CABLE_VERIFY_URL = "https://plugin.example.com/verify-cable/"
+
+
+def _cable_member_row_markup(row_id, *, serial_owner=None):
+    """Render one VC cable row, as the VC cable table renders it on member 1."""
+    esc = escape
+    options = '<option value="1" selected>m1</option><option value="2">m2</option>'
+    if serial_owner is None:
+        member = f'<select name="device_selection_{esc(row_id)}" id="device_selection_{esc(row_id)}">{options}</select>'
+    else:
+        # A console port row fixes its owner: the dropdown is shown disabled and a hidden field submits the owner.
+        member = (
+            f'<select id="device_selection_{esc(row_id)}" disabled>{options}</select>'
+            f'<input type="hidden" name="device_selection_{esc(row_id)}" value="{esc(serial_owner)}">'
+        )
+    return (
+        f'<tr data-interface="{esc(row_id)}" id="{esc(row_id)}">'
+        f'<td data-col="selection"><input type="checkbox" name="select" value="{esc(row_id)}"'
+        f' id="cb-{esc(row_id)}"></td>'
+        f'<td data-col="device_selection">{member}</td>'
+        '<td data-col="local_port">Ethernet1</td><td data-col="actions"></td></tr>'
+    )
+
+
+def _load_cable_member_page(page, row_ids, *, serial_owner=None, url=SELECTION_PAGE_URL):
+    """Serve a chassis cable tab whose rows the cable verify endpoint could repaint."""
+    body = "".join(_cable_member_row_markup(row_id, serial_owner=serial_owner) for row_id in row_ids)
+    html = f"""<!doctype html><html><body>
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+          <input type="hidden" name="csrfmiddlewaretoken" value="test-token">
+          <input type="hidden" name="server_key" value="production">
+          <div data-cable-verify-url="{CABLE_VERIFY_URL}" data-cable-origin-device-id="1">
+            <table id="librenms-cable-table-vc"><tbody>{body}</tbody></table>
+          </div>
+          <button type="submit" id="do-sync">Sync</button>
+        </form>
+        </body></html>"""
+    page.route(
+        f"{SELECTION_PAGE_URL}**",
+        lambda route: route.fulfill(status=200, content_type="text/html", body=html),
+    )
+    page.goto(url)
+    _add_page_scripts(page)
+    page.evaluate("initializeCheckboxes()")
+
+
+def _store_cable_member_choice(page, row_id, member):
+    """Leave a stored cable selection of one row on another member, as an earlier visit does."""
+    page.evaluate(
+        """([rowId, member]) => writeStoredSelection(
+            document.getElementById('librenms-cable-table-vc'),
+            {[rowId]: {inputs: {[`device_selection_${rowId}`]: member}, auto: ''}},
+        )""",
+        [row_id, member],
+    )
+
+
+class TestAMovedCableMemberIsNotRestored:
+    """The cable table clears a stored selection for another member by the same rule as the interface table."""
+
+    def _restore(self, page, member, *, serial_owner=None):
+        verify_requests = []
+        page.on("request", lambda request: CABLE_VERIFY_URL in request.url and verify_requests.append(request))
+        _load_cable_member_page(page, ["other-row"])
+        _store_cable_member_choice(page, "cable-10", member)
+        _load_cable_member_page(page, ["cable-10"], serial_owner=serial_owner)
+        return verify_requests
+
+    def _stored(self, page):
+        return page.evaluate("() => readStoredSelection(document.getElementById('librenms-cable-table-vc'))")
+
+    def test_a_differing_member_is_cleared_with_a_notice_and_no_verify(self, page):
+        verify_requests = self._restore(page, "2")
+
+        expect(page.locator("#librenms-cable-table-vc-cleared-selections")).to_have_text(
+            "1 saved selection(s) on another Virtual Chassis member were cleared; select them again."
+        )
+        assert verify_requests == []
+        assert _checked_values(page) == set()
+        assert page.locator("#device_selection_cable-10").input_value() == "1"
+        assert "cable-10" not in self._stored(page)
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+        assert ("select", "cable-10") not in pairs
+        assert [value for key, value in pairs if key == "device_selection_cable-10"] == ["1"]
+
+    def test_a_differing_fixed_owner_is_cleared_and_keeps_the_rendered_owner(self, page):
+        verify_requests = self._restore(page, "2", serial_owner="1")
+
+        expect(page.locator("#librenms-cable-table-vc-cleared-selections")).to_have_count(1)
+        assert verify_requests == []
+        assert _checked_values(page) == set()
+        assert page.locator('input[type="hidden"][name="device_selection_cable-10"]').input_value() == "1"
+
+    def test_an_equal_member_restores(self, page):
+        verify_requests = self._restore(page, "1")
+
+        assert verify_requests == []
+        assert _checked_values(page) == {"cable-10"}
+        assert page.locator("#librenms-cable-table-vc-cleared-selections").count() == 0
+
+    def test_an_off_page_selection_still_submits_with_its_member(self, page):
+        _load_cable_member_page(page, ["other-row"])
+        _store_cable_member_choice(page, "cable-10", "2")
+        _load_cable_member_page(page, ["other-row"], url=f"{SELECTION_PAGE_URL}?page=2")
+
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+
+        assert ("select", "cable-10") in pairs
+        assert ("device_selection_cable-10", "2") in pairs
+
+
 class TestADetachedVerifyChangesNothing:
     """A verify answer for a row the tab swap replaced must not touch the new page or storage."""
 
@@ -1083,13 +1198,15 @@ class TestCrossPageSelection:
         assert {name: submitted.get(name) for name in expected_fields} == expected_fields
 
     def test_a_companion_input_is_restored_when_its_row_returns(self, page):
+        # The module table restores a stored member; the member-verified tables clear it instead.
         rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
-        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+        table = "librenms-module-table"
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
         page.select_option('[name="device_selection_4303"]', "9")
         page.check("#cb-4303")
 
-        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
-        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2", table_id=table)
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
 
         assert "4303" in _checked_values(page)
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
@@ -1105,11 +1222,12 @@ class TestCrossPageSelection:
                 "inventory_binding": "old-binding",
             },
         )
-        _load_selection_page(page, [old_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1")
+        table = "librenms-module-table"
+        _load_selection_page(page, [old_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
         page.select_option('[name="device_selection_4303"]', "9")
         page.check("#cb-4303")
 
-        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2", table_id=table)
         new_row = dict(
             old_row,
             hidden_fields={
@@ -1119,7 +1237,7 @@ class TestCrossPageSelection:
                 "inventory_binding": "new-binding",
             },
         )
-        _load_selection_page(page, [new_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1")
+        _load_selection_page(page, [new_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
 
         assert "4303" in _checked_values(page)
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
