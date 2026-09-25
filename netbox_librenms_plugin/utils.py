@@ -4984,23 +4984,27 @@ def hidden_refusal_text(model, fields) -> str:
     return f"NetBox refuses {subject} (only a superuser sees the message)"
 
 
-def validation_error_text_for(exc: ValidationError, model, user) -> str:
+def exception_text_for(exc: Exception, model, user) -> str:
     """
-    Return the text of NetBox's *exc* that a page may show *user*.
+    Return the text of a caught *exc* that *user* may read.
 
     NetBox's ``clean()`` messages can name related objects, and admin ``CUSTOM_VALIDATORS`` or
-    ``post_clean`` receivers can add any text under any key. So only a superuser gets the message.
-    Every other viewer gets the concrete *model* fields that the error keys name, or the model.
+    ``post_clean`` and ``pre_save`` receivers can add any text under any key. So only a superuser
+    gets the message of a ValidationError. Every other viewer gets the concrete *model* fields
+    that the error keys name, or the model. Any other exception keeps its own text.
 
     Args:
-        exc (ValidationError): The error that NetBox raised.
+        exc (Exception): The caught error.
         model (type[Model]): The model that NetBox validated.
-        user (User): The viewer.
+        user (User | None): The viewer.
 
     Returns:
-        str: ``validation_error_detail(exc)`` for a superuser, else ``hidden_refusal_text``.
+        str: ``str(exc)`` for an exception that is not a ValidationError, ``validation_error_detail(exc)``
+            for a superuser, else ``hidden_refusal_text``.
 
     """
+    if not isinstance(exc, ValidationError):
+        return str(exc)
     if is_active_superuser(user):
         return validation_error_detail(exc)
     keys = exc.error_dict if hasattr(exc, "error_dict") else ()

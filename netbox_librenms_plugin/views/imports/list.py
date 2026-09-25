@@ -362,7 +362,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                     show_disabled=bool(self._filter_form_data.get("show_disabled", False)),
                 )
             except Exception as e:
-                logger.error(f"Error getting device count: {e}")
+                logger.error("Error getting device count: %s", e)
                 device_count = 0
                 preflight_failed = True
 

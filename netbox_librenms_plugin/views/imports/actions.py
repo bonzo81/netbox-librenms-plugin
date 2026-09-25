@@ -97,7 +97,7 @@ from netbox_librenms_plugin.utils import (
     set_device_ip_fk,
     validate_import_context_columns,
     validation_error_detail,
-    validation_error_text_for,
+    exception_text_for,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -678,7 +678,7 @@ def _save_device(device, update_fields: list[str], request=None) -> HttpResponse
             "Validation error saving %s pk=%s: %s", type(device).__name__, device.pk, validation_error_detail(exc)
         )
         user = getattr(request, "user", None)
-        return _err(f"Validation error: {validation_error_text_for(exc, type(device), user)}", 400)
+        return _err(f"Validation error: {exception_text_for(exc, type(device), user)}", 400)
     except DataError:
         # save(update_fields=...) skips full_clean(), so an overlong/invalid value
         # from LibreNMS (e.g. a hostname past Device.name max_length) reaches the DB
@@ -2846,9 +2846,7 @@ class CreatePlatformFromImportView(
                         )
         except ValidationError as exc:
             logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
-            return _htmx_error_response(
-                f"Error creating platform: {validation_error_text_for(exc, Platform, request.user)}"
-            )
+            return _htmx_error_response(f"Error creating platform: {exception_text_for(exc, Platform, request.user)}")
         except IntegrityError:
             logger.exception("CreatePlatformFromImportView: integrity error while creating platform")
             return _htmx_error_response(

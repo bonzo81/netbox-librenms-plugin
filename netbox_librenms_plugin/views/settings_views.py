@@ -6,11 +6,17 @@ from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.utils.html import escape
 from django.views import View
+from extras.models import Tag
 
-from netbox_librenms_plugin.forms import CableSyncSettingsForm, ImportSettingsForm, ServerConfigForm
+from netbox_librenms_plugin.forms import (
+    CableSyncSettingsForm,
+    CableSyncTagNameTaken,
+    ImportSettingsForm,
+    ServerConfigForm,
+)
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
-from netbox_librenms_plugin.utils import save_user_pref
+from netbox_librenms_plugin.utils import exception_text_for, save_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -124,9 +130,12 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
                     # not imply Tag change permission. Re-render with the input instead of a bare
                     # 403 page that discards it.
                     cable_sync_form.add_error(None, str(exc))
-                except ValidationError as exc:
+                except CableSyncTagNameTaken as exc:
                     # The tag name was taken between validation and the locked rename.
                     cable_sync_form.add_error(None, exc)
+                except ValidationError as exc:
+                    # A Tag receiver of another plugin can refuse the tag write with any text.
+                    cable_sync_form.add_error(None, exception_text_for(exc, Tag, request.user))
                 else:
                     messages.success(
                         request,

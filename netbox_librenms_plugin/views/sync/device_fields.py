@@ -36,7 +36,7 @@ from netbox_librenms_plugin.utils import (
     normalize_serial,
     resolve_naming_preferences,
     validation_error_detail,
-    validation_error_text_for,
+    exception_text_for,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -103,9 +103,7 @@ def _server_mapping_redirect(object_type, pk, active_server_key=None, active_syn
 
 def _write_failure_message(exc, action, written_field, model, user):
     """Describe a failed single-field write to *user*, and say when the failure is on another field."""
-    if not isinstance(exc, ValidationError):
-        return f"Failed to {action}: {exc}"
-    detail = validation_error_text_for(exc, model, user)
+    detail = exception_text_for(exc, model, user)
     # full_clean() validates the whole object, so the failure can sit on a field this write never
     # touched. Whether the write caused the failure is not knowable from the error keys alone:
     # a custom validator can add any key, so the wording states what failed, never when it broke.
@@ -596,7 +594,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     messages.error(
                         request,
                         f"Platform '{platform_name}' could not be created: "
-                        f"{validation_error_text_for(e, Platform, request.user)}",
+                        f"{exception_text_for(e, Platform, request.user)}",
                     )
                     return self._sync_redirect(
                         request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
@@ -705,7 +703,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                             mapping.save()
                         mapping_created = True
                     except ValidationError as e:
-                        mapping_error = validation_error_text_for(e, PlatformMapping, request.user)
+                        mapping_error = exception_text_for(e, PlatformMapping, request.user)
                         logger.exception("Failed to create PlatformMapping '%s' -> '%s'", librenms_os, platform_name)
                     except IntegrityError as e:
                         # Only treat this as "already exists" if a row is actually present now AND
@@ -858,7 +856,8 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             except Device.DoesNotExist:
                 errors.append(f"Device with ID {member_id} not found")
             except Exception as exc:  # pragma: no cover - defensive guard
-                errors.append(f"Error assigning serial to member {member_id}: {str(exc)}")
+                detail = exception_text_for(exc, Device, request.user)
+                errors.append(f"Error assigning serial to member {member_id}: {detail}")
 
             counter += 1
 
@@ -985,8 +984,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     )
                     messages.error(
                         request,
-                        "Validation error removing LibreNMS mapping: "
-                        f"{validation_error_text_for(exc, model, request.user)}",
+                        f"Validation error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
                     )
                     return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 except Exception as exc:
@@ -1064,7 +1062,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 )
                 messages.error(
                     request,
-                    f"Validation error changing preferred server: {validation_error_text_for(exc, model, request.user)}",
+                    f"Validation error changing preferred server: {exception_text_for(exc, model, request.user)}",
                 )
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
             except Exception:

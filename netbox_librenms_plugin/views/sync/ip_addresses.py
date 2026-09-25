@@ -47,7 +47,7 @@ from netbox_librenms_plugin.utils import (
     resolve_set_primary_ip,
     same_host,
     syncable_interface_name,
-    validation_error_text_for,
+    exception_text_for,
 )
 from netbox_librenms_plugin.views.base.ip_addresses_view import ip_assignment_ports, ip_interface_scope
 from netbox_librenms_plugin.views.mixins import (
@@ -1292,14 +1292,15 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                 # The row's savepoint rolled back, so drop only this row's keys.
                 row_mutations.clear()
+                detail = exception_text_for(exc, IPAddress, request.user)
                 if isinstance(exc, PortSyncBlocked):
                     # The interface rules refused the create: an expected outcome, not an error.
                     logger.info("IP sync skipped %s: %s", row_id, exc)
-                    results["skipped_by_rule"].append(f"{display_address} ({exc})")
+                    results["skipped_by_rule"].append(f"{display_address} ({detail})")
                 else:
                     logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
                     results["failed"].append(display_address)
-                    results["errors"][display_address] = str(exc) or exc.__class__.__name__
+                    results["errors"][display_address] = detail or type(exc).__name__
             finally:
                 # `finally`, not `else`: the conflict and no-interface paths leave the row with
                 # `continue`, which skips an `else` clause but keeps their committed writes.
@@ -1504,7 +1505,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
                 raise refusal from exc
             if isinstance(exc, IntegrityError):
                 raise
-            detail = validation_error_text_for(exc, VRF, request.user)
+            detail = exception_text_for(exc, VRF, request.user)
             raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
         # The model-level grant says nothing about WHICH VRFs the user may add; a constrained grant rolls back.
         if not VRF.objects.restrict(request.user, "add").filter(pk=vrf.pk).exists():

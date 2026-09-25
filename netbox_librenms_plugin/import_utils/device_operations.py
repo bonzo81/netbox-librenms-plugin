@@ -3,13 +3,13 @@
 import logging
 from types import SimpleNamespace
 
-from dcim.models import Device, DeviceRole, DeviceType, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from tenancy.models import Tenant
-from virtualization.models import Cluster
+from virtualization.models import Cluster, VirtualMachine
 
 from ..constants import normalize_oob_type
 from ..import_validation_helpers import (
@@ -23,6 +23,7 @@ from ..utils import (
     AmbiguousLibreNMSIdError,
     cached_row_matches,
     coerce_librenms_id,
+    exception_text_for,
     find_by_librenms_id,
     find_devices_by_serial,
     find_matching_location,
@@ -751,8 +752,6 @@ def validate_device_for_import(  # noqa: C901
             f"librenms_id={librenms_id} (type={type(librenms_id).__name__}), "
             f"hostname={hostname}"
         )
-
-        from virtualization.models import VirtualMachine
 
         server_key = api.server_key if api is not None else server_key
 
@@ -1570,8 +1569,9 @@ def validate_device_for_import(  # noqa: C901
                             )
                             result["virtual_chassis"] = update_vc_member_suggested_names(vc_detection, hostname)
                 except Exception as e:
-                    logger.exception(f"Exception during VC detection for device {hostname}: {e}")
-                    result["virtual_chassis"]["detection_error"] = str(e)
+                    logger.exception("Exception during VC detection for device %s: %s", hostname, e)
+                    # The validation result has no viewer: it is cached and shown to any import user.
+                    result["virtual_chassis"]["detection_error"] = exception_text_for(e, VirtualChassis, None)
                     result["virtual_chassis"]["detection_failed"] = True
                     result["issues"].append(STACK_DETECTION_FAILED_MESSAGE)
             else:
@@ -1627,7 +1627,9 @@ def validate_device_for_import(  # noqa: C901
 
     except Exception as e:
         logger.exception(f"Error validating device for import: {libre_device.get('hostname', 'unknown')}")
-        result["issues"].append(f"{VALIDATION_ERROR_ISSUE_PREFIX} {str(e)}")
+        # The validation result has no viewer: it is cached and shown to any import user.
+        detail = exception_text_for(e, VirtualMachine if import_as_vm else Device, None)
+        result["issues"].append(f"{VALIDATION_ERROR_ISSUE_PREFIX} {detail}")
         return result
 
 
@@ -1923,7 +1925,7 @@ def import_single_device(  # noqa: C901
                 logger.info(f"Cable sync should be performed for device {device.name}")
 
         except Exception as e:
-            logger.warning(f"Error during post-import sync: {str(e)}")
+            logger.warning("Error during post-import sync: %s", e)
             # Don't fail the import if sync fails
 
         return {
@@ -1940,7 +1942,7 @@ def import_single_device(  # noqa: C901
             "success": False,
             "device": None,
             "message": "",
-            "error": str(e),
+            "error": exception_text_for(e, Device, user),
             "synced": {},
         }
 
@@ -1969,7 +1971,7 @@ def get_librenms_device_by_id(api: LibreNMSAPI, device_id: int, use_cache: bool 
         logger.warning(f"Device {device_id} not found in LibreNMS")
         return None
     except Exception as e:
-        logger.exception(f"Failed to get device {device_id} from LibreNMS: {e}")
+        logger.exception("Failed to get device %s from LibreNMS: %s", device_id, e)
         return None
 
 

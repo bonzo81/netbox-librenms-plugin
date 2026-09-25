@@ -41,7 +41,7 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     set_device_ip_fk,
     validation_error_detail,
-    validation_error_text_for,
+    exception_text_for,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -679,7 +679,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                         winner.pk,
                         validation_error_detail(exc),
                     )
-                    detail = validation_error_text_for(exc, Interface, request.user)
+                    detail = exception_text_for(exc, Interface, request.user)
                     return self._fail(
                         request,
                         f"Cannot move interface '{interface.name}' to '{winner.name}': {detail}",

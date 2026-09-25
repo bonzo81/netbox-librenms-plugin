@@ -196,7 +196,8 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
     except Exception as e:
         # Don't break startup if custom field creation fails (e.g., during initial migration),
         # but log the error so it's not silently swallowed.
-        logging.getLogger("netbox_librenms_plugin").exception("Failed to auto-create 'librenms_id' custom field: %s", e)
+        logger = logging.getLogger("netbox_librenms_plugin")
+        logger.exception("Failed to auto-create 'librenms_id' custom field: %s", e)
 
 
 config = LibreNMSSyncConfig

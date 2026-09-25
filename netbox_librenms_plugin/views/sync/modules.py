@@ -46,7 +46,7 @@ from netbox_librenms_plugin.utils import (
     prefetch_module_bay_types,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
-    validation_error_text_for,
+    exception_text_for,
 )
 from netbox_librenms_plugin.utils import (
     coerce_positive_int as _coerce_positive_int,
@@ -272,18 +272,16 @@ def _module_write_failure(exc, model, user):
         user (User | None): The viewer.
 
     Returns:
-        str: NetBox's refusal through ``validation_error_text_for``, or the database error.
+        str: The duplicate interface name hint, else the text from ``exception_text_for``.
 
     """
-    if isinstance(exc, ValidationError):
-        return validation_error_text_for(exc, model, user)
-    if "dcim_interface_unique_device_name" in str(exc):
+    if isinstance(exc, IntegrityError) and "dcim_interface_unique_device_name" in str(exc):
         return (
             "duplicate interface name — this module type's interface template "
             "uses the '{module}' token which resolves to the same name for all siblings. "
             "An interface naming plugin with a rewrite rule for this module type can fix this."
         )
-    return str(exc)
+    return exception_text_for(exc, model, user)
 
 
 def _report_install_results(request, installed, skipped, failed):

@@ -5,7 +5,7 @@ import logging
 from dcim.models import Device, DeviceRole, Site
 from django.db import transaction
 from django.utils import timezone
-from virtualization.models import Cluster
+from virtualization.models import Cluster, VirtualMachine
 
 from ..import_plan import VMPlacementMethod
 from ..import_validation_helpers import (
@@ -15,7 +15,7 @@ from ..import_validation_helpers import (
     vm_host_placement_issue,
 )
 from ..librenms_api import LibreNMSAPI
-from ..utils import lock_librenms_id_assignment
+from ..utils import exception_text_for, lock_librenms_id_assignment
 from .bulk_import import _is_job_cancelled
 from .device_operations import _determine_device_name, fetch_device_with_cache, validate_device_for_import
 from .permissions import require_permissions
@@ -330,7 +330,9 @@ def bulk_import_vms(
             log.info(f"Successfully imported VM {vm.name} (ID: {vm_id})")
 
         except Exception as vm_error:
-            log.error(f"Failed to import VM {vm_id}: {vm_error}", exc_info=True)
-            result["failed"].append({"device_id": vm_id, "error": str(vm_error)})
+            # A job log and the job data are visible to each viewer of the job, not only its user.
+            detail = exception_text_for(vm_error, VirtualMachine, user)
+            log.error(f"Failed to import VM {vm_id}: {detail}", exc_info=True)
+            result["failed"].append({"device_id": vm_id, "error": detail})
 
     return result

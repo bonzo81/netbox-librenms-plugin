@@ -47,6 +47,7 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     is_list_of_dicts,
     PortDisclosure,
+    exception_text_for,
     render_cable_trace,
     resolve_interface_on_device,
     set_librenms_device_id,
@@ -279,8 +280,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 if not self.restricted_queryset(Cable, "add").filter(pk=cable.pk).exists():
                     raise PermissionDenied("You may not add this cable.")
             return True
-        except Exception as exc:  # pragma: no cover - protects UX
-            messages.error(request, f"Failed to create cable: {str(exc)}")
+        except Exception as exc:
+            messages.error(request, f"Failed to create cable: {exception_text_for(exc, Cable, request.user)}")
             return False
 
     def _apply_cable_action(self, local_term, remote_term, link_data, display_name, force, port_records=None):

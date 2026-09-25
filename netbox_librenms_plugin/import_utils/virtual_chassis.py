@@ -9,6 +9,7 @@ from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
+    exception_text_for,
     find_devices_by_serial,
     normalize_inventory_serial,
     normalize_stack_serial,
@@ -133,12 +134,12 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
         try:
             get_virtual_chassis_data(api, device_id, force_refresh=force_refresh)
         except (BrokenPipeError, ConnectionError, IOError, OSError) as e:
-            logger.warning(f"Connection error during VC prefetch at device {idx}: {e}")
+            logger.warning("Connection error during VC prefetch at device %s: %s", idx, e)
             # Stop processing if connection is broken
             return
         except Exception as e:
             # Log but continue for other errors
-            logger.warning(f"Error prefetching VC data for device {device_id}: {e}")
+            logger.warning("Error prefetching VC data for device %s: %s", device_id, e)
 
     logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
 
@@ -335,8 +336,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         }
 
     except Exception as e:
-        logger.exception(f"Error detecting virtual chassis for device {device_id}: {e}")
-        return _failed_virtual_chassis_data(str(e) or type(e).__name__)
+        logger.exception("Error detecting virtual chassis for device %s: %s", device_id, e)
+        # The detection result has no viewer: it is cached and shown to any import user.
+        return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None) or type(e).__name__)
 
 
 def _load_vc_member_name_pattern() -> str:
@@ -351,7 +353,7 @@ def _load_vc_member_name_pattern() -> str:
         pattern = settings.vc_member_name_pattern
         return pattern if isinstance(pattern, str) and pattern.strip() else default
     except Exception as e:
-        logger.warning(f"Could not load VC member name pattern from settings: {e}. Using default.")
+        logger.warning("Could not load VC member name pattern from settings: %s. Using default.", e)
         return default
 
 
@@ -680,8 +682,5 @@ def create_virtual_chassis_with_members(  # noqa: C901
         master_device.name = original_master_name
         master_device.virtual_chassis = original_vc
         master_device.vc_position = original_vc_position
-        logger.error(
-            f"Virtual Chassis creation failed for device {original_master_name}: {e}",
-            exc_info=True,
-        )
+        logger.error("Virtual Chassis creation failed for device %s: %s", original_master_name, e, exc_info=True)
         raise

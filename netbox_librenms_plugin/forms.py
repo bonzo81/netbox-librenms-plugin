@@ -365,6 +365,10 @@ class ImportSettingsForm(NetBoxModelForm):
         return cleaned_data
 
 
+class CableSyncTagNameTaken(ValidationError):
+    """The form's own refusal: another tag holds the provenance tag name. The message names only the user's input."""
+
+
 class CableSyncSettingsForm(NetBoxModelForm):
     """
     Form for the cable-sync provenance settings (tag name, tag/cable color, description).
@@ -424,7 +428,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
         if tag is None and any(candidate.name == new_tag_name for candidate in locked_tags):
             # The old provenance tag is gone and an unrelated tag took the target name after
             # clean_cable_sync_tag ran, so the settings must not adopt it.
-            raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."})
+            raise CableSyncTagNameTaken({"cable_sync_tag": "A different tag already uses this name."})
         new_color = self.cleaned_data["cable_sync_tag_color"]
         if tag is None:
             if self.user is not None and not self.user.has_perm("extras.add_tag"):
@@ -438,7 +442,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
             except IntegrityError as exc:
                 # A concurrent insert can take either the unique name or the selected free slug.
                 # Do not adopt that row because this settings form did not create it.
-                raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
+                raise CableSyncTagNameTaken({"cable_sync_tag": "A different tag already uses this name."}) from exc
             if self.user is not None and not Tag.objects.restrict(self.user, "add").filter(pk=tag.pk).exists():
                 raise PermissionDenied("You do not have permission to create the cable provenance tag.")
         elif tag.name != new_tag_name or tag.color != new_color:
@@ -453,7 +457,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
             except IntegrityError as exc:
                 # select_for_update cannot lock a name that has no row yet, so a concurrent
                 # create can take the target name between clean_cable_sync_tag and this save.
-                raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
+                raise CableSyncTagNameTaken({"cable_sync_tag": "A different tag already uses this name."}) from exc
             if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
                 raise PermissionDenied("You do not have permission to change the cable provenance tag.")
 
@@ -1657,7 +1661,7 @@ class LibreNMSImportFilterForm(forms.Form):
             else:
                 logger.warning(f"Failed to load LibreNMS locations: {locations}")
         except Exception as e:
-            logger.exception(f"Error loading LibreNMS locations: {e}")
+            logger.exception("Error loading LibreNMS locations: %s", e)
             # Keep default choices on error
 
 

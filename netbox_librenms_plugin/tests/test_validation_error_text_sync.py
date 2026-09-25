@@ -106,22 +106,22 @@ def test_a_vrf_create_shows_netboxs_message_only_to_a_superuser(client, settings
 def test_a_hidden_refusal_names_only_the_concrete_fields_of_the_model(errors, expected):
     from django.core.exceptions import ValidationError
 
-    from netbox_librenms_plugin.utils import validation_error_text_for
+    from netbox_librenms_plugin.utils import exception_text_for
 
     viewer = make_user_with_perms("vetext-helper-viewer", [("change", Device)])
 
-    assert validation_error_text_for(ValidationError(errors), Device, viewer) == f"NetBox refuses {expected} {HIDDEN}"
+    assert exception_text_for(ValidationError(errors), Device, viewer) == f"NetBox refuses {expected} {HIDDEN}"
 
 
 @pytest.mark.django_db
 def test_an_inactive_superuser_gets_the_hidden_refusal():
     from django.core.exceptions import ValidationError
 
-    from netbox_librenms_plugin.utils import validation_error_text_for
+    from netbox_librenms_plugin.utils import exception_text_for
 
     viewer = make_superuser("vetext-helper-inactive")
     viewer.is_active = False
 
-    assert validation_error_text_for(ValidationError({"serial": ["x"]}), Device, viewer) == (
+    assert exception_text_for(ValidationError({"serial": ["x"]}), Device, viewer) == (
         f"NetBox refuses the serial field {HIDDEN}"
     )
