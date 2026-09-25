@@ -1856,7 +1856,7 @@ class TestSerialCableReadScope:
         from django.urls import reverse
 
         from netbox_librenms_plugin.models import LibreNMSSettings
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, map_device_to_librenms
         from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
@@ -1897,7 +1897,8 @@ class TestSerialCableReadScope:
             {"pk__in": [local_interface.pk, visible_interface.pk]},
         )
         client.force_login(user)
-        persist_test_server_mapping(local, server_key)
+        # Fixed ids, never the device pk: a local pk of 42 made the neighbour's id 42 ambiguous.
+        map_device_to_librenms(local, 41, server_key=server_key)
 
         response = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
