@@ -37,7 +37,10 @@ from netbox_librenms_plugin.interface_rules import (
     rule_names,
 )
 from netbox_librenms_plugin.interface_sync import (
+    changed_fields,
+    copy_before_change,
     interface_owner_platform_id,
+    keep_change_log_before_state,
     update_interface_from_port,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -2273,9 +2276,9 @@ def _promote_lag_aggregate(agg, *, with_restore):
     endpoint (``SyncInterfaceLagView._prepare_related``) so they can't drift on the promotion or the
     save fields. Returns None when *agg* isn't an Interface or is already ``type=lag``.
 
-    The persist saves ONLY the ``type`` column (``update_fields=["type"]``) so a concurrent edit to
-    the aggregate's other fields — loaded into the shared interface index outside the row lock — is
-    not clobbered.
+    The persist saves ONLY the ``type`` column and ``last_updated`` (which ``update_fields`` skips
+    otherwise) so a concurrent edit to the aggregate's other fields — loaded into the shared
+    interface index outside the row lock — is not clobbered.
 
     Args:
         agg: The aggregate interface to promote.
@@ -2300,7 +2303,7 @@ def _promote_lag_aggregate(agg, *, with_restore):
             raise ValidationError({"type": "A LAG aggregate cannot have a parent interface."})
         # Validate the rest of the prepared aggregate state before saving its new type.
         agg.clean()
-        agg.save(update_fields=["type"])
+        agg.save(update_fields=["type", "last_updated"])
         logger.info("Set interface %s type=lag", agg.name)
 
     if with_restore:
@@ -2314,19 +2317,18 @@ def _parent_child_needs_promotion(child):
 
 
 def _promote_parent_child(child, *, with_restore):
-    """Promote a non-channel child to type=virtual before parent validation."""
+    """Promote a non-channel child to type=virtual before parent validation; the save of its parent link writes the type."""
     if not _parent_child_needs_promotion(child):
         return None
     original_type = child.type
     child.type = "virtual"
 
-    def _persist():
-        child.save(update_fields=["type"])
+    def _report():
         logger.info("Set interface %s type=virtual", child.name)
 
     if with_restore:
-        return (_persist, lambda: setattr(child, "type", original_type))
-    return _persist
+        return (_report, lambda: setattr(child, "type", original_type))
+    return _report
 
 
 def _apply_interface_relationship(
@@ -2345,11 +2347,15 @@ def _apply_interface_relationship(
 
     The optional preparation hooks may mutate either interface before validation. Each hook
     returns a persist callable or a ``(persist, restore)`` pair. The persist call runs only after
-    validation. The restore call repairs shared in-memory objects after a failed edge.
+    validation. The restore call repairs shared in-memory objects after a failed edge. The related
+    hook's persist saves the related row. The source is saved once, with every column that the
+    edge changed on it (also a column that the source hook changed), and then the source hook's
+    persist runs.
 
     Both rows are persisted with ``update_fields`` so a concurrent edit to their other columns
     isn't clobbered: the objects may have been loaded into a shared index outside any row lock,
-    so a full ``save()`` of the stale instance would lose-update the concurrent write.
+    so a full ``save()`` of the stale instance would lose-update the concurrent write. Each saved
+    row gets its state before the edge as the change log's before-state.
 
     Raises:
         ValidationError: when the source fails ``clean()`` (after restoring the related
@@ -2363,6 +2369,7 @@ def _apply_interface_relationship(
     # member sharing it skips the type bump and never persists it, leaving the DB type stale.
     relation_id_field = f"{relation_field}_id"
     original_related_id = getattr(source_iface, relation_id_field)
+    source_before, related_before = copy_before_change(source_iface), copy_before_change(related_iface)
     setattr(source_iface, relation_field, related_iface)
     prepared_source = prepare_source(source_iface) if prepare_source else None
     prepared_related = prepare_related(related_iface) if prepare_related else None
@@ -2387,10 +2394,13 @@ def _apply_interface_relationship(
         # adding several SELECTs per edge while all relationship rows remain locked.
         netbox_interface_clean(source_iface)
         if persist_related:
+            keep_change_log_before_state(related_iface, related_before)
             persist_related()
+        if source_fields := [field.name for field in changed_fields(source_iface, source_before)]:
+            keep_change_log_before_state(source_iface, source_before)
+            source_iface.save(update_fields=[*source_fields, "last_updated"])
         if persist_source:
             persist_source()
-        source_iface.save(update_fields=[relation_field])
     except (ValidationError, IntegrityError):
         # clean() rejection OR a statement-time persist failure (the savepoint rolls back
         # the DB, but the in-memory instances stay mutated): undo both before the caller skips

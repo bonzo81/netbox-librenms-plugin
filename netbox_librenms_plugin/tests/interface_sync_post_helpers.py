@@ -32,9 +32,13 @@ def sync_port(port_id, name, *, alias="", mac="", if_type="ethernetCsmacd", **ex
     }
 
 
-def seed_ports(device, ports, *, lag_members=None):
+def seed_ports(device, ports, *, lag_members=None, sub_interfaces=None, bridge_members=None):
     """Put *ports* in the interface snapshot of *device*, as a refresh of the tab does."""
-    relationships = {"lag_members": lag_members or {}, "sub_interfaces": {}, "bridge_members": {}}
+    relationships = {
+        "lag_members": lag_members or {},
+        "sub_interfaces": sub_interfaces or {},
+        "bridge_members": bridge_members or {},
+    }
     payload = {"ports": ports, "port_stack_relationships": relationships}
     cache.set(SyncInterfacesView().get_cache_key(device, "ports", SERVER_KEY), payload, timeout=300)
 
