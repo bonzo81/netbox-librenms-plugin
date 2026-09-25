@@ -1798,9 +1798,8 @@ const MEMBER_VERIFIED_TABLE_IDS = new Set(['librenms-interface-table', 'librenms
 function _storedMemberDiffers(table, row, rowKey, companionInputs) {
     if (!MEMBER_VERIFIED_TABLE_IDS.has(table.id)) return false;
     const name = 'device_selection_' + rowKey;
-    const member = row.querySelector(
-        'select[name="' + CSS.escape(name) + '"], input[type="hidden"][name="' + CSS.escape(name) + '"]'
-    );
+    // Compare names instead of building a selector: no row key may reach a selector.
+    const member = Array.from(row.querySelectorAll('select, input[type="hidden"]')).find((field) => field.name === name);
     return Boolean(member) && Object.hasOwn(companionInputs, name) && companionInputs[name] !== member.value;
 }
 
