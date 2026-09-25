@@ -952,6 +952,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 legacy_url_configured and not configured_servers and server_key == "default"
             )
             if isinstance(cf, dict) and server_key in cf and not _is_protected:
+                obj_locked.snapshot()
                 cf = without_server_mapping(cf, server_key)
                 obj_locked.custom_field_data["librenms_id"] = cf
                 usable_count = sum(mapping.is_selectable for mapping in build_server_mappings(obj_locked))
@@ -962,7 +963,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     obj_locked.clean_fields(
                         exclude={field.name for field in obj_locked._meta.fields if field.name != "custom_field_data"}
                     )
-                    obj_locked.save(update_fields=["custom_field_data"])
+                    obj_locked.save(update_fields=["custom_field_data", "last_updated"])
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
@@ -1030,12 +1031,13 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 messages.error(request, "The preferred server is not a usable mapping for this object.")
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
+            owner.snapshot()
             owner.custom_field_data["librenms_id"] = with_preferred_server(raw_mapping, requested_key)
             try:
                 owner.clean_fields(
                     exclude={field.name for field in owner._meta.fields if field.name != "custom_field_data"}
                 )
-                owner.save(update_fields=["custom_field_data"])
+                owner.save(update_fields=["custom_field_data", "last_updated"])
             except ValidationError as exc:
                 transaction.set_rollback(True)
                 error = exc.message_dict if hasattr(exc, "message_dict") else str(exc)

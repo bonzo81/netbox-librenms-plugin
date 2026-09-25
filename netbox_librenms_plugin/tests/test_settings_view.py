@@ -76,6 +76,38 @@ class TestCableSyncSettingsTab:
         cable.refresh_from_db()
         assert cable_has_librenms_tag(cable) is True
 
+    def test_renaming_provenance_tag_records_the_rename_with_its_before_state(self, client):
+        """The tag is saved with only some columns, so the save must also move last_updated."""
+        from core.models import ObjectChange
+        from django.contrib.contenttypes.models import ContentType
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        client.force_login(make_superuser())
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        tag = get_librenms_cable_tag(sync_settings=settings)
+        old_name, old_color, old_last_updated = tag.name, tag.color, tag.last_updated
+
+        client.post(
+            self._url(),
+            {
+                "form_type": "cable_sync_settings",
+                "cable_sync_tag": "logged-cables",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+        )
+
+        tag.refresh_from_db()
+        assert (tag.name, tag.color) == ("logged-cables", "ff5722")
+        assert tag.last_updated > old_last_updated
+        change = ObjectChange.objects.get(
+            changed_object_type=ContentType.objects.get_for_model(Tag), changed_object_id=tag.pk, action="update"
+        )
+        assert (change.prechange_data["name"], change.prechange_data["color"]) == (old_name, old_color)
+        assert (change.postchange_data["name"], change.postchange_data["color"]) == ("logged-cables", "ff5722")
+
     def test_tag_rename_requires_permission_for_the_existing_tag(self, client):
         """Plugin settings access must not authorize a global Tag mutation."""
         import re

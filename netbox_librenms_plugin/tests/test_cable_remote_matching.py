@@ -1340,6 +1340,31 @@ class TestCheckAndCreateTheRemoteEnd:
         assert local_interface.cable is not None
         assert created.cable_id == local_interface.cable_id
 
+    def test_the_create_records_the_port_binding_with_its_before_state(self, librenms_server, settings):
+        """The port is bound by a second, partial save of the new interface, and its change record has the before-state."""
+        from core.models import ObjectChange
+        from dcim.models import Interface
+        from django.contrib.contenttypes.models import ContentType
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, _, remote_device, row_id = self._scenario("mk-log", librenms_server, settings)
+
+        _logged_in(make_superuser("remote-create-mk-log")).post(
+            _remote_create_url(local_device),
+            {"row_id": row_id, "server_key": server_key},
+        )
+
+        created = Interface.objects.get(device=remote_device, name="Gi0/1")
+        changes = ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(Interface), changed_object_id=created.pk
+        ).order_by("time", "pk")
+        assert changes.filter(action="create").count() == 1
+        # The cable save that follows writes the whole row again, so only the change record shows the partial save.
+        binding = changes.filter(action="update").first()
+        assert binding.prechange_data["custom_fields"].get("librenms_id") is None
+        assert binding.postchange_data["custom_fields"].get("librenms_id") == {server_key: 500}
+
     @pytest.mark.parametrize("drift", ["owner", "migration"])
     def test_remote_create_rechecks_the_local_owner_after_proposal_resolution(
         self, librenms_server, settings, monkeypatch, drift

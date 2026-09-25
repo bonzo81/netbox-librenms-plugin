@@ -102,7 +102,9 @@ def changed_fields(instance, before):
 
 def keep_change_log_before_state(instance, before):
     """
-    Give the change log record of the next save of *instance* the state of *before*, its earlier copy.
+    Give the change log record of the next save of *instance* the state of *before*.
+
+    *before* is an earlier copy of *instance*, or its row as stored before the caller changed *instance*.
 
     Call it only for a row that the caller saves: the snapshot serializes *before*, and it reads
     the tags and the many-to-many values of the row.

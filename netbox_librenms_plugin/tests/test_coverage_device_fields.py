@@ -745,6 +745,25 @@ class TestRemoveServerMappingView:
         assert response.url.endswith(f"?tab=interfaces&server_key={SERVER_KEY}")
         assert any("Removed LibreNMS mapping" in text for text in _messages(response, "success"))
 
+    def test_a_removed_mapping_is_recorded_with_its_before_state(self, logged_in_client, librenms_server):
+        """The owner is saved with only its custom field data, so the save must also move last_updated."""
+        from core.models import ObjectChange
+        from dcim.models import Device
+        from django.contrib.contenttypes.models import ContentType
+
+        device = make_device("mapping-remove-log", librenms_cf={SERVER_KEY: 6544, "retired": 9003})
+        old_last_updated = Device.objects.values_list("last_updated", flat=True).get(pk=device.pk)
+
+        _post(logged_in_client, "remove_server_mapping", device, {"object_type": "device", "server_key": "retired"})
+
+        device.refresh_from_db()
+        assert device.last_updated > old_last_updated
+        change = ObjectChange.objects.get(
+            changed_object_type=ContentType.objects.get_for_model(Device), changed_object_id=device.pk, action="update"
+        )
+        assert change.prechange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6544, "retired": 9003}
+        assert change.postchange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6544}
+
     def test_configured_mapping_cannot_be_removed(self, logged_in_client, librenms_server):
         device = _linked_device("mapping-configured", 6542)
 

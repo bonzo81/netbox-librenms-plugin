@@ -441,25 +441,21 @@ class CableSyncSettingsForm(NetBoxModelForm):
                 raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
             if self.user is not None and not Tag.objects.restrict(self.user, "add").filter(pk=tag.pk).exists():
                 raise PermissionDenied("You do not have permission to create the cable provenance tag.")
-        else:
-            update_fields = []
-            if tag.name != new_tag_name:
-                tag.name = new_tag_name
-                update_fields.append("name")
-            if tag.color != new_color:
-                tag.color = new_color
-                update_fields.append("color")
-            if update_fields:
-                if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
-                    raise PermissionDenied("You do not have permission to change the cable provenance tag.")
-                try:
-                    tag.save(update_fields=update_fields)
-                except IntegrityError as exc:
-                    # select_for_update cannot lock a name that has no row yet, so a concurrent
-                    # create can take the target name between clean_cable_sync_tag and this save.
-                    raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
-                if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
-                    raise PermissionDenied("You do not have permission to change the cable provenance tag.")
+        elif tag.name != new_tag_name or tag.color != new_color:
+            if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
+                raise PermissionDenied("You do not have permission to change the cable provenance tag.")
+            tag.snapshot()
+            tag.name = new_tag_name
+            tag.color = new_color
+            try:
+                # The tag row is locked, so the save of an unchanged column writes its current value.
+                tag.save(update_fields=["name", "color", "last_updated"])
+            except IntegrityError as exc:
+                # select_for_update cannot lock a name that has no row yet, so a concurrent
+                # create can take the target name between clean_cable_sync_tag and this save.
+                raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
+            if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
+                raise PermissionDenied("You do not have permission to change the cable provenance tag.")
 
         setting_fields = ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description")
         for field_name in setting_fields:

@@ -843,8 +843,9 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                         "Move the interface first, then retry.",
                         status=409,
                     )
+                ip.snapshot()
                 ip.assigned_object = winner_iface
-                ip.save(update_fields=["assigned_object_type", "assigned_object_id"])
+                ip.save(update_fields=["assigned_object_type", "assigned_object_id", "last_updated"])
 
                 # The moved address may itself be the donor's primary_ip4/primary_ip6/oob_ip;
                 # reconcile those device FKs so the donor isn't left referencing an address now on a

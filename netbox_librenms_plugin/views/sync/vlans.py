@@ -315,7 +315,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         vlan.name = proposed_name
         try:
             with transaction.atomic():
-                vlan.save(update_fields=["name"])
+                vlan.save(update_fields=["name", "last_updated"])
         except IntegrityError as exc:
             raise ValueError(
                 "The proposed VLAN name already exists in the selected group. Refresh the VLAN data and try again."

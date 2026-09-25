@@ -3603,8 +3603,9 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
         if int_id <= 0:
             return None
         if auto_save:
+            obj.snapshot()
             obj.custom_field_data["librenms_id"] = int_id
-            obj.save(update_fields=["custom_field_data"])
+            obj.save(update_fields=["custom_field_data", "last_updated"])
         return int_id
     if isinstance(cf_value, dict):
         value = cf_value.get(server_key)
@@ -3617,9 +3618,10 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
                 return None
             # Normalise a string-stored id ("42" → 42) back to the DB.
             if auto_save and isinstance(inner, str):
+                obj.snapshot()
                 value["id"] = int_id
                 obj.custom_field_data["librenms_id"] = cf_value
-                obj.save(update_fields=["custom_field_data"])
+                obj.save(update_fields=["custom_field_data", "last_updated"])
             return int_id
         # Bare scalar entry ({"primary": 42} / {"primary": "42"}): coerce_librenms_id
         # rejects bools, non-positive, and non-numeric strings in one place.
@@ -3628,9 +3630,10 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             return None
         # Normalise a string-stored id back to the DB so later queries use a plain int.
         if auto_save and isinstance(value, str):
+            obj.snapshot()
             cf_value[server_key] = int_id
             obj.custom_field_data["librenms_id"] = cf_value
-            obj.save(update_fields=["custom_field_data"])
+            obj.save(update_fields=["custom_field_data", "last_updated"])
         return int_id
     return None
 
@@ -5008,9 +5011,11 @@ def set_device_ip_fk(device, field, ip, *, save=True):
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip4 to non-IPv4 address {ip}")
         if field == "primary_ip6" and family != 6:
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip6 to non-IPv6 address {ip}")
+    if save:
+        device.snapshot()
     setattr(device, field, ip)
     if save:
-        device.save(update_fields=[field])
+        device.save(update_fields=[field, "last_updated"])
     return field
 
 

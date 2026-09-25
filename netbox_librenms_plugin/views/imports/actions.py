@@ -62,6 +62,7 @@ from netbox_librenms_plugin.import_utils import (
     visible_object_label,
 )
 from netbox_librenms_plugin.import_utils.bulk_import import ambiguous_stack_groups, stack_identity
+from netbox_librenms_plugin.interface_sync import keep_change_log_before_state
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -621,25 +622,19 @@ def _device_type_rack_fit_error(device) -> HttpResponse | None:
     return None
 
 
-def _save_device(device, update_fields: list[str] | None = None, request=None) -> HttpResponse | None:
+def _save_device(device, update_fields: list[str], request=None) -> HttpResponse | None:
     """
-    Persist a Device row, returning an HttpResponse on failure or None on success.
+    Save the columns *update_fields* of a Device or VirtualMachine row, returning an HttpResponse on failure or None on success.
 
-    When ``update_fields`` is provided, the call uses ``save(update_fields=...)``
-    which issues a narrower UPDATE that only writes those columns and bypasses
-    ``full_clean()``. This is the correct mode when the caller mutates only a known
-    small set of fields and the device row may carry pre-existing inconsistencies on
-    *other* fields (e.g. a legacy ``face`` value left behind after a rack was
-    cleared); validating those untouched fields would block legitimate updates.
-
-    When ``update_fields`` is ``None`` (the default), the legacy behaviour is
-    preserved: ``full_clean()`` runs against the entire row before ``save()`` writes
-    every column.
+    The call uses ``save(update_fields=...)``, which writes only those columns and ``last_updated``
+    and bypasses ``full_clean()``. The row may carry pre-existing inconsistencies on *other* fields
+    (e.g. a legacy ``face`` value left behind after a rack was cleared), and a validation of those
+    untouched fields would block legitimate updates. The callers change the instance before the
+    call, so the change record takes its before-state from the row as stored.
 
     Args:
-        device: The NetBox Device to persist.
-        update_fields (list[str] | None): The columns to write; None runs
-            ``full_clean()`` and saves the whole row.
+        device: The NetBox Device or VirtualMachine to persist.
+        update_fields (list[str]): The columns to write.
         request: The current HTTP request; when it is an HTMX request, errors are
             returned via ``_htmx_error_response()`` so modal swap/toast flows remain
             intact, otherwise plain ``HttpResponse`` status codes are used.
@@ -654,37 +649,25 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
             return _htmx_error_response(msg)
         return HttpResponse(escape(msg), status=status)
 
-    # ValidationError messages are field-level and safe/useful to surface; raw DB exception
-    # strings (IntegrityError/DataError/DatabaseError) can leak constraint names, column
-    # details, or backend text, so log them server-side and return a generic toast.
-    if update_fields is None:
-        try:
-            device.full_clean()
-        except ValidationError as exc:
-            error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-            return _err(f"Validation error: {error_msg}", 400)
-        try:
-            device.save()
-        except IntegrityError:
-            logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
-            return _err("Could not save: a database integrity constraint was violated.", 409)
-        return None
-
     # full_clean() is intentionally skipped here (it would abort on unrelated legacy field
     # values), but a device_type/platform write still carries the platform/manufacturer
     # cross-field constraint with no DB backstop — validate just that one rule so an
     # inconsistent pairing can't be persisted silently with a success toast.
-    if update_fields and ({"device_type", "platform"} & set(update_fields)):
+    if {"device_type", "platform"} & set(update_fields):
         if mismatch := _platform_device_type_mismatch(device):
             return mismatch
     # A device_type write also bypasses Device.clean()'s rack-fit check; re-validate just that rule
     # so a taller device_type can't overflow the rack elevation with a success toast.
-    if update_fields and "device_type" in update_fields:
+    if "device_type" in update_fields:
         if rack_fit := _device_type_rack_fit_error(device):
             return rack_fit
 
+    stored = type(device).objects.filter(pk=device.pk).first()
+    if stored is None:
+        return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
+    keep_change_log_before_state(device, stored)
     try:
-        device.save(update_fields=update_fields)
+        device.save(update_fields=[*update_fields, "last_updated"])
     except IntegrityError:
         logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
         return _err("Could not save: a database integrity constraint was violated.", 409)
@@ -2378,6 +2361,7 @@ class DeviceConflictActionView(
                     )
                 # migrate_legacy_librenms_id refuses only the values is_legacy_librenms_id already
                 # rejects, and the locked value passed that gate above, so it cannot fail here.
+                locked_device.snapshot()
                 migrate_legacy_librenms_id(locked_device, server_key)
                 # Save only the field we actually mutated. Running full_clean() on the
                 # whole object would reject the migration over unrelated pre-existing
@@ -2386,7 +2370,7 @@ class DeviceConflictActionView(
                 # mapping" is to clean up the librenms_id custom field, not to gate
                 # on every other field being valid.
                 try:
-                    locked_device.save(update_fields=["custom_field_data"])
+                    locked_device.save(update_fields=["custom_field_data", "last_updated"])
                 except IntegrityError:
                     logger.exception(
                         "Failed to persist migrated LibreNMS mapping for %s pk=%s",

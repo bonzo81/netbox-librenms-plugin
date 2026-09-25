@@ -524,6 +524,7 @@ def create_virtual_chassis_with_members(  # noqa: C901
 
     try:
         with transaction.atomic():
+            master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
@@ -556,7 +557,7 @@ def create_virtual_chassis_with_members(  # noqa: C901
             # Update master device
             master_device.virtual_chassis = vc
             master_device.vc_position = _master_pos
-            save_fields = ["virtual_chassis", "vc_position"]
+            save_fields = ["virtual_chassis", "vc_position", "last_updated"]
             if rename_master:
                 save_fields.append("name")
             master_device.save(update_fields=save_fields)
@@ -663,8 +664,9 @@ def create_virtual_chassis_with_members(  # noqa: C901
 
             # Assign VC master only after all members are attached to avoid
             # NetBox's create-time auto-master signal changing order/state.
+            vc.snapshot()
             vc.master = master_device
-            vc.save(update_fields=["master"])
+            vc.save(update_fields=["master", "last_updated"])
             _sync_module_bay_counter(master_device)
 
             logger.info(

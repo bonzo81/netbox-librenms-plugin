@@ -1643,6 +1643,7 @@ class CableRemoteCreateView(SyncCablesView):
         if not Interface.objects.restrict(request.user, "add").filter(pk=interface.pk).exists():
             raise _RemoteCreateAborted(f"You may not add interfaces to {remote_device.name}.")
         # The row resolves by LibreNMS port id from now on, never by name luck.
+        interface.snapshot()
         set_librenms_device_id(interface, context["row"].get("remote_port_key"), context["server_key"])
-        interface.save(update_fields=["custom_field_data"])
+        interface.save(update_fields=["custom_field_data", "last_updated"])
         return interface

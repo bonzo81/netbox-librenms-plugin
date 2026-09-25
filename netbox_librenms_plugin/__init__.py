@@ -152,7 +152,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         # dict format {"server_key": device_id} is accepted by the UI/API.
         if not created and cf.type == "integer":
             cf.type = "json"
-            cf.save(using=db_alias, update_fields=["type"])
+            cf.save(using=db_alias, update_fields=["type", "last_updated"])
             logging.getLogger("netbox_librenms_plugin").info(
                 "Migrated 'librenms_id' custom field type from integer to json"
             )
