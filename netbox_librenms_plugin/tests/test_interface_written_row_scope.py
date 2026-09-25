@@ -380,6 +380,45 @@ def test_the_relationship_pass_names_a_refused_row_only_when_the_user_may_view_i
 
 
 # ---------------------------------------------------------------------------
+# NetBox renames the channel children of a renamed parent after the commit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not hasattr(Interface, "channels"), reason="NetBox before 4.7 has no channelized interfaces")
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize(
+    "scope, refused",
+    [("inside", None), ("outside", "eth-old:1 (change)"), ("outside-hidden", "1 interface you cannot view")],
+)
+def test_the_channel_children_that_netbox_renames_must_be_in_the_change_scope(client, flushed_events, scope, refused):
+    """The sync renames ``eth-old``; NetBox renames ``eth-old:1`` after the commit, but not ``breakout-2``."""
+    device = make_device(f"written-scope-channels-{scope}")
+    parent = bound_interface(device, "eth-old", 1, iface_type="1000base-t")
+    parent.channels = 4
+    parent.save()
+    child = Interface.objects.create(device=device, name="eth-old:1", parent=parent, channel_id=1, type="1000base-t")
+    # Outside every change scope here, but its name does not follow ``<parent name>:<channel ID>``.
+    Interface.objects.create(device=device, name="breakout-2", parent=parent, channel_id=2, type="1000base-t")
+    seed_ports(device, [sync_port(1, "eth-new")])
+    view = {"channel_id__isnull": True} if scope == "outside-hidden" else None
+    change = IN_SCOPE if scope == "inside" else {"pk": parent.pk}
+    client.force_login(_user(f"written-scope-channels-{scope}-user", Device, Interface, view=view, change=change))
+
+    response = _post_sync(client, device, "device", [1], exclude_columns=("vlans", "type"))
+
+    parent.refresh_from_db()
+    child.refresh_from_db()
+    assert Interface.objects.filter(device=device, name="breakout-2").exists()
+    if refused is None:
+        assert messages_on(response.wsgi_request) == [("success", SYNCED)]
+        assert (parent.name, child.name) == ("eth-new", "eth-new:1")
+    else:
+        assert messages_on(response.wsgi_request) == [_refused(refused)]
+        assert (parent.name, child.name) == ("eth-old", "eth-old:1")
+        assert flushed_events == []
+
+
+# ---------------------------------------------------------------------------
 # The collection of the written rows
 # ---------------------------------------------------------------------------
 

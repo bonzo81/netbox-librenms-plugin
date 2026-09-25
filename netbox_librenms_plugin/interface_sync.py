@@ -33,6 +33,12 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.transactions import first_at_version, row_changed, save_at_version
 
+try:
+    # NetBox 4.7 renames the channel children of a renamed interface; older NetBox has no channels.
+    from dcim.models.mixins import InterfaceChannelRenameMixin
+except ImportError:
+    InterfaceChannelRenameMixin = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,7 +91,8 @@ class InterfaceWrites:
 
     The receivers ``record_interface_save`` (``post_save``) and ``record_tagged_vlan_change``
     (``m2m_changed``) record the rows, so every save and every tagged-VLAN change is recorded, also
-    one that NetBox makes. Each write path gives each row that it writes a name for a refusal
+    one that NetBox makes. ``write_interface_row`` also records the channel children that NetBox
+    renames after the commit. Each write path gives each row that it writes a name for a refusal
     (``name_interface_row``): the name that it read while the user could view the row, or None.
     """
 
@@ -94,6 +101,13 @@ class InterfaceWrites:
         self.written = defaultdict(set)
         self.created = defaultdict(set)
         self.names = {}
+
+    def add_renamed_by_netbox(self, model, pks):
+        """Record the rows that NetBox renames after the commit; each is named only when the user may view it."""
+        viewable = dict(model.objects.restrict(self.user, "view").filter(pk__in=pks).values_list("pk", "name"))
+        self.written[model].update(pks)
+        for pk in pks:
+            self.names.setdefault((model, pk), viewable.get(pk))
 
     def outside_scope(self):
         """
@@ -151,6 +165,29 @@ def name_interface_row(interface, name):
     """
     if (writes := _active_writes.get()) is not None:
         writes.names.setdefault((type(interface), interface.pk), name)
+
+
+def _record_renamed_channel_children(row, old_name):
+    """
+    Record the channel children that NetBox renames after the commit, when the write renames *row*.
+
+    NetBox's ``InterfaceChannelRenameMixin`` renames them in ``on_commit``, after the final check,
+    so the check must read them now. This is NetBox's rule: each child of a row with channels whose
+    name is ``<old name>:<channel ID>`` and whose new name fits the name column.
+    """
+    writes = _active_writes.get()
+    if writes is None or InterfaceChannelRenameMixin is None or not isinstance(row, InterfaceChannelRenameMixin):
+        return
+    if not row.channels:
+        return
+    max_length = type(row)._meta.get_field("name").max_length
+    children = {
+        child.pk
+        for child in row.child_interfaces.filter(channel_id__isnull=False).only("pk", "name", "channel_id")
+        if child.name == f"{old_name}:{child.channel_id}" and len(f"{row.name}:{child.channel_id}") <= max_length
+    }
+    if children:
+        writes.add_renamed_by_netbox(type(row), children)
 
 
 def record_interface_save(sender, instance, created, **kwargs):
@@ -226,7 +263,9 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
     instance. With no changed column, nothing is locked, written or serialized. With a changed
     column, the change log's before-state is the state of the fresh read, and the row is saved only
     when no other operation changed it since the fresh read (``save_at_version``). A row that this
-    sync created is private to its transaction, so it is written without a fresh read.
+    sync created is private to its transaction, so it is written without a fresh read. When the
+    write renames the row, the channel children that NetBox renames after the commit are recorded
+    for the final check of the interface sync.
 
     Args:
         interface (Interface | VMInterface): The interface as the caller read it.
@@ -255,6 +294,8 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
     fresh = copy_before_change(row)
     changed_elsewhere = apply(row)
     changed_columns = {field.column for field in changed_fields(row, fresh)}
+    if row.name != fresh.name:
+        _record_renamed_channel_children(row, fresh.name)
     if changed_columns and created:
         row.save()
     elif changed_columns:
