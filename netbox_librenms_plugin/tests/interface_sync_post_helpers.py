@@ -51,6 +51,16 @@ def bound_interface(device, name, port_id, *, iface_type="other"):
     return interface
 
 
+def synced_interface(device, name, port_id, **fields):
+    """Return an interface that a sync of ``sync_port(port_id, name)`` leaves unchanged, with *fields* set."""
+    from dcim.models import Interface
+
+    interface = bound_interface(device, name, port_id)
+    Interface.objects.filter(pk=interface.pk).update(speed=1_000_000, mtu=1500, enabled=True, **fields)
+    interface.refresh_from_db()
+    return interface
+
+
 def sync_page(device):
     """Return the absolute URL of the interfaces tab of *device*."""
     return "http://testserver" + reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk}) + "?tab=interfaces"

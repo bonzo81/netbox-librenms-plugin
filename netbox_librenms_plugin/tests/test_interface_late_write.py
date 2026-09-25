@@ -44,6 +44,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     post_interface_sync,
     seed_ports,
     sync_port,
+    synced_interface,
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
@@ -129,14 +130,6 @@ def _column_values(interface, columns):
     return {column: row[column] for column in columns}
 
 
-def _synced_interface(device, name, port_id, **fields):
-    """Return an interface that a sync of ``sync_port(port_id, name)`` leaves unchanged, with *fields* set."""
-    interface = bound_interface(device, name, port_id)
-    Interface.objects.filter(pk=interface.pk).update(speed=1_000_000, mtu=1500, enabled=True, **fields)
-    interface.refresh_from_db()
-    return interface
-
-
 # ---------------------------------------------------------------------------
 # AC1: a concurrent change to a column the writer does not write survives
 # ---------------------------------------------------------------------------
@@ -180,7 +173,7 @@ def test_a_concurrent_change_to_unowned_columns_survives_the_attribute_write(
 def test_a_concurrent_change_to_unowned_columns_survives_the_vlan_write(client, attempts, monkeypatch, commit_point):
     """Only the mode and the untagged VLAN change, so the attribute writer does not write and the VLAN helper does."""
     device = make_device(f"late-write-vlan-{commit_point}", librenms_cf={SERVER_KEY: {"id": 2}})
-    interface = _synced_interface(device, "eth10", 10)
+    interface = synced_interface(device, "eth10", 10)
     vlan = VLAN.objects.create(vid=100, name=f"late-write-vlan-{commit_point}")
     concurrent = _unowned_columns(device)
     seed_ports(device, [sync_port(10, "eth10", untagged_vlan=100, tagged_vlans=[])])
@@ -281,7 +274,7 @@ def test_a_written_row_keeps_its_ordering_name_timestamp_and_change_record(clien
 def test_a_tagged_vlan_only_change_records_the_before_state(client, monkeypatch):
     """No column changes, so the scalar write takes no snapshot; the tagged VLAN change still needs one."""
     device = make_device("late-write-tagged-only", librenms_cf={SERVER_KEY: {"id": 50}})
-    interface = _synced_interface(device, "eth10", 10, mode="tagged")
+    interface = synced_interface(device, "eth10", 10, mode="tagged")
     old_vlan = VLAN.objects.create(vid=100, name="late-write-old-vlan")
     new_vlan = VLAN.objects.create(vid=200, name="late-write-new-vlan")
     interface.tagged_vlans.set([old_vlan])
@@ -522,7 +515,7 @@ def test_a_row_that_leaves_the_change_scope_is_not_written_by_the_vlan_helper(
 ):
     """Only the mode and the untagged VLAN change, so the VLAN helper is the one writer of the row."""
     device = make_device(f"late-write-scope-vlan-{commit_point}", librenms_cf={SERVER_KEY: {"id": 9}})
-    interface = _synced_interface(device, "eth10", 10)
+    interface = synced_interface(device, "eth10", 10)
     VLAN.objects.create(vid=100, name=f"late-write-scope-vlan-{commit_point}")
     seed_ports(device, [sync_port(10, "eth10", untagged_vlan=100, tagged_vlans=[])])
     client.force_login(

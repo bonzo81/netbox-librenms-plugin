@@ -27,11 +27,11 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     SERVER_KEY,
     SYNCED,
-    bound_interface,
     count_sync_attempts,
     post_interface_sync,
     seed_ports,
     sync_port,
+    synced_interface,
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     backend_pid,
@@ -56,14 +56,6 @@ def _server(settings):
 @pytest.fixture
 def attempts(monkeypatch):
     return count_sync_attempts(monkeypatch)
-
-
-def _synced_interface(device, name, port_id, **fields):
-    """Return an interface that a sync of ``sync_port(port_id, name)`` leaves unchanged, with *fields* set."""
-    interface = bound_interface(device, name, port_id)
-    Interface.objects.filter(pk=interface.pk).update(speed=1_000_000, mtu=1500, enabled=True, **fields)
-    interface.refresh_from_db()
-    return interface
 
 
 def _interface_row_locks(queries):
@@ -99,7 +91,7 @@ def _interface_updates(queries):
 )
 def test_a_row_is_locked_only_when_it_changes_and_in_the_mode_of_its_update(client, port, locks):
     device = make_device("late-lock", librenms_cf={SERVER_KEY: {"id": 11}})
-    _synced_interface(device, "eth10", 10)
+    synced_interface(device, "eth10", 10)
     seed_ports(device, [port])
     client.force_login(make_superuser("late-lock-user"))
 
@@ -125,7 +117,7 @@ CHANGE_LOG_READS = ('"extras_taggeditem"', '"dcim_interface_vdcs"', '"dcim_inter
 )
 def test_a_row_is_serialized_for_the_change_log_only_when_it_changes(client, port, serialized):
     device = make_device("late-lock-change-log", librenms_cf={SERVER_KEY: {"id": 14}})
-    _synced_interface(device, "eth10", 10)
+    synced_interface(device, "eth10", 10)
     seed_ports(device, [port])
     client.force_login(make_superuser("late-lock-change-log-user"))
 
@@ -192,13 +184,13 @@ def test_the_tagged_vlan_clear_schedule_completes_without_a_deadlock(client, att
     tagged = VLAN.objects.create(vid=100, name=f"late-lock-clear-{writer}-100")
     if writer == "vlan-helper":
         # The sync takes the row out of tagged mode; the attribute writer has nothing to write.
-        interface = _synced_interface(device, "eth10", 10, mode="tagged")
+        interface = synced_interface(device, "eth10", 10, mode="tagged")
         untagged = VLAN.objects.create(vid=200, name=f"late-lock-clear-{writer}-200")
         port = sync_port(10, "eth10", untagged_vlan=200, tagged_vlans=[])
         exclude_columns = ("mac_address",)
     else:
         # An access row that still has a tagged VLAN: the attribute write's save() clears it.
-        interface = _synced_interface(device, "eth10", 10, mode="access")
+        interface = synced_interface(device, "eth10", 10, mode="access")
         port = sync_port(10, "eth10", alias="uplink")
         exclude_columns = ("vlans", "mac_address")
     interface.tagged_vlans.add(tagged)
@@ -235,7 +227,7 @@ def test_the_primary_mac_schedule_completes_without_a_deadlock(client, attempts)
     first in the weaker ``FOR NO KEY UPDATE`` mode and then upgraded would close the cycle.
     """
     device = make_device("late-lock-mac", librenms_cf={SERVER_KEY: {"id": 13}})
-    interface = _synced_interface(device, "eth10", 10)
+    interface = synced_interface(device, "eth10", 10)
     seed_ports(device, [sync_port(10, "eth10", mac=MAC)])
     client.force_login(make_superuser("late-lock-mac-user"))
 
