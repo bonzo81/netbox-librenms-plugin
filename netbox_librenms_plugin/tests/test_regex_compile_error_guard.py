@@ -14,6 +14,8 @@ import pytest
 
 PACKAGE = Path(__file__).resolve().parents[1]
 
+RE_ERROR_NAMES = {"error", "PatternError"}
+
 TEMPLATE_ONLY = "The try body compiles no pattern; the error comes from the replacement template."
 
 # (path, function, first statement of the try body, reason): each entry waives one handler.
@@ -52,20 +54,23 @@ ALLOWED = [
 
 
 def _re_aliases(tree):
-    """Return the names that the module binds to the ``re`` module."""
-    return {
-        alias.asname or alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-        if alias.name == "re"
-    }
+    """Return the names bound to the ``re`` module, and the names bound to its error class."""
+    modules, errors = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.asname or alias.name for alias in node.names if alias.name == "re")
+        elif isinstance(node, ast.ImportFrom) and node.module == "re":
+            errors.update(alias.asname or alias.name for alias in node.names if alias.name in RE_ERROR_NAMES)
+    return modules, errors
 
 
 def _caught(handler_type):
-    """Return the expressions that one ``except`` clause names, with a starred element unwrapped."""
-    elements = handler_type.elts if isinstance(handler_type, ast.Tuple) else [handler_type]
-    return [element.value if isinstance(element, ast.Starred) else element for element in elements]
+    """Return the expressions that one ``except`` clause names, with tuples and starred tuples flattened."""
+    if isinstance(handler_type, ast.Starred):
+        return _caught(handler_type.value)
+    if isinstance(handler_type, ast.Tuple):
+        return [node for element in handler_type.elts for node in _caught(element)]
+    return [handler_type]
 
 
 def _name(node):
@@ -76,7 +81,7 @@ class _HandlerScan(ast.NodeVisitor):
     """Collect every ``try`` whose handler catches ``re.error`` without ``OverflowError``."""
 
     def __init__(self, re_aliases):
-        self.re_aliases = re_aliases
+        self.re_modules, self.re_errors = re_aliases
         self.scope = []
         self.violations = []
 
@@ -95,10 +100,13 @@ class _HandlerScan(ast.NodeVisitor):
 
     def _misses_overflow(self, caught):
         catches_re_error = any(
-            isinstance(node, ast.Attribute)
-            and node.attr in {"error", "PatternError"}
-            and isinstance(node.value, ast.Name)
-            and node.value.id in self.re_aliases
+            (isinstance(node, ast.Name) and node.id in self.re_errors)
+            or (
+                isinstance(node, ast.Attribute)
+                and node.attr in RE_ERROR_NAMES
+                and isinstance(node.value, ast.Name)
+                and node.value.id in self.re_modules
+            )
             for node in caught
         )
         covers_overflow = any(_name(node) in {"OverflowError", "REGEX_COMPILE_ERRORS"} for node in caught)
@@ -139,6 +147,10 @@ def test_every_re_error_handler_also_catches_overflow_error():
         ("except (re.error, IndexError):", True),
         ("except re.PatternError:", True),
         ("except (_re.error, TypeError):", True),
+        ("except regex_error:", True),
+        ("except (ValueError, PatternError):", True),
+        ("except (*(re.error,),):", True),
+        ("except (*(re.error, OverflowError),):", False),
         ("except (re.error, OverflowError):", False),
         ("except REGEX_COMPILE_ERRORS:", False),
         ("except (*REGEX_COMPILE_ERRORS, IndexError):", False),
@@ -153,6 +165,8 @@ def test_the_scan_flags_a_re_error_handler_that_misses_overflow_error(clause, fl
         f"""
         import re
         import re as _re
+        from re import PatternError
+        from re import error as regex_error
 
         class Rule:
             def compile(self):
