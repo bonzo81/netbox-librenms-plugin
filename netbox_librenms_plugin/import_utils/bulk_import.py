@@ -194,7 +194,8 @@ def detect_collisions_for_device_ids(
                 # unexpected transport/backend failure. The gate's contract is to fail closed per
                 # row, so treat an exception like a fetch miss instead of crashing the whole batch.
                 if getattr(job, "logger", None):
-                    detail = exception_text_for(exc, Device, user)
+                    # A job log is read later by each viewer of the job, so it keeps only hidden text.
+                    detail = exception_text_for(exc, Device, None)
                     job.logger.warning(f"Collision pre-check couldn't fetch device {device_id}: {detail}")
                 else:
                     logger.warning("Collision pre-check couldn't fetch device %s: %s", device_id, exc)
@@ -483,6 +484,8 @@ def bulk_import_devices_shared(  # noqa: C901
     # Extract user from job if not explicitly provided
     if user is None and job is not None:
         user = getattr(job.job, "user", None)
+    # A job's data and log are read later by each viewer of the job, so they keep only hidden text.
+    text_viewer = None if job is not None else user
 
     # change_device is needed for VC master/member updates.
     required_perms = [
@@ -639,6 +642,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 manual_mappings=device_mappings if device_mappings else None,
                 libre_device=libre_device,
                 user=user,
+                text_viewer=text_viewer,
             )
 
             if result["success"]:
@@ -679,7 +683,7 @@ def bulk_import_devices_shared(  # noqa: C901
                         except Exception as vc_error:
                             # Remove from set on failure so retry is possible
                             processed_vc_domains.discard(vc_domain)
-                            detail = exception_text_for(vc_error, VirtualChassis, user)
+                            detail = exception_text_for(vc_error, VirtualChassis, text_viewer)
                             warn_msg = f"Failed to create VC for device {device_id}: {detail}"
                             if job and job.logger:
                                 job.logger.warning(warn_msg)
@@ -695,7 +699,7 @@ def bulk_import_devices_shared(  # noqa: C901
                     job.logger.error(f"Failed to import device {device_id}: {result['error']}")
 
         except Exception as e:
-            detail = exception_text_for(e, Device, user)
+            detail = exception_text_for(e, Device, text_viewer)
             if job and job.logger:
                 job.logger.error(f"Unexpected error importing device {device_id}: {detail}", exc_info=True)
             else:

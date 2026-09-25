@@ -1641,6 +1641,7 @@ def import_single_device(  # noqa: C901
     sync_options: dict = None,
     libre_device: dict = None,
     user=None,
+    text_viewer=None,
 ) -> dict:
     """
     Import a single LibreNMS device to NetBox.
@@ -1662,6 +1663,8 @@ def import_single_device(  # noqa: C901
         libre_device: Pre-fetched LibreNMS device data (optional).
             If provided, skips API call to fetch device info.
         user: User whose view scope authorizes explicit object selections.
+        text_viewer: User who reads the ``error`` text. None (the default) for text that is saved,
+            such as job output, so that only the hidden text of a NetBox refusal is kept.
 
     Returns:
         dict: Import result with structure:
@@ -1942,7 +1945,7 @@ def import_single_device(  # noqa: C901
             "success": False,
             "device": None,
             "message": "",
-            "error": exception_text_for(e, Device, user),
+            "error": exception_text_for(e, Device, text_viewer),
             "synced": {},
         }
 

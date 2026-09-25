@@ -189,7 +189,9 @@ def test_the_cable_create(client, superuser):
     _assert_shown([response.content.decode(), *_messages(response)], hidden, superuser, "the cable")
 
 
-def test_a_background_import_of_a_device_and_a_vm(settings, librenms_server, superuser):  # noqa: F811
+def test_a_background_import_saves_only_the_hidden_text(settings, librenms_server, superuser):  # noqa: F811
+    """A job's data and log are read later by each viewer of the job, so they hide the message for any job user."""
+    from core.choices import JobStatusChoices
     from core.models import Job
     from dcim.models import Device, DeviceRole
     from virtualization.models import VirtualMachine
@@ -220,7 +222,9 @@ def test_a_background_import_of_a_device_and_a_vm(settings, librenms_server, sup
     refusal = _Refuses(f"Conflicts with {hidden.name}.")
     settings.CUSTOM_VALIDATORS = {"dcim.device": [refusal], "virtualization.virtualmachine": [refusal]}
 
-    ImportDevicesJob(job).run(
+    # handle() runs the whole job lifecycle: terminate() saves the data and the log entries.
+    ImportDevicesJob.handle(
+        job,
         import_plans=[
             {"source_device_id": 6481, "object_type": "device", "role_id": infrastructure.role_id, "rack_id": None},
             {
@@ -235,12 +239,19 @@ def test_a_background_import_of_a_device_and_a_vm(settings, librenms_server, sup
         libre_devices_cache=rows,
     )
 
-    job.refresh_from_db()
+    job = Job.objects.get(pk=job.pk)
+    assert job.status == JobStatusChoices.STATUS_COMPLETED, (job.status, job.error, job.log_entries)
     assert not Device.objects.filter(name=f"{tag}-device").exists()
     assert not VirtualMachine.objects.filter(name=f"{tag}-vm").exists()
     errors = {error["device_id"]: error["error"] for error in job.data["errors"]}
     assert set(errors) == {6481, 6482}, job.data
-    _assert_shown([errors[6481]], hidden, superuser, "the device")
-    _assert_shown([errors[6482]], hidden, superuser, "the virtual machine")
-    if not superuser:
-        assert hidden.name not in str(job.log_entries), job.log_entries
+    _assert_shown([errors[6481]], hidden, False, "the device")
+    _assert_shown([errors[6482]], hidden, False, "the virtual machine")
+    failures = {
+        prefix: [entry["message"] for entry in job.log_entries if entry["message"].startswith(prefix)]
+        for prefix in ("Failed to import device 6481: ", "Failed to import VM 6482: ")
+    }
+    assert all(failures.values()), job.log_entries
+    _assert_shown(failures["Failed to import device 6481: "], hidden, False, "the device")
+    _assert_shown(failures["Failed to import VM 6482: "], hidden, False, "the virtual machine")
+    assert hidden.name not in str(job.log_entries), job.log_entries

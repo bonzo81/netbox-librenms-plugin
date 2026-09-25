@@ -224,6 +224,8 @@ def bulk_import_vms(
     # Extract user from job if not explicitly provided
     if user is None and job is not None:
         user = getattr(job.job, "user", None)
+    # A job's data and log are read later by each viewer of the job, so they keep only hidden text.
+    text_viewer = None if job is not None else user
 
     # Check permissions at start of bulk operation
     require_permissions(user, ["virtualization.add_virtualmachine"], "import VMs")
@@ -330,8 +332,7 @@ def bulk_import_vms(
             log.info(f"Successfully imported VM {vm.name} (ID: {vm_id})")
 
         except Exception as vm_error:
-            # A job log and the job data are visible to each viewer of the job, not only its user.
-            detail = exception_text_for(vm_error, VirtualMachine, user)
+            detail = exception_text_for(vm_error, VirtualMachine, text_viewer)
             log.error(f"Failed to import VM {vm_id}: {detail}", exc_info=True)
             result["failed"].append({"device_id": vm_id, "error": detail})
 
