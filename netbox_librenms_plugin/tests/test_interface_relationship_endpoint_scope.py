@@ -4,9 +4,11 @@ The single-row LAG, parent and bridge endpoints save only when every row that th
 The tests post the inline endpoints with real constrained object permissions. The endpoint reads
 the rows that it may change and the rows that it may name before its first write. After the last
 write, each written row must be in the user's change scope and in that selection. A row outside
-refuses the whole link: nothing is saved, NetBox sends no event, and the refusal names only a row
-that the user may view.
+refuses the whole link: nothing is saved, NetBox sends no event, the server logs no write, and the
+refusal names only a row that the user may view.
 """
+
+import logging
 
 import pytest
 from core.models import ObjectChange
@@ -22,7 +24,9 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, seed_ports, sync_port
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.transactions import row_changed
 from netbox_librenms_plugin.utils import set_librenms_device_id
+from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
 
 CACHE_TRANSITION_HEADER = "X-LibreNMS-Cache-Transition"
 
@@ -30,6 +34,17 @@ CACHE_TRANSITION_HEADER = "X-LibreNMS-Cache-Transition"
 @pytest.fixture(autouse=True)
 def _server(settings):
     configure_default_librenms_server(settings)
+
+
+@pytest.fixture
+def write_logs(caplog):
+    """Return a function that lists the write lines that the sync views log, as the server log records them."""
+    caplog.set_level(logging.INFO, logger=interfaces_view.__name__)
+    return lambda: [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == interfaces_view.__name__ and record.getMessage().startswith("Set ")
+    ]
 
 
 def _refused(rows):
@@ -82,8 +97,8 @@ def _interface_change_records():
     return ObjectChange.objects.filter(changed_object_type__model__in=("interface", "vminterface"))
 
 
-def _assert_nothing_saved(response, flushed_events, error, *rows):
-    """Assert the 403 refusal *error*, and that no write of the link stayed: no row, no change record, no event."""
+def _assert_nothing_saved(response, flushed_events, write_logs, error, *rows):
+    """Assert the 403 refusal *error*, and that no write of the link stayed: no row, change record, event or log."""
     assert response.status_code == 403
     assert response.json() == error
     for row, before in rows:
@@ -91,11 +106,12 @@ def _assert_nothing_saved(response, flushed_events, error, *rows):
         assert {field: getattr(row, field) for field in before} == before
     assert not _interface_change_records().exists()
     assert flushed_events == []
+    assert write_logs() == []
     assert CACHE_TRANSITION_HEADER not in response
 
 
 @transactional_db_with_all_apps()
-def test_a_lag_link_that_moves_the_member_out_of_the_change_scope_saves_nothing(client, flushed_events):
+def test_a_lag_link_that_moves_the_member_out_of_the_change_scope_saves_nothing(client, flushed_events, write_logs):
     """The aggregate stays in the scope; the member leaves it with its LAG, so the aggregate promotion rolls back too."""
     device, member, aggregate = _lag_scenario("relationship-scope-lag-member")
     client.force_login(_user("relationship-scope-lag-member-user", Device, Interface, change={"lag__isnull": True}))
@@ -103,19 +119,31 @@ def test_a_lag_link_that_moves_the_member_out_of_the_change_scope_saves_nothing(
     response = _link(client, device, "lag", 1, 100)
 
     _assert_nothing_saved(
-        response, flushed_events, _refused("eth1 (change)"), (member, {"lag_id": None}), (aggregate, {"type": "other"})
+        response,
+        flushed_events,
+        write_logs,
+        _refused("eth1 (change)"),
+        (member, {"lag_id": None}),
+        (aggregate, {"type": "other"}),
     )
 
 
 @transactional_db_with_all_apps()
-def test_a_lag_link_whose_promotion_moves_the_aggregate_out_of_the_change_scope_saves_nothing(client, flushed_events):
+def test_a_lag_link_whose_promotion_moves_the_aggregate_out_of_the_change_scope_saves_nothing(
+    client, flushed_events, write_logs
+):
     device, member, aggregate = _lag_scenario("relationship-scope-lag-aggregate")
     client.force_login(_user("relationship-scope-lag-aggregate-user", Device, Interface, change={"type": "other"}))
 
     response = _link(client, device, "lag", 1, 100)
 
     _assert_nothing_saved(
-        response, flushed_events, _refused("Po1 (change)"), (member, {"lag_id": None}), (aggregate, {"type": "other"})
+        response,
+        flushed_events,
+        write_logs,
+        _refused("Po1 (change)"),
+        (member, {"lag_id": None}),
+        (aggregate, {"type": "other"}),
     )
 
 
@@ -125,7 +153,7 @@ def test_a_lag_link_whose_promotion_moves_the_aggregate_out_of_the_change_scope_
     "owner_model, interface_model", [(Device, Interface), (VirtualMachine, VMInterface)], ids=["device", "vm"]
 )
 def test_a_parent_or_bridge_link_that_moves_the_source_out_of_the_change_scope_saves_nothing(
-    client, flushed_events, relation, owner_model, interface_model
+    client, flushed_events, write_logs, relation, owner_model, interface_model
 ):
     tag = f"relationship-scope-{relation}-{owner_model._meta.model_name}"
     owner = make_device(tag) if owner_model is Device else make_vm(tag)
@@ -141,12 +169,12 @@ def test_a_parent_or_bridge_link_that_moves_the_source_out_of_the_change_scope_s
     source_before = {f"{relation}_id": None}
     if owner_model is Device and relation == "parent":
         source_before["type"] = "other"
-    _assert_nothing_saved(response, flushed_events, _refused("eth1.100 (change)"), (source, source_before))
+    _assert_nothing_saved(response, flushed_events, write_logs, _refused("eth1.100 (change)"), (source, source_before))
     assert related.pk not in {pk for _model, pk in flushed_events}
 
 
 @transactional_db_with_all_apps()
-def test_a_refusal_names_only_the_rows_that_the_user_may_view(client, flushed_events):
+def test_a_refusal_names_only_the_rows_that_the_user_may_view(client, flushed_events, write_logs):
     """The user may view only the aggregate, so the refusal counts the member and never names it."""
     device, member, aggregate = _lag_scenario("relationship-scope-hidden")
     client.force_login(
@@ -164,6 +192,7 @@ def test_a_refusal_names_only_the_rows_that_the_user_may_view(client, flushed_ev
     _assert_nothing_saved(
         response,
         flushed_events,
+        write_logs,
         _refused("Po1 (change) and 1 interface you cannot view"),
         (member, {"lag_id": None}),
         (aggregate, {"type": "other"}),
@@ -172,7 +201,7 @@ def test_a_refusal_names_only_the_rows_that_the_user_may_view(client, flushed_ev
 
 
 @transactional_db_with_all_apps()
-def test_a_link_that_keeps_every_written_row_in_the_change_scope_is_saved(client, flushed_events):
+def test_a_link_that_keeps_every_written_row_in_the_change_scope_is_saved(client, flushed_events, write_logs):
     device, member, aggregate = _lag_scenario("relationship-scope-kept")
     client.force_login(_user("relationship-scope-kept-user", Device, Interface, change={"enabled": True}))
 
@@ -184,3 +213,30 @@ def test_a_link_that_keeps_every_written_row_in_the_change_scope_is_saved(client
     aggregate.refresh_from_db()
     assert (member.lag_id, aggregate.type) == (aggregate.pk, "lag")
     assert sorted(flushed_events) == sorted([("interface", member.pk), ("interface", aggregate.pk)])
+    assert write_logs() == ["Set interface Po1 type=lag", "Set eth1.lag = Po1"]
+
+
+@transactional_db_with_all_apps()
+def test_a_link_that_runs_again_after_a_lock_conflict_logs_each_write_once(client, monkeypatch, write_logs):
+    """Error injection: the first attempt records a stale row after its writes, so the runner rolls it back and runs again."""
+    device, member, aggregate = _lag_scenario("relationship-scope-retry")
+    client.force_login(_user("relationship-scope-retry-user", Device, Interface))
+    real_check = interfaces_view._RowSelection.check_writes
+    attempts = []
+
+    def check_then_conflict_once(selection, writes):
+        real_check(selection, writes)
+        attempts.append(selection)
+        if len(attempts) == 1:
+            row_changed("eth1")
+
+    monkeypatch.setattr(interfaces_view._RowSelection, "check_writes", check_then_conflict_once)
+
+    response = _link(client, device, "lag", 1, 100)
+
+    assert response.status_code == 200
+    assert len(attempts) == 2
+    member.refresh_from_db()
+    aggregate.refresh_from_db()
+    assert (member.lag_id, aggregate.type) == (aggregate.pk, "lag")
+    assert write_logs() == ["Set interface Po1 type=lag", "Set eth1.lag = Po1"]

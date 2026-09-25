@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass, field
+from functools import partial
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface, VirtualChassis
@@ -86,6 +87,11 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_write(message, *args):
+    """Log a write when its transaction commits, so a write that rolls back logs nothing."""
+    transaction.on_commit(partial(logger.info, message, *args))
 
 
 class _ConflictingRowTargetError(Exception):
@@ -1245,7 +1251,7 @@ class SyncInterfacesView(
                 exc,
             )
             return False
-        logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
+        _log_write("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
         return True
 
     def sync_selected_interfaces(
@@ -2519,7 +2525,7 @@ def _promote_lag_aggregate(agg, *, with_restore):
         # Validate the rest of the prepared aggregate state before saving its new type.
         agg.clean()
         agg.save(update_fields=["type", "last_updated"])
-        logger.info("Set interface %s type=lag", agg.name)
+        _log_write("Set interface %s type=lag", agg.name)
 
     if with_restore:
         return (_persist, lambda: setattr(agg, "type", original_type))
@@ -2539,7 +2545,7 @@ def _promote_parent_child(child, *, with_restore):
     child.type = "virtual"
 
     def _report():
-        logger.info("Set interface %s type=virtual", child.name)
+        _log_write("Set interface %s type=virtual", child.name)
 
     if with_restore:
         return (_report, lambda: setattr(child, "type", original_type))
@@ -3015,7 +3021,7 @@ class _BaseRelationshipSyncView(
                 )
         selection.check_writes(writes)
         if relationship_changed:
-            logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+            _log_write("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
         return _RelationshipLink(obj=obj, source=source_iface, related=related_iface, changed=relationship_changed)
 
 
