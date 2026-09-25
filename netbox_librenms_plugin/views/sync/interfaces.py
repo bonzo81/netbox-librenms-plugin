@@ -152,6 +152,22 @@ class _RowSelection:
             return None
         return self.created_names.get(pk, self.viewable_names.get(pk))
 
+    def check_writes(self, writes):
+        """
+        Refuse the attempt when a row of *writes* is outside the user's scope or outside this selection.
+
+        This is the final write check. Call it after the last write, inside the transaction of the writes.
+
+        Raises:
+            _RowsOutsideScopeError: A written row is outside the scope. The text names only a row that the user may view.
+
+        """
+        if refused := writes.outside_scope(self.selected):
+            named = sorted(
+                (name, actions) for model, pk, actions in refused if (name := self.shown_name(model, pk)) is not None
+            )
+            raise _RowsOutsideScopeError(named, len(refused) - len(named))
+
 
 class _RowsOutsideScopeError(Exception):
     """Rows that a sync attempt wrote are outside the user's add or change scope; the attempt rolls back."""
@@ -388,9 +404,10 @@ class SyncInterfacesView(
         its first write, the attempt reads which existing rows it may change and which a text may
         name (``_RowSelection``); every pass uses that selection. Write: after the last write, each
         interface row that the attempt created or changed must be in the user's change scope, and each
-        created row also in the add scope; one row outside the scope rolls the whole attempt back, as
-        a NetBox edit view does, and the runner does not retry it. Display: every text names a row
-        through ``_shown_name`` only. A retry is a new attempt, so it reads a new selection.
+        created row also in the add scope (``_RowSelection.check_writes``); one row outside the scope
+        rolls the whole attempt back, as a NetBox edit view does, and the runner does not retry it.
+        Display: every text names a row through ``_RowSelection.shown_name`` only. A retry is a new
+        attempt, so it reads a new selection.
 
         Args:
             visible_port_ids (set[int]): The port IDs the user selected.
@@ -444,11 +461,8 @@ class SyncInterfacesView(
             # No locked owner means no selected row, so a write here is a defect of a write path.
             if any(writes.written.values()):
                 raise RuntimeError("The interface sync wrote an interface row with no selection.")
-        elif refused := writes.outside_scope(self._selection.selected):
-            named = sorted(
-                (name, actions) for model, pk, actions in refused if (name := self._shown_name(model, pk)) is not None
-            )
-            raise _RowsOutsideScopeError(named, len(refused) - len(named))
+        else:
+            self._selection.check_writes(writes)
         return _InterfaceSyncOutcome(
             skipped_conflicts=tuple(self._skipped_conflicts),
             kept_name_conflicts=tuple(self._kept_name_conflicts),
@@ -781,7 +795,7 @@ class SyncInterfacesView(
                     candidate_names,
                 )
                 # The selection of the attempt start: this pass does not read the scopes again.
-                catalog_index, source_index, related_index, changeable_ids = _build_locked_relationship_indexes(
+                catalog_index, source_index, related_index, _, changeable_ids = _build_locked_relationship_indexes(
                     obj,
                     server_key,
                     locked_device_ids,
@@ -2339,6 +2353,11 @@ def _build_locked_relationship_indexes(
 
     *permitted* takes a set of candidate pks and returns the pks that the user may view and the pks
     that the user may change. It is called before the row locks and again for the locked rows.
+
+    Returns:
+        tuple: The catalog, source and related indexes, the name of each locked row that the user
+            may view by pk, and the pks of the locked rows that the user may change.
+
     """
     if candidate_ids is None:
         candidate_queryset = interface_queryset_for_object(obj).filter(candidate_q)
@@ -2374,7 +2393,13 @@ def _build_locked_relationship_indexes(
     viewable_ids, changeable_ids = permitted(prelock_permitted_ids)
     related_index = filter_interface_index(locked_index, viewable_ids | changeable_ids)
     source_index = filter_interface_index(related_index, changeable_ids)
-    return catalog_index, source_index, related_index, changeable_ids
+    viewable_names = {
+        interface.pk: interface.name
+        for interfaces in related_index["by_name"].values()
+        for interface in interfaces
+        if interface.pk in viewable_ids
+    }
+    return catalog_index, source_index, related_index, viewable_names, changeable_ids
 
 
 def _user_scope(obj, user, locked_device_ids):
@@ -2400,6 +2425,23 @@ def _user_scope(obj, user, locked_device_ids):
         )
 
     return permitted
+
+
+def _relationship_selection(obj, locked_device_ids, viewable_names, changeable_ids):
+    """Return the ``_RowSelection`` of a single-row link from the scopes read for its locked rows."""
+    if isinstance(obj, Device):
+        return _RowSelection(Interface, frozenset(locked_device_ids), frozenset(changeable_ids), viewable_names)
+    return _RowSelection(VMInterface, frozenset({obj.pk}), frozenset(changeable_ids), viewable_names)
+
+
+@dataclass(frozen=True)
+class _RelationshipLink:
+    """The link that one attempt of a single-row relationship sync made."""
+
+    obj: Device | VirtualMachine
+    source: Interface | VMInterface
+    related: Interface | VMInterface
+    changed: bool
 
 
 def _relationship_decisions(rules, *ends):
@@ -2735,7 +2777,7 @@ class _BaseRelationshipSyncView(
             related_name = related_port.get(interface_name_field) or ""
         return source_port, related_port, source_name, related_name, interface_name_field
 
-    def post(self, request, object_type, object_id):  # noqa: C901
+    def post(self, request, object_type, object_id):
         # Set the object-type-scoped permissions BEFORE the gate (an unsupported type raises
         # Http404 here). JSON endpoint: require_all_permissions would return the mixin's
         # HTML/redirect on denial, breaking the fetch() caller, so use the _json variant.
@@ -2761,151 +2803,20 @@ class _BaseRelationshipSyncView(
                 {"error": "The LibreNMS relationship changed or expired. Refresh and retry."},
                 status=409,
             )
-        source_port, related_port, source_name, related_name, _interface_name_field = current_edge
 
-        # The IntegrityError wrapper sits OUTSIDE the atomic: a concurrent conflict (e.g. the
+        # The IntegrityError handler sits OUTSIDE the transaction: a concurrent conflict (e.g. the
         # related interface deleted in the validate/write TOCTOU window) raises either at the
-        # failed statement — propagating out of the atomic after rollback — or, for Django's
-        # INITIALLY DEFERRED Postgres FKs, only at the atomic's COMMIT. Both land here and
-        # become a JSON 409 instead of an unhandled 500 to the fetch() caller, mirroring the
-        # bulk pass (_apply_relationship_edge).
-        source_iface = None
-        related_iface = None
-        relationship_changed = False
+        # failed statement or, for Django's INITIALLY DEFERRED Postgres FKs, at the runner's
+        # constraint check. Both roll the attempt back and become a JSON 409 instead of an
+        # unhandled 500 to the fetch() caller, mirroring the bulk pass (_apply_relationship_edge).
         try:
-            with transaction.atomic():
-                obj, locked_device_ids = _lock_relationship_scope(
-                    obj,
-                    self.restricted_queryset(type(obj)),
-                )
-                if obj is None:
-                    return JsonResponse(
-                        {"error": "The interface owner changed concurrently. Refresh and retry."},
-                        status=409,
-                    )
-                if error := self._migrated_donor_error(obj, server_key):
-                    return error
-
-                candidate_q = relationship_candidate_q(
-                    server_key,
-                    (source_port.get("port_id"), related_port.get("port_id")),
-                    (source_name, related_name),
-                )
-                catalog_index, source_index, related_index, changeable_ids = _build_locked_relationship_indexes(
-                    obj,
-                    server_key,
-                    locked_device_ids,
-                    _user_scope(obj, request.user, locked_device_ids),
-                    candidate_q=candidate_q,
-                )
-
-                _, err = resolve_interface_by_port_id(
-                    obj,
-                    port_id,
-                    server_key,
-                    name_hint=source_name,
-                    expected_owner=interface_owner_for_object(obj),
-                    index=catalog_index,
-                )
-                if err:
-                    return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
-                source_iface, err = resolve_interface_by_port_id(
-                    obj,
-                    port_id,
-                    server_key,
-                    name_hint=source_name,
-                    expected_owner=interface_owner_for_object(obj),
-                    index=source_index,
-                )
-                if err:
-                    return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
-
-                _, err = resolve_interface_by_port_id(
-                    obj,
-                    related_port_id,
-                    server_key,
-                    name_hint=related_name,
-                    index=catalog_index,
-                )
-                if err:
-                    return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
-                related_iface, err = resolve_interface_by_port_id(
-                    obj,
-                    related_port_id,
-                    server_key,
-                    name_hint=related_name,
-                    index=related_index,
-                )
-                if err:
-                    return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
-                decisions, blocked_end, reason = _relationship_decisions(
-                    interface_rules_for_request(request), (source_port, source_iface), (related_port, related_iface)
-                )
-                if reason is None and (conflict := self._promotion_conflict(source_iface, related_iface, decisions)):
-                    blocked_end, reason = conflict
-                if reason is not None:
-                    return JsonResponse(
-                        {
-                            "error": (
-                                f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}. "
-                                f"{blocked_end.name}: {reason}."
-                            )
-                        },
-                        status=409,
-                    )
-                if (
-                    self.relation_field == "lag"
-                    and related_iface.type != "lag"
-                    and related_iface.pk not in changeable_ids
-                ):
-                    return JsonResponse(
-                        {"error": "Aggregate interface cannot be changed to type LAG."},
-                        status=403,
-                    )
-
-                # Validate before persisting: a crafted POST with port_id == related_port_id
-                # resolves source == related, so clean() rejects the resulting
-                # self-relationship. The shared helper sets the FK, runs
-                # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
-                # saves with update_fields.
-                try:
-                    if (
-                        getattr(source_iface, f"{self.relation_field}_id") != related_iface.pk
-                        or self._related_needs_preparation(related_iface)
-                        or self._source_needs_preparation(source_iface)
-                    ):
-                        _apply_interface_relationship(
-                            source_iface,
-                            self.relation_field,
-                            related_iface,
-                            self._prepare_related,
-                            self._prepare_source,
-                        )
-                        relationship_changed = True
-                except ValidationError as exc:
-                    # Log the validation detail server-side and return a fixed message — don't echo
-                    # exception text to the client (CodeQL py/stack-trace-exposure). The
-                    # detail can include a self-link, incompatible types, or invalid chassis scope.
-                    logger.warning(
-                        "%s link validation failed (%s -> %s): %s",
-                        self.relation_label,
-                        source_iface.name,
-                        related_iface.name,
-                        validation_error_detail(exc),
-                    )
-                    return JsonResponse(
-                        {
-                            "error": (
-                                f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
-                                f"NetBox rejected the {self.relation_label} relationship. Check the interface "
-                                "types, chassis membership, and that the two interfaces are not the same interface."
-                            )
-                        },
-                        status=409,
-                    )
-                if relationship_changed:
-                    logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+            outcome = run_transaction(
+                lambda: self._link_attempt(request, obj, server_key, port_id, related_port_id, current_edge)
+            )
+        except _RowsOutsideScopeError as refused:
+            return JsonResponse({"error": str(refused)}, status=403)
         except IntegrityError as exc:
+            source_iface, related_iface = self._attempt_ends
             source_name = getattr(source_iface, "name", self.source_label.lower())
             related_name = getattr(related_iface, "name", self.related_label.lower())
             logger.warning(
@@ -2924,11 +2835,13 @@ class _BaseRelationshipSyncView(
                 },
                 status=409,
             )
+        if isinstance(outcome, JsonResponse):
+            return outcome
 
-        if relationship_changed:
+        if outcome.changed:
             schedule_request_cache_mutation(
                 request,
-                obj,
+                outcome.obj,
                 SyncTab.INTERFACES,
                 server_key,
                 source_fragment_required=True,
@@ -2936,10 +2849,174 @@ class _BaseRelationshipSyncView(
         response = JsonResponse(
             {
                 "status": "success",
-                "message": f"Linked {source_iface.name} to {self.relation_label} {related_iface.name}",
+                "message": f"Linked {outcome.source.name} to {self.relation_label} {outcome.related.name}",
             }
         )
         return apply_request_cache_transition(request, response)
+
+    def _link_attempt(self, request, obj, server_key, port_id, related_port_id, current_edge):
+        """
+        Run one attempt of the link transaction, and return its answer or the link that it wrote.
+
+        ``run_transaction`` calls this once for each attempt, and each attempt locks and reads its
+        rows again. The attempt reads its selection under the owner and row locks, before its first
+        write: the rows that it may change and the name of each row that the user may view. After
+        the last write, ``_RowSelection.check_writes`` refuses the whole attempt when a written row is
+        outside the user's change scope or the selection. The refusal rolls back every write and
+        the NetBox events of the writes.
+
+        Args:
+            request (HttpRequest): The POST request.
+            obj (Device | VirtualMachine): The owner that the request resolved through the view scope.
+            server_key (str): The validated POSTed server key.
+            port_id (str): The posted port ID of the source interface.
+            related_port_id (str): The posted port ID of the related interface.
+            current_edge (tuple): The cached edge rows and name hints from ``_get_current_edge``.
+
+        Returns:
+            JsonResponse | _RelationshipLink: The answer of an attempt that stopped before its
+                first write, or the link that the attempt made.
+
+        Raises:
+            _RowsOutsideScopeError: A written row is outside the user's change scope or the selection.
+
+        """
+        source_port, related_port, source_name, related_name, _interface_name_field = current_edge
+        # The ends of this attempt, for the text of a conflict that ends the transaction.
+        self._attempt_ends = (None, None)
+        obj, locked_device_ids = _lock_relationship_scope(
+            obj,
+            self.restricted_queryset(type(obj)),
+        )
+        if obj is None:
+            return JsonResponse(
+                {"error": "The interface owner changed concurrently. Refresh and retry."},
+                status=409,
+            )
+        if error := self._migrated_donor_error(obj, server_key):
+            return error
+
+        candidate_q = relationship_candidate_q(
+            server_key,
+            (source_port.get("port_id"), related_port.get("port_id")),
+            (source_name, related_name),
+        )
+        catalog_index, source_index, related_index, viewable_names, changeable_ids = _build_locked_relationship_indexes(
+            obj,
+            server_key,
+            locked_device_ids,
+            _user_scope(obj, request.user, locked_device_ids),
+            candidate_q=candidate_q,
+        )
+        selection = _relationship_selection(obj, locked_device_ids, viewable_names, changeable_ids)
+
+        _, err = resolve_interface_by_port_id(
+            obj,
+            port_id,
+            server_key,
+            name_hint=source_name,
+            expected_owner=interface_owner_for_object(obj),
+            index=catalog_index,
+        )
+        if err:
+            return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
+        source_iface, err = resolve_interface_by_port_id(
+            obj,
+            port_id,
+            server_key,
+            name_hint=source_name,
+            expected_owner=interface_owner_for_object(obj),
+            index=source_index,
+        )
+        if err:
+            return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
+
+        _, err = resolve_interface_by_port_id(
+            obj,
+            related_port_id,
+            server_key,
+            name_hint=related_name,
+            index=catalog_index,
+        )
+        if err:
+            return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
+        related_iface, err = resolve_interface_by_port_id(
+            obj,
+            related_port_id,
+            server_key,
+            name_hint=related_name,
+            index=related_index,
+        )
+        if err:
+            return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
+        self._attempt_ends = (source_iface, related_iface)
+        decisions, blocked_end, reason = _relationship_decisions(
+            interface_rules_for_request(request), (source_port, source_iface), (related_port, related_iface)
+        )
+        if reason is None and (conflict := self._promotion_conflict(source_iface, related_iface, decisions)):
+            blocked_end, reason = conflict
+        if reason is not None:
+            return JsonResponse(
+                {
+                    "error": (
+                        f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}. "
+                        f"{blocked_end.name}: {reason}."
+                    )
+                },
+                status=409,
+            )
+        if self.relation_field == "lag" and related_iface.type != "lag" and not selection.may_change(related_iface):
+            return JsonResponse(
+                {"error": "Aggregate interface cannot be changed to type LAG."},
+                status=403,
+            )
+
+        # Validate before persisting: a crafted POST with port_id == related_port_id
+        # resolves source == related, so clean() rejects the resulting
+        # self-relationship. The shared helper sets the FK, runs
+        # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
+        # saves with update_fields.
+        relationship_changed = False
+        with collect_interface_writes(request.user) as writes:
+            try:
+                if (
+                    getattr(source_iface, f"{self.relation_field}_id") != related_iface.pk
+                    or self._related_needs_preparation(related_iface)
+                    or self._source_needs_preparation(source_iface)
+                ):
+                    _apply_interface_relationship(
+                        source_iface,
+                        self.relation_field,
+                        related_iface,
+                        self._prepare_related,
+                        self._prepare_source,
+                    )
+                    relationship_changed = True
+            except ValidationError as exc:
+                # Log the validation detail server-side and return a fixed message — don't echo
+                # exception text to the client (CodeQL py/stack-trace-exposure). The
+                # detail can include a self-link, incompatible types, or invalid chassis scope.
+                logger.warning(
+                    "%s link validation failed (%s -> %s): %s",
+                    self.relation_label,
+                    source_iface.name,
+                    related_iface.name,
+                    validation_error_detail(exc),
+                )
+                return JsonResponse(
+                    {
+                        "error": (
+                            f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
+                            f"NetBox rejected the {self.relation_label} relationship. Check the interface "
+                            "types, chassis membership, and that the two interfaces are not the same interface."
+                        )
+                    },
+                    status=409,
+                )
+        selection.check_writes(writes)
+        if relationship_changed:
+            logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+        return _RelationshipLink(obj=obj, source=source_iface, related=related_iface, changed=relationship_changed)
 
 
 class SyncInterfaceLagView(_BaseRelationshipSyncView):

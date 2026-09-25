@@ -1,0 +1,186 @@
+"""
+The single-row LAG, parent and bridge endpoints save only when every row that they wrote is in the user's change scope.
+
+The tests post the inline endpoints with real constrained object permissions. The endpoint reads
+the rows that it may change and the rows that it may name before its first write. After the last
+write, each written row must be in the user's change scope and in that selection. A row outside
+refuses the whole link: nothing is saved, NetBox sends no event, and the refusal names only a row
+that the user may view.
+"""
+
+import pytest
+from core.models import ObjectChange
+from dcim.models import Device, Interface
+from django.urls import reverse
+from virtualization.models import VirtualMachine, VMInterface
+
+from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
+    make_device,
+    make_vm,
+    transactional_db_with_all_apps,
+)
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, seed_ports, sync_port
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.utils import set_librenms_device_id
+
+CACHE_TRANSITION_HEADER = "X-LibreNMS-Cache-Transition"
+
+
+@pytest.fixture(autouse=True)
+def _server(settings):
+    configure_default_librenms_server(settings)
+
+
+def _refused(rows):
+    """Return the JSON error of a refused link that names *rows*."""
+    return {
+        "error": f"Nothing was saved. These interfaces are outside the scope of your permissions after the sync: {rows}."
+    }
+
+
+def _bound(owner, name, port_id, **fields):
+    """Create an interface of *owner* that is bound to LibreNMS port *port_id*."""
+    if isinstance(owner, Device):
+        interface = Interface(device=owner, name=name, type=fields.pop("type", "other"), **fields)
+    else:
+        interface = VMInterface(virtual_machine=owner, name=name, **fields)
+    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    interface.save()
+    return interface
+
+
+def _user(username, owner_model, interface_model, *, view=None, change=None):
+    """Return a user who may view the owner, with the given view and change scopes of the interfaces."""
+    user = make_user_with_perms(username, [("view", owner_model)])
+    user = grant(user, "view", interface_model, constraints=view)
+    return grant(user, "change", interface_model, constraints=change)
+
+
+def _link(client, owner, relation, port_id, related_port_id):
+    """POST one single-row relationship sync, the way the inline button of the row does."""
+    object_type = "device" if isinstance(owner, Device) else "virtualmachine"
+    return client.post(
+        reverse(
+            f"plugins:netbox_librenms_plugin:sync_interface_{relation}",
+            kwargs={"object_type": object_type, "object_id": owner.pk},
+        ),
+        {"port_id": str(port_id), f"{relation}_port_id": str(related_port_id), "server_key": SERVER_KEY},
+    )
+
+
+def _lag_scenario(tag):
+    """A member ``eth1`` (port 1) and an aggregate ``Po1`` (port 100) of type ``other``, which the link promotes."""
+    device = make_device(tag)
+    member = _bound(device, "eth1", 1)
+    aggregate = _bound(device, "Po1", 100)
+    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], lag_members={1: 100})
+    return device, member, aggregate
+
+
+def _interface_change_records():
+    return ObjectChange.objects.filter(changed_object_type__model__in=("interface", "vminterface"))
+
+
+def _assert_nothing_saved(response, flushed_events, error, *rows):
+    """Assert the 403 refusal *error*, and that no write of the link stayed: no row, no change record, no event."""
+    assert response.status_code == 403
+    assert response.json() == error
+    for row, before in rows:
+        row.refresh_from_db()
+        assert {field: getattr(row, field) for field in before} == before
+    assert not _interface_change_records().exists()
+    assert flushed_events == []
+    assert CACHE_TRANSITION_HEADER not in response
+
+
+@transactional_db_with_all_apps()
+def test_a_lag_link_that_moves_the_member_out_of_the_change_scope_saves_nothing(client, flushed_events):
+    """The aggregate stays in the scope; the member leaves it with its LAG, so the aggregate promotion rolls back too."""
+    device, member, aggregate = _lag_scenario("relationship-scope-lag-member")
+    client.force_login(_user("relationship-scope-lag-member-user", Device, Interface, change={"lag__isnull": True}))
+
+    response = _link(client, device, "lag", 1, 100)
+
+    _assert_nothing_saved(
+        response, flushed_events, _refused("eth1 (change)"), (member, {"lag_id": None}), (aggregate, {"type": "other"})
+    )
+
+
+@transactional_db_with_all_apps()
+def test_a_lag_link_whose_promotion_moves_the_aggregate_out_of_the_change_scope_saves_nothing(client, flushed_events):
+    device, member, aggregate = _lag_scenario("relationship-scope-lag-aggregate")
+    client.force_login(_user("relationship-scope-lag-aggregate-user", Device, Interface, change={"type": "other"}))
+
+    response = _link(client, device, "lag", 1, 100)
+
+    _assert_nothing_saved(
+        response, flushed_events, _refused("Po1 (change)"), (member, {"lag_id": None}), (aggregate, {"type": "other"})
+    )
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("relation", ["parent", "bridge"])
+@pytest.mark.parametrize(
+    "owner_model, interface_model", [(Device, Interface), (VirtualMachine, VMInterface)], ids=["device", "vm"]
+)
+def test_a_parent_or_bridge_link_that_moves_the_source_out_of_the_change_scope_saves_nothing(
+    client, flushed_events, relation, owner_model, interface_model
+):
+    tag = f"relationship-scope-{relation}-{owner_model._meta.model_name}"
+    owner = make_device(tag) if owner_model is Device else make_vm(tag)
+    related_fields = {"type": "bridge"} if relation == "bridge" and owner_model is Device else {}
+    source = _bound(owner, "eth1.100", 11)
+    related = _bound(owner, "eth1", 10, **related_fields)
+    edges = {"sub_interfaces": {11: 10}} if relation == "parent" else {"bridge_members": {11: 10}}
+    seed_ports(owner, [sync_port(11, "eth1.100"), sync_port(10, "eth1")], **edges)
+    client.force_login(_user(f"{tag}-user", owner_model, interface_model, change={f"{relation}__isnull": True}))
+
+    response = _link(client, owner, relation, 11, 10)
+
+    source_before = {f"{relation}_id": None}
+    if owner_model is Device and relation == "parent":
+        source_before["type"] = "other"
+    _assert_nothing_saved(response, flushed_events, _refused("eth1.100 (change)"), (source, source_before))
+    assert related.pk not in {pk for _model, pk in flushed_events}
+
+
+@transactional_db_with_all_apps()
+def test_a_refusal_names_only_the_rows_that_the_user_may_view(client, flushed_events):
+    """The user may view only the aggregate, so the refusal counts the member and never names it."""
+    device, member, aggregate = _lag_scenario("relationship-scope-hidden")
+    client.force_login(
+        _user(
+            "relationship-scope-hidden-user",
+            Device,
+            Interface,
+            view={"name__startswith": "Po"},
+            change={"lag__isnull": True, "type": "other"},
+        )
+    )
+
+    response = _link(client, device, "lag", 1, 100)
+
+    _assert_nothing_saved(
+        response,
+        flushed_events,
+        _refused("Po1 (change) and 1 interface you cannot view"),
+        (member, {"lag_id": None}),
+        (aggregate, {"type": "other"}),
+    )
+    assert "eth1" not in response.json()["error"]
+
+
+@transactional_db_with_all_apps()
+def test_a_link_that_keeps_every_written_row_in_the_change_scope_is_saved(client, flushed_events):
+    device, member, aggregate = _lag_scenario("relationship-scope-kept")
+    client.force_login(_user("relationship-scope-kept-user", Device, Interface, change={"enabled": True}))
+
+    response = _link(client, device, "lag", 1, 100)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "success", "message": "Linked eth1 to LAG Po1"}
+    member.refresh_from_db()
+    aggregate.refresh_from_db()
+    assert (member.lag_id, aggregate.type) == (aggregate.pk, "lag")
+    assert sorted(flushed_events) == sorted([("interface", member.pk), ("interface", aggregate.pk)])

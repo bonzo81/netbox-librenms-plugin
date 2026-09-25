@@ -18,7 +18,6 @@ from core.models import ObjectChange
 from dcim.models import Device, Interface, MACAddress
 from django.urls import reverse
 from ipam.models import VLAN, IPAddress, VLANGroup
-from netbox import context_managers
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -69,20 +68,6 @@ def attempts(monkeypatch):
 
     monkeypatch.setattr(SyncInterfacesView, "_sync_attempt", counting_attempt)
     return calls
-
-
-@pytest.fixture
-def flushed_events(monkeypatch):
-    """Record the object of each event that NetBox sends at the end of a request; NetBox still sends it."""
-    real_flush = context_managers.flush_events
-    flushed = []
-
-    def recording_flush(events):
-        flushed.extend((event["object_type"].model, event["object_id"]) for event in events)
-        return real_flush(events)
-
-    monkeypatch.setattr(context_managers, "flush_events", recording_flush)
-    return flushed
 
 
 def _refused(rows):
