@@ -61,40 +61,49 @@ def synced_interface(device, name, port_id, **fields):
     return interface
 
 
-def select_attempt_rows(view, owner):
-    """Give *view* the row selection that a sync attempt reads under its owner locks, for a test that runs one pass alone."""
-    from dcim.models import Interface
-    from virtualization.models import VirtualMachine, VMInterface
+def _object_type(owner):
+    """Return the URL object type of *owner*, a Device or a VirtualMachine."""
+    from virtualization.models import VirtualMachine
 
-    if isinstance(owner, VirtualMachine):
-        view._selection = view._select_rows(VMInterface, {owner.pk})
-    elif owner.virtual_chassis_id is not None:
-        view._selection = view._select_rows(Interface, set(owner.virtual_chassis.members.values_list("pk", flat=True)))
-    else:
-        view._selection = view._select_rows(Interface, {owner.pk})
+    return "virtualmachine" if isinstance(owner, VirtualMachine) else "device"
 
 
-def sync_page(device):
-    """Return the absolute URL of the interfaces tab of *device*."""
-    return "http://testserver" + reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk}) + "?tab=interfaces"
+def sync_page(owner):
+    """Return the absolute URL of the interfaces tab of *owner*."""
+    url_name = (
+        "dcim:device_librenms_sync"
+        if _object_type(owner) == "device"
+        else "plugins:netbox_librenms_plugin:vm_librenms_sync"
+    )
+    return "http://testserver" + reverse(url_name, kwargs={"pk": owner.pk}) + "?tab=interfaces"
 
 
-def post_interface_sync(client, device, port_ids, *, htmx, exclude_columns=("vlans", "mac_address")):
-    """Post the interface sync form of *device* for *port_ids*."""
+def post_interface_sync(
+    client,
+    owner,
+    port_ids,
+    *,
+    htmx,
+    exclude_columns=("vlans", "mac_address"),
+    interface_name_field="ifName",
+    extra=None,
+):
+    """Post the interface sync form of *owner* for *port_ids*; *extra* adds form fields such as a row's target device."""
     url = (
         reverse(
             "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-            kwargs={"object_type": "device", "object_id": device.pk},
+            kwargs={"object_type": _object_type(owner), "object_id": owner.pk},
         )
-        + "?interface_name_field=ifName"
+        + f"?interface_name_field={interface_name_field}"
     )
-    headers = {"HTTP_REFERER": sync_page(device)}
+    headers = {"HTTP_REFERER": sync_page(owner)}
     if htmx:
         headers["HTTP_HX_REQUEST"] = "true"
     data = {
         "server_key": SERVER_KEY,
         "select": [str(port_id) for port_id in port_ids],
         "exclude_columns": list(exclude_columns),
+        **(extra or {}),
     }
     return client.post(url, data, **headers)
 

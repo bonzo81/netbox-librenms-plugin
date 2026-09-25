@@ -20,7 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -131,10 +131,14 @@ def _sync_view(request=None):
     return view
 
 
-def _selection_of(view, owner):
-    """Return the row selection that a sync attempt reads for *owner*."""
-    select_attempt_rows(view, owner)
-    return view._selection
+def _post_sync(client, settings, owner, ports, port_ids, *, user=None, relationships=None, **post_kwargs):
+    """Seed *ports* for *owner* and post its interface sync through the real URL, as *user* or a superuser."""
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+
+    configure_default_librenms_server(settings)
+    client.force_login(user or make_superuser(f"{owner.name}-user"))
+    seed_ports(owner, ports, **(relationships or {}))
+    return post_interface_sync(client, owner, port_ids, htmx=False, **post_kwargs)
 
 
 def _cache_relationship(view, obj, relation_field, source_id, related_id, source_name="", related_name=""):
@@ -2362,12 +2366,11 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         assert set(view._lookup_maps_by_owner) == {target_device.pk}
 
-    def test_auto_selected_owner_materializes_only_port_id_candidates(self):
+    def test_auto_selected_owner_materializes_only_port_id_candidates(self, client, settings, monkeypatch):
         """One inferred row must not hydrate every Interface in a large chassis."""
         from dcim.models import Interface
         from django.db.models.signals import post_init
 
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
         from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -2377,69 +2380,65 @@ class TestSyncInterfacesViewPost:
         target.save()
         for index in range(40):
             make_interface(page_device, f"unrelated-{index}")
-        request = _make_request(user=make_superuser("auto-owner-candidate-scope"))
-        view = SyncInterfacesView()
-        view.setup(request)
         materialized_interface_ids = []
+        inferred = []
+        real_inference = SyncInterfacesView._infer_snapshot_target_ids
 
         def capture_interface(instance, **_kwargs):
             materialized_interface_ids.append(instance.pk)
 
-        post_init.connect(capture_interface, sender=Interface, weak=False)
-        try:
-            targets = view._infer_snapshot_target_ids(
-                page_device,
-                [{"port_id": 10, "ifName": "Ethernet2", "ifType": "ethernetCsmacd"}],
-                {10},
-                "ifName",
-                "default",
-                selection=_selection_of(view, page_device),
-                members=[page_device, target_device],
-            )
-        finally:
-            post_init.disconnect(capture_interface, sender=Interface)
+        def observed_inference(self, *args, **kwargs):
+            # The real attempt calls the inference with its own selection; this only records what it reads.
+            post_init.connect(capture_interface, sender=Interface, weak=False)
+            try:
+                inferred.append(real_inference(self, *args, **kwargs))
+            finally:
+                post_init.disconnect(capture_interface, sender=Interface)
+            return inferred[-1]
 
-        assert targets == {10: target_device.pk}
+        monkeypatch.setattr(SyncInterfacesView, "_infer_snapshot_target_ids", observed_inference)
+        port = {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet2", "ifType": "ethernetCsmacd"}
+        _post_sync(client, settings, page_device, [port], [10])
+
+        assert inferred == [{10: target_device.pk}]
         assert len(materialized_interface_ids) <= 5
 
-    def test_auto_selected_owner_batches_large_candidate_lookup(self):
+    def test_auto_selected_owner_batches_large_candidate_lookup(self, client, settings, monkeypatch):
         """Many inferred rows must not produce one unbounded stable-ID query."""
         from django.db import connection
 
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, target_device) = make_virtual_chassis_members("auto-owner-batched-lookup")
         port_ids = set(range(1, 301))
         ports = [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": port_id,
                 "ifName": f"Ethernet2/{port_id}",
                 "ifType": "ethernetCsmacd",
             }
             for port_id in port_ids
         ]
-        request = _make_request(user=make_superuser("auto-owner-batched-lookup"))
-        view = SyncInterfacesView()
-        view.setup(request)
         parameter_counts = []
+        inferred = []
+        real_inference = SyncInterfacesView._infer_snapshot_target_ids
 
         def capture_parameters(execute, sql, params, many, context):
             parameter_counts.append(len(params or ()))
             return execute(sql, params, many, context)
 
-        with connection.execute_wrapper(capture_parameters):
-            targets = view._infer_snapshot_target_ids(
-                page_device,
-                ports,
-                port_ids,
-                "ifName",
-                "default",
-                selection=_selection_of(view, page_device),
-                members=[page_device, target_device],
-            )
+        def observed_inference(self, *args, **kwargs):
+            # The real attempt calls the inference with its own selection; this only records its SQL.
+            with connection.execute_wrapper(capture_parameters):
+                inferred.append(real_inference(self, *args, **kwargs))
+            return inferred[-1]
 
-        assert targets == {port_id: target_device.pk for port_id in port_ids}
+        monkeypatch.setattr(SyncInterfacesView, "_infer_snapshot_target_ids", observed_inference)
+        # One selected row: the inference still reads every row of the snapshot.
+        _post_sync(client, settings, page_device, ports, [1])
+
+        assert inferred == [{port_id: target_device.pk for port_id in port_ids}]
         assert max(parameter_counts) < 2_000
 
     def test_excluding_type_does_not_promote_or_link_a_non_lag_aggregate(self):
@@ -4530,11 +4529,10 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         iface = Interface.objects.get(device=dev, name="iDRAC-NIC")
         assert iface.description == "BMC dedicated"
 
-    def test_device_interface_created(self):
-        """End-to-end: sync_interface creates a real Interface on a real Device and persists the synced attributes (the real get_or_create + update_interface_attributes + save run)."""
+    def test_device_interface_created(self, client, settings):
+        """End-to-end: the sync POST creates a real Interface on a real Device and persists the synced attributes."""
         from dcim.models import Interface
 
-        view = self._make_view()
         dev = make_device("sync-create")
         librenms_port = {
             **_PORT_KEYS_UNSET,
@@ -4543,14 +4541,14 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifSpeed": 1000000000,
             "ifAlias": "uplink",
             "ifMtu": 1500,
-            "port_id": None,
+            "port_id": 1,
             "ifAdminStatus": "up",
         }
 
-        # exclude "vlans" so the (separately tested) VLAN sub-sync isn't exercised here.
-        select_attempt_rows(view, dev)
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
+        # The post excludes "vlans", so the (separately tested) VLAN sub-sync does not run here.
+        response = _post_sync(client, settings, dev, [librenms_port], [1])
 
+        assert message_texts(response.wsgi_request, "success") == ["Selected interfaces synced successfully."]
         iface = Interface.objects.get(device=dev, name="Gi0/1")
         assert iface.speed == 1000000
         assert iface.description == "uplink"
@@ -4572,13 +4570,11 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert not Interface.objects.filter(device=dev).exists()
 
     @pytest.mark.django_db
-    def test_foreign_port_id_refuses_local_same_named_interface(self):
+    def test_foreign_port_id_refuses_local_same_named_interface(self, client, settings):
         """A foreign port binding prevents every local field change, even when names match."""
         from dcim.models import Interface
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        view = self._make_view()
 
         # The device the user is syncing — it legitimately owns its own Gi0/1.
         dev = make_device("sync-fallback-own")
@@ -4601,25 +4597,24 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifAdminStatus": "up",
         }
 
-        select_attempt_rows(view, dev)
         before_local = Interface.objects.filter(pk=own_iface.pk).values().get()
         before_holder = Interface.objects.filter(pk=other_iface.pk).values().get()
-        view._skipped_conflicts = []
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
-        assert view._skipped_conflicts == ["Gi0/1 (LibreNMS port ID is already assigned to another NetBox interface)"]
+        response = _post_sync(client, settings, dev, [librenms_port], [77])
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: Gi0/1 (LibreNMS port ID is already assigned to another NetBox interface)."
+        ]
 
         assert Interface.objects.filter(pk=own_iface.pk).values().get() == before_local
         assert Interface.objects.filter(pk=other_iface.pk).values().get() == before_holder
 
-    def test_device_selection_with_vc_valid(self):
+    def test_device_selection_with_vc_valid(self, client, settings):
         """A posted sibling of the same chassis receives the interface."""
         from dcim.models import Interface
 
         _vc, (host, sibling) = make_virtual_chassis_members("selvalid")
-        view = self._make_view(_make_request(post_data={"device_selection_10": str(sibling.pk)}))
+        port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
 
-        select_attempt_rows(view, host)
-        view.sync_interface(host, {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}, ["vlans"], "ifName", "Gi0/1")
+        _post_sync(client, settings, host, [port], [10], extra={"device_selection_10": str(sibling.pk)})
 
         assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=host, name="Gi0/1").exists()
@@ -4675,13 +4670,11 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert view._skipped_conflicts == ["Gi0/1 (selected target unavailable)"]
 
     @pytest.mark.django_db
-    def test_device_port_id_prefers_existing_librenms_id_match(self):
+    def test_device_port_id_prefers_existing_librenms_id_match(self, client, settings):
         """A port_id stored on this device's own interface updates that interface directly, no duplicate."""
         from dcim.models import Interface
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        view = self._make_view()
 
         dev = make_device("sync-prefers-own")
         iface = make_interface(dev, "Gi0/1")
@@ -4699,8 +4692,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifAdminStatus": "up",
         }
 
-        select_attempt_rows(view, dev)
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
+        _post_sync(client, settings, dev, [librenms_port], [42])
 
         iface.refresh_from_db()
         assert iface.mtu == 1400
@@ -4709,14 +4701,11 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert Interface.objects.filter(device=dev, name="Gi0/1").count() == 1
 
     @pytest.mark.django_db
-    def test_device_port_id_conflict_without_local_name_match_refuses(self):
-        """A port_id owned by another device with no same-named local interface is skipped, not created."""
+    def test_device_port_id_conflict_without_local_name_match_refuses(self, client, settings):
+        """A foreign port binding refuses creation when no local interface exists."""
         from dcim.models import Interface
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        view = self._make_view()
-        view._skipped_conflicts = []
 
         dev = make_device("sync-conflict-nolocal")  # deliberately has NO Gi0/1
         other = make_device("sync-conflict-other")
@@ -4733,27 +4722,24 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "port_id": 77,
             "ifAdminStatus": "up",
         }
-        select_attempt_rows(view, dev)
-        view._skipped_conflicts = []
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
-        assert view._skipped_conflicts == ["Gi0/1 (LibreNMS port ID is already assigned to another NetBox interface)"]
+        response = _post_sync(client, settings, dev, [librenms_port], [77])
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: Gi0/1 (LibreNMS port ID is already assigned to another NetBox interface)."
+        ]
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
 
 
 class TestSyncInterfacesViewSyncInterfaceVM:
-    def test_vm_interface_created(self):
+    def test_vm_interface_created(self, client, settings):
         from virtualization.models import VMInterface
 
         vm = make_vm("vmsync-created")
-        view = _sync_view()
-        view._lookup_maps = {}
 
-        select_attempt_rows(view, vm)
-        view.sync_interface(vm, {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": None}, ["vlans"], "ifName", "eth0")
+        _post_sync(client, settings, vm, [{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 1}], [1])
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
 
-    def test_vm_port_id_prefers_existing_librenms_id_match(self):
+    def test_vm_port_id_prefers_existing_librenms_id_match(self, client, settings):
         """A port_id already stored on this VM's interface updates it; no second interface."""
         from virtualization.models import VMInterface
 
@@ -4761,12 +4747,9 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         matched = VMInterface.objects.create(virtual_machine=vm, name="eth0")
         matched.custom_field_data["librenms_id"] = {"default": 55}
         matched.save()
-        view = _sync_view()
-        view._lookup_maps = {}
         librenms_port = {**_PORT_KEYS_UNSET, "ifName": "renamed-in-librenms", "port_id": 55}
 
-        select_attempt_rows(view, vm)
-        view.sync_interface(vm, librenms_port, ["vlans"], "ifName", "renamed-in-librenms")
+        _post_sync(client, settings, vm, [librenms_port], [55])
 
         assert VMInterface.objects.filter(virtual_machine=vm).count() == 1
         matched.refresh_from_db()
@@ -5053,9 +5036,9 @@ class TestSyncLagAndParentRelationships:
         iface.save()
         return iface
 
-    def _sync_vm_sub_interface(self, name_limit=None):
+    def _sync_vm_sub_interface(self, client, settings, name_limit=None):
         """
-        Run the relationship pass for one VM sub-interface, optionally shrinking the
+        Post the sync of one VM sub-interface, optionally shrinking the
         VMInterface name limit. Interface and VMInterface both allow 64 in NetBox 4.7, so the
         gate reading the wrong model is only observable once the two differ.
         """
@@ -5072,32 +5055,30 @@ class TestSyncLagAndParentRelationships:
             {**_PORT_KEYS_UNSET, "ifName": "eth0", "ifDescr": "eth0", "port_id": 10},
             {**_PORT_KEYS_UNSET, "ifName": "eth0.100", "ifDescr": "eth0.100", "port_id": 11},
         ]
-        relationships = {"lag_members": {}, "sub_interfaces": {11: 10}}
-        view = self._make_view(selected_port_ids={11})
-        select_attempt_rows(view, vm)
+        relationships = {"sub_interfaces": {11: 10}}
 
         if name_limit is None:
-            view._sync_interface_relationships(vm, ports_data, relationships, "default")
+            _post_sync(client, settings, vm, ports_data, [11], relationships=relationships)
         else:
             with patch.object(VMInterface._meta.get_field("name"), "max_length", name_limit):
-                view._sync_interface_relationships(vm, ports_data, relationships, "default")
+                _post_sync(client, settings, vm, ports_data, [11], relationships=relationships)
 
         child.refresh_from_db()
         return child, parent
 
-    def test_the_relationship_gate_bounds_a_vm_name_by_vminterface(self, db):
+    def test_the_relationship_gate_bounds_a_vm_name_by_vminterface(self, client, settings):
         """The writer refuses a name over VMInterface's limit, so the gate must refuse it too."""
-        child, _ = self._sync_vm_sub_interface(name_limit=5)
+        child, _ = self._sync_vm_sub_interface(client, settings, name_limit=5)
 
         assert child.parent_id is None, "a name the VMInterface writer refuses must not gain a parent"
 
-    def test_the_relationship_gate_still_links_a_vm_name_that_fits(self, db):
+    def test_the_relationship_gate_still_links_a_vm_name_that_fits(self, client, settings):
         """The model-aware gate must not stop linking ordinary VM sub-interfaces."""
-        child, parent = self._sync_vm_sub_interface()
+        child, parent = self._sync_vm_sub_interface(client, settings)
 
         assert child.parent_id == parent.pk
 
-    def test_duplicate_display_name_links_only_selected_port(self, db):
+    def test_duplicate_display_name_links_only_selected_port(self, client, settings):
         """Selecting one stable port ID must not link another port with the same ifDescr."""
         device = self._make_device()
         m1 = self._iface(device, "Gi0/1", 10)
@@ -5109,34 +5090,36 @@ class TestSyncLagAndParentRelationships:
             {**_PORT_KEYS_UNSET, "ifDescr": "Ethernet", "ifName": "Gi0/2", "port_id": 11},
             {**_PORT_KEYS_UNSET, "ifDescr": "Po1", "ifName": "Po1", "port_id": 100},
         ]
-        relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
+        relationships = {"lag_members": {10: 100, 11: 100}}
 
-        view = self._make_view(name_field="ifDescr", selected_port_ids={10})
-        select_attempt_rows(view, device)
-        view._sync_interface_relationships(device, ports_data, relationships, "default")
+        _post_sync(
+            client, settings, device, ports_data, [10], relationships=relationships, interface_name_field="ifDescr"
+        )
 
         m1.refresh_from_db()
         m2.refresh_from_db()
         assert m1.lag_id == agg.pk
         assert m2.lag_id is None
 
-    def test_large_bulk_relationship_set_avoids_unbounded_candidate_predicates(self):
+    def test_large_bulk_relationship_set_avoids_unbounded_candidate_predicates(self, client, settings, monkeypatch):
         """A large selection must bound SQL without locking unrelated interfaces."""
         from django.db import connection
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = self._make_device()
         unrelated = make_interface(device, "unrelated")
         source_ids = range(1, 301)
-        ports_data = [{"ifName": f"Ethernet{port_id}", "port_id": port_id} for port_id in source_ids] + [
-            {"ifName": f"Port-Channel{port_id}", "port_id": 10_000 + port_id} for port_id in source_ids
+        ports_data = [
+            {**_PORT_KEYS_UNSET, "ifName": f"Ethernet{port_id}", "port_id": port_id} for port_id in source_ids
+        ] + [
+            {**_PORT_KEYS_UNSET, "ifName": f"Port-Channel{port_id}", "port_id": 10_000 + port_id}
+            for port_id in source_ids
         ]
-        relationships = {
-            "lag_members": {port_id: 10_000 + port_id for port_id in source_ids},
-            "sub_interfaces": {},
-        }
-        view = self._make_view(selected_port_ids=source_ids)
+        relationships = {"lag_members": {port_id: 10_000 + port_id for port_id in source_ids}}
         parameter_counts = []
         locked_interface_parameters = []
+        real_pass = SyncInterfacesView._sync_interface_relationships
 
         def capture_parameters(execute, sql, params, many, context):
             parameter_counts.append(len(params or ()))
@@ -5144,14 +5127,19 @@ class TestSyncLagAndParentRelationships:
                 locked_interface_parameters.extend(params or ())
             return execute(sql, params, many, context)
 
-        with connection.execute_wrapper(capture_parameters):
-            select_attempt_rows(view, device)
-            view._sync_interface_relationships(device, ports_data, relationships, "default")
+        def observed_pass(self, *args, **kwargs):
+            # The real attempt calls the pass with its own selection; this only records the SQL of the pass.
+            with connection.execute_wrapper(capture_parameters):
+                return real_pass(self, *args, **kwargs)
 
+        monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", observed_pass)
+        _post_sync(client, settings, device, ports_data, source_ids, relationships=relationships)
+
+        assert parameter_counts, "the attempt did not run the relationship pass"
         assert max(parameter_counts) < 2_000
         assert unrelated.pk not in locked_interface_parameters
 
-    def test_member_selected_only_by_stable_id_is_linked(self, db):
+    def test_member_selected_only_by_stable_id_is_linked(self, client, settings):
         """A selected stable port ID is processed by the relationship sync."""
         device = self._make_device()
         member = self._iface(device, "Gi0/2", 11)
@@ -5161,16 +5149,14 @@ class TestSyncLagAndParentRelationships:
             {**_PORT_KEYS_UNSET, "ifName": "Gi0/2", "port_id": 11},
             {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100},
         ]
-        relationships = {"lag_members": {11: 100}, "sub_interfaces": {}}
+        relationships = {"lag_members": {11: 100}}
 
-        view = self._make_view(name_field="ifName", selected_port_ids={"11"})
-        select_attempt_rows(view, device)
-        view._sync_interface_relationships(device, ports_data, relationships, "default")
+        _post_sync(client, settings, device, ports_data, ["11"], relationships=relationships)
 
         member.refresh_from_db()
         assert member.lag_id == agg.pk
 
-    def test_stable_ids_are_canonicalized_before_relationship_lookup(self, db):
+    def test_stable_ids_are_canonicalized_before_relationship_lookup(self, client, settings):
         """Equivalent string and integer port IDs must resolve to one canonical key."""
         device = self._make_device()
         member = self._iface(device, "Gi0/3", 12)
@@ -5179,18 +5165,16 @@ class TestSyncLagAndParentRelationships:
             {**_PORT_KEYS_UNSET, "ifName": "Gi0/3", "port_id": "0012"},
             {**_PORT_KEYS_UNSET, "ifName": "Po2", "port_id": 101},
         ]
-        relationships = {"lag_members": {12: 101}, "sub_interfaces": {}}
+        relationships = {"lag_members": {12: 101}}
 
-        view = self._make_view(selected_port_ids={"12"})
-        select_attempt_rows(view, device)
-        view._sync_interface_relationships(device, ports_data, relationships, "default")
+        _post_sync(client, settings, device, ports_data, ["12"], relationships=relationships)
 
         member.refresh_from_db()
         assert member.lag_id == agg.pk
 
-    def test_bulk_relationship_sync_excludes_interfaces_outside_the_change_grant(self, db):
+    def test_bulk_relationship_sync_excludes_interfaces_outside_the_change_grant(self, client, settings):
         """A constrained change grant must scope the shared bulk relationship index."""
-        from dcim.models import Interface
+        from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
@@ -5198,23 +5182,22 @@ class TestSyncLagAndParentRelationships:
         self._iface(device, "allowed", 20)
         hidden_member = self._iface(device, "Gi0/4", 21)
         hidden_agg = self._iface(device, "Po3", 102)
-        user = make_user_with_perms("bulk-rel-scope", [])
+        user = make_user_with_perms("bulk-rel-scope", [("view", Device), ("view", Interface), ("add", Interface)])
         user = grant(user, "change", Interface, constraints={"name": "allowed"})
         ports_data = [
-            {"ifName": "Gi0/4", "port_id": 21},
-            {"ifName": "Po3", "port_id": 102},
+            {**_PORT_KEYS_UNSET, "ifName": "Gi0/4", "port_id": 21},
+            {**_PORT_KEYS_UNSET, "ifName": "Po3", "port_id": 102},
         ]
-        relationships = {"lag_members": {21: 102}, "sub_interfaces": {}}
+        relationships = {"lag_members": {21: 102}}
 
-        view = self._make_view(selected_port_ids={"21"})
-        view.request = make_request("post", {}, user=user)
-        select_attempt_rows(view, device)
-        view._sync_interface_relationships(device, ports_data, relationships, "default")
+        response = _post_sync(client, settings, device, ports_data, ["21"], user=user, relationships=relationships)
 
         hidden_member.refresh_from_db()
         hidden_agg.refresh_from_db()
         assert hidden_member.lag_id is None
         assert hidden_agg.type == "1000base-t"
+        # The pass left the rows out, so the final write check found nothing to refuse.
+        assert message_texts(response.wsgi_request, "error") == []
 
     def test_non_dict_relationships_fails_soft_not_attributeerror(self, db):
         """A truthy non-dict relationship cache value fails soft instead of raising AttributeError."""
@@ -5229,7 +5212,7 @@ class TestSyncLagAndParentRelationships:
         member.refresh_from_db()
         assert member.lag_id is None  # nothing persisted from the corrupt map
 
-    def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self, db):
+    def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self, client, settings):
         """A relationship that fails Interface.full_clean() (a self-LAG from stale/crafted port_stack data) must be skipped, not persisted."""
         device = self._make_device()
         member = self._iface(device, "Gi0/2", 11)
@@ -5237,21 +5220,19 @@ class TestSyncLagAndParentRelationships:
         ports_data = [{"ifName": "Gi0/2", "port_id": 11}]
         # Self-LAG: the member's aggregate resolves back to itself (port_id 11 → 11), which
         # Interface.full_clean() rejects.
-        relationships = {"lag_members": {11: 11}, "sub_interfaces": {}}
+        relationships = {"lag_members": {11: 11}}
 
-        view = self._make_view(name_field="ifName", selected_port_ids={"11"})
-        select_attempt_rows(view, device)
-        view._sync_interface_relationships(device, ports_data, relationships, "default")
+        _post_sync(client, settings, device, ports_data, ["11"], relationships=relationships)
 
         member.refresh_from_db()
         assert member.lag_id is None  # invalid self-LAG was not persisted
 
-    def test_agg_type_restored_when_a_sharing_member_fails_validation(self, db):
+    def test_agg_type_restored_when_a_sharing_member_fails_validation(self, client, settings):
         """A member whose LAG link fails full_clean must not leave the shared agg_iface.type='lag' dirty: a later valid member sharing that aggregate must still persist it as a LAG in the DB."""
         device = self._make_device()
         # A virtual interface cannot be assigned to a LAG, so its link fails full_clean — but only
         # after agg.type was set to 'lag' in memory on the shared index object.
-        self._iface(device, "virt0", 10, itype="virtual")
+        member1 = self._iface(device, "virt0", 10, itype="virtual")
         member2 = self._iface(device, "Gi0/2", 11)
         agg = self._iface(device, "Po1", 100, itype="1000base-t")  # not yet a LAG
 
@@ -5260,14 +5241,14 @@ class TestSyncLagAndParentRelationships:
             {**_PORT_KEYS_UNSET, "ifName": "Gi0/2", "port_id": 11},
             {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100},
         ]
-        relationships = {"lag_members": {10: 100, 11: 100}, "sub_interfaces": {}}
+        relationships = {"lag_members": {10: 100, 11: 100}}
 
-        view = self._make_view(name_field="ifName", selected_port_ids={"10", "11"})
-        select_attempt_rows(view, device)
-        view._sync_interface_relationships(device, ports_data, relationships, "default")
+        _post_sync(client, settings, device, ports_data, ["10", "11"], relationships=relationships)
 
+        member1.refresh_from_db()
         member2.refresh_from_db()
         agg.refresh_from_db()
+        assert (member1.type, member1.lag_id) == ("virtual", None), "precondition: the first member must fail"
         # Invariant: if the valid member was linked, the aggregate MUST be persisted as a LAG.
         assert member2.lag_id == agg.pk
         assert agg.type == "lag"

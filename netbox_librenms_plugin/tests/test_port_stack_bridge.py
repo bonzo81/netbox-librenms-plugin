@@ -4,13 +4,14 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
+    configure_default_librenms_server,
     make_device,
     make_interface,
     stamp_rule_decision,
     typed_maps,
 )
-from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
 from netbox_librenms_plugin.utils import _get_netbox_version_tuple, normalize_relationship_maps
 
 
@@ -692,11 +693,12 @@ def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monke
     assert child.lag_id is None
 
 
-def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface():
+def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface(client, settings):
     """Keep bridge membership independent from the child interface's parent edge."""
     from netbox_librenms_plugin.utils import set_librenms_device_id
-    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser("bulk-parent-bridge-sync-user"))
     device = make_device("bulk-parent-bridge-sync")
     child = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0", iface_type="lag")
@@ -709,22 +711,9 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface():
         {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
         {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
     ]
-    view = object.__new__(SyncInterfacesView)
-    view.interface_name_field = "ifName"
-    view.request = make_request("post")
-    view._selected_port_ids = {102}
-    select_attempt_rows(view, device)
+    seed_ports(device, ports, sub_interfaces={102: 101}, bridge_members={102: 100})
 
-    view._sync_interface_relationships(
-        device,
-        ports,
-        {
-            "lag_members": {},
-            "sub_interfaces": {102: 101},
-            "bridge_members": {102: 100},
-        },
-        "default",
-    )
+    post_interface_sync(client, device, [102], htmx=False)
 
     child.refresh_from_db()
     assert child.type == "virtual"

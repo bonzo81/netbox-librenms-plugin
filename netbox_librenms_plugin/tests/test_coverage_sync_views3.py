@@ -10,8 +10,14 @@ Targets:
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
-from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
+from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
+    make_device,
+    make_interface,
+    make_virtual_chassis_members,
+    make_vm,
+)
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -43,6 +49,14 @@ def _make_iv(request=None):
     v._post_server_key = "default"
     v.object = None
     return v
+
+
+def _post_sync(client, settings, user, owner, port):
+    """Seed *port* for *owner* and post the sync of that one row through the real URL, as *user*."""
+    configure_default_librenms_server(settings)
+    client.force_login(user)
+    seed_ports(owner, [port])
+    return post_interface_sync(client, owner, [port["port_id"]], htmx=False)
 
 
 def _make_dv(request=None):
@@ -136,31 +150,6 @@ class TestSyncInterface:
         v._skipped_conflicts = []
         return v
 
-    def test_device_no_vc_uses_obj(self):
-        from dcim.models import Interface
-
-        dev = make_device("sync-novc")
-        v = self._v()
-
-        select_attempt_rows(v, dev)
-        v.sync_interface(dev, _record(ifName="eth0"), [], "ifName", "eth0")
-
-        assert Interface.objects.filter(device=dev, name="eth0").exists()
-
-    def test_device_vc_target_in_valid_ids(self):
-        """A posted sibling of the same chassis is honoured: the interface lands on the sibling."""
-        from dcim.models import Interface
-
-        _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-ok")
-        req = make_request("post", {"device_selection_10": str(sibling.pk)})
-        v = self._v(req)
-
-        select_attempt_rows(v, host)
-        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
-
-        assert Interface.objects.filter(device=sibling, name="eth0").exists()
-        assert not Interface.objects.filter(device=host, name="eth0").exists()
-
     def test_device_vc_target_not_in_valid_ids_is_skipped(self):
         """An explicit device outside the chassis is refused without a fallback write."""
         from dcim.models import Interface
@@ -218,7 +207,7 @@ class TestSyncInterface:
         assert not Interface.objects.filter(device=sibling, name="eth0").exists()
         assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
 
-    def test_existing_interface_outside_the_change_grant_is_skipped(self):
+    def test_existing_interface_outside_the_change_grant_is_skipped(self, client, settings):
         """A natural-key match must not bypass the caller's constrained change grant."""
         from dcim.models import Device, Interface
 
@@ -230,15 +219,14 @@ class TestSyncInterface:
             [("view", Device), ("add", Interface)],
         )
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
-        request = make_request("post", user=user)
-        view = self._v(request)
 
-        select_attempt_rows(view, device)
-        view.sync_interface(device, _record(ifName=hidden.name), [], "ifName", hidden.name)
+        response = _post_sync(client, settings, user, device, _record(ifName=hidden.name, port_id=1))
 
-        assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: eth0 (port already mapped elsewhere or ambiguous)."
+        ]
 
-    def test_existing_interface_with_an_unconstrained_change_grant_is_synced(self):
+    def test_existing_interface_with_an_unconstrained_change_grant_is_synced(self, client, settings):
         """The permission-scoped skip must disappear when the existing interface is changeable."""
         from dcim.models import Device, Interface
 
@@ -249,24 +237,11 @@ class TestSyncInterface:
             "sync-interface-change-control",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = make_request("post", user=user)
-        view = self._v(request)
 
-        select_attempt_rows(view, device)
-        view.sync_interface(device, _record(ifName=existing.name), [], "ifName", existing.name)
+        response = _post_sync(client, settings, user, device, _record(ifName=existing.name, port_id=1))
 
-        assert view._skipped_conflicts == []
-
-    def test_vm_uses_vminterface(self):
-        from virtualization.models import VMInterface
-
-        vm = make_vm("sync-vm")
-        v = self._v()
-
-        select_attempt_rows(v, vm)
-        v.sync_interface(vm, _record(ifName="eth0"), [], "ifName", "eth0")
-
-        assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
+        assert message_texts(response.wsgi_request, "warning") == []
+        assert message_texts(response.wsgi_request, "success") == ["Selected interfaces synced successfully."]
 
 
 # ===========================================================================

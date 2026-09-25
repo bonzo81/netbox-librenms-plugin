@@ -15,7 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     run_in_threads,
 )
-from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import SYNCED, post_interface_sync, seed_ports
 
 
 # Window a competing thread must NOT get through while the row lock is held. A negative wait
@@ -868,16 +868,17 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges():
     assert relationship_finished.is_set()
 
 
-def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
+def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
     """A selected parent edge must lock only its source and related candidates."""
     from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
+    from django.test import Client
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser, message_texts
     from netbox_librenms_plugin.utils import set_librenms_device_id
-    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+    configure_default_librenms_server(settings)
     server_key = configured_server_key()
 
     device = make_device("bulk-targeted-edge")
@@ -888,45 +889,33 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
         set_librenms_device_id(interface, port_id, server_key)
         interface.save()
     user = make_superuser("bulk-targeted-edge-user")
-    relationship_finished = Event()
     ports = [
         {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
         {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
         {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": unrelated.name},
     ]
+    seed_ports(device, ports, sub_interfaces={10: 20})
 
-    def apply_relationships():
+    def post_the_sync():
         close_old_connections()
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
-            thread_device = type(device).objects.get(pk=device.pk)
-            thread_user = get_user_model().objects.get(pk=user.pk)
-            request = make_request("post", {}, user=thread_user)
-            view = make_view(SyncInterfacesView, request)
-            view.interface_name_field = "ifName"
-            view._selected_port_ids = {10}
-            view._auto_selected_port_ids = set()
-            view._auto_selected_target_ids = {}
-            select_attempt_rows(view, thread_device)
-            view._sync_interface_relationships(
-                thread_device,
-                ports,
-                {"lag_members": {}, "sub_interfaces": {10: 20}},
-                server_key,
-            )
-            relationship_finished.set()
+            client = Client()
+            client.force_login(get_user_model().objects.get(pk=user.pk))
+            response = post_interface_sync(client, device, [10], htmx=False)
+            return message_texts(response.wsgi_request)
         finally:
             close_old_connections()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         with transaction.atomic():
             type(unrelated).objects.select_for_update().get(pk=unrelated.pk)
-            future = executor.submit(apply_relationships)
-            future.result(timeout=5)
+            future = executor.submit(post_the_sync)
+            texts = future.result(timeout=5)
 
-    assert relationship_finished.is_set()
+    assert texts == [SYNCED]
     child.refresh_from_db()
     assert child.parent_id == parent.pk
 
