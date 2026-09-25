@@ -5,17 +5,19 @@ The tests post the inline endpoints with real constrained object permissions. Th
 the rows that it may change and the rows that it may name before its first write. After the last
 write, each written row must be in the user's change scope and in that selection. A row outside
 refuses the whole link: nothing is saved, NetBox sends no event, the server logs no write, and the
-refusal names only a row that the user may view.
+refusal names only a row that the user may view. Every other text of the endpoints obeys the same display rule.
 """
 
 import logging
 
 import pytest
 from core.models import ObjectChange
-from dcim.models import Device, Interface
+from dcim.models import Device, Interface, Platform
+from django.db import IntegrityError
 from django.urls import reverse
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -240,3 +242,104 @@ def test_a_link_that_runs_again_after_a_lock_conflict_logs_each_write_once(clien
     aggregate.refresh_from_db()
     assert (member.lag_id, aggregate.type) == (aggregate.pk, "lag")
     assert write_logs() == ["Set interface Po1 type=lag", "Set eth1.lag = Po1"]
+
+
+# Each end of the LAG link that the user may change but not view, as a view scope that hides it.
+HIDDEN_END_SCOPES = {"member": {"name__startswith": "Po"}, "aggregate": {"name__startswith": "eth"}}
+
+
+def _shown_ends(hidden_end):
+    """Return the texts that name the member and the aggregate when the user may not view *hidden_end*."""
+    hidden = interfaces_view.HIDDEN_INTERFACE
+    return (hidden, "Po1") if hidden_end == "member" else ("eth1", hidden)
+
+
+def _hidden_end_user(tag, hidden_end):
+    return _user(f"{tag}-{hidden_end}-user", Device, Interface, view=HIDDEN_END_SCOPES[hidden_end])
+
+
+def _assert_link_refused(response, error, member, aggregate, hidden_end):
+    assert response.status_code == 409
+    assert response.json() == {"error": error}
+    assert ("eth1" if hidden_end == "member" else "Po1") not in error
+    member.refresh_from_db()
+    aggregate.refresh_from_db()
+    assert (member.lag_id, aggregate.type) == (None, "other")
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("hidden_end", HIDDEN_END_SCOPES)
+def test_a_saved_link_names_only_the_interfaces_that_the_user_may_view(client, hidden_end):
+    device, member, aggregate = _lag_scenario(f"relationship-text-saved-{hidden_end}")
+    client.force_login(_hidden_end_user("relationship-text-saved", hidden_end))
+
+    response = _link(client, device, "lag", 1, 100)
+
+    member_text, aggregate_text = _shown_ends(hidden_end)
+    assert response.status_code == 200
+    assert response.json() == {"status": "success", "message": f"Linked {member_text} to LAG {aggregate_text}"}
+    member.refresh_from_db()
+    assert member.lag_id == aggregate.pk
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("hidden_end", HIDDEN_END_SCOPES)
+def test_an_interface_rule_refusal_names_only_the_interfaces_that_the_user_may_view(client, hidden_end):
+    """The rule ignores the hidden end, so the refusal also says which end blocks the link without naming it."""
+    tag = f"relationship-text-rule-{hidden_end}"
+    device, member, aggregate = _lag_scenario(tag)
+    device.platform = Platform.objects.create(name=tag, slug=tag)
+    device.save()
+    rule = InterfaceTypeMapping.objects.create(
+        action=InterfaceTypeMapping.ACTION_IGNORE,
+        platform=device.platform,
+        name_pattern="^eth" if hidden_end == "member" else "^Po",
+    )
+    client.force_login(_hidden_end_user("relationship-text-rule", hidden_end))
+
+    response = _link(client, device, "lag", 1, 100)
+
+    member_text, aggregate_text = _shown_ends(hidden_end)
+    reason = f"ignored by interface rule {rule.pk} ({rule})"
+    error = f"Cannot link {member_text} to LAG {aggregate_text}; {interfaces_view.HIDDEN_INTERFACE}: {reason}."
+    _assert_link_refused(response, error, member, aggregate, hidden_end)
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("hidden_end", HIDDEN_END_SCOPES)
+def test_a_netbox_validation_refusal_names_only_the_interfaces_that_the_user_may_view(client, hidden_end):
+    """NetBox refuses a LAG for a virtual member."""
+    device, member, aggregate = _lag_scenario(f"relationship-text-invalid-{hidden_end}")
+    Interface.objects.filter(pk=member.pk).update(type="virtual")
+    client.force_login(_hidden_end_user("relationship-text-invalid", hidden_end))
+
+    response = _link(client, device, "lag", 1, 100)
+
+    member_text, aggregate_text = _shown_ends(hidden_end)
+    error = (
+        f"Cannot link {member_text} to LAG {aggregate_text}: NetBox rejected the LAG relationship. Check the "
+        "interface types, chassis membership, and that the two interfaces are not the same interface."
+    )
+    _assert_link_refused(response, error, member, aggregate, hidden_end)
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("hidden_end", HIDDEN_END_SCOPES)
+def test_a_database_conflict_names_only_the_interfaces_that_the_user_may_view(client, monkeypatch, hidden_end):
+    """Error injection: the write of the link raises the IntegrityError of a concurrent change."""
+    device, member, aggregate = _lag_scenario(f"relationship-text-conflict-{hidden_end}")
+    client.force_login(_hidden_end_user("relationship-text-conflict", hidden_end))
+
+    def conflict(*_args, **_kwargs):
+        raise IntegrityError("the aggregate was deleted concurrently")
+
+    monkeypatch.setattr(interfaces_view, "_apply_interface_relationship", conflict)
+
+    response = _link(client, device, "lag", 1, 100)
+
+    member_text, aggregate_text = _shown_ends(hidden_end)
+    error = (
+        f"Cannot link {member_text} to LAG {aggregate_text}: "
+        "a concurrent change interrupted the update. Refresh and retry."
+    )
+    _assert_link_refused(response, error, member, aggregate, hidden_end)

@@ -158,6 +158,11 @@ class _RowSelection:
             return None
         return self.created_names.get(pk, self.viewable_names.get(pk))
 
+    def shown(self, interface):
+        """Return the name of *interface* for a text, or ``HIDDEN_INTERFACE`` when the user may not view it."""
+        name = self.shown_name(type(interface), interface.pk)
+        return HIDDEN_INTERFACE if name is None else name
+
     def check_writes(self, writes):
         """
         Refuse the attempt when a row of *writes* is outside the user's scope or outside this selection.
@@ -1508,8 +1513,7 @@ class SyncInterfacesView(
 
     def _shown(self, interface):
         """Return the name of *interface* for a text, or ``HIDDEN_INTERFACE`` when the user may not view it."""
-        name = self._shown_name(type(interface), interface.pk)
-        return HIDDEN_INTERFACE if name is None else name
+        return self._selection.shown(interface)
 
     def _reserved_name_port_ids(self, obj, server_key):
         """Return active-server port IDs bound to each target interface name."""
@@ -2823,19 +2827,18 @@ class _BaseRelationshipSyncView(
             return JsonResponse({"error": str(refused)}, status=403)
         except IntegrityError as exc:
             source_iface, related_iface = self._attempt_ends
-            source_name = getattr(source_iface, "name", self.source_label.lower())
-            related_name = getattr(related_iface, "name", self.related_label.lower())
             logger.warning(
                 "%s link hit a concurrent DB conflict (%s -> %s): %s",
                 self.relation_label,
-                source_name,
-                related_name,
+                getattr(source_iface, "name", self.source_label.lower()),
+                getattr(related_iface, "name", self.related_label.lower()),
                 exc,
             )
+            source_text, related_text = self._attempt_texts
             return JsonResponse(
                 {
                     "error": (
-                        f"Cannot link {source_name} to {self.relation_label} {related_name}: "
+                        f"Cannot link {source_text} to {self.relation_label} {related_text}: "
                         "a concurrent change interrupted the update. Refresh and retry."
                     )
                 },
@@ -2855,7 +2858,7 @@ class _BaseRelationshipSyncView(
         response = JsonResponse(
             {
                 "status": "success",
-                "message": f"Linked {outcome.source.name} to {self.relation_label} {outcome.related.name}",
+                "message": f"Linked {self._attempt_texts[0]} to {self.relation_label} {self._attempt_texts[1]}",
             }
         )
         return apply_request_cache_transition(request, response)
@@ -2888,8 +2891,9 @@ class _BaseRelationshipSyncView(
 
         """
         source_port, related_port, source_name, related_name, _interface_name_field = current_edge
-        # The ends of this attempt, for the text of a conflict that ends the transaction.
+        # The ends of this attempt and their texts, for the answers that post() gives after the transaction.
         self._attempt_ends = (None, None)
+        self._attempt_texts = (self.source_label.lower(), self.related_label.lower())
         obj, locked_device_ids = _lock_relationship_scope(
             obj,
             self.restricted_queryset(type(obj)),
@@ -2956,6 +2960,7 @@ class _BaseRelationshipSyncView(
         if err:
             return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
         self._attempt_ends = (source_iface, related_iface)
+        self._attempt_texts = source_text, related_text = selection.shown(source_iface), selection.shown(related_iface)
         decisions, blocked_end, reason = _relationship_decisions(
             interface_rules_for_request(request), (source_port, source_iface), (related_port, related_iface)
         )
@@ -2965,8 +2970,8 @@ class _BaseRelationshipSyncView(
             return JsonResponse(
                 {
                     "error": (
-                        f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}. "
-                        f"{blocked_end.name}: {reason}."
+                        f"Cannot link {source_text} to {self.relation_label} {related_text}; "
+                        f"{selection.shown(blocked_end)}: {reason}."
                     )
                 },
                 status=409,
@@ -3012,7 +3017,7 @@ class _BaseRelationshipSyncView(
                 return JsonResponse(
                     {
                         "error": (
-                            f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
+                            f"Cannot link {source_text} to {self.relation_label} {related_text}: "
                             f"NetBox rejected the {self.relation_label} relationship. Check the interface "
                             "types, chassis membership, and that the two interfaces are not the same interface."
                         )
