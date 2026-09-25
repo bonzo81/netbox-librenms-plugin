@@ -10,7 +10,7 @@ from typing import Optional
 import netaddr
 from dcim.models import Device, Interface
 from django.core import signing
-from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
@@ -4942,6 +4942,70 @@ def validation_error_detail(exc: ValidationError) -> str:
     if hasattr(exc, "message_dict"):
         return "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
     return "; ".join(str(m) for m in exc.messages) if hasattr(exc, "messages") else str(exc)
+
+
+def is_active_superuser(user) -> bool:
+    """Return whether *user* is an authenticated, active superuser: the only viewer who may view every object."""
+    return bool(
+        getattr(user, "is_authenticated", False)
+        and getattr(user, "is_active", False)
+        and getattr(user, "is_superuser", False)
+    )
+
+
+def refused_model_field(model, key) -> str | None:
+    """Return the concrete *model* field that a ValidationError key names, or None for any other key."""
+    # A validator or a post_clean receiver can key an error by any text, such as an object's name.
+    try:
+        field = model._meta.get_field(key)
+    except FieldDoesNotExist:
+        return None
+    return field.name if field.concrete else None
+
+
+def hidden_refusal_text(model, fields) -> str:
+    """
+    Return the text that tells a viewer which *model* fields NetBox refuses, without NetBox's message.
+
+    Args:
+        model (type[Model]): The model that NetBox validated.
+        fields (list[str]): The concrete *model* fields that NetBox refuses (from ``refused_model_field``).
+
+    Returns:
+        str: For example "NetBox refuses the serial field (only a superuser sees the message)".
+
+    """
+    if not fields:
+        subject = f"the {model._meta.verbose_name}"
+    elif len(fields) == 1:
+        subject = f"the {fields[0]} field"
+    else:
+        subject = f"the {', '.join(fields[:-1])} and {fields[-1]} fields"
+    return f"NetBox refuses {subject} (only a superuser sees the message)"
+
+
+def validation_error_text_for(exc: ValidationError, model, user) -> str:
+    """
+    Return the text of NetBox's *exc* that a page may show *user*.
+
+    NetBox's ``clean()`` messages can name related objects, and admin ``CUSTOM_VALIDATORS`` or
+    ``post_clean`` receivers can add any text under any key. So only a superuser gets the message.
+    Every other viewer gets the concrete *model* fields that the error keys name, or the model.
+
+    Args:
+        exc (ValidationError): The error that NetBox raised.
+        model (type[Model]): The model that NetBox validated.
+        user (User): The viewer.
+
+    Returns:
+        str: ``validation_error_detail(exc)`` for a superuser, else ``hidden_refusal_text``.
+
+    """
+    if is_active_superuser(user):
+        return validation_error_detail(exc)
+    keys = exc.error_dict if hasattr(exc, "error_dict") else ()
+    fields = [name for name in dict.fromkeys(refused_model_field(model, key) for key in keys) if name]
+    return hidden_refusal_text(model, fields)
 
 
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the

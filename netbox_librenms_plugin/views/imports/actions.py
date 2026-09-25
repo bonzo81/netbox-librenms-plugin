@@ -96,6 +96,8 @@ from netbox_librenms_plugin.utils import (
     save_user_pref,
     set_device_ip_fk,
     validate_import_context_columns,
+    validation_error_detail,
+    validation_error_text_for,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -672,8 +674,11 @@ def _save_device(device, update_fields: list[str], request=None) -> HttpResponse
         logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
         return _err("Could not save: a database integrity constraint was violated.", 409)
     except ValidationError as exc:
-        error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-        return _err(f"Validation error: {error_msg}", 400)
+        logger.warning(
+            "Validation error saving %s pk=%s: %s", type(device).__name__, device.pk, validation_error_detail(exc)
+        )
+        user = getattr(request, "user", None)
+        return _err(f"Validation error: {validation_error_text_for(exc, type(device), user)}", 400)
     except DataError:
         # save(update_fields=...) skips full_clean(), so an overlong/invalid value
         # from LibreNMS (e.g. a hostname past Device.name max_length) reaches the DB
@@ -2841,8 +2846,9 @@ class CreatePlatformFromImportView(
                         )
         except ValidationError as exc:
             logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
-            detail = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-            return _htmx_error_response(f"Error creating platform: {detail}")
+            return _htmx_error_response(
+                f"Error creating platform: {validation_error_text_for(exc, Platform, request.user)}"
+            )
         except IntegrityError:
             logger.exception("CreatePlatformFromImportView: integrity error while creating platform")
             return _htmx_error_response(

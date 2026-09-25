@@ -157,7 +157,7 @@ class TestUpdateDeviceNameView:
         device.refresh_from_db()
         assert device.name == "name-before-invalid-oob"
         errors = _messages(response, "error")
-        assert any("validation fails on oob_ip" in text for text in errors), errors
+        assert any("another field fails validation. oob_ip:" in text for text in errors), errors
         # The old rendering dumped a raw error dict, which read as though the rename needed oob_ip.
         assert not any("{'oob_ip'" in text for text in errors), errors
 

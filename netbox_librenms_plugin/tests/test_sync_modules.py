@@ -3488,16 +3488,22 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
 )
 def test_module_validation_details_are_plain_text(details, expected):
     from django.core.exceptions import ValidationError
-    from netbox_librenms_plugin.views.sync.modules import _module_error_detail
+    from dcim.models import Module
+    from django.contrib.auth import get_user_model
+    from netbox_librenms_plugin.views.sync.modules import _module_write_failure
 
-    assert _module_error_detail(ValidationError(details)) == expected
+    user = get_user_model()(is_superuser=True, is_active=True)
+    assert _module_write_failure(ValidationError(details), Module, user) == expected
 
 
 def test_module_database_conflict_details_are_preserved():
     from django.db import IntegrityError
-    from netbox_librenms_plugin.views.sync.modules import _module_error_detail
+    from dcim.models import Module
+    from django.contrib.auth import get_user_model
+    from netbox_librenms_plugin.views.sync.modules import _module_write_failure
 
-    assert _module_error_detail(IntegrityError("Duplicate module.")) == "Duplicate module."
+    user = get_user_model()(is_superuser=True, is_active=True)
+    assert _module_write_failure(IntegrityError("Duplicate module."), Module, user) == "Duplicate module."
 
 
 @pytest.mark.django_db
