@@ -3,7 +3,7 @@ A sync writes an existing interface row from a fresh read and saves it only if n
 
 Every concurrent change here is a real commit on a second database connection. It lands at a real
 point of the sync, between the sync's read of the row and its write: when the writer starts (after
-the view read the row), or right after the late write read the row fresh (at its ``snapshot()``).
+the view read the row), or right after the late write read the row fresh.
 The patches only call through and commit; nothing replaces the database or the ORM.
 """
 
@@ -22,6 +22,7 @@ from django.urls import reverse
 from ipam.models import VLAN, VRF, IPAddress
 from utilities.ordering import naturalize_interface
 
+from netbox_librenms_plugin import interface_sync
 from netbox_librenms_plugin.interface_sync import InterfaceWrite, update_interface_from_port
 from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -71,15 +72,16 @@ def attempts(monkeypatch):
 def commit_at_the_fresh_read(monkeypatch, pk, commit, *, times=1, armed=lambda: True):
     """Run *commit* right after the late write reads interface *pk* fresh, at most *times* times."""
     state = SimpleNamespace(commits=0)
-    real_snapshot = Interface.snapshot
+    real_read = interface_sync.first_at_version
 
-    def snapshot(self):
-        real_snapshot(self)
-        if self.pk == pk and armed() and state.commits < times:
+    def fresh_read(queryset):
+        row, version = real_read(queryset)
+        if row is not None and row.pk == pk and armed() and state.commits < times:
             state.commits += 1
             commit()
+        return row, version
 
-    monkeypatch.setattr(Interface, "snapshot", snapshot)
+    monkeypatch.setattr(interface_sync, "first_at_version", fresh_read)
     return state
 
 
