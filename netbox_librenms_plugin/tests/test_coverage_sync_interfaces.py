@@ -5683,7 +5683,9 @@ class TestBulkRelationshipRobustness:
         Interface.objects.filter(pk=agg.pk).update(description="agg-fresh")
 
         view = object.__new__(SyncInterfacesView)
-        view._apply_relationship_edge(member, "lag", agg, SyncInterfacesView._prepare_bulk_lag_aggregate, "LAG")
+        view._apply_relationship_edge(
+            member, "lag", agg, SyncInterfacesView._prepare_bulk_lag_aggregate, "LAG", viewable_ids=set()
+        )
 
         agg.refresh_from_db()
         member.refresh_from_db()

@@ -85,13 +85,12 @@ def _refused(rows):
     )
 
 
-def _user(username, owner_model, interface_model, *, add=None, change=None):
-    """Return a user who may view the owner, the interfaces and the VLANs, with the given add and change scopes."""
-    user = make_user_with_perms(
-        username, [("view", owner_model), ("view", interface_model), ("view", VLAN), ("view", VLANGroup)]
-    )
-    user = grant(user, "add", interface_model, constraints=add)
-    return grant(user, "change", interface_model, constraints=change)
+def _user(username, owner_model, interface_model, *, view=None, add=None, change=None):
+    """Return a user who may view the owner and the VLANs, with the given view, add and change scopes of the interfaces."""
+    user = make_user_with_perms(username, [("view", owner_model), ("view", VLAN), ("view", VLANGroup)])
+    for action, constraints in (("view", view), ("add", add), ("change", change)):
+        user = grant(user, action, interface_model, constraints=constraints)
+    return user
 
 
 def _owner(object_type, name):
@@ -341,6 +340,46 @@ def test_a_final_state_in_the_change_scope_is_saved_through_an_intermediate_stat
 
 
 # ---------------------------------------------------------------------------
+# A refusal names only a row that the user may view
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_the_attribute_pass_names_a_refused_row_only_when_the_user_may_view_it(client):
+    """The user may change ``private0`` but not view it, so the refusal counts it and does not name it."""
+    device = make_device("written-scope-hidden-row")
+    synced_interface(device, "eth0", 10, description="old")
+    synced_interface(device, "private0", 11, description="old")
+    seed_ports(device, [sync_port(10, "eth0", alias="new"), sync_port(11, "private0", alias="new")])
+    client.force_login(
+        _user("written-scope-hidden-row-user", Device, Interface, view=IN_SCOPE, change={"description": "old"})
+    )
+
+    response = _post_sync(client, device, "device", [10, 11], exclude_columns=("vlans",))
+
+    assert messages_on(response.wsgi_request) == [_refused("eth0 (change) and 1 interface you cannot view")]
+
+
+@pytest.mark.django_db
+def test_the_relationship_pass_names_a_refused_row_only_when_the_user_may_view_it(client):
+    """The pass finds the aggregate through its port and may change it, but the user may not view it."""
+    device = make_device("written-scope-hidden-aggregate")
+    aggregate = bound_interface(device, "private-current", 100)
+    seed_ports(
+        device,
+        [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")],
+        lag_members={1: 100},
+    )
+    change = [IN_SCOPE, {"type": "other"}]
+    client.force_login(_user("written-scope-hidden-aggregate-user", Device, Interface, view=IN_SCOPE, change=change))
+
+    response = _post_sync(client, device, "device", [1], exclude_columns=("vlans",))
+
+    assert messages_on(response.wsgi_request) == [_refused("1 interface you cannot view")]
+    assert Interface.objects.get(pk=aggregate.pk).type == "other"
+
+
+# ---------------------------------------------------------------------------
 # The collection of the written rows
 # ---------------------------------------------------------------------------
 
@@ -354,9 +393,10 @@ def test_the_collection_records_a_change_of_the_tagged_vlans_from_the_vlan_side(
     vlan = VLAN.objects.create(vid=100, name="written-scope-reverse")
     vlan.interfaces_as_tagged.add(cleared)
 
-    with collect_interface_writes() as writes:
+    user = make_user_with_perms("written-scope-reverse-user", [])
+    with collect_interface_writes(user) as writes:
         vlan.interfaces_as_tagged.add(added)
-    with collect_interface_writes() as clear_writes:
+    with collect_interface_writes(user) as clear_writes:
         vlan.interfaces_as_tagged.clear()
 
     assert (writes.written, writes.created) == ({Interface: {added.pk}}, {})
@@ -369,11 +409,11 @@ def test_a_refused_row_that_no_write_path_named_is_a_defect():
     from netbox_librenms_plugin.interface_sync import collect_interface_writes
 
     device = make_device("written-scope-unnamed")
-    with collect_interface_writes() as writes:
+    with collect_interface_writes(make_user_with_perms("written-scope-unnamed-user", [])) as writes:
         make_interface(device, "eth0")
 
     with pytest.raises(RuntimeError, match="no name"):
-        writes.outside_scope(make_user_with_perms("written-scope-unnamed-user", []))
+        writes.outside_scope()
 
 
 # ---------------------------------------------------------------------------

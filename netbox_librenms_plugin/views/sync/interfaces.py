@@ -100,8 +100,12 @@ class _DuplicatedSelectionError(Exception):
 class _RowsOutsideScopeError(Exception):
     """Rows that a sync attempt wrote are outside the user's add or change scope; the attempt rolls back."""
 
-    def __init__(self, refused):
-        rows = ", ".join(f"{name} ({', '.join(actions)})" for name, actions in refused)
+    def __init__(self, named, hidden):
+        rows = ", ".join(f"{name} ({', '.join(actions)})" for name, actions in named)
+        if hidden:
+            # Nothing identifies a row that the user may not view: not its name, not its actions.
+            unnamed = f"{hidden} interface{'s' if hidden > 1 else ''} you cannot view"
+            rows = f"{rows} and {unnamed}" if rows else unnamed
         super().__init__(
             f"Nothing was saved. These interfaces are outside the scope of your permissions after the sync: {rows}."
         )
@@ -154,6 +158,7 @@ class _BulkRelationshipContext:
     source_index: dict
     related_index: dict
     changeable_ids: set
+    viewable_ids: set
     server_key: str
     interface_name_field: str
     unique_host_port_ids: set
@@ -355,7 +360,7 @@ class SyncInterfacesView(
         self._synced_count = 0
         self._mutated = False
         self._attempt_warnings = []
-        with collect_interface_writes() as writes:
+        with collect_interface_writes(self.request.user) as writes:
             try:
                 self.sync_selected_interfaces(
                     self.object,
@@ -374,8 +379,9 @@ class SyncInterfacesView(
                 )
             finally:
                 self.__dict__.pop("_locked_target_devices", None)
-        if refused := writes.outside_scope(self.request.user):
-            raise _RowsOutsideScopeError(refused)
+        named, hidden = writes.outside_scope()
+        if named or hidden:
+            raise _RowsOutsideScopeError(named, hidden)
         return _InterfaceSyncOutcome(
             skipped_conflicts=tuple(self._skipped_conflicts),
             kept_name_conflicts=tuple(self._kept_name_conflicts),
@@ -709,12 +715,14 @@ class SyncInterfacesView(
                     candidate_port_ids,
                     candidate_names,
                 )
-                catalog_index, source_index, related_index, changeable_ids = _build_locked_relationship_indexes(
-                    obj,
-                    server_key,
-                    self.request.user,
-                    locked_device_ids,
-                    candidate_ids=candidate_ids,
+                catalog_index, source_index, related_index, changeable_ids, viewable_ids = (
+                    _build_locked_relationship_indexes(
+                        obj,
+                        server_key,
+                        self.request.user,
+                        locked_device_ids,
+                        candidate_ids=candidate_ids,
+                    )
                 )
                 context = _BulkRelationshipContext(
                     obj=obj,
@@ -726,6 +734,7 @@ class SyncInterfacesView(
                     source_index=source_index,
                     related_index=related_index,
                     changeable_ids=changeable_ids,
+                    viewable_ids=viewable_ids,
                     server_key=server_key,
                     interface_name_field=interface_name_field,
                     unique_host_port_ids=unique_host_port_ids,
@@ -874,7 +883,9 @@ class SyncInterfacesView(
                 aggregate.name,
             )
             return
-        if self._apply_relationship_edge(member, "lag", aggregate, self._prepare_bulk_lag_aggregate, "LAG"):
+        if self._apply_relationship_edge(
+            member, "lag", aggregate, self._prepare_bulk_lag_aggregate, "LAG", viewable_ids=context.viewable_ids
+        ):
             self._mutated = True
 
     def _apply_bulk_parent(self, context, port_id, expected_owner):
@@ -905,6 +916,7 @@ class SyncInterfacesView(
             parent,
             None,
             "parent",
+            viewable_ids=context.viewable_ids,
             prepare_source=self._prepare_bulk_parent_child,
         ):
             self._mutated = True
@@ -919,7 +931,7 @@ class SyncInterfacesView(
             return
         if self._bulk_edge_decisions(context, "bridge", (port_id, member), (raw_bridge, bridge)) is None:
             return
-        if self._apply_relationship_edge(member, "bridge", bridge, None, "bridge"):
+        if self._apply_relationship_edge(member, "bridge", bridge, None, "bridge", viewable_ids=context.viewable_ids):
             self._mutated = True
 
     def _bulk_edge_decisions(self, context, label, source, related):
@@ -1098,6 +1110,7 @@ class SyncInterfacesView(
         prepare_related,
         log_kind,
         *,
+        viewable_ids,
         prepare_source=None,
     ):
         """
@@ -1115,6 +1128,7 @@ class SyncInterfacesView(
             related_iface (Interface | VMInterface): The interface assigned to the relationship field.
             prepare_related (callable | None): The hook that prepares the related interface before validation.
             log_kind (str): The relationship label used in log messages.
+            viewable_ids (set[int]): The interfaces that the locked read found in the user's view scope.
             prepare_source (callable | None): The hook that prepares the source interface before
                 validation, mirroring ``prepare_related`` on the other side of the edge.
 
@@ -1122,9 +1136,9 @@ class SyncInterfacesView(
             bool: True when the relationship is saved, or False when validation or persistence fails.
 
         """
-        # The locked read gave both names, so a refusal of a row outside the scope can name it.
-        name_interface_row(source_iface, source_iface.name)
-        name_interface_row(related_iface, related_iface.name)
+        # A refusal names an end only when the locked read found it in the user's view scope.
+        for interface in (source_iface, related_iface):
+            name_interface_row(interface, interface.name if interface.pk in viewable_ids else None)
         try:
             # Own savepoint: an IntegrityError from the persist poisons the enclosing batch
             # transaction ("current transaction is aborted" on every later row) unless the
@@ -1686,8 +1700,13 @@ class SyncInterfacesView(
 
         # The name that the permission check saw; a concurrent rename can put the fresh name out of view.
         checked_name = interface.name
-        name_interface_row(interface, checked_name)
         created = bool(getattr(interface, "_librenms_sync_created", False))
+        # A new row has the name that the user selected; an existing row is named only when the user may view it.
+        viewable = (
+            created
+            or self.restricted_queryset(type(interface), "view").filter(pk=interface.pk, name=checked_name).exists()
+        )
+        name_interface_row(interface, checked_name if viewable else None)
         interface, changed = self.update_interface_attributes(
             interface,
             librenms_interface,
@@ -2257,7 +2276,7 @@ def _build_locked_relationship_indexes(
     changeable_ids = set(locked_candidates.restrict(user, "change").values_list("pk", flat=True))
     related_index = filter_interface_index(locked_index, viewable_ids | changeable_ids)
     source_index = filter_interface_index(related_index, changeable_ids)
-    return catalog_index, source_index, related_index, changeable_ids
+    return catalog_index, source_index, related_index, changeable_ids, viewable_ids
 
 
 def _relationship_decisions(rules, *ends):
@@ -2649,12 +2668,14 @@ class _BaseRelationshipSyncView(
                     (source_port.get("port_id"), related_port.get("port_id")),
                     (source_name, related_name),
                 )
-                catalog_index, source_index, related_index, changeable_ids = _build_locked_relationship_indexes(
-                    obj,
-                    server_key,
-                    request.user,
-                    locked_device_ids,
-                    candidate_q=candidate_q,
+                catalog_index, source_index, related_index, changeable_ids, _viewable_ids = (
+                    _build_locked_relationship_indexes(
+                        obj,
+                        server_key,
+                        request.user,
+                        locked_device_ids,
+                        candidate_q=candidate_q,
+                    )
                 )
 
                 _, err = resolve_interface_by_port_id(

@@ -81,47 +81,49 @@ def interface_rows_outside_scope(written, created, *, addable_queryset, changeab
 
 class InterfaceWrites:
     """
-    The Interface and VMInterface rows that one sync created or changed while ``collect_interface_writes`` runs.
+    The Interface and VMInterface rows that one sync of *user* created or changed while ``collect_interface_writes`` runs.
 
     The receivers ``record_interface_save`` (``post_save``) and ``record_tagged_vlan_change``
     (``m2m_changed``) record the rows, so every save and every tagged-VLAN change is recorded, also
-    one that NetBox makes. The caller gives each row that it writes the name that it read before
-    its permission check (``name_interface_row``), so that a refusal can name the row.
+    one that NetBox makes. Each write path gives each row that it writes a name for a refusal
+    (``name_interface_row``): the name that it read while the user could view the row, or None.
     """
 
-    def __init__(self):
+    def __init__(self, user):
+        self.user = user
         self.written = defaultdict(set)
         self.created = defaultdict(set)
         self.names = {}
 
-    def outside_scope(self, user):
+    def outside_scope(self):
         """
-        Return the recorded rows that are outside the scopes of *user* now, with one query for each model and action.
-
-        Args:
-            user (User): The user whose add and change scopes the rows must be in.
+        Return the recorded rows that are outside the user's scopes now, with one query for each model and action.
 
         Returns:
-            list[tuple[str, tuple[str, ...]]]: The name of each refused row and the actions whose
-                scope it is outside, sorted.
+            tuple[list[tuple[str, tuple[str, ...]]], int]: The name of each refused row that the
+                user may view and the actions whose scope it is outside, sorted; and the number of
+                refused rows that the user may not view.
 
         Raises:
-            RuntimeError: A refused row has no name: a write path of the caller did not name it.
+            RuntimeError: A refused row has no name entry: a write path of the caller did not name it.
 
         """
-        refused = []
+        named, hidden = [], 0
         for model, written in self.written.items():
             outside = interface_rows_outside_scope(
                 written,
                 self.created[model],
-                addable_queryset=model.objects.restrict(user, "add"),
-                changeable_queryset=model.objects.restrict(user, "change"),
+                addable_queryset=model.objects.restrict(self.user, "add"),
+                changeable_queryset=model.objects.restrict(self.user, "change"),
             )
             for pk, actions in outside.items():
                 if (model, pk) not in self.names:
                     raise RuntimeError(f"The sync wrote {model.__name__} {pk}, but gave it no name.")
-                refused.append((self.names[(model, pk)], actions))
-        return sorted(refused)
+                if (name := self.names[(model, pk)]) is None:
+                    hidden += 1
+                else:
+                    named.append((name, actions))
+        return sorted(named), hidden
 
 
 # The writes of the sync that runs now; None outside ``collect_interface_writes``.
@@ -129,9 +131,9 @@ _active_writes = ContextVar("librenms_interface_writes", default=None)
 
 
 @contextmanager
-def collect_interface_writes():
-    """Record the Interface and VMInterface rows that the block writes, and yield the ``InterfaceWrites``."""
-    writes = InterfaceWrites()
+def collect_interface_writes(user):
+    """Record the Interface and VMInterface rows that the block writes for *user*, and yield the ``InterfaceWrites``."""
+    writes = InterfaceWrites(user)
     token = _active_writes.set(writes)
     try:
         yield writes
@@ -141,9 +143,11 @@ def collect_interface_writes():
 
 def name_interface_row(interface, name):
     """
-    Give *interface* the name for a refusal: the name that the caller read before its permission check.
+    Give *interface* its name for a refusal. The first name of a row stays.
 
-    The first name of a row stays. Outside ``collect_interface_writes`` it does nothing.
+    *name* is the name that the caller read while the user could view the row, or None for a row
+    that the user may not view: a refusal counts that row and does not name it. Outside
+    ``collect_interface_writes`` it does nothing.
     """
     if (writes := _active_writes.get()) is not None:
         writes.names.setdefault((type(interface), interface.pk), name)
