@@ -94,9 +94,16 @@ class InterfaceWrites:
         self.written = defaultdict(set)
         self.created = defaultdict(set)
 
-    def outside_scope(self):
+    def outside_scope(self, selected):
         """
         Return the recorded rows that are outside the user's scopes now, with one query for each model and action.
+
+        A row that the attempt did not create must also be one that it selected before its first
+        write: a channel child that NetBox renames, for example, is not written by any pass.
+
+        Args:
+            selected (Callable[[type, int], bool]): Whether the attempt selected row *pk* of *model*
+                before its first write.
 
         Returns:
             list[tuple[type, int, tuple[str, ...]]]: The model and pk of each refused row, and the
@@ -111,6 +118,9 @@ class InterfaceWrites:
                 addable_queryset=model.objects.restrict(self.user, "add"),
                 changeable_queryset=model.objects.restrict(self.user, "change"),
             )
+            for pk in written - self.created[model]:
+                if not selected(model, pk):
+                    outside.setdefault(pk, ("change",))
             refused += [(model, pk, actions) for pk, actions in outside.items()]
         return refused
 

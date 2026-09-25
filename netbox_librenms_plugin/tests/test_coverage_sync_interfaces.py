@@ -5195,6 +5195,7 @@ class TestSyncLagAndParentRelationships:
 
         view = self._make_view(selected_port_ids={"21"})
         view.request = make_request("post", {}, user=user)
+        select_attempt_rows(view, device)
         view._sync_interface_relationships(device, ports_data, relationships, "default")
 
         hidden_member.refresh_from_db()

@@ -241,6 +241,58 @@ def test_the_relationship_pass_uses_the_selection_read_at_the_start_of_the_attem
     assert (member.description, member.lag_id) == ("new", aggregate.pk)
 
 
+@pytest.mark.django_db
+def test_the_relationship_pass_takes_the_owner_visibility_from_the_selection(client):
+    """The Device view scope follows the member: after the attribute write, it matches the device only with the LAG."""
+    device = make_device("written-scope-owner-view")
+    member = synced_interface(device, "eth1", 1, description="old")
+    aggregate = bound_interface(device, "Po1", 100, iface_type="lag")
+    seed_ports(
+        device,
+        [sync_port(1, "eth1", alias="new"), sync_port(100, "Po1", if_type="ieee8023adLag")],
+        lag_members={1: 100},
+    )
+    user = make_user_with_perms(
+        "written-scope-owner-view-user",
+        [("view", VLAN), ("view", VLANGroup), ("view", Interface), ("add", Interface), ("change", Interface)],
+    )
+    before = {"interfaces__pk": member.pk, "interfaces__description": "old", "interfaces__lag__isnull": True}
+    after = {"interfaces__pk": member.pk, "interfaces__description": "new", "interfaces__lag_id": aggregate.pk}
+    user = grant(user, "view", Device, constraints=[before, after])
+    assert Device.objects.restrict(user, "view").filter(pk=device.pk).exists(), "precondition"
+    client.force_login(user)
+
+    response = _post_sync(client, device, "device", [1], exclude_columns=("vlans",))
+
+    assert messages_on(response.wsgi_request) == [("success", SYNCED)]
+    member.refresh_from_db()
+    assert (member.description, member.lag_id) == ("new", aggregate.pk)
+
+
+@pytest.mark.django_db
+def test_a_relationship_pass_that_cannot_lock_its_owner_is_not_a_silent_success(client, monkeypatch):
+    """Error injection: the owner lock of the relationship pass finds no owner."""
+    from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
+
+    device = make_device("written-scope-no-relationship-owner")
+    synced_interface(device, "eth1", 1)
+    bound_interface(device, "Po1", 100, iface_type="lag")
+    seed_ports(
+        device,
+        [sync_port(1, "eth1", alias="new"), sync_port(100, "Po1", if_type="ieee8023adLag")],
+        lag_members={1: 100},
+    )
+    client.force_login(_user("written-scope-no-relationship-owner-user", Device, Interface))
+    monkeypatch.setattr(interfaces_view, "_lock_relationship_scope", lambda obj, owner_queryset=None: (None, set()))
+
+    response = _post_sync(client, device, "device", [1], exclude_columns=("vlans",))
+
+    assert messages_on(response.wsgi_request) == [
+        ("warning", interfaces_view.RELATIONSHIPS_NOT_SYNCED),
+        ("success", SYNCED),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # A port bound to an interface of another owner keeps its rule
 # ---------------------------------------------------------------------------
@@ -565,25 +617,59 @@ def _reads_a_name(expression):
     return any(isinstance(node, ast.Attribute) and node.attr == "name" for node in ast.walk(expression))
 
 
+def texts_that_read_a_name(tree):
+    """
+    Return each text in *tree* that reads a ``.name``: an f-string, a ``%`` format, a ``str.format()`` or a skipped row.
+
+    A log call passes its values as arguments, so it is not a text of the sync.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FormattedValue):
+            reads = _reads_a_name(node.value)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            reads = (
+                isinstance(node.left, ast.Constant) and isinstance(node.left.value, str) and _reads_a_name(node.right)
+            )
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            values = [*node.args, *(keyword.value for keyword in node.keywords)]
+            reads = (node.func.attr == "format" and any(_reads_a_name(value) for value in values)) or (
+                node.func.attr == "_record_skipped_conflict" and bool(node.args) and _reads_a_name(node.args[0])
+            )
+        else:
+            reads = False
+        if reads:
+            found.append(ast.unparse(node))
+    return found
+
+
+@pytest.mark.parametrize(
+    "source, found",
+    [
+        ("f'{row.name} kept'", ["{row.name}"]),
+        ("'%s kept' % row.name", ["'%s kept' % row.name"]),
+        ("'%s kept' % (row.name,)", ["'%s kept' % (row.name,)"]),
+        ("'{} kept'.format(row.name)", ["'{} kept'.format(row.name)"]),
+        ("'{name} kept'.format(name=row.name)", ["'{name} kept'.format(name=row.name)"]),
+        ("self._record_skipped_conflict(row.name, 'why')", ["self._record_skipped_conflict(row.name, 'why')"]),
+        ("f'{self._shown(row)} kept'", []),
+        ("'%s kept' % self._shown(row)", []),
+        ("logger.warning('%s kept', row.name)", []),
+        ("count % row.width", []),
+    ],
+)
+def test_the_display_scan_finds_each_way_to_format_a_name(source, found):
+    assert texts_that_read_a_name(ast.parse(source)) == found
+
+
 def test_no_text_of_the_sync_view_takes_an_interface_name_past_the_display_rule():
     """A cheap first check; the scenarios above prove the rule for each warning path."""
     from netbox_librenms_plugin.views.sync import interfaces
 
     module = ast.parse(inspect.getsource(interfaces))
     view = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "SyncInterfacesView")
-    direct = [
-        ast.unparse(node)
-        for node in ast.walk(view)
-        if (isinstance(node, ast.FormattedValue) and _reads_a_name(node.value))
-        or (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_record_skipped_conflict"
-            and _reads_a_name(node.args[0])
-        )
-    ]
 
-    assert direct == [], "an interface name reaches a text without _shown()"
+    assert texts_that_read_a_name(view) == [], "an interface name reaches a text without _shown()"
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +681,13 @@ def test_no_text_of_the_sync_view_takes_an_interface_name_past_the_display_rule(
 @transactional_db_with_all_apps()
 @pytest.mark.parametrize(
     "scope, refused",
-    [("inside", None), ("outside", "eth-old:1 (change)"), ("outside-hidden", "1 interface you cannot view")],
+    [
+        ("inside", None),
+        ("outside", "eth-old:1 (change)"),
+        ("outside-hidden", "1 interface you cannot view"),
+        # The child passes the final check after the rename, but the attempt did not select it.
+        ("inside-only-after-the-rename", "eth-old:1 (change)"),
+    ],
 )
 def test_the_channel_children_that_netbox_renames_must_be_in_the_change_scope(client, flushed_events, scope, refused):
     """The sync renames ``eth-old``; NetBox renames ``eth-old:1`` after the commit, but not ``breakout-2``."""
@@ -608,7 +700,10 @@ def test_the_channel_children_that_netbox_renames_must_be_in_the_change_scope(cl
     Interface.objects.create(device=device, name="breakout-2", parent=parent, channel_id=2, type="1000base-t")
     seed_ports(device, [sync_port(1, "eth-new")])
     view = {"channel_id__isnull": True} if scope == "outside-hidden" else None
-    change = IN_SCOPE if scope == "inside" else {"pk": parent.pk}
+    change = {
+        "inside": IN_SCOPE,
+        "inside-only-after-the-rename": [{"pk": parent.pk}, {"parent__name": "eth-new"}],
+    }.get(scope, {"pk": parent.pk})
     client.force_login(_user(f"written-scope-channels-{scope}-user", Device, Interface, view=view, change=change))
 
     response = _post_sync(client, device, "device", [1], exclude_columns=("vlans", "type"))

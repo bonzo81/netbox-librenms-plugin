@@ -98,6 +98,10 @@ class _DuplicatedSelectionError(Exception):
 
 # The text for an interface that the user may not view: nothing identifies it.
 HIDDEN_INTERFACE = "an interface you cannot view"
+RELATIONSHIPS_NOT_SYNCED = (
+    "The LAG, parent and bridge links were not synced: the interface owner changed during the sync. "
+    "Refresh the LibreNMS data and try again."
+)
 
 
 @dataclass
@@ -436,7 +440,7 @@ class SyncInterfacesView(
                     )
             finally:
                 self.__dict__.pop("_locked_target_devices", None)
-        if refused := writes.outside_scope():
+        if refused := writes.outside_scope(self._selection.selected):
             named = sorted(
                 (name, actions) for model, pk, actions in refused if (name := self._shown_name(model, pk)) is not None
             )
@@ -761,11 +765,10 @@ class SyncInterfacesView(
         )
         try:
             with transaction.atomic():
-                obj, locked_device_ids = _lock_relationship_scope(
-                    obj,
-                    self.restricted_queryset(type(obj)),
-                )
-                if obj is None:
+                # The same locks in the same order; the owners and their view scope come from the selection.
+                obj, locked_device_ids = _lock_relationship_scope(obj)
+                if obj is None or obj.pk not in self._selection.owner_ids:
+                    self._attempt_warnings.append(RELATIONSHIPS_NOT_SYNCED)
                     return
                 candidate_ids = relationship_candidate_ids(
                     obj,
