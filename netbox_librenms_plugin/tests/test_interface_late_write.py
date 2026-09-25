@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 from core.models import ObjectChange
-from dcim.models import Device, Interface
+from dcim.models import Device, Interface, MACAddress
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db import transaction
@@ -274,6 +274,35 @@ def test_a_written_row_keeps_its_ordering_name_timestamp_and_change_record(clien
         "description": "uplink",
         "label": "set by another operation",
     }
+
+
+@transactional_db_with_all_apps()
+def test_the_before_state_of_a_row_holds_the_old_mac_and_the_old_custom_field_data(client):
+    """The MAC step creates and attaches the new MAC, and the port binding changes the custom field data, before the save."""
+    device = make_device("late-write-mac-before", librenms_cf={SERVER_KEY: {"id": 10}})
+    interface = make_interface(device, "eth10")
+    old_mac = MACAddress.objects.create(mac_address="00:11:22:33:44:01", assigned_object=interface)
+    Interface.objects.filter(pk=interface.pk).update(
+        primary_mac_address=old_mac, speed=1_000_000, mtu=1500, enabled=True
+    )
+    old_custom_fields = Interface.objects.get(pk=interface.pk).custom_field_data
+    seed_ports(device, [sync_port(10, "eth10", mac="00:11:22:33:44:02")])
+    client.force_login(make_superuser("late-write-mac-before-user"))
+
+    post_interface_sync(client, device, [10], htmx=False, exclude_columns=("vlans",))
+
+    new_mac = MACAddress.objects.get(mac_address="00:11:22:33:44:02")
+    change = ObjectChange.objects.get(
+        changed_object_type=ContentType.objects.get_for_model(Interface), changed_object_id=interface.pk
+    )
+    assert (change.prechange_data["primary_mac_address"], change.prechange_data["custom_fields"]) == (
+        old_mac.pk,
+        old_custom_fields,
+    )
+    assert (change.postchange_data["primary_mac_address"], change.postchange_data["custom_fields"]) == (
+        new_mac.pk,
+        {**old_custom_fields, "librenms_id": {SERVER_KEY: 10}},
+    )
 
 
 @transactional_db_with_all_apps()

@@ -111,6 +111,35 @@ def test_a_row_is_locked_only_when_it_changes_and_in_the_mode_of_its_update(clie
     assert len(_interface_updates(queries)) == len(locks)
 
 
+# The reads that only the change log's serializer makes for an interface: its tags, VDCs and wireless LANs.
+CHANGE_LOG_READS = ('"extras_taggeditem"', '"dcim_interface_vdcs"', '"dcim_interface_wireless_lans"')
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("port", "serialized"),
+    [
+        pytest.param(sync_port(10, "eth10"), False, id="no-change"),
+        pytest.param(sync_port(10, "eth10", alias="uplink"), True, id="description"),
+    ],
+)
+def test_a_row_is_serialized_for_the_change_log_only_when_it_changes(client, port, serialized):
+    device = make_device("late-lock-change-log", librenms_cf={SERVER_KEY: {"id": 14}})
+    _synced_interface(device, "eth10", 10)
+    seed_ports(device, [port])
+    client.force_login(make_superuser("late-lock-change-log-user"))
+
+    with CaptureQueriesContext(connection) as queries:
+        response = post_interface_sync(client, device, [10], htmx=False, exclude_columns=())
+
+    assert [text for level, text in messages_on(response.wsgi_request) if level == "success"] == [SYNCED]
+    reads = [
+        query["sql"] for query in queries.captured_queries if any(table in query["sql"] for table in CHANGE_LOG_READS)
+    ]
+    assert bool(reads) is serialized, reads
+    assert bool(_interface_row_locks(queries)) is serialized
+
+
 # ---------------------------------------------------------------------------
 # The two lock schedules complete without a deadlock
 # ---------------------------------------------------------------------------

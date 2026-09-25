@@ -1,7 +1,7 @@
 """Shared LibreNMS port to NetBox interface synchronization."""
 
 import logging
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import NamedTuple
 
 from dcim.models import Device, Interface, MACAddress
@@ -49,9 +49,35 @@ def _owner_filter(interface):
     return {"virtual_machine_id": interface.virtual_machine_id}
 
 
-def _column_values(interface):
-    """Return a copy of the value of each column of *interface*, by column name."""
-    return deepcopy({field.column: getattr(interface, field.attname) for field in interface._meta.concrete_fields})
+def copy_before_change(instance):
+    """
+    Return a copy of *instance* that keeps the field values that *instance* has now.
+
+    The copy shares no field value with *instance*, so a later change of *instance* leaves the copy
+    as it was, also a change inside a value such as the custom field data. It sends no query.
+    """
+    before = copy(instance)
+    for field in instance._meta.concrete_fields:
+        setattr(before, field.attname, deepcopy(getattr(instance, field.attname)))
+    return before
+
+
+def changed_fields(instance, before):
+    """Return the concrete fields of *instance* whose values are not the values of *before*, its earlier copy."""
+    fields = instance._meta.concrete_fields
+    return [field for field in fields if getattr(instance, field.attname) != getattr(before, field.attname)]
+
+
+def keep_change_log_before_state(instance, before):
+    """
+    Give the change log record of the next save of *instance* the state of *before*, its earlier copy.
+
+    Call it only for a row that the caller saves: the snapshot serializes *before*, and it reads
+    the tags and the many-to-many values of the row.
+    """
+    before.snapshot()
+    # snapshot() stores the before-state as _prechange_snapshot, where the change log and the events read it.
+    instance._prechange_snapshot = before._prechange_snapshot
 
 
 def write_interface_row(interface, apply, *, changeable_queryset, created=False):
@@ -59,14 +85,14 @@ def write_interface_row(interface, apply, *, changeable_queryset, created=False)
     Write the values that *apply* sets to the current row of *interface*, and only when a column changes.
 
     A row that this sync did not create is read again, with its row version, from its pk and its
-    owner, and only from the rows that the caller may change. The change log's before-state comes
-    from that fresh read. Then ``apply(row)`` sets the values on the fresh instance. With no changed
-    column, nothing is locked and nothing is written. With a changed column, the row is saved only
-    when no other operation changed it since the fresh read (``save_at_version``). So a change that
-    takes the row out of the change scope after the fresh read also stops the write. A scope that
-    reads a related row, such as the site of the device, can change without a change of this row.
-    A row that this sync created is private to its transaction, so it is written without a fresh
-    read.
+    owner, and only from the rows that the caller may change. Then ``apply(row)`` sets the values
+    on the fresh instance. With no changed column, nothing is locked, written or serialized. With a
+    changed column, the change log's before-state is the state of the fresh read, and the row is
+    saved only when no other operation changed it since the fresh read (``save_at_version``). So a
+    change that takes the row out of the change scope after the fresh read also stops the write. A
+    scope that reads a related row, such as the site of the device, can change without a change of
+    this row. A row that this sync created is private to its transaction, so it is written without
+    a fresh read.
 
     Args:
         interface (Interface | VMInterface): The interface as the caller read it.
@@ -89,13 +115,14 @@ def write_interface_row(interface, apply, *, changeable_queryset, created=False)
         row, version = first_at_version(changeable_queryset.filter(pk=interface.pk, **_owner_filter(interface)))
         if row is None:
             raise row_changed(interface.name)
-        row.snapshot()
-    before = _column_values(row)
+    # A copy now, and a snapshot only for a changed row: a snapshot reads the database.
+    fresh = copy_before_change(row)
     changed_elsewhere = apply(row)
-    changed_columns = {column for column, value in _column_values(row).items() if value != before[column]}
+    changed_columns = {field.column for field in changed_fields(row, fresh)}
     if changed_columns and created:
         row.save()
     elif changed_columns:
+        keep_change_log_before_state(row, fresh)
         save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
     return InterfaceWrite(row, bool(changed_columns) or changed_elsewhere)
 
