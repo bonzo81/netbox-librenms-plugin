@@ -74,11 +74,25 @@ ALLOWED = [
         NOT_A_LITERAL,
         "source_fields holds only the relationship columns and type; last_updated is added at the save.",
     ),
+    (
+        "models.py",
+        "FullCleanOnSaveMixin.save",
+        "super()",
+        NOT_A_LITERAL,
+        "It passes on the arguments of the caller's save call, and the scan checks that call.",
+    ),
+    (
+        "models.py",
+        "LibreNMSSettings.save",
+        "super()",
+        NOT_A_LITERAL,
+        "It passes on the arguments of the caller's save call, and the scan checks that call.",
+    ),
 ]
 
 
 class _PartialSaveScan(ast.NodeVisitor):
-    """Collect every ``.save(update_fields=...)`` call with the function that holds it and its violations."""
+    """Collect every ``.save()`` call that can set ``update_fields``, with the function that holds it and its violations."""
 
     def __init__(self):
         self.scope = []
@@ -94,9 +108,21 @@ class _PartialSaveScan(ast.NodeVisitor):
     def visit_Call(self, node):
         if isinstance(node.func, ast.Attribute) and node.func.attr == "save":
             for keyword in node.keywords:
-                if keyword.arg == "update_fields":
-                    self.saves.append((".".join(self.scope), ast.unparse(node.func.value), _violations(keyword.value)))
+                if (violations := _keyword_violations(keyword)) is not None:
+                    self.saves.append((".".join(self.scope), ast.unparse(node.func.value), violations))
         self.generic_visit(node)
+
+
+def _keyword_violations(keyword):
+    """Return the violations of one keyword of a ``save()`` call, or None when the keyword sets no ``update_fields``."""
+    if keyword.arg is not None:
+        return _violations(keyword.value) if keyword.arg == "update_fields" else None
+    # A ** unpack can set update_fields; the scan reads only a dict literal whose keys are all literals.
+    unpacked = keyword.value
+    if not isinstance(unpacked, ast.Dict) or not all(isinstance(key, ast.Constant) for key in unpacked.keys):
+        return [NOT_A_LITERAL]
+    values = {key.value: value for key, value in zip(unpacked.keys, unpacked.values, strict=True)}
+    return _violations(values["update_fields"]) if "update_fields" in values else None
 
 
 def _violations(value):
@@ -116,7 +142,7 @@ def _violations(value):
 
 
 def partial_saves(source):
-    """Return ``(function, receiver, violations)`` for each ``.save(update_fields=...)`` call in *source*."""
+    """Return ``(function, receiver, violations)`` for each ``.save()`` call in *source* that can set ``update_fields``."""
     scan = _PartialSaveScan()
     scan.visit(ast.parse(source))
     return scan.saves
@@ -166,6 +192,11 @@ def test_the_scan_reads_the_production_partial_saves():
         ("obj.save(using='default', update_fields=('type',))", [NO_LAST_UPDATED]),
         ("obj.save(update_fields=['name', '_name', 'last_updated'])", []),
         ("obj.save(update_fields={'type', 'last_updated'})", []),
+        ("obj.save(**{'update_fields': ['name']})", [NO_LAST_UPDATED, NAME_WITHOUT_NATURAL_ORDER]),
+        ("obj.save(**{'update_fields': ['type', 'last_updated']})", []),
+        ("obj.save(**kwargs)", [NOT_A_LITERAL]),
+        ("obj.save(**{key: ['type']})", [NOT_A_LITERAL]),
+        ("obj.save(**{**defaults, 'update_fields': ['type', 'last_updated']})", [NOT_A_LITERAL]),
     ],
 )
 def test_the_scan_names_each_violation_of_a_partial_save(source, expected):
@@ -180,6 +211,7 @@ def test_the_scan_names_the_function_and_the_receiver_and_ignores_other_calls():
                 def persist():
                     self.row.save(update_fields=["type"])
                 self.row.save()
+                self.row.save(**{"using": "default"})
                 self.row.update(update_fields=["type"])
                 save(update_fields=["type"])
         """
