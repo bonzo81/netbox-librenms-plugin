@@ -23,6 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.utils import (
+    REGEX_COMPILE_ERRORS,
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
@@ -1930,10 +1931,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     compiled = rm._compiled_pattern
                     if compiled is None:
                         continue
-                    try:
-                        match = compiled.fullmatch(name)
-                    except re.error:
-                        continue
+                    match = compiled.fullmatch(name)
                     if not match:
                         continue
                     try:
@@ -3482,7 +3480,7 @@ class AddBayTemplateView(
         netbox_replacement = "".join(replacement_parts)
         try:
             compiled = re.compile(librenms_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
         if not compiled.fullmatch(librenms_name):
             return None
@@ -3533,7 +3531,7 @@ class AddBayTemplateView(
             try:
                 if re.compile(mapping.librenms_name).fullmatch(librenms_name):
                     return True
-            except re.error:
+            except REGEX_COMPILE_ERRORS:
                 continue
         return False
 

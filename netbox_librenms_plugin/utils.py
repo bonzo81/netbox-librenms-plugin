@@ -1138,7 +1138,7 @@ def get_virtual_chassis_member(
         if members_by_position:
             return members_by_position.get(vc_position, fallback)
         return device.virtual_chassis.members.get(vc_position=vc_position)
-    except (re.error, ValueError, ObjectDoesNotExist):
+    except (ValueError, ObjectDoesNotExist):
         return fallback
 
 
@@ -2821,7 +2821,7 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
         else:
             compiled = re.compile(_placeholder_pattern_to_regex(pattern))
             match = compiled.match(location_string)
-    except re.error:
+    except REGEX_COMPILE_ERRORS:
         logger.warning("Invalid LibreNMS location parse pattern: %r", pattern)
         return result
 
@@ -5674,7 +5674,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
         for rule in rules_qs:
             try:
                 val = re.sub(rule.match_pattern, rule.replacement, val)
-            except (re.error, IndexError):
+            except (*REGEX_COMPILE_ERRORS, IndexError):
                 logger.error(
                     "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
                 )

@@ -15,7 +15,7 @@ from django.urls import reverse
 from netbox.models import NetBoxModel
 from utilities.fields import ColorField
 
-from netbox_librenms_plugin.utils import get_object_site_id, validate_regex_field
+from netbox_librenms_plugin.utils import REGEX_COMPILE_ERRORS, get_object_site_id, validate_regex_field
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +507,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
             return None
         try:
             return re.compile(self.librenms_name)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
 
     def clean(self):
@@ -815,7 +815,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             return None
         try:
             return re.compile(self.pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
 
     def matches_class(self, phys_class: str) -> bool:
@@ -839,17 +839,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
                     self.pattern,
                 )
                 return False
-            try:
-                return bool(compiled.search(name))
-            except re.error as exc:
-                logger.error(
-                    "Regex error in InventoryIgnoreRule pk=%s pattern=%r name=%r: %s — skipping",
-                    self.pk,
-                    self.pattern,
-                    name,
-                    exc,
-                )
-                return False
+            return bool(compiled.search(name))
         name_up = name.upper()
         pat = self.pattern.upper()
         if self.match_type == self.MATCH_ENDS_WITH:
@@ -1176,7 +1166,7 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
             return None
         try:
             return re.compile(self.device_type_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
 
     @functools.cached_property
@@ -1185,7 +1175,7 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
             return None
         try:
             return re.compile(self.librenms_child_name_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
 
     @functools.cached_property
@@ -1194,7 +1184,7 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
             return None
         try:
             return re.compile(self.netbox_bay_name_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
 
     def clean(self):
@@ -1344,7 +1334,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         """Compiled lag_name_pattern regex, or None when it doesn't compile (skipped, not fatal)."""
         try:
             return re.compile(self.lag_name_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
 
     @functools.cached_property
@@ -1354,7 +1344,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             return None
         try:
             return re.compile(self.sap_name_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
 
     @functools.cached_property
@@ -1364,7 +1354,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             return None
         try:
             return re.compile(self.bridge_name_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
 
     @classmethod

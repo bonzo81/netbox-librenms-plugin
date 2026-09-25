@@ -2734,10 +2734,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             compiled = mapping._compiled_pattern
             if compiled is None:
                 continue
-            try:
-                match = compiled.fullmatch(name)
-            except re.error:
-                continue
+            match = compiled.fullmatch(name)
             if not match:
                 continue
             try:

@@ -49,7 +49,7 @@ from .models import (
     PortStackLagPattern,
     SerialSensorTypePattern,
 )
-from .utils import _free_cable_tag_slug, normalize_cable_tag_slug
+from .utils import REGEX_COMPILE_ERRORS, _free_cable_tag_slug, normalize_cable_tag_slug
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +318,7 @@ class ImportSettingsForm(NetBoxModelForm):
         if is_regex:
             try:
                 compiled = re.compile(pattern)
-            except re.error as exc:
+            except REGEX_COMPILE_ERRORS as exc:
                 self.add_error("location_parse_pattern", f"Invalid regular expression: {exc}")
                 return cleaned_data
             group_names = set(compiled.groupindex.keys())
