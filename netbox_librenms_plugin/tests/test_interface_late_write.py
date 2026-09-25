@@ -19,6 +19,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db import transaction
 from django.urls import reverse
+from extras import events
 from ipam.models import VLAN, VRF, IPAddress, VLANGroup
 from utilities.ordering import naturalize_interface
 
@@ -274,6 +275,37 @@ def test_a_written_row_keeps_its_ordering_name_timestamp_and_change_record(clien
         "description": "uplink",
         "label": "set by another operation",
     }
+
+
+@pytest.mark.django_db
+def test_a_tagged_vlan_only_change_records_the_before_state(client, monkeypatch):
+    """No column changes, so the scalar write takes no snapshot; the tagged VLAN change still needs one."""
+    device = make_device("late-write-tagged-only", librenms_cf={SERVER_KEY: {"id": 50}})
+    interface = _synced_interface(device, "eth10", 10, mode="tagged")
+    old_vlan = VLAN.objects.create(vid=100, name="late-write-old-vlan")
+    new_vlan = VLAN.objects.create(vid=200, name="late-write-new-vlan")
+    interface.tagged_vlans.set([old_vlan])
+    seed_ports(device, [sync_port(10, "eth10", ifTrunk="dot1Q", tagged_vlans=[100, 200])])
+    client.force_login(make_superuser("late-write-tagged-only-user"))
+    event_prechanges = []
+    get_snapshots = events.get_snapshots
+
+    def record_event_snapshots(instance, event_type):
+        snapshots = get_snapshots(instance, event_type)
+        if isinstance(instance, Interface) and instance.pk == interface.pk:
+            event_prechanges.append(snapshots["prechange"])
+        return snapshots
+
+    monkeypatch.setattr(events, "get_snapshots", record_event_snapshots)
+
+    post_interface_sync(client, device, [10], htmx=False, exclude_columns=("mac_address",))
+
+    assert set(interface.tagged_vlans.values_list("pk", flat=True)) == {old_vlan.pk, new_vlan.pk}
+    change = ObjectChange.objects.get(
+        changed_object_type=ContentType.objects.get_for_model(Interface), changed_object_id=interface.pk
+    )
+    assert change.prechange_data["tagged_vlans"] == [old_vlan.pk]
+    assert event_prechanges and all(pre["tagged_vlans"] == [old_vlan.pk] for pre in event_prechanges)
 
 
 @transactional_db_with_all_apps()

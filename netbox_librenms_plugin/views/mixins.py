@@ -1760,11 +1760,15 @@ class VlanAssignmentMixin:
                 else:
                     missing_vlans.append(vid)
             tagged_vlan_ids = {vlan.pk for vlan in tagged_set}
-            if tagged_vlan_ids != prior_tagged_vlan_ids:
-                interface.tagged_vlans.set(tagged_set)
         else:
             tagged_vlan_ids = set()
-            if prior_tagged_vlan_ids:
+        if tagged_vlan_ids != prior_tagged_vlan_ids:
+            # An unsaved row has no change-log before-state yet, and its tagged VLANs are about to change.
+            if not fields_changed:
+                interface.snapshot()
+            if tagged_vids:
+                interface.tagged_vlans.set(tagged_set)
+            else:
                 interface.tagged_vlans.clear()
 
         return {
