@@ -33,12 +33,6 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.transactions import first_at_version, row_changed, save_at_version
 
-try:
-    # NetBox 4.7 renames the channel children of a renamed interface; older NetBox has no channels.
-    from dcim.models.mixins import InterfaceChannelRenameMixin
-except ImportError:
-    InterfaceChannelRenameMixin = None
-
 logger = logging.getLogger(__name__)
 
 
@@ -167,6 +161,11 @@ def name_interface_row(interface, name):
         writes.names.setdefault((type(interface), interface.pk), name)
 
 
+def _has_channels(model):
+    """Return whether *model* has NetBox's ``channels`` field: an Interface of NetBox 4.7 or later."""
+    return any(field.name == "channels" for field in model._meta.concrete_fields)
+
+
 def _record_renamed_channel_children(row, old_name):
     """
     Record the channel children that NetBox renames after the commit, when the write renames *row*.
@@ -174,10 +173,21 @@ def _record_renamed_channel_children(row, old_name):
     NetBox's ``InterfaceChannelRenameMixin`` renames them in ``on_commit``, after the final check,
     so the check must read them now. This is NetBox's rule: each child of a row with channels whose
     name is ``<old name>:<channel ID>`` and whose new name fits the name column.
+
+    Raises:
+        RuntimeError: The model has channels, but not the rename rule of NetBox that this mirrors.
+
     """
     writes = _active_writes.get()
-    if writes is None or InterfaceChannelRenameMixin is None or not isinstance(row, InterfaceChannelRenameMixin):
+    if writes is None or not _has_channels(type(row)):
         return
+    # The channels field came with this rename; a NetBox that moves the rule fails here, never skips the check.
+    from dcim.models.mixins import InterfaceChannelRenameMixin
+
+    if not isinstance(row, InterfaceChannelRenameMixin):
+        raise RuntimeError(
+            f"{type(row).__name__} has channels, but not the channel rename of NetBox that the sync checks."
+        )
     if not row.channels:
         return
     max_length = type(row)._meta.get_field("name").max_length

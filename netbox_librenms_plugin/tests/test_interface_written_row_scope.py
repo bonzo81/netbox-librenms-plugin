@@ -418,6 +418,27 @@ def test_the_channel_children_that_netbox_renames_must_be_in_the_change_scope(cl
         assert flushed_events == []
 
 
+@pytest.mark.skipif(not hasattr(Interface, "channels"), reason="NetBox before 4.7 has no channelized interfaces")
+@pytest.mark.django_db
+def test_a_model_with_channels_but_without_the_channel_rename_of_netbox_fails_the_sync(client, monkeypatch):
+    """The check mirrors NetBox's rename rule, so a NetBox that renames the channel children in another way stops it."""
+    from dcim.models import mixins
+
+    device = make_device("written-scope-channel-rule")
+    parent = bound_interface(device, "eth-old", 1, iface_type="1000base-t")
+    parent.channels = 4
+    parent.save()
+    Interface.objects.create(device=device, name="eth-old:1", parent=parent, channel_id=1, type="1000base-t")
+    seed_ports(device, [sync_port(1, "eth-new")])
+    client.force_login(_user("written-scope-channel-rule-user", Device, Interface))
+    monkeypatch.setattr(mixins, "InterfaceChannelRenameMixin", type("OtherChannelRename", (), {}))
+
+    with pytest.raises(RuntimeError, match="channel"):
+        _post_sync(client, device, "device", [1], exclude_columns=("vlans", "type"))
+
+    assert Interface.objects.get(pk=parent.pk).name == "eth-old"
+
+
 # ---------------------------------------------------------------------------
 # The collection of the written rows
 # ---------------------------------------------------------------------------
