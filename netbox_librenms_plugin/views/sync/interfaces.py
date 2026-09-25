@@ -112,16 +112,25 @@ class _RowSelection:
     """
 
     model: type
+    # The locked owners (Devices or the VirtualMachine) whose interfaces the selection holds.
+    owner_ids: frozenset
     changeable_ids: frozenset
     # The name of each row in the user's view scope, read with the scope.
     viewable_names: dict
     created_names: dict = field(default_factory=dict)
 
+    def covers(self, interface):
+        """Return whether *interface* belongs to an owner of the selection."""
+        owner_id = interface.virtual_machine_id if isinstance(interface, VMInterface) else interface.device_id
+        return type(interface) is self.model and owner_id in self.owner_ids
+
+    def selected(self, model, pk):
+        """Return whether the attempt may write row *pk* of *model*: a selected row, or one that it created."""
+        return model is self.model and (pk in self.changeable_ids or pk in self.created_names)
+
     def may_change(self, interface):
         """Return whether the attempt may write *interface*."""
-        return type(interface) is self.model and (
-            interface.pk in self.changeable_ids or interface.pk in self.created_names
-        )
+        return self.selected(type(interface), interface.pk)
 
     def add_created(self, interface):
         """Record *interface*, which the attempt created with the name that the user selected."""
@@ -1320,7 +1329,7 @@ class SyncInterfacesView(
             obj = self.restricted_queryset(VirtualMachine).select_for_update(of=("self",)).filter(pk=obj.pk).first()
             if obj is not None:
                 self.object = obj
-                self._selection = self._select_rows(VMInterface.objects.filter(virtual_machine=obj))
+                self._selection = self._select_rows(VMInterface, {obj.pk})
                 self._expand_related_rows(obj, ports_data, interface_name_field, inferred_ids={}, device_for=None)
             return obj
         if not isinstance(obj, Device):
@@ -1331,7 +1340,7 @@ class SyncInterfacesView(
             return None
         self._locked_target_devices = locked_targets
         self.object = obj
-        self._selection = self._select_rows(Interface.objects.filter(device_id__in=locked_targets))
+        self._selection = self._select_rows(Interface, set(locked_targets))
         snapshot_port_ids = {
             port_id for port in ports_data if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
         }
@@ -1430,20 +1439,36 @@ class SyncInterfacesView(
             return None
         return owner.port_id
 
-    def _select_rows(self, interfaces):
+    def _select_rows(self, model, owner_ids):
         """
-        Return the ``_RowSelection`` of *interfaces*, read now through the user's change and view scopes.
+        Return the ``_RowSelection`` of the interfaces of *owner_ids*, read now through the user's scopes.
 
         Args:
-            interfaces (QuerySet): The interfaces of the locked owners of the attempt.
+            model (type): ``Interface`` or ``VMInterface``.
+            owner_ids (set[int]): The locked owners of the attempt: Devices, or the VirtualMachine.
 
         """
+        owner_field = "virtual_machine_id" if model is VMInterface else "device_id"
+        interfaces = model.objects.filter(**{f"{owner_field}__in": owner_ids})
         user = self.request.user
         return _RowSelection(
-            model=interfaces.model,
+            model=model,
+            owner_ids=frozenset(owner_ids),
             changeable_ids=frozenset(interfaces.restrict(user, "change").values_list("pk", flat=True)),
             viewable_names=dict(interfaces.restrict(user, "view").values_list("pk", "name")),
         )
+
+    def _port_owner_may_change(self, port_owner):
+        """
+        Return whether the user may change *port_owner*, the interface that holds the port of a row.
+
+        The selection decides for an interface of its owners. An interface of another owner (a stale
+        binding) is outside the attempt: the sync never writes it, and its change scope decides, as it
+        always did, whether the row can fall back to the local interface of the same name.
+        """
+        if self._selection.covers(port_owner):
+            return self._selection.may_change(port_owner)
+        return self.restricted_queryset(type(port_owner), "change").filter(pk=port_owner.pk).exists()
 
     def _shown_name(self, model, pk):
         """

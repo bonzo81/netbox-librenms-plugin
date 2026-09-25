@@ -63,9 +63,15 @@ def synced_interface(device, name, port_id, **fields):
 
 def select_attempt_rows(view, owner):
     """Give *view* the row selection that a sync attempt reads under its owner locks, for a test that runs one pass alone."""
-    from netbox_librenms_plugin.interface_relationships import interface_queryset_for_object
+    from dcim.models import Interface
+    from virtualization.models import VirtualMachine, VMInterface
 
-    view._selection = view._select_rows(interface_queryset_for_object(owner))
+    if isinstance(owner, VirtualMachine):
+        view._selection = view._select_rows(VMInterface, {owner.pk})
+    elif owner.virtual_chassis_id is not None:
+        view._selection = view._select_rows(Interface, set(owner.virtual_chassis.members.values_list("pk", flat=True)))
+    else:
+        view._selection = view._select_rows(Interface, {owner.pk})
 
 
 def sync_page(device):

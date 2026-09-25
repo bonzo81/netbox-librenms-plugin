@@ -38,6 +38,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
 )
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
+from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 IN_SCOPE = {"name__startswith": "eth"}
@@ -238,6 +239,72 @@ def test_the_relationship_pass_uses_the_selection_read_at_the_start_of_the_attem
     assert messages_on(response.wsgi_request) == [("success", SYNCED)]
     member.refresh_from_db()
     assert (member.description, member.lag_id) == ("new", aggregate.pk)
+
+
+# ---------------------------------------------------------------------------
+# A port bound to an interface of another owner keeps its rule
+# ---------------------------------------------------------------------------
+
+
+def _row_of(owner, name, *, description, port_id=None):
+    """Create interface *name* of *owner*, bound to LibreNMS port *port_id* when one is given."""
+    if isinstance(owner, Device):
+        row = make_interface(owner, name)
+    else:
+        row = VMInterface.objects.create(virtual_machine=owner, name=name)
+    row.description = description
+    if port_id is not None:
+        set_librenms_device_id(row, port_id, SERVER_KEY)
+    row.save()
+    return row
+
+
+@pytest.mark.django_db
+@OWNERS
+@pytest.mark.parametrize(
+    "foreign_view, foreign_change, writes_the_local_row",
+    [(True, True, True), (True, False, False), (False, True, True), (False, False, False)],
+    ids=["view-change", "view-only", "change-only", "neither"],
+)
+def test_a_port_bound_to_another_owner_keeps_the_rule_of_its_change_scope(
+    client, object_type, owner_model, interface_model, foreign_view, foreign_change, writes_the_local_row
+):
+    """A stale binding: port 1 is bound to an interface of another owner, and this owner has an unbound ``eth0``."""
+    case = f"{object_type}-{foreign_view}-{foreign_change}"
+    owner = _owner(object_type, f"written-scope-foreign-{case}")
+    local = _row_of(owner, "eth0", description="local-old")
+    foreign = _row_of(
+        _owner(object_type, f"written-scope-foreign-other-{case}"),
+        "private-foreign",
+        description="foreign-old",
+        port_id=1,
+    )
+    seed_ports(owner, [sync_port(1, "eth0", alias="remote-new")])
+    only_the_local_row = {"pk": local.pk}
+    client.force_login(
+        _user(
+            f"written-scope-foreign-{case}-user",
+            owner_model,
+            interface_model,
+            view=None if foreign_view else only_the_local_row,
+            change=None if foreign_change else only_the_local_row,
+        )
+    )
+
+    response = _post_sync(client, owner, object_type, [1], exclude_columns=("vlans",), htmx=True)
+
+    local.refresh_from_db()
+    foreign.refresh_from_db()
+    texts = messages_on(response.wsgi_request)
+    if writes_the_local_row:
+        assert texts == [("success", SYNCED)]
+        assert local.description == "remote-new"
+    else:
+        assert texts == [("warning", "1 interface(s) skipped: eth0 (port already mapped elsewhere or ambiguous).")]
+        assert local.description == "local-old"
+    assert get_librenms_device_id(local, SERVER_KEY, auto_save=False) is None
+    assert (foreign.description, get_librenms_device_id(foreign, SERVER_KEY, auto_save=False)) == ("foreign-old", 1)
+    assert "private-foreign" not in response.content.decode()
 
 
 @transactional_db_with_all_apps()
