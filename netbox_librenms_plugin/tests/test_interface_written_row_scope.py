@@ -133,6 +133,40 @@ def _written_change_records():
     return ObjectChange.objects.filter(changed_object_type__model__in=("interface", "vminterface", "macaddress"))
 
 
+@pytest.mark.django_db
+@OWNERS
+def test_an_owner_that_leaves_the_view_scope_before_its_lock_gives_the_skip_not_an_error(
+    client, monkeypatch, object_type, owner_model, interface_model
+):
+    """With no locked owner the attempt selects no row, so it writes none and reports the skip."""
+    owner = _owner(object_type, "written-scope-owner-before-lock")
+    owner_field = "device" if object_type == "device" else "virtual_machine"
+    row = interface_model.objects.create(name="eth0", description="old", **{owner_field: owner})
+    seed_ports(owner, [sync_port(1, "eth0", alias="new")])
+    user = make_user_with_perms(
+        "written-scope-owner-before-lock-user",
+        [("view", VLAN), ("view", VLANGroup), ("view", interface_model), ("add", interface_model)],
+    )
+    user = grant(user, "change", interface_model)
+    user = grant(user, "view", owner_model, constraints={"description": ""})
+    real_lock = SyncInterfacesView._lock_sync_scope
+
+    def owner_leaves_the_view_scope(self, obj, *args, **kwargs):
+        owner_model.objects.filter(pk=obj.pk).update(description="moved out of the view scope")
+        return real_lock(self, obj, *args, **kwargs)
+
+    monkeypatch.setattr(SyncInterfacesView, "_lock_sync_scope", owner_leaves_the_view_scope)
+    client.force_login(user)
+
+    response = _post_sync(client, owner, object_type, [1], exclude_columns=("vlans",))
+
+    row.refresh_from_db()
+    assert row.description == "old"
+    assert messages_on(response.wsgi_request) == [
+        ("warning", "1 interface(s) skipped: eth0 (selected target unavailable).")
+    ]
+
+
 @transactional_db_with_all_apps()
 @OWNERS
 @pytest.mark.parametrize("refused_action", ["add", "change"])

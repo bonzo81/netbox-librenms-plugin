@@ -440,7 +440,11 @@ class SyncInterfacesView(
                     )
             finally:
                 self.__dict__.pop("_locked_target_devices", None)
-        if refused := writes.outside_scope(self._selection.selected):
+        if self._selection is None:
+            # No locked owner means no selected row, so a write here is a defect of a write path.
+            if any(writes.written.values()):
+                raise RuntimeError("The interface sync wrote an interface row with no selection.")
+        elif refused := writes.outside_scope(self._selection.selected):
             named = sorted(
                 (name, actions) for model, pk, actions in refused if (name := self._shown_name(model, pk)) is not None
             )
