@@ -188,6 +188,7 @@ class TestTheIPPathResolver:
                 rules=InterfaceRuleMatcher.load(),
                 server_key=SERVER_KEY,
                 interface_name_field="ifName",
+                addable_queryset=Interface.objects.all(),
                 changeable_queryset=Interface.objects.all(),
                 viewable_queryset=Interface.objects.all(),
             )

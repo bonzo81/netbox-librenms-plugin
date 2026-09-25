@@ -42,6 +42,38 @@ class InterfaceWrite(NamedTuple):
     changed: bool
 
 
+class NewInterfaceOutsideScope(ValueError):
+    """A row that the sync created is outside the user's add scope or change scope, as the sync wrote it."""
+
+    def __init__(self, action):
+        self.action = action
+        super().__init__(f"The new NetBox interface is outside your {action} scope.")
+
+
+def check_new_interface_scope(interface, *, addable_queryset, changeable_queryset):
+    """
+    Refuse a row that this sync created unless the row, as the sync wrote it, is in the user's add and change scopes.
+
+    NetBox's own edit view checks the add scope of a new object after the save, on the saved
+    values. The sync also writes the row as a change: the VLAN write, the relationship pass and
+    every later sync read it through the change scope. So the row must be in both scopes. Call
+    this after the last write of the row, in the transaction or savepoint that created the row,
+    so that the refusal rolls the row back.
+
+    Args:
+        interface (Interface | VMInterface): The row that this sync created and wrote.
+        addable_queryset (QuerySet): The interfaces that the user may add.
+        changeable_queryset (QuerySet): The interfaces that the user may change.
+
+    Raises:
+        NewInterfaceOutsideScope: The row is outside one of the two scopes.
+
+    """
+    for action, queryset in (("add", addable_queryset), ("change", changeable_queryset)):
+        if not queryset.filter(pk=interface.pk).exists():
+            raise NewInterfaceOutsideScope(action)
+
+
 def _owner_filter(interface):
     """Return the lookup of the owner of *interface*: its Device or its VirtualMachine."""
     if isinstance(interface, Interface):
@@ -284,6 +316,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
     rules,
     server_key,
     interface_name_field,
+    addable_queryset,
     changeable_queryset,
     viewable_queryset,
     speed_converter=convert_speed_to_kbps,
@@ -293,6 +326,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
 
     Raises:
         PortSyncBlocked: Before any lookup or write, when ``rules`` block the port for ``owner``.
+        NewInterfaceOutsideScope: The created row, as written, is outside the add or change scope.
         ValueError: When the port cannot be resolved to one interface safely.
 
     """
@@ -359,11 +393,6 @@ def resolve_or_create_interface_from_port(  # noqa: C901
                     raise ValueError("The matching NetBox interface is outside your view scope.")
                 if not changeable_queryset.filter(pk=interface.pk).exists():
                     raise ValueError("The matching NetBox interface is outside your change scope.")
-            # A model-level add grant does not imply a constrained change grant, so the row
-            # this call just created still has to fall inside the caller's change scope
-            # before update_interface_from_port() populates it.
-            elif not changeable_queryset.filter(pk=interface.pk).exists():
-                raise ValueError("The new NetBox interface is outside your change scope.")
 
     interface = update_interface_from_port(
         interface,
@@ -376,6 +405,8 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         changeable_queryset=changeable_queryset,
         speed_converter=speed_converter,
     ).interface
+    if created:
+        check_new_interface_scope(interface, addable_queryset=addable_queryset, changeable_queryset=changeable_queryset)
     if not viewable_queryset.filter(pk=interface.pk).exists():
         raise ValueError("The synchronized NetBox interface is outside your view scope.")
     return interface

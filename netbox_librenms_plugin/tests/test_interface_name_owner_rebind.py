@@ -510,6 +510,7 @@ def test_the_ip_path_names_the_holding_port_only_inside_the_view_scope(viewable)
             rules=InterfaceRuleMatcher.load(),
             server_key=SERVER_KEY,
             interface_name_field="ifName",
+            addable_queryset=Interface.objects.all(),
             changeable_queryset=Interface.objects.all(),
             viewable_queryset=viewable_queryset,
         )

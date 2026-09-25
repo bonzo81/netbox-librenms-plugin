@@ -586,6 +586,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             rules=interface_rules_for_request(self.request),
             server_key=server_key,
             interface_name_field=interface_name_field,
+            addable_queryset=self.restricted_queryset(interface_model, "add"),
             changeable_queryset=self.restricted_queryset(interface_model, "change"),
             viewable_queryset=self.restricted_queryset(interface_model, "view"),
         )

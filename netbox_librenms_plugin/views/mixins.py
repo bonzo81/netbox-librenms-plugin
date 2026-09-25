@@ -1683,7 +1683,7 @@ class VlanAssignmentMixin:
         return vlans[0] if vlans else None
 
     def _update_interface_vlan_assignment(
-        self, interface, vlan_data, vlan_group_map, lookup_maps, *, changeable_queryset
+        self, interface, vlan_data, vlan_group_map, lookup_maps, *, changeable_queryset, created=False
     ):
         """
         Update interface VLAN assignments in NetBox (mode, untagged_vlan, tagged_vlans).
@@ -1699,6 +1699,7 @@ class VlanAssignmentMixin:
                            Can also be a single group ID string for backward compat.
             lookup_maps: Dict from _build_vlan_lookup_maps()
             changeable_queryset: The interfaces that the caller may change, for the write's fresh read.
+            created: Whether this sync created the interface, as in ``write_interface_row``.
 
         Returns:
             Dict with sync results:
@@ -1748,7 +1749,9 @@ class VlanAssignmentMixin:
         # Save mode + untagged_vlan before M2M operations.
         # tagged_vlans.set() triggers a DB refresh that wipes unsaved
         # in-memory attributes, so we must persist first.
-        interface, fields_changed = write_interface_row(interface, apply_vlans, changeable_queryset=changeable_queryset)
+        interface, fields_changed = write_interface_row(
+            interface, apply_vlans, changeable_queryset=changeable_queryset, created=created
+        )
 
         # Set tagged VLANs (M2M - requires the instance to be saved first)
         tagged_set = []
