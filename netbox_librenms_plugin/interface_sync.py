@@ -1,6 +1,9 @@
 """Shared LibreNMS port to NetBox interface synchronization."""
 
 import logging
+from collections import defaultdict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy, deepcopy
 from typing import NamedTuple
 
@@ -45,33 +48,129 @@ class InterfaceWrite(NamedTuple):
 class NewInterfaceOutsideScope(ValueError):
     """A row that the sync created is outside the user's add scope or change scope, as the sync wrote it."""
 
-    def __init__(self, action):
-        self.action = action
-        super().__init__(f"The new NetBox interface is outside your {action} scope.")
+    def __init__(self, actions):
+        super().__init__(f"The new NetBox interface is outside your {' and '.join(actions)} scope.")
 
 
-def check_new_interface_scope(interface, *, addable_queryset, changeable_queryset):
+def interface_rows_outside_scope(written, created, *, addable_queryset, changeable_queryset):
     """
-    Refuse a row that this sync created unless the row, as the sync wrote it, is in the user's add and change scopes.
+    Return the rows that a sync wrote and that are outside the user's scopes as the rows are now.
 
-    NetBox's own edit view checks the add scope of a new object after the save, on the saved
-    values. The sync also writes the row as a change: the VLAN write, the relationship pass and
-    every later sync read it through the change scope. So the row must be in both scopes. Call
-    this after the last write of the row, in the transaction or savepoint that created the row,
-    so that the refusal rolls the row back.
+    NetBox's edit views save an object and then check that the saved object is in the user's
+    scope. The sync writes a row that it created as a change too, so each written row must be in
+    the change scope, and each created row also in the add scope. Call it after the last write,
+    inside the transaction of the writes, so that a refusal can roll the writes back.
 
     Args:
-        interface (Interface | VMInterface): The row that this sync created and wrote.
-        addable_queryset (QuerySet): The interfaces that the user may add.
-        changeable_queryset (QuerySet): The interfaces that the user may change.
+        written (set[int]): The pks of the rows of one model that the sync created or changed.
+        created (set[int]): The pks of the rows in *written* that the sync created.
+        addable_queryset (QuerySet): The rows of the model that the user may add.
+        changeable_queryset (QuerySet): The rows of the model that the user may change.
 
-    Raises:
-        NewInterfaceOutsideScope: The row is outside one of the two scopes.
+    Returns:
+        dict[int, tuple[str, ...]]: The actions (``add``, ``change``) whose scope each refused row is outside, by pk.
 
     """
-    for action, queryset in (("add", addable_queryset), ("change", changeable_queryset)):
-        if not queryset.filter(pk=interface.pk).exists():
-            raise NewInterfaceOutsideScope(action)
+    refused = {}
+    for action, pks, queryset in (("add", created, addable_queryset), ("change", written, changeable_queryset)):
+        if pks:
+            for pk in pks - set(queryset.filter(pk__in=pks).values_list("pk", flat=True)):
+                refused[pk] = (*refused.get(pk, ()), action)
+    return refused
+
+
+class InterfaceWrites:
+    """
+    The Interface and VMInterface rows that one sync created or changed while ``collect_interface_writes`` runs.
+
+    The receivers ``record_interface_save`` (``post_save``) and ``record_tagged_vlan_change``
+    (``m2m_changed``) record the rows, so every save and every tagged-VLAN change is recorded, also
+    one that NetBox makes. The caller gives each row that it writes the name that it read before
+    its permission check (``name_interface_row``), so that a refusal can name the row.
+    """
+
+    def __init__(self):
+        self.written = defaultdict(set)
+        self.created = defaultdict(set)
+        self.names = {}
+
+    def outside_scope(self, user):
+        """
+        Return the recorded rows that are outside the scopes of *user* now, with one query for each model and action.
+
+        Args:
+            user (User): The user whose add and change scopes the rows must be in.
+
+        Returns:
+            list[tuple[str, tuple[str, ...]]]: The name of each refused row and the actions whose
+                scope it is outside, sorted.
+
+        Raises:
+            RuntimeError: A refused row has no name: a write path of the caller did not name it.
+
+        """
+        refused = []
+        for model, written in self.written.items():
+            outside = interface_rows_outside_scope(
+                written,
+                self.created[model],
+                addable_queryset=model.objects.restrict(user, "add"),
+                changeable_queryset=model.objects.restrict(user, "change"),
+            )
+            for pk, actions in outside.items():
+                if (model, pk) not in self.names:
+                    raise RuntimeError(f"The sync wrote {model.__name__} {pk}, but gave it no name.")
+                refused.append((self.names[(model, pk)], actions))
+        return sorted(refused)
+
+
+# The writes of the sync that runs now; None outside ``collect_interface_writes``.
+_active_writes = ContextVar("librenms_interface_writes", default=None)
+
+
+@contextmanager
+def collect_interface_writes():
+    """Record the Interface and VMInterface rows that the block writes, and yield the ``InterfaceWrites``."""
+    writes = InterfaceWrites()
+    token = _active_writes.set(writes)
+    try:
+        yield writes
+    finally:
+        _active_writes.reset(token)
+
+
+def name_interface_row(interface, name):
+    """
+    Give *interface* the name for a refusal: the name that the caller read before its permission check.
+
+    The first name of a row stays. Outside ``collect_interface_writes`` it does nothing.
+    """
+    if (writes := _active_writes.get()) is not None:
+        writes.names.setdefault((type(interface), interface.pk), name)
+
+
+def record_interface_save(sender, instance, created, **kwargs):
+    """``post_save`` receiver: record a saved Interface or VMInterface row."""
+    if (writes := _active_writes.get()) is not None:
+        writes.written[sender].add(instance.pk)
+        if created:
+            writes.created[sender].add(instance.pk)
+
+
+def record_tagged_vlan_change(sender, instance, action, reverse, model, pk_set, using, **kwargs):
+    """``m2m_changed`` receiver of the tagged VLANs: record each row whose tagged VLANs change."""
+    if (writes := _active_writes.get()) is None:
+        return
+    if not reverse:
+        if action in ("post_add", "post_remove", "post_clear"):
+            writes.written[type(instance)].add(instance.pk)
+    elif action in ("post_add", "post_remove"):
+        writes.written[model].update(pk_set)
+    elif action == "pre_clear":
+        # A clear from the VLAN side names no rows, so read them before the clear.
+        writes.written[model].update(
+            model.objects.using(using).filter(tagged_vlans=instance).values_list("pk", flat=True)
+        )
 
 
 def _owner_filter(interface):
@@ -408,7 +507,11 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         speed_converter=speed_converter,
     ).interface
     if created:
-        check_new_interface_scope(interface, addable_queryset=addable_queryset, changeable_queryset=changeable_queryset)
+        refused = interface_rows_outside_scope(
+            {interface.pk}, {interface.pk}, addable_queryset=addable_queryset, changeable_queryset=changeable_queryset
+        )
+        if refused:
+            raise NewInterfaceOutsideScope(refused[interface.pk])
     if not viewable_queryset.filter(pk=interface.pk).exists():
         raise ValueError("The synchronized NetBox interface is outside your view scope.")
     return interface

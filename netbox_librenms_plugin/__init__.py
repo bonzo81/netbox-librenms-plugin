@@ -64,9 +64,10 @@ class LibreNMSSyncConfig(PluginConfig):
 
         # The late write of an interface row locks the row and checks its version just before the UPDATE.
         from dcim.models import Interface
-        from django.db.models.signals import pre_save
+        from django.db.models.signals import m2m_changed, post_save, pre_save
         from virtualization.models import VMInterface
 
+        from netbox_librenms_plugin.interface_sync import record_interface_save, record_tagged_vlan_change
         from netbox_librenms_plugin.transactions import lock_row_at_version
 
         for model in (Interface, VMInterface):
@@ -74,6 +75,17 @@ class LibreNMSSyncConfig(PluginConfig):
                 lock_row_at_version,
                 sender=model,
                 dispatch_uid=f"netbox_librenms_plugin_row_version_{model._meta.label_lower}",
+            )
+            # The interface sync checks the scope of every row that it wrote, from the writes themselves.
+            post_save.connect(
+                record_interface_save,
+                sender=model,
+                dispatch_uid=f"netbox_librenms_plugin_written_row_{model._meta.label_lower}",
+            )
+            m2m_changed.connect(
+                record_tagged_vlan_change,
+                sender=model.tagged_vlans.through,
+                dispatch_uid=f"netbox_librenms_plugin_written_tagged_vlans_{model._meta.label_lower}",
             )
 
     def _validate_multi_server_config(self, servers_config):

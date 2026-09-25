@@ -37,12 +37,12 @@ from netbox_librenms_plugin.interface_rules import (
     rule_names,
 )
 from netbox_librenms_plugin.interface_sync import (
-    NewInterfaceOutsideScope,
     changed_fields,
-    check_new_interface_scope,
+    collect_interface_writes,
     copy_before_change,
     interface_owner_platform_id,
     keep_change_log_before_state,
+    name_interface_row,
     update_interface_from_port,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -95,6 +95,16 @@ class _ConflictingRowTargetError(Exception):
 
 class _DuplicatedSelectionError(Exception):
     """The related-row walk reached a port ID the cached snapshot holds more than once."""
+
+
+class _RowsOutsideScopeError(Exception):
+    """Rows that a sync attempt wrote are outside the user's add or change scope; the attempt rolls back."""
+
+    def __init__(self, refused):
+        rows = ", ".join(f"{name} ({', '.join(actions)})" for name, actions in refused)
+        super().__init__(
+            f"Nothing was saved. These interfaces are outside the scope of your permissions after the sync: {rows}."
+        )
 
 
 _DUPLICATED_SELECTION_MESSAGE = (
@@ -249,6 +259,9 @@ class SyncInterfacesView(
             # The walk reached a duplicated port before anything was written; the attempt rolled back.
             messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
             return self._tab_response(request, object_type, interface_name_field, server_key)
+        except _RowsOutsideScopeError as refused:
+            messages.error(request, str(refused))
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         except IntegrityError:
             # The runner checks Django's deferred foreign keys as the attempt's last step. A related
             # row deleted mid-sync therefore surfaces here, past every inner savepoint handler.
@@ -313,6 +326,10 @@ class SyncInterfacesView(
         counter afresh, and it re-locks and re-reads the objects it writes, so a retry reads nothing
         that a failed attempt derived. It adds no message: ``post()`` publishes the committed outcome.
 
+        After the last write, each interface row that the attempt created or changed must be in the
+        user's change scope, and each created row also in the add scope. One row outside the scope
+        rolls the whole attempt back, as a NetBox edit view does, and the runner does not retry it.
+
         Args:
             visible_port_ids (set[int]): The port IDs the user selected.
             ports_data (list[dict]): The cached snapshot rows.
@@ -323,6 +340,9 @@ class SyncInterfacesView(
 
         Returns:
             _InterfaceSyncOutcome: What the attempt synced, skipped and warned about.
+
+        Raises:
+            _RowsOutsideScopeError: A written row is outside the user's add or change scope.
 
         """
         self._selected_port_ids = set(visible_port_ids)
@@ -335,24 +355,27 @@ class SyncInterfacesView(
         self._synced_count = 0
         self._mutated = False
         self._attempt_warnings = []
-        try:
-            self.sync_selected_interfaces(
-                self.object,
-                ports_data,
-                exclude_columns,
-                interface_name_field,
-                keep_locked_targets=True,
-            )
-            # The relationship pass reuses the locked target map of the attribute pass.
-            self._sync_interface_relationships(
-                self.object,
-                ports_data,
-                relationships,
-                server_key,
-                excluded_columns=exclude_columns,
-            )
-        finally:
-            self.__dict__.pop("_locked_target_devices", None)
+        with collect_interface_writes() as writes:
+            try:
+                self.sync_selected_interfaces(
+                    self.object,
+                    ports_data,
+                    exclude_columns,
+                    interface_name_field,
+                    keep_locked_targets=True,
+                )
+                # The relationship pass reuses the locked target map of the attribute pass.
+                self._sync_interface_relationships(
+                    self.object,
+                    ports_data,
+                    relationships,
+                    server_key,
+                    excluded_columns=exclude_columns,
+                )
+            finally:
+                self.__dict__.pop("_locked_target_devices", None)
+        if refused := writes.outside_scope(self.request.user):
+            raise _RowsOutsideScopeError(refused)
         return _InterfaceSyncOutcome(
             skipped_conflicts=tuple(self._skipped_conflicts),
             kept_name_conflicts=tuple(self._kept_name_conflicts),
@@ -1099,6 +1122,9 @@ class SyncInterfacesView(
             bool: True when the relationship is saved, or False when validation or persistence fails.
 
         """
+        # The locked read gave both names, so a refusal of a row outside the scope can name it.
+        name_interface_row(source_iface, source_iface.name)
+        name_interface_row(related_iface, related_iface.name)
         try:
             # Own savepoint: an IntegrityError from the persist poisons the enclosing batch
             # transaction ("current transaction is aborted" on every later row) unless the
@@ -1618,30 +1644,27 @@ class SyncInterfacesView(
                 interface_name, "LibreNMS port ID is already assigned to another NetBox interface"
             )
             return
-        written = None
-        if not port_owner_is_ambiguous:
+        if port_owner_is_ambiguous:
+            interface = None
+        elif target_device is not None:
             try:
-                # A savepoint for the row: a refused new row is rolled back with all that the sync wrote to it.
-                with transaction.atomic():
-                    written = self._resolve_and_write_row(
-                        obj,
-                        target_device,
-                        librenms_interface,
-                        exclude_columns,
-                        interface_name_field,
-                        synced_name,
-                        lookup_port_id=lookup_port_id,
-                        server_key=server_key,
-                        port_owner=port_owner,
-                    )
+                interface = self._resolve_device_interface(
+                    target_device,
+                    interface_name,
+                    lookup_port_id,
+                    server_key,
+                    port_owner=port_owner,
+                    oob=librenms_interface.get("_source") == OOB_INVENTORY_SOURCE,
+                )
             except _HostInterfaceNameConflict:
                 self._record_skipped_conflict(interface_name, "host interface already uses this name")
                 return
-            except NewInterfaceOutsideScope as refused:
-                self._record_skipped_conflict(interface_name, f"new interface outside your {refused.action} scope")
-                return
+        else:
+            interface = self._resolve_vm_interface(
+                obj, interface_name, lookup_port_id, server_key, port_owner=port_owner
+            )
 
-        if written is None:
+        if interface is None:
             logger.warning(
                 "Skipping interface sync for '%s': unable to resolve target interface safely (port_id=%r).",
                 interface_name,
@@ -1655,71 +1678,15 @@ class SyncInterfacesView(
             self._record_skipped_conflict(interface_name, skip_reason)
             return
 
-        # An interface resolved and was synced — count it explicitly (defensive getattr:
+        # An interface resolved and is being synced — count it explicitly (defensive getattr:
         # sync_interface may be exercised directly without post() initialising the counter). The
         # count, not a skip-vs-selected size comparison, drives the success banner in post().
         if getattr(self, "_synced_count", None) is not None:
             self._synced_count += 1
-        interface, changed, checked_name = written
-        # The writer kept the stored name, so the written row still carries it.
-        if "name" not in exclude_columns and interface.name != synced_name:
-            kept_names = getattr(self, "_kept_name_conflicts", None)
-            if kept_names is not None:
-                kept_names.append((checked_name, synced_name, name_conflict_reason))
-        if changed and getattr(self, "_mutated", None) is not None:
-            self._mutated = True
 
-    def _resolve_and_write_row(
-        self,
-        obj,
-        target_device,
-        librenms_interface,
-        exclude_columns,
-        interface_name_field,
-        synced_name,
-        *,
-        lookup_port_id,
-        server_key,
-        port_owner,
-    ):
-        """
-        Resolve the interface of one row and write the row, in the caller's savepoint.
-
-        Args:
-            obj (Device | VirtualMachine): The page object.
-            target_device (Device | None): The row's Device, or None for a VirtualMachine row.
-            librenms_interface (dict): The cached port row.
-            exclude_columns (list[str]): The columns this row must not write.
-            interface_name_field (str): Port field that contains the interface name.
-            synced_name (str | None): The name that the sync writes.
-            lookup_port_id: The raw port ID for the lookup, or None when it is not valid.
-            server_key (str): The validated POSTed server key.
-            port_owner (Interface | VMInterface | None): The interface that holds the port.
-
-        Returns:
-            tuple | None: ``(interface, changed, checked_name)`` for the written row, or None when
-                no interface resolved safely. ``checked_name`` is the name that the permission check saw.
-
-        Raises:
-            NewInterfaceOutsideScope: The sync created the row, and the written row is outside the
-                user's add or change scope. The caller rolls the savepoint back.
-
-        """
-        if target_device is not None:
-            interface = self._resolve_device_interface(
-                target_device,
-                synced_name,
-                lookup_port_id,
-                server_key,
-                port_owner=port_owner,
-                oob=librenms_interface.get("_source") == OOB_INVENTORY_SOURCE,
-            )
-        else:
-            interface = self._resolve_vm_interface(obj, synced_name, lookup_port_id, server_key, port_owner=port_owner)
-        if interface is None:
-            return None
         # The name that the permission check saw; a concurrent rename can put the fresh name out of view.
         checked_name = interface.name
+        name_interface_row(interface, checked_name)
         created = bool(getattr(interface, "_librenms_sync_created", False))
         interface, changed = self.update_interface_attributes(
             interface,
@@ -1729,17 +1696,18 @@ class SyncInterfacesView(
             synced_name,
             created=created,
         )
+        changed = changed or created
+        # The writer kept the stored name, so the written row still carries it.
+        if "name" not in exclude_columns and interface.name != synced_name:
+            kept_names = getattr(self, "_kept_name_conflicts", None)
+            if kept_names is not None:
+                kept_names.append((checked_name, synced_name, name_conflict_reason))
+
         # Sync VLANs if not excluded, and never when the caller cannot read the whole VLAN scope.
         if "vlans" not in exclude_columns and not getattr(self, "_vlan_scope_incomplete", False):
             changed = self._sync_interface_vlans(interface, librenms_interface, created=created) or changed
-        if created:
-            interface_model = type(interface)
-            check_new_interface_scope(
-                interface,
-                addable_queryset=self.restricted_queryset(interface_model, "add"),
-                changeable_queryset=self.restricted_queryset(interface_model, "change"),
-            )
-        return interface, changed or created, checked_name
+        if changed and getattr(self, "_mutated", None) is not None:
+            self._mutated = True
 
     def _missing_target_reason(self, port_id):
         """Return why a row resolved to no target device."""
