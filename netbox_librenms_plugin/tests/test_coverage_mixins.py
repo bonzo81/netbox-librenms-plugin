@@ -1144,7 +1144,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             {"untagged_vlan": 100, "tagged_vlans": []},
             {"100": str(group.pk)},
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -1164,7 +1164,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             {"untagged_vlan": 10, "tagged_vlans": [20]},
             {"10": str(group.pk), "20": str(group.pk)},
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -1186,7 +1186,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             {"untagged_vlan": None, "tagged_vlans": []},
             {},
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -1205,7 +1205,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             {"untagged_vlan": None, "tagged_vlans": []},
             {},
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         assert result["changed"] is False
@@ -1225,7 +1225,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             {"untagged_vlan": None, "tagged_vlans": []},
             {},
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -1248,7 +1248,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             {"untagged_vlan": 100, "tagged_vlans": []},
             str(wanted_group.pk),
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         assert result["untagged_set"] == wanted
@@ -1261,7 +1261,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         mixin, interface, _group, maps, _ = self._fixture("missing")
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": 999, "tagged_vlans": []}, {}, maps, changeable_queryset=Interface.objects.all()
+            interface, {"untagged_vlan": 999, "tagged_vlans": []}, {}, maps, fresh_read_queryset=Interface.objects.all()
         )
 
         interface.refresh_from_db()
@@ -1277,7 +1277,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             {"untagged_vlan": None, "tagged_vlans": []},
             {},
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         assert set(result) == {"interface", "mode_set", "untagged_set", "tagged_set", "missing_vlans", "changed"}

@@ -1705,7 +1705,7 @@ class SyncInterfacesView(
 
         # Sync VLANs if not excluded, and never when the caller cannot read the whole VLAN scope.
         if "vlans" not in exclude_columns and not getattr(self, "_vlan_scope_incomplete", False):
-            changed = self._sync_interface_vlans(interface, librenms_interface, created=created) or changed
+            changed = self._sync_interface_vlans(interface, librenms_interface) or changed
         if changed and getattr(self, "_mutated", None) is not None:
             self._mutated = True
 
@@ -1816,12 +1816,13 @@ class SyncInterfacesView(
             server_key=server_key,
             interface_name_field=interface_name_field,
             created=created,
-            changeable_queryset=self.restricted_queryset(type(interface), "change"),
+            # The attempt checks the scope of every written row after its last write.
+            fresh_read_queryset=type(interface).objects.all(),
             exclude_columns=exclude_columns,
             speed_converter=convert_speed_to_kbps,
         )
 
-    def _sync_interface_vlans(self, interface, librenms_port, *, created=False):
+    def _sync_interface_vlans(self, interface, librenms_port):
         """
         Sync VLAN assignments from LibreNMS to NetBox interface.
 
@@ -1830,7 +1831,6 @@ class SyncInterfacesView(
         Args:
             interface: NetBox Interface or VMInterface object
             librenms_port: Port data dict from LibreNMS with VLAN info
-            created: Whether this sync created the interface, as in ``write_interface_row``.
 
         """
         port_id = normalize_librenms_port_id(librenms_port.get("port_id"))
@@ -1893,8 +1893,8 @@ class SyncInterfacesView(
             vlan_data,
             vlan_group_map,
             lookup_maps,
-            changeable_queryset=self.restricted_queryset(type(interface), "change"),
-            created=created,
+            # The attempt checks the scope of every written row after its last write.
+            fresh_read_queryset=type(interface).objects.all(),
         )
         return bool(result and result.get("changed"))
 

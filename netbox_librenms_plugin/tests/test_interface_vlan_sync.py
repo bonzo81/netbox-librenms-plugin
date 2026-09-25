@@ -250,7 +250,7 @@ class TestInterfaceVlanSync:
             {"untagged_vlan": 100, "tagged_vlans": []},
             None,
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -282,7 +282,7 @@ class TestInterfaceVlanSync:
             {"untagged_vlan": 100, "tagged_vlans": []},
             None,
             VlanAssignmentMixin._index_vlans([untagged_vlan, stale_tagged_vlan]),
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -302,7 +302,7 @@ class TestInterfaceVlanSync:
             {"untagged_vlan": 100, "tagged_vlans": [200, 300]},
             None,
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -319,7 +319,7 @@ class TestInterfaceVlanSync:
             {"untagged_vlan": 100, "tagged_vlans": [200, 300]},
             None,
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -341,7 +341,7 @@ class TestInterfaceVlanSync:
             {"untagged_vlan": 100, "tagged_vlans": []},
             group.pk,
             maps,
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()

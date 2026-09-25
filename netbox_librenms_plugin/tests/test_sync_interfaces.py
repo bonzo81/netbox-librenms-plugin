@@ -267,7 +267,7 @@ def test_interface_update_ignores_non_string_mac(mac):
         server_key="default",
         interface_name_field="ifName",
         created=False,
-        changeable_queryset=Interface.objects.all(),
+        fresh_read_queryset=Interface.objects.all(),
     )
     interface.refresh_from_db()
     assert interface.description == "updated description"

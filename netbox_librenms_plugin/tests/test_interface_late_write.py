@@ -462,11 +462,15 @@ def test_a_row_that_left_its_owner_after_the_read_is_not_written(client, attempt
 
 
 # ---------------------------------------------------------------------------
-# The late write reads the row within the user's change scope
+# A row that leaves the change scope during the write: the final check of the scope decides
 # ---------------------------------------------------------------------------
 
 LEFT_THE_SCOPE = {"name": "private-link"}
 SKIPPED_OUT_OF_SCOPE = ("warning", "1 interface(s) skipped: eth10 (port already mapped elsewhere or ambiguous).")
+REFUSED_ETH10 = (
+    "error",
+    "Nothing was saved. These interfaces are outside the scope of your permissions after the sync: eth10 (change).",
+)
 
 
 def _user_who_may_change_only_eth_interfaces(username, *perm_specs):
@@ -478,11 +482,23 @@ def _user_who_may_change_only_eth_interfaces(username, *perm_specs):
 
 
 @transactional_db_with_all_apps()
-@COMMIT_POINTS
-def test_a_row_that_leaves_the_change_scope_is_not_written_by_the_attribute_writer(
-    client, attempts, monkeypatch, commit_point
+@pytest.mark.parametrize(
+    "commit_point, attempt_count, shown, columns",
+    [
+        # The fresh read finds the row by its pk and owner; the sync writes its name back, so the row is in the scope.
+        (
+            BEFORE_THE_FRESH_READ,
+            1,
+            [("success", SYNCED)],
+            {"name": "eth10", "description": "uplink", "speed": 1_000_000},
+        ),
+        # The row version moved after the fresh read: the retry resolves the port again, and the view skips the row.
+        (AFTER_THE_FRESH_READ, 2, [SKIPPED_OUT_OF_SCOPE], {"name": "private-link", "description": "", "speed": None}),
+    ],
+)
+def test_a_row_that_leaves_the_change_scope_during_the_attribute_write(
+    client, attempts, monkeypatch, commit_point, attempt_count, shown, columns
 ):
-    """The retry resolves the port again, and the view refuses the row that it may no longer change."""
     device = make_device(f"late-write-scope-attr-{commit_point}", librenms_cf={SERVER_KEY: {"id": 8}})
     interface = bound_interface(device, "eth10", 10)
     seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
@@ -499,19 +515,23 @@ def test_a_row_that_leaves_the_change_scope_is_not_written_by_the_attribute_writ
         response = post_interface_sync(client, device, [10], htmx=False)
 
     assert commits.commits == 1
-    assert attempts.count == 2
-    assert messages_on(response.wsgi_request) == [SKIPPED_OUT_OF_SCOPE]
-    assert _column_values(interface, ["name", "description", "speed"]) == {
-        "name": "private-link",
-        "description": "",
-        "speed": None,
-    }
+    assert attempts.count == attempt_count
+    assert messages_on(response.wsgi_request) == shown
+    assert _column_values(interface, ["name", "description", "speed"]) == columns
 
 
 @transactional_db_with_all_apps()
-@COMMIT_POINTS
-def test_a_row_that_leaves_the_change_scope_is_not_written_by_the_vlan_helper(
-    client, attempts, monkeypatch, commit_point
+@pytest.mark.parametrize(
+    "commit_point, attempt_count, shown",
+    [
+        # The VLAN write does not write the name, so the row stays outside the scope and the final check refuses it.
+        (BEFORE_THE_FRESH_READ, 1, [REFUSED_ETH10]),
+        # The row version moved after the fresh read: the retry resolves the port again, and the view skips the row.
+        (AFTER_THE_FRESH_READ, 2, [SKIPPED_OUT_OF_SCOPE]),
+    ],
+)
+def test_a_row_that_leaves_the_change_scope_during_the_vlan_write(
+    client, attempts, monkeypatch, commit_point, attempt_count, shown
 ):
     """Only the mode and the untagged VLAN change, so the VLAN helper is the one writer of the row."""
     device = make_device(f"late-write-scope-vlan-{commit_point}", librenms_cf={SERVER_KEY: {"id": 9}})
@@ -535,8 +555,8 @@ def test_a_row_that_leaves_the_change_scope_is_not_written_by_the_vlan_helper(
         response = post_interface_sync(client, device, [10], htmx=False, exclude_columns=("mac_address",))
 
     assert commits.commits == 1
-    assert attempts.count == 2
-    assert messages_on(response.wsgi_request) == [SKIPPED_OUT_OF_SCOPE]
+    assert attempts.count == attempt_count
+    assert messages_on(response.wsgi_request) == shown
     assert _column_values(interface, ["name", "mode", "untagged_vlan_id"]) == {
         "name": "private-link",
         "mode": None,

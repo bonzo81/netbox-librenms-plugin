@@ -151,7 +151,7 @@ class TestTheDiffMatchesTheWriter:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
-            changeable_queryset=Interface.objects.all(),
+            fresh_read_queryset=Interface.objects.all(),
         ).changed
 
         assert predicted == changed == writes, f"{label}: predicted={predicted} actual={changed}"

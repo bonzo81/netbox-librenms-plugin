@@ -1683,14 +1683,14 @@ class VlanAssignmentMixin:
         return vlans[0] if vlans else None
 
     def _update_interface_vlan_assignment(
-        self, interface, vlan_data, vlan_group_map, lookup_maps, *, changeable_queryset, created=False
+        self, interface, vlan_data, vlan_group_map, lookup_maps, *, fresh_read_queryset
     ):
         """
         Update interface VLAN assignments in NetBox (mode, untagged_vlan, tagged_vlans).
 
         The mode and the untagged VLAN are written through ``write_interface_row``, so they are
-        written to the current row, only while the caller may change it, and only when no other
-        operation changed it after the read. The tagged VLANs follow on the written instance.
+        written to the current row, and only when no other operation changed it after the read.
+        The tagged VLANs follow on the written instance.
 
         Args:
             interface: NetBox Interface or VMInterface object
@@ -1698,8 +1698,7 @@ class VlanAssignmentMixin:
             vlan_group_map: Dict mapping VID (str) to VLAN group ID for per-VLAN group lookups.
                            Can also be a single group ID string for backward compat.
             lookup_maps: Dict from _build_vlan_lookup_maps()
-            changeable_queryset: The interfaces that the caller may change, for the write's fresh read.
-            created: Whether this sync created the interface, as in ``write_interface_row``.
+            fresh_read_queryset: The rows that the write's fresh read may find, as in ``write_interface_row``.
 
         Returns:
             Dict with sync results:
@@ -1711,8 +1710,8 @@ class VlanAssignmentMixin:
                 - changed: bool, True when the mode, the untagged VLAN or the tagged VLANs were written
 
         Raises:
-            ConcurrentRowChange: The row left the caller's change scope, or another operation
-                changed it after the write read it.
+            ConcurrentRowChange: The row left *fresh_read_queryset*, or another operation changed
+                it after the write read it.
 
         """
         # Support both dict (per-VLAN) and string/int/None (single group) for backward compat
@@ -1749,9 +1748,7 @@ class VlanAssignmentMixin:
         # Save mode + untagged_vlan before M2M operations.
         # tagged_vlans.set() triggers a DB refresh that wipes unsaved
         # in-memory attributes, so we must persist first.
-        interface, fields_changed = write_interface_row(
-            interface, apply_vlans, changeable_queryset=changeable_queryset, created=created
-        )
+        interface, fields_changed = write_interface_row(interface, apply_vlans, fresh_read_queryset=fresh_read_queryset)
 
         # Set tagged VLANs (M2M - requires the instance to be saved first)
         tagged_set = []

@@ -307,6 +307,39 @@ def test_a_change_of_only_the_tagged_vlans_is_checked(client):
     assert not interface.tagged_vlans.exists()
 
 
+@pytest.mark.django_db
+def test_a_write_that_takes_a_row_out_of_the_change_scope_gets_the_refusal_not_a_retry(client, attempts):
+    """The VLAN write reads the row after the attribute write took it out of the scope; only the final check decides."""
+    device = make_device("written-scope-description")
+    interface = synced_interface(device, "eth0", 1, description="old")
+    seed_ports(device, [sync_port(1, "eth0", alias="new")])
+    client.force_login(_user("written-scope-description-user", Device, Interface, change={"description": "old"}))
+
+    response = _post_sync(client, device, "device", [1])
+
+    assert messages_on(response.wsgi_request) == [_refused("eth0 (change)")]
+    assert len(attempts) == 1
+    interface.refresh_from_db()
+    assert interface.description == "old"
+
+
+@pytest.mark.django_db
+def test_a_final_state_in_the_change_scope_is_saved_through_an_intermediate_state_outside_it(client):
+    """The attribute write sets the description first, so the row is outside the scope until the VLAN write sets the mode."""
+    device = make_device("written-scope-final-state")
+    interface = synced_interface(device, "eth0", 1, description="old", mode="access")
+    vlan = VLAN.objects.create(vid=100, name="written-scope-final-state")
+    seed_ports(device, [sync_port(1, "eth0", alias="new", tagged_vlans=[100])])
+    change = [{"description": "old", "mode": "access"}, {"description": "new", "mode": "tagged"}]
+    client.force_login(_user("written-scope-final-state-user", Device, Interface, change=change))
+
+    response = _post_sync(client, device, "device", [1])
+
+    assert messages_on(response.wsgi_request) == [("success", SYNCED)]
+    interface.refresh_from_db()
+    assert (interface.description, interface.mode, list(interface.tagged_vlans.all())) == ("new", "tagged", [vlan])
+
+
 # ---------------------------------------------------------------------------
 # The collection of the written rows
 # ---------------------------------------------------------------------------
