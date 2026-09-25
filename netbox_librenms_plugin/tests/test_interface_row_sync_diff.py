@@ -7,6 +7,7 @@ runs the real writer against every row shape and asserts the row state predicted
 """
 
 import pytest
+from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
@@ -150,6 +151,7 @@ class TestTheDiffMatchesTheWriter:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            changeable_queryset=Interface.objects.all(),
         ).changed
 
         assert predicted == changed == writes, f"{label}: predicted={predicted} actual={changed}"

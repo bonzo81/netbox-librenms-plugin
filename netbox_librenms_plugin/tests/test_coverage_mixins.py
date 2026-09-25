@@ -12,6 +12,7 @@ Targets:
 """
 
 import pytest
+from dcim.models import Interface
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, configure_no_librenms_servers
 
@@ -1139,7 +1140,11 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         mixin, interface, group, maps, (vlan,) = self._fixture("access", vlans=[(100, "ACCESS-100")])
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": 100, "tagged_vlans": []}, {"100": str(group.pk)}, maps
+            interface,
+            {"untagged_vlan": 100, "tagged_vlans": []},
+            {"100": str(group.pk)},
+            maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -1159,6 +1164,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
             {"untagged_vlan": 10, "tagged_vlans": [20]},
             {"10": str(group.pk), "20": str(group.pk)},
             maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -1176,7 +1182,11 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         interface.save()
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
+            interface,
+            {"untagged_vlan": None, "tagged_vlans": []},
+            {},
+            maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -1191,7 +1201,11 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         mixin, interface, group, maps, _ = self._fixture("unchanged")
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
+            interface,
+            {"untagged_vlan": None, "tagged_vlans": []},
+            {},
+            maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         assert result["changed"] is False
@@ -1207,7 +1221,11 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         assert list(interface.tagged_vlans.all()) == [vlan]
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
+            interface,
+            {"untagged_vlan": None, "tagged_vlans": []},
+            {},
+            maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -1226,7 +1244,11 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         maps = mixin._build_vlan_lookup_maps([decoy_group, wanted_group])
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": 100, "tagged_vlans": []}, str(wanted_group.pk), maps
+            interface,
+            {"untagged_vlan": 100, "tagged_vlans": []},
+            str(wanted_group.pk),
+            maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         assert result["untagged_set"] == wanted
@@ -1239,7 +1261,7 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         mixin, interface, _group, maps, _ = self._fixture("missing")
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": 999, "tagged_vlans": []}, {}, maps
+            interface, {"untagged_vlan": 999, "tagged_vlans": []}, {}, maps, changeable_queryset=Interface.objects.all()
         )
 
         interface.refresh_from_db()
@@ -1251,7 +1273,11 @@ class TestUpdateInterfaceVlanAssignmentBranches:
         mixin, interface, _group, maps, _ = self._fixture("contract")
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": None, "tagged_vlans": []}, {}, maps
+            interface,
+            {"untagged_vlan": None, "tagged_vlans": []},
+            {},
+            maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         assert set(result) == {"interface", "mode_set", "untagged_set", "tagged_set", "missing_vlans", "changed"}

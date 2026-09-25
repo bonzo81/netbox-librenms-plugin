@@ -54,34 +54,39 @@ def _column_values(interface):
     return deepcopy({field.column: getattr(interface, field.attname) for field in interface._meta.concrete_fields})
 
 
-def write_interface_row(interface, apply, *, created=False):
+def write_interface_row(interface, apply, *, changeable_queryset, created=False):
     """
     Write the values that *apply* sets to the current row of *interface*, and only when a column changes.
 
     A row that this sync did not create is read again, with its row version, from its pk and its
-    owner. The change log's before-state comes from that fresh read. Then ``apply(row)`` sets the
-    values on the fresh instance. With no changed column, nothing is locked and nothing is written.
-    With a changed column, the row is saved only when no other operation changed it since the fresh
-    read (``save_at_version``). A row that this sync created is private to its transaction, so it
-    is written without a fresh read.
+    owner, and only from the rows that the caller may change. The change log's before-state comes
+    from that fresh read. Then ``apply(row)`` sets the values on the fresh instance. With no changed
+    column, nothing is locked and nothing is written. With a changed column, the row is saved only
+    when no other operation changed it since the fresh read (``save_at_version``). So a change that
+    takes the row out of the change scope after the fresh read also stops the write. A scope that
+    reads a related row, such as the site of the device, can change without a change of this row.
+    A row that this sync created is private to its transaction, so it is written without a fresh
+    read.
 
     Args:
         interface (Interface | VMInterface): The interface as the caller read it.
         apply (Callable[[Interface | VMInterface], bool]): Sets the values on the row to write, and
             returns whether it changed NetBox outside the row's columns.
+        changeable_queryset (QuerySet): The interfaces that the caller may change, for the fresh read.
         created (bool): Whether this sync created the interface.
 
     Returns:
         InterfaceWrite: The instance that holds the row as written, and whether NetBox changed.
 
     Raises:
-        ConcurrentRowChange: The row left its owner, or another operation changed it after the fresh read.
+        ConcurrentRowChange: The row left its owner or the caller's change scope, or another
+            operation changed it after the fresh read.
 
     """
     if created:
         row, version = interface, None
     else:
-        row, version = first_at_version(type(interface).objects.filter(pk=interface.pk, **_owner_filter(interface)))
+        row, version = first_at_version(changeable_queryset.filter(pk=interface.pk, **_owner_filter(interface)))
         if row is None:
             raise row_changed(interface.name)
         row.snapshot()
@@ -153,6 +158,7 @@ def update_interface_from_port(  # noqa: C901
     server_key,
     interface_name_field,
     created,
+    changeable_queryset,
     exclude_columns=(),
     speed_converter=convert_speed_to_kbps,
 ):
@@ -163,6 +169,8 @@ def update_interface_from_port(  # noqa: C901
     ignored or ambiguous port, or an incomplete port record, raises ``PortSyncBlocked``.
     ``created`` says whether the caller's resolver just created the interface, which is the
     one case where the planned type is written without a check against its links.
+    ``changeable_queryset`` holds the interfaces that the caller may change; the write reads the
+    row from it again.
 
     Claim and re-read the cross-model port identity before changing any field.
 
@@ -171,7 +179,8 @@ def update_interface_from_port(  # noqa: C901
             The caller continues with that instance, not with *interface*.
 
     Raises:
-        ConcurrentRowChange: Another operation changed the row after the write read it.
+        ConcurrentRowChange: The row left the caller's change scope, or another operation changed
+            it after the write read it.
 
     """
     decision = rules.decide_interface_write(librenms_interface, platform_id=interface_owner_platform_id(interface))
@@ -237,7 +246,7 @@ def update_interface_from_port(  # noqa: C901
             return False
         return assign_interface_mac(row, librenms_interface.get("ifPhysAddress"))
 
-    return write_interface_row(interface, apply_port, created=created)
+    return write_interface_row(interface, apply_port, changeable_queryset=changeable_queryset, created=created)
 
 
 @transaction.atomic
@@ -337,6 +346,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         server_key=server_key,
         interface_name_field=interface_name_field,
         created=created,
+        changeable_queryset=changeable_queryset,
         speed_converter=speed_converter,
     ).interface
     if not viewable_queryset.filter(pk=interface.pk).exists():

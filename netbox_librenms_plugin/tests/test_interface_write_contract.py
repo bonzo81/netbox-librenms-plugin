@@ -5,6 +5,7 @@ value it accepts reaches the column as-is.
 """
 
 import pytest
+from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface
@@ -42,6 +43,7 @@ class TestInterfaceMacContract:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            changeable_queryset=Interface.objects.all(),
         )
         interface.refresh_from_db()
         return interface
@@ -118,6 +120,7 @@ class TestInterfaceMtuContract:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            changeable_queryset=Interface.objects.all(),
         )
         # The contract is about what reaches the column, so read the row back rather than
         # asserting on the attribute the writer just assigned in memory.
@@ -152,6 +155,7 @@ class TestInterfaceAliasContract:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            changeable_queryset=Interface.objects.all(),
         )
         # The contract is about what reaches the column, so read the row back rather than
         # asserting on the attribute the writer just assigned in memory.
@@ -247,6 +251,7 @@ class TestInterfaceStringLengthContract:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            changeable_queryset=Interface.objects.all(),
         )
         interface.refresh_from_db()
         return interface
@@ -303,4 +308,5 @@ class TestInterfaceStringLengthContract:
                 interface_name_field="ifName",
                 created=False,
                 rules=InterfaceRuleMatcher.load(),
+                changeable_queryset=Interface.objects.all(),
             )

@@ -8,6 +8,7 @@ Tests cover:
 """
 
 import pytest
+from dcim.models import Interface
 
 
 @pytest.mark.django_db
@@ -244,7 +245,13 @@ class TestInterfaceVlanSync:
         """An untagged-only port lands in access mode with that VLAN attached."""
         mixin, interface, maps, (vlan,) = self._fixture("access", [(100, "IVS-SYNC-100")])
 
-        mixin._update_interface_vlan_assignment(interface, {"untagged_vlan": 100, "tagged_vlans": []}, None, maps)
+        mixin._update_interface_vlan_assignment(
+            interface,
+            {"untagged_vlan": 100, "tagged_vlans": []},
+            None,
+            maps,
+            changeable_queryset=Interface.objects.all(),
+        )
 
         interface.refresh_from_db()
         assert interface.mode == "access"
@@ -275,6 +282,7 @@ class TestInterfaceVlanSync:
             {"untagged_vlan": 100, "tagged_vlans": []},
             None,
             VlanAssignmentMixin._index_vlans([untagged_vlan, stale_tagged_vlan]),
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -290,7 +298,11 @@ class TestInterfaceVlanSync:
         )
 
         mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": 100, "tagged_vlans": [200, 300]}, None, maps
+            interface,
+            {"untagged_vlan": 100, "tagged_vlans": [200, 300]},
+            None,
+            maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -303,7 +315,11 @@ class TestInterfaceVlanSync:
         mixin, interface, maps, _ = self._fixture("missing")
 
         result = mixin._update_interface_vlan_assignment(
-            interface, {"untagged_vlan": 100, "tagged_vlans": [200, 300]}, None, maps
+            interface,
+            {"untagged_vlan": 100, "tagged_vlans": [200, 300]},
+            None,
+            maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -320,7 +336,13 @@ class TestInterfaceVlanSync:
         global_vlan = VLAN.objects.create(vid=100, name="IVS-SYNC-GLOBAL100")
         maps = mixin._index_vlans([in_group, global_vlan])
 
-        mixin._update_interface_vlan_assignment(interface, {"untagged_vlan": 100, "tagged_vlans": []}, group.pk, maps)
+        mixin._update_interface_vlan_assignment(
+            interface,
+            {"untagged_vlan": 100, "tagged_vlans": []},
+            group.pk,
+            maps,
+            changeable_queryset=Interface.objects.all(),
+        )
 
         interface.refresh_from_db()
         assert interface.untagged_vlan == in_group

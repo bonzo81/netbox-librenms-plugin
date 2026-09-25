@@ -7,6 +7,7 @@ rule vendor-neutral (Juniper reports VLANs on the aggregate, other platforms on 
 """
 
 import pytest
+from dcim.models import Interface
 
 
 def _fixture(tag, vlans=()):
@@ -34,6 +35,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": "tagged", "untagged_vlan": 100, "tagged_vlans": []},
             None,
             maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -49,6 +51,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": "access", "untagged_vlan": 100, "tagged_vlans": []},
             None,
             maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -63,6 +66,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": "access", "untagged_vlan": 100, "tagged_vlans": [200]},
             None,
             maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -77,6 +81,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": None, "untagged_vlan": 100, "tagged_vlans": []},
             None,
             maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -94,6 +99,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": None, "untagged_vlan": None, "tagged_vlans": []},
             None,
             maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -109,6 +115,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": "tagged", "untagged_vlan": None, "tagged_vlans": []},
             None,
             maps,
+            changeable_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()

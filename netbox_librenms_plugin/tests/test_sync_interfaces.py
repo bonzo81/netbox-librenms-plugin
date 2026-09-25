@@ -1,6 +1,7 @@
 """Integration tests for shared interface attribute and MAC synchronization."""
 
 import pytest
+from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_sync import assign_interface_mac
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
@@ -266,6 +267,7 @@ def test_interface_update_ignores_non_string_mac(mac):
         server_key="default",
         interface_name_field="ifName",
         created=False,
+        changeable_queryset=Interface.objects.all(),
     )
     interface.refresh_from_db()
     assert interface.description == "updated description"

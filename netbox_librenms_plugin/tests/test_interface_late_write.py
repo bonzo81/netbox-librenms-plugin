@@ -19,7 +19,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db import transaction
 from django.urls import reverse
-from ipam.models import VLAN, VRF, IPAddress
+from ipam.models import VLAN, VRF, IPAddress, VLANGroup
 from utilities.ordering import naturalize_interface
 
 from netbox_librenms_plugin import interface_sync
@@ -278,12 +278,14 @@ def test_a_written_row_keeps_its_ordering_name_timestamp_and_change_record(clien
 
 @transactional_db_with_all_apps()
 def test_a_kept_name_warning_never_shows_a_name_that_a_concurrent_rename_put_out_of_view(client, monkeypatch):
+    """The renamed row stays in the change scope, so the sync writes it, but it leaves the view scope."""
     device = make_device("late-write-kept-name", librenms_cf={SERVER_KEY: {"id": 5}})
     interface = bound_interface(device, "eth10", 10)
     make_interface(device, "eth11")
-    user = make_user_with_perms("late-write-kept-name-user", [("view", Device), ("add", Interface)])
-    for action in ("view", "change"):
-        user = grant(user, action, Interface, constraints={"name__startswith": "eth"})
+    user = make_user_with_perms(
+        "late-write-kept-name-user", [("view", Device), ("add", Interface), ("change", Interface)]
+    )
+    user = grant(user, "view", Interface, constraints={"name__startswith": "eth"})
     client.force_login(user)
     # LibreNMS reports a name that another interface holds, so the sync keeps the stored name.
     seed_ports(device, [sync_port(10, "eth11", alias="uplink")])
@@ -406,13 +408,141 @@ def test_a_row_that_left_its_owner_after_the_read_is_not_written(client, attempt
 
 
 # ---------------------------------------------------------------------------
+# The late write reads the row within the user's change scope
+# ---------------------------------------------------------------------------
+
+LEFT_THE_SCOPE = {"name": "private-link"}
+SKIPPED_OUT_OF_SCOPE = ("warning", "1 interface(s) skipped: eth10 (port already mapped elsewhere or ambiguous).")
+
+
+def _user_who_may_change_only_eth_interfaces(username, *perm_specs):
+    """Return a user who may view and change only the interfaces whose name starts with ``eth``."""
+    user = make_user_with_perms(username, [("view", Device), ("add", Interface), *perm_specs])
+    for action in ("view", "change"):
+        user = grant(user, action, Interface, constraints={"name__startswith": "eth"})
+    return user
+
+
+@transactional_db_with_all_apps()
+@COMMIT_POINTS
+def test_a_row_that_leaves_the_change_scope_is_not_written_by_the_attribute_writer(
+    client, attempts, monkeypatch, commit_point
+):
+    """The retry resolves the port again, and the view refuses the row that it may no longer change."""
+    device = make_device(f"late-write-scope-attr-{commit_point}", librenms_cf={SERVER_KEY: {"id": 8}})
+    interface = bound_interface(device, "eth10", 10)
+    seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
+    client.force_login(_user_who_may_change_only_eth_interfaces(f"late-write-scope-attr-{commit_point}-user"))
+
+    with second_connection() as other:
+        commits = commit_during_the_writer(
+            monkeypatch,
+            ATTRIBUTE_WRITER,
+            interface.pk,
+            lambda: commit_row_change(other, Interface, interface.pk, LEFT_THE_SCOPE),
+            point=commit_point,
+        )
+        response = post_interface_sync(client, device, [10], htmx=False)
+
+    assert commits.commits == 1
+    assert attempts.count == 2
+    assert messages_on(response.wsgi_request) == [SKIPPED_OUT_OF_SCOPE]
+    assert _column_values(interface, ["name", "description", "speed"]) == {
+        "name": "private-link",
+        "description": "",
+        "speed": None,
+    }
+
+
+@transactional_db_with_all_apps()
+@COMMIT_POINTS
+def test_a_row_that_leaves_the_change_scope_is_not_written_by_the_vlan_helper(
+    client, attempts, monkeypatch, commit_point
+):
+    """Only the mode and the untagged VLAN change, so the VLAN helper is the one writer of the row."""
+    device = make_device(f"late-write-scope-vlan-{commit_point}", librenms_cf={SERVER_KEY: {"id": 9}})
+    interface = _synced_interface(device, "eth10", 10)
+    VLAN.objects.create(vid=100, name=f"late-write-scope-vlan-{commit_point}")
+    seed_ports(device, [sync_port(10, "eth10", untagged_vlan=100, tagged_vlans=[])])
+    client.force_login(
+        _user_who_may_change_only_eth_interfaces(
+            f"late-write-scope-vlan-{commit_point}-user", ("view", VLAN), ("view", VLANGroup)
+        )
+    )
+
+    with second_connection() as other:
+        commits = commit_during_the_writer(
+            monkeypatch,
+            VLAN_WRITER,
+            interface.pk,
+            lambda: commit_row_change(other, Interface, interface.pk, LEFT_THE_SCOPE),
+            point=commit_point,
+        )
+        response = post_interface_sync(client, device, [10], htmx=False, exclude_columns=("mac_address",))
+
+    assert commits.commits == 1
+    assert attempts.count == 2
+    assert messages_on(response.wsgi_request) == [SKIPPED_OUT_OF_SCOPE]
+    assert _column_values(interface, ["name", "mode", "untagged_vlan_id"]) == {
+        "name": "private-link",
+        "mode": None,
+        "untagged_vlan_id": None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # The IP tab's create-missing path runs outside the runner: a stale row fails alone
 # ---------------------------------------------------------------------------
 
 
-def _ip_row(address, port_id):
-    # No interface name: the IP tab does not match the row to an interface, so it resolves one from the port.
-    return {"ip_address": address, "prefix_length": 24, "ip_with_mask": f"{address}/24", "port_id": port_id}
+def seed_ip_rows(device, rows):
+    """
+    Put one IP row per ``(address, port_id, interface name)`` in the IP snapshot of *device*.
+
+    An IP row has no interface name, so the IP tab resolves the interface from the cached port.
+    """
+    cache.set(
+        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
+        {
+            "ip_addresses": [
+                {"ip_address": address, "prefix_length": 24, "ip_with_mask": f"{address}/24", "port_id": port_id}
+                for address, port_id, _ in rows
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {port_id: sync_port(port_id, name, alias=f"{name} uplink") for _, port_id, name in rows},
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+
+
+def post_ip_sync(client, device, addresses):
+    """Post the IP sync of *device* for *addresses*, with the missing interfaces created."""
+    data = {
+        "server_key": SERVER_KEY,
+        "create-missing-interfaces-toggle": "on",
+        "select": [f"{address}/24" for address in addresses],
+        **{f"vrf_{address}/24": "" for address in addresses},
+    }
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
+    )
+    return client.post(url, data)
+
+
+def commit_when_the_ip_tab_writes(monkeypatch, pk, commit):
+    """Run *commit* when the IP tab starts to write interface *pk*: after its permission checks, before the fresh read."""
+    state = SimpleNamespace(commits=0)
+    real_writer = interface_sync.update_interface_from_port
+
+    def writer(interface, *args, **kwargs):
+        if interface.pk == pk and state.commits == 0:
+            state.commits += 1
+            commit()
+        return real_writer(interface, *args, **kwargs)
+
+    monkeypatch.setattr(interface_sync, "update_interface_from_port", writer)
+    return state
 
 
 @transactional_db_with_all_apps()
@@ -420,20 +550,7 @@ def test_a_stale_row_in_the_ip_tab_fails_with_the_fixed_text_and_the_other_rows_
     device = make_device("late-write-ip", librenms_cf={SERVER_KEY: {"id": 42}})
     stale = make_interface(device, "Ethernet1", iface_type="1000base-t")
     fine = make_interface(device, "Ethernet2", iface_type="1000base-t")
-    ports = {
-        port_id: sync_port(port_id, name, alias=f"{name} uplink")
-        for port_id, name in ((7020, "Ethernet1"), (7021, "Ethernet2"))
-    }
-    cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
-        {
-            "ip_addresses": [_ip_row("198.18.20.10", 7020), _ip_row("198.18.21.10", 7021)],
-            "mgmt_ip": "",
-            "ports_by_id": ports,
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    seed_ip_rows(device, [("198.18.20.10", 7020, "Ethernet1"), ("198.18.21.10", 7021, "Ethernet2")])
     client.force_login(make_superuser("late-write-ip-user"))
 
     with second_connection() as other:
@@ -442,19 +559,7 @@ def test_a_stale_row_in_the_ip_tab_fails_with_the_fixed_text_and_the_other_rows_
             stale.pk,
             lambda: commit_row_change(other, Interface, stale.pk, {"label": "set by another operation"}),
         )
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-                kwargs={"object_type": "device", "pk": device.pk},
-            ),
-            {
-                "server_key": SERVER_KEY,
-                "create-missing-interfaces-toggle": "on",
-                "select": ["198.18.20.10/24", "198.18.21.10/24"],
-                "vrf_198.18.20.10/24": "",
-                "vrf_198.18.21.10/24": "",
-            },
-        )
+        response = post_ip_sync(client, device, ["198.18.20.10", "198.18.21.10"])
 
     assert response.status_code == 302
     errors = [text for level, text in messages_on(response.wsgi_request) if level == "error"]
@@ -466,6 +571,38 @@ def test_a_stale_row_in_the_ip_tab_fails_with_the_fixed_text_and_the_other_rows_
     fine.refresh_from_db()
     assert fine.description == "Ethernet2 uplink"
     assert IPAddress.objects.get(address="198.18.21.10/24").assigned_object == fine
+
+
+@transactional_db_with_all_apps()
+@COMMIT_POINTS
+def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_fails_with_the_fixed_text(client, monkeypatch, commit_point):
+    device = make_device(f"late-write-ip-scope-{commit_point}", librenms_cf={SERVER_KEY: {"id": 43}})
+    interface = make_interface(device, "eth1", iface_type="1000base-t")
+    seed_ip_rows(device, [("198.18.22.10", 7022, "eth1")])
+    client.force_login(
+        _user_who_may_change_only_eth_interfaces(
+            f"late-write-ip-scope-{commit_point}-user", ("add", IPAddress), ("change", IPAddress)
+        )
+    )
+
+    with second_connection() as other:
+
+        def leave_the_scope():
+            commit_row_change(other, Interface, interface.pk, LEFT_THE_SCOPE)
+
+        seam = commit_when_the_ip_tab_writes if commit_point == BEFORE_THE_FRESH_READ else commit_at_the_fresh_read
+        commits = seam(monkeypatch, interface.pk, leave_the_scope)
+        response = post_ip_sync(client, device, ["198.18.22.10"])
+
+    assert commits.commits == 1
+    assert response.status_code == 302
+    assert messages_on(response.wsgi_request) == [
+        ("error", f"Failed to sync IP addresses: 198.18.22.10/24 ({CHANGED_TEXT.format('eth1')})")
+    ]
+    interface.refresh_from_db()
+    assert (interface.name, interface.description) == ("private-link", "")
+    assert get_librenms_device_id(interface, SERVER_KEY, auto_save=False) is None
+    assert not IPAddress.objects.filter(address="198.18.22.10/24").exists()
 
 
 # ---------------------------------------------------------------------------

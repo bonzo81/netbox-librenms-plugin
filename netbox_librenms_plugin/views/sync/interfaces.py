@@ -1784,6 +1784,7 @@ class SyncInterfacesView(
             server_key=server_key,
             interface_name_field=interface_name_field,
             created=created,
+            changeable_queryset=self.restricted_queryset(type(interface), "change"),
             exclude_columns=exclude_columns,
             speed_converter=convert_speed_to_kbps,
         )
@@ -1854,7 +1855,13 @@ class SyncInterfacesView(
                 vlan_group_map.pop(vid, None)
             else:
                 vlan_group_map[vid] = str(selected_group.pk)
-        result = self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, lookup_maps)
+        result = self._update_interface_vlan_assignment(
+            interface,
+            vlan_data,
+            vlan_group_map,
+            lookup_maps,
+            changeable_queryset=self.restricted_queryset(type(interface), "change"),
+        )
         return bool(result and result.get("changed"))
 
 
