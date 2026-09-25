@@ -279,6 +279,16 @@ class SyncInterfacesView(
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
+    @property
+    def _attempt_selection(self):
+        """Return the row selection of the running attempt, or raise RuntimeError when no attempt set it."""
+        selection = getattr(self, "_selection", None)
+        if selection is None:
+            raise RuntimeError(
+                "The interface sync reads its row selection only inside _sync_attempt, after _lock_sync_scope."
+            )
+        return selection
+
     def post(self, request, object_type, object_id):
         """Sync selected interfaces from LibreNMS into NetBox."""
         # Set permissions dynamically based on object type
@@ -796,7 +806,7 @@ class SyncInterfacesView(
             with transaction.atomic():
                 # The same locks in the same order; the owners and their view scope come from the selection.
                 obj, locked_device_ids = _lock_relationship_scope(obj)
-                if obj is None or obj.pk not in self._selection.owner_ids:
+                if obj is None or obj.pk not in self._attempt_selection.owner_ids:
                     self._attempt_warnings.append(RELATIONSHIPS_NOT_SYNCED)
                     return
                 candidate_ids = relationship_candidate_ids(
@@ -810,7 +820,7 @@ class SyncInterfacesView(
                     obj,
                     server_key,
                     locked_device_ids,
-                    self._selection.permitted,
+                    self._attempt_selection.permitted,
                     candidate_ids=candidate_ids,
                 )
                 context = _BulkRelationshipContext(
@@ -1382,7 +1392,7 @@ class SyncInterfacesView(
             snapshot_port_ids,
             interface_name_field,
             self._post_server_key,
-            selection=self._selection,
+            selection=self._attempt_selection,
             members=list(locked_targets.values()),
         )
         host_port_ids = {
@@ -1498,8 +1508,8 @@ class SyncInterfacesView(
         binding) is outside the attempt: the sync never writes it, and its change scope decides, as it
         always did, whether the row can fall back to the local interface of the same name.
         """
-        if self._selection.covers(port_owner):
-            return self._selection.may_change(port_owner)
+        if self._attempt_selection.covers(port_owner):
+            return self._attempt_selection.may_change(port_owner)
         return self.restricted_queryset(type(port_owner), "change").filter(pk=port_owner.pk).exists()
 
     def _shown_name(self, model, pk):
@@ -1509,11 +1519,11 @@ class SyncInterfacesView(
         A text names a row only when the user could view it when the attempt selected its rows, or
         when the attempt created it with the name that the user selected.
         """
-        return self._selection.shown_name(model, pk)
+        return self._attempt_selection.shown_name(model, pk)
 
     def _shown(self, interface):
         """Return the name of *interface* for a text, or ``HIDDEN_INTERFACE`` when the user may not view it."""
-        return self._selection.shown(interface)
+        return self._attempt_selection.shown(interface)
 
     def _reserved_name_port_ids(self, obj, server_key):
         """Return active-server port IDs bound to each target interface name."""
@@ -1901,7 +1911,7 @@ class SyncInterfacesView(
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, port_owner, oob=False):
         """Resolve a device interface from the port's owner first, then safe name fallback."""
-        selection = self._selection
+        selection = self._attempt_selection
         if port_id and port_owner is not None:
             if not isinstance(port_owner, Interface) or port_owner.device_id != target_device.pk:
                 raise LibreNMSPortBindingConflict(
@@ -1925,7 +1935,7 @@ class SyncInterfacesView(
 
     def _resolve_vm_interface(self, vm, interface_name, port_id, server_key, *, port_owner):
         """Resolve a VM interface from the port's owner first, then safe name fallback."""
-        selection = self._selection
+        selection = self._attempt_selection
         if port_id and port_owner is not None:
             if not isinstance(port_owner, VMInterface) or port_owner.virtual_machine_id != vm.pk:
                 raise LibreNMSPortBindingConflict(

@@ -4558,6 +4558,19 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert iface.enabled is True
         assert iface.type  # a real NetBox type was resolved from ifType (non-empty)
 
+    def test_sync_interface_outside_the_attempt_fails_with_the_selection_rule(self):
+        """A caller outside the attempt has no row selection, so the row sync stops with the rule and writes nothing."""
+        from dcim.models import Interface
+
+        view = self._make_view()
+        dev = make_device("sync-no-attempt")
+        librenms_port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": None}
+
+        with pytest.raises(RuntimeError, match=r"only inside _sync_attempt, after _lock_sync_scope"):
+            view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
+
+        assert not Interface.objects.filter(device=dev).exists()
+
     @pytest.mark.django_db
     def test_foreign_port_id_refuses_local_same_named_interface(self):
         """A foreign port binding prevents every local field change, even when names match."""
