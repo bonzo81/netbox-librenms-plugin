@@ -4291,7 +4291,9 @@ class TestSyncInterfacesViewPost:
         warnings = message_texts(request, "warning")
         if bound_elsewhere:
             assert not Interface.objects.filter(device=device, name="eno1-oob").exists()
-            assert warnings == ["The LibreNMS port ID is already assigned to another NetBox interface."]
+            assert warnings == [
+                "1 interface(s) skipped: eno1-oob (LibreNMS port ID is already assigned to another NetBox interface)."
+            ]
             foreign.refresh_from_db()
             assert get_librenms_device_id(foreign, "default", auto_save=False) == 8902
         else:
@@ -4552,7 +4554,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A foreign port binding prevents every local field change, even when names match."""
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         view = self._make_view()
 
@@ -4579,8 +4581,9 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
         before_local = Interface.objects.filter(pk=own_iface.pk).values().get()
         before_holder = Interface.objects.filter(pk=other_iface.pk).values().get()
-        with pytest.raises(LibreNMSPortBindingConflict, match="already assigned to another NetBox interface"):
-            view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
+        view._skipped_conflicts = []
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
+        assert view._skipped_conflicts == ["Gi0/1 (LibreNMS port ID is already assigned to another NetBox interface)"]
 
         assert Interface.objects.filter(pk=own_iface.pk).values().get() == before_local
         assert Interface.objects.filter(pk=other_iface.pk).values().get() == before_holder
@@ -4685,7 +4688,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A port_id owned by another device with no same-named local interface is skipped, not created."""
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         view = self._make_view()
         view._skipped_conflicts = []
@@ -4705,8 +4708,9 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "port_id": 77,
             "ifAdminStatus": "up",
         }
-        with pytest.raises(LibreNMSPortBindingConflict, match="already assigned to another NetBox interface"):
-            view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
+        view._skipped_conflicts = []
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
+        assert view._skipped_conflicts == ["Gi0/1 (LibreNMS port ID is already assigned to another NetBox interface)"]
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
 
 

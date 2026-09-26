@@ -535,3 +535,46 @@ def test_cross_page_host_row_reserves_its_inferred_member_name(client, settings)
     oob_interface = Interface.objects.get(device=target_member, name="Ethernet2/1-oob")
     assert _binding(oob_interface) == 9402
     assert not Interface.objects.filter(device=viewed_member, name__in=["Ethernet2/1", "Ethernet2/1-oob"]).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("case", ["derived", "contested", "rebind"])
+def test_verify_preserves_the_full_table_name_and_action_metadata(client, settings, case):
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+    configure_default_librenms_server(settings)
+    device = make_device("verify-name-metadata", librenms_cf={SERVER_KEY: {"id": 71}})
+    user = make_superuser("verify-name-metadata-user")
+    client.force_login(user)
+    if case == "rebind":
+        interface = make_interface(device, "eth0")
+        set_librenms_device_id(interface, 8501, SERVER_KEY)
+        interface.save()
+        ports = [_port(8502, "eth0")]
+    else:
+        ports = [_port(8501, "eth0"), _port(8502, "eth0", source="oob")]
+        if case == "contested":
+            ports.append(_port(8503, "eth0-oob"))
+    cache.set(
+        SyncInterfacesView().get_cache_key(device, "ports", SERVER_KEY),
+        {"ports": ports, "port_stack_relationships": {}},
+        timeout=300,
+    )
+    request = make_request("get", {"server_key": SERVER_KEY}, user=user)
+    view = DeviceInterfaceTableView()
+    view.setup(request, pk=device.pk)
+    context = view.get_context_data(request, device, "ifName", server_key=SERVER_KEY)
+    record = next(row for row in context["table"].data if row["port_id"] == 8502)
+    expected = context["table"].format_interface_data(record, device)
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_interface"),
+        {"device_id": device.pk, "port_id": 8502, "server_key": SERVER_KEY, "interface_name_field": "ifName"},
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    actual = response.json()["formatted_row"]
+    for key in ("parent", "actions"):
+        assert actual[key] == expected[key]
+    marker = {"derived": "Will sync as eth0-oob", "contested": "Name conflict", "rebind": "Rebind"}[case]
+    assert marker in expected["parent"] + expected["actions"]

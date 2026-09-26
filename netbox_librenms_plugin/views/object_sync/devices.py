@@ -1,6 +1,6 @@
 import copy
 
-from dcim.models import Device
+from dcim.models import Device, Interface
 from django.core.cache import cache
 from django.http import JsonResponse
 from django.urls import reverse
@@ -39,6 +39,7 @@ from netbox_librenms_plugin.utils import (
     normalize_librenms_port_id,
     normalize_vlan_vid,
     render_vlan_sync_action,
+    resolve_interface_row_device,
 )
 
 from ..base.cables_view import BaseCableTableView
@@ -325,7 +326,16 @@ class SingleInterfaceVerifyView(
                     unambiguous_name_port_ids,
                     relationship_maps,
                 )
-                port_data["synced_name"] = port_data.get(interface_name_field)
+                self._enrich_interface_names(
+                    request,
+                    origin_device,
+                    selected_device,
+                    ports,
+                    posted_port_id,
+                    interface_name_field,
+                    server_key,
+                    snapshot_complete=not cached_data.get("oob_incomplete"),
+                )
                 # The selected member owns the row now, so the rules read its platform.
                 port_data["rule_decision"] = interface_rules_for_request(request).check_interface_write(
                     port_data, platform_id=selected_device.platform_id
@@ -334,6 +344,63 @@ class SingleInterfaceVerifyView(
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})
 
         return JsonResponse({"status": "error", "message": "Interface data not found"}, status=404)
+
+    def _enrich_interface_names(
+        self,
+        request,
+        origin_device,
+        selected_device,
+        ports,
+        posted_port_id,
+        interface_name_field,
+        server_key,
+        *,
+        snapshot_complete,
+    ):
+        """Use the table naming computation with this row's explicitly selected member."""
+        view = DeviceInterfaceTableView()
+        view.setup(request, pk=origin_device.pk)
+        view.rebind_api_for_server(server_key)
+        members = (
+            list(origin_device.virtual_chassis.members.all()) if origin_device.virtual_chassis_id else [origin_device]
+        )
+        interfaces_by_device = {member.pk: view._build_interface_lookup_maps(member) for member in members}
+        interfaces_by_port_id = {}
+        for interface_maps in interfaces_by_device.values():
+            for port_id, interface in interface_maps["by_librenms_id"].items():
+                interfaces_by_port_id.setdefault(port_id, []).append(interface)
+        members_by_position = {member.vc_position: member for member in members}
+        members_by_id = {member.pk: member for member in members}
+        target_device_ids = {}
+        for port in ports:
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            if port_id is None:
+                continue
+            target = (
+                resolve_interface_row_device(
+                    origin_device,
+                    port,
+                    interface_name_field,
+                    interfaces_by_port_id=interfaces_by_port_id,
+                    members_by_position=members_by_position,
+                    members_by_id=members_by_id,
+                )
+                if origin_device.virtual_chassis_id
+                else origin_device
+            )
+            target_device_ids[port_id] = target.pk
+        target_device_ids[posted_port_id] = selected_device.pk
+        interfaces = Interface.objects.filter(device_id__in=interfaces_by_device)
+        view.enrich_interface_name_metadata(
+            ports,
+            interface_name_field,
+            Interface,
+            interfaces_by_device,
+            target_device_ids,
+            set(interfaces.restrict(request.user, "view").values_list("pk", flat=True)),
+            set(interfaces.restrict(request.user, "change").values_list("pk", flat=True)),
+            snapshot_complete=snapshot_complete,
+        )
 
 
 class SingleModuleVerifyView(

@@ -137,7 +137,9 @@ class TestTheSyncWriter:
         response = _sync(client, owner, object_type, PORT)
 
         assert response.status_code == 302
-        assert _warnings(response) == ["The LibreNMS port ID is already assigned to another NetBox interface."]
+        assert _warnings(response) == [
+            "1 interface(s) skipped: eth0 (LibreNMS port ID is already assigned to another NetBox interface)."
+        ]
         assert type(holder).objects.filter(pk=holder.pk).values().get() == before_holder
         assert not model.objects.filter(**owner_filter).exclude(pk=getattr(existing, "pk", None)).exists()
         if existing is not None:
@@ -316,3 +318,48 @@ class TestTheCableFarEndCreate:
 
         assert not Interface.objects.filter(device=remote_device).exists()
         assert any("LibreNMS port 500 is already bound" in text for text in _messages(response))
+
+
+@pytest.mark.parametrize("object_type", ["device", "virtualmachine"])
+@pytest.mark.parametrize("holder_type", ["device", "virtualmachine"])
+def test_a_persistent_foreign_binding_skips_only_its_row(client, settings, object_type, holder_type):
+    configure_default_librenms_server(settings)
+    holder = (
+        _bind(make_interface(make_device("bulk-foreign-holder"), "private-holder-name"), PORT)
+        if holder_type == "device"
+        else _vm_interface("bulk-foreign-holder", PORT)
+    )
+    if object_type == "device":
+        owner = make_device("bulk-conflict-owner", librenms_cf={SERVER_KEY: {"id": 71}})
+        model, owner_filter = Interface, {"device": owner}
+    else:
+        owner = make_vm("bulk-conflict-owner", make_cluster("bulk-conflict-cluster"))
+        model, owner_filter = VMInterface, {"virtual_machine": owner}
+    client.force_login(make_superuser("bulk-conflict-user"))
+    cache.set(
+        SyncInterfacesView().get_cache_key(owner, "ports", SERVER_KEY),
+        {"ports": [_port(PORT + 1, "clean-port"), _port(PORT, "conflicting-port")], "port_stack_relationships": {}},
+        timeout=300,
+    )
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+            kwargs={"object_type": object_type, "object_id": owner.pk},
+        ),
+        {
+            "server_key": SERVER_KEY,
+            "interface_name_field": "ifName",
+            "select": [str(PORT + 1), str(PORT)],
+            "exclude_columns": ["vlans", "mac_address"],
+        },
+    )
+    assert response.status_code == 302
+    clean = model.objects.get(**owner_filter, name="clean-port")
+    assert _binding(clean) == PORT + 1
+    assert not model.objects.filter(**owner_filter, name="conflicting-port").exists()
+    assert _binding(holder) == PORT
+    warnings = _warnings(response)
+    assert any(
+        "conflicting-port" in text and "already assigned to another NetBox interface" in text for text in warnings
+    )
+    assert all(holder.name not in text for text in warnings)

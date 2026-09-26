@@ -1,7 +1,8 @@
 # Interface ignore rules
 
-Status: **RATIFIED (split core + cable mechanism), 2026-09-23.** Target branch:
-`feat/interface-member-badges`. Deferred: type-vs-links validation and module port binding.
+Status: **RATIFIED (split core + cable mechanism), 2026-09-23; type-vs-links validation ratified
+2026-09-24, see sections 6 and 7.** Target branch: `feat/interface-member-badges`.
+Deferred: interface-row concurrency (AC5) and module port binding.
 
 ## 1. Brief
 

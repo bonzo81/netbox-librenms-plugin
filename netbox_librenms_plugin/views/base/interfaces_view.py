@@ -548,6 +548,76 @@ class BaseInterfaceTableView(
             enriched.append(port)
         return enriched
 
+    @staticmethod
+    def enrich_interface_name_metadata(
+        ports_data,
+        interface_name_field,
+        interface_model,
+        interfaces_by_device,
+        target_device_ids,
+        viewable_interface_ids,
+        changeable_interface_ids,
+        *,
+        snapshot_complete,
+    ):
+        """Set derived names and permission-scoped holder metadata; return names claimed by host rows."""
+        reserved_name_port_ids = {}
+        for device_id, interface_maps in interfaces_by_device.items():
+            for port_id, interfaces in interface_maps["by_librenms_id_matches"].items():
+                for interface in interfaces:
+                    reserved_name_port_ids.setdefault(device_id, {}).setdefault(interface.name, set()).add(port_id)
+        synced_names, rejected_names = synced_interface_names(
+            ports_data,
+            interface_name_field,
+            interface_model,
+            target_device_ids=target_device_ids,
+            reserved_name_port_ids_by_device=reserved_name_port_ids,
+        )
+        name_owners = reported_name_owners(
+            ports_data,
+            interface_name_field,
+            synced_names,
+            rejected_names,
+            target_device_ids=target_device_ids,
+            reserved_name_port_ids_by_device=reserved_name_port_ids,
+            snapshot_complete=snapshot_complete,
+            model=interface_model,
+        )
+        claimable_names_by_device = {}
+        for port in ports_data:
+            if port.get("_source") == OOB_INVENTORY_SOURCE:
+                continue
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            if port.get("_dedup_conflict") or port_id in rejected_names:
+                continue
+            synced_name = synced_names.get(port_id)
+            device_id = target_device_ids.get(port_id)
+            if synced_name is not None and device_id is not None:
+                claimable_names_by_device.setdefault(device_id, set()).add(synced_name)
+
+        for port in ports_data:
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            synced_name = synced_names.get(port_id)
+            rejection_reason = rejected_names.get(port_id)
+            port["synced_name"] = synced_name
+            port["synced_name_is_derived"] = synced_name is not None and synced_name != port.get(interface_name_field)
+            port["synced_name_contested"] = rejection_reason in (
+                HOST_NAME_COLLISION_REASON,
+                REPORTED_NAME_PORT_COLLISION_REASON,
+            )
+            port["synced_name_rejection_reason"] = rejection_reason
+            # Name the holder only when its interface is in the caller's view scope.
+            name_owner = name_owners.get(port_id)
+            owner_interface = (
+                interfaces_by_device.get(target_device_ids.get(port_id), {}).get("by_name", {}).get(name_owner.name)
+                if name_owner is not None
+                else None
+            )
+            owner_visible = owner_interface is not None and owner_interface.pk in viewable_interface_ids
+            port["reported_name_owner"] = name_owner if owner_visible else None
+            port["reported_name_owner_changeable"] = owner_visible and owner_interface.pk in changeable_interface_ids
+        return claimable_names_by_device
+
     def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None, sync_device=None):  # noqa: C901
         """
         Build the context data for the interface sync view.
@@ -814,65 +884,19 @@ class BaseInterfaceTableView(
                 else:
                     target_device = obj
                 target_device_ids[port_id] = target_device.pk
-            reserved_name_port_ids = {}
-            for device_id, interface_maps in interfaces_by_device.items():
-                for port_id, interfaces in interface_maps["by_librenms_id_matches"].items():
-                    for interface in interfaces:
-                        reserved_name_port_ids.setdefault(device_id, {}).setdefault(interface.name, set()).add(port_id)
-            synced_names, rejected_names = synced_interface_names(
+            claimable_names_by_device = self.enrich_interface_name_metadata(
                 ports_data,
                 interface_name_field,
                 interface_model,
-                target_device_ids=target_device_ids,
-                reserved_name_port_ids_by_device=reserved_name_port_ids,
-            )
-            name_owners = reported_name_owners(
-                ports_data,
-                interface_name_field,
-                synced_names,
-                rejected_names,
-                target_device_ids=target_device_ids,
-                reserved_name_port_ids_by_device=reserved_name_port_ids,
+                interfaces_by_device,
+                target_device_ids,
+                viewable_interface_ids,
+                changeable_interface_ids,
                 snapshot_complete=not oob_incomplete,
-                model=interface_model,
             )
-            claimable_names_by_device = {}
-            for port in ports_data:
-                if port.get("_source") == OOB_INVENTORY_SOURCE:
-                    continue
-                port_id = normalize_librenms_port_id(port.get("port_id"))
-                if port.get("_dedup_conflict") or port_id in rejected_names:
-                    continue
-                synced_name = synced_names.get(port_id)
-                device_id = target_device_ids.get(port_id)
-                if synced_name is not None and device_id is not None:
-                    claimable_names_by_device.setdefault(device_id, set()).add(synced_name)
 
             for port in ports_data:
                 port_id = normalize_librenms_port_id(port.get("port_id"))
-                synced_name = synced_names.get(port_id)
-                rejection_reason = rejected_names.get(port_id)
-                port["synced_name"] = synced_name
-                port["synced_name_is_derived"] = synced_name is not None and synced_name != port.get(
-                    interface_name_field
-                )
-                port["synced_name_contested"] = rejection_reason in (
-                    HOST_NAME_COLLISION_REASON,
-                    REPORTED_NAME_PORT_COLLISION_REASON,
-                )
-                port["synced_name_rejection_reason"] = rejection_reason
-                # Name the holder only when its interface is in the caller's view scope.
-                name_owner = name_owners.get(port_id)
-                owner_interface = (
-                    interfaces_by_device.get(target_device_ids.get(port_id), {}).get("by_name", {}).get(name_owner.name)
-                    if name_owner is not None
-                    else None
-                )
-                owner_visible = owner_interface is not None and owner_interface.pk in viewable_interface_ids
-                port["reported_name_owner"] = name_owner if owner_visible else None
-                port["reported_name_owner_changeable"] = (
-                    owner_visible and owner_interface.pk in changeable_interface_ids
-                )
                 port["enabled"] = interface_enabled_from_port(port)
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:

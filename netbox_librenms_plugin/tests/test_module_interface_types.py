@@ -1014,3 +1014,34 @@ class TestApplyModuleInterfaceTypes:
         assert message_texts(request, "warning") == [
             "Skipped 1 selected interface because it is unavailable for this module."
         ]
+
+
+def test_module_type_apply_records_the_type_before_and_after(client, settings):
+    from core.models import ObjectChange
+    from dcim.models import Interface
+    from django.contrib.contenttypes.models import ContentType
+
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_superuser
+
+    configure_default_librenms_server(settings)
+    page, member, module, interface = _vc_member_type_mismatch("type-change-log")
+    client.force_login(make_superuser("type-change-log-user"))
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:apply_module_interface_types", kwargs={"pk": page.pk}),
+        {
+            "server_key": "default",
+            "selected_device_id": str(member.pk),
+            "module_id": str(module.pk),
+            "interface_id": [str(interface.pk)],
+            f"current_type_{interface.pk}": "1000base-t",
+            f"template_type_{interface.pk}": "10gbase-x-sfpp",
+        },
+    )
+    assert response.status_code == 302
+    interface.refresh_from_db()
+    assert interface.type == "10gbase-x-sfpp"
+    change = ObjectChange.objects.get(
+        changed_object_type=ContentType.objects.get_for_model(Interface), changed_object_id=interface.pk
+    )
+    assert change.prechange_data["type"] == "1000base-t"
+    assert change.postchange_data["type"] == "10gbase-x-sfpp"

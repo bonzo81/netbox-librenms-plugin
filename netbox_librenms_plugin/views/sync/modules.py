@@ -2524,6 +2524,7 @@ def _apply_module_interface_type(interface, template_type, current_type, offered
     refusal = type_change_refusal(interface, template_type)
     if refusal is not None:
         return "validation_failed", refusal
+    interface.snapshot()
     interface.type = template_type
     interface.save(update_fields=["type"])
     return "updated", None

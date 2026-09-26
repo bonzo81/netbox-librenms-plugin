@@ -1543,6 +1543,20 @@ class SyncInterfacesView(
             # to an arbitrary one (recorded below).
             logger.warning("Skipping interface row — port_id %s is ambiguous (multiple matches).", port_id)
             port_owner, port_owner_is_ambiguous = None, True
+        if port_owner is not None and (
+            (
+                target_device is not None
+                and (not isinstance(port_owner, Interface) or port_owner.device_id != target_device.pk)
+            )
+            or (
+                target_device is None
+                and (not isinstance(port_owner, VMInterface) or port_owner.virtual_machine_id != obj.pk)
+            )
+        ):
+            self._record_skipped_conflict(
+                interface_name, "LibreNMS port ID is already assigned to another NetBox interface"
+            )
+            return
         if port_owner_is_ambiguous:
             interface = None
         elif target_device is not None:
