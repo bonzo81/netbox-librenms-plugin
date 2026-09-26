@@ -3577,7 +3577,8 @@ class TestSyncInterfacesViewPost:
         assert Interface.objects.filter(device=device, name="lom0").exists() is (selected_port_id == "99")
         assert any("shared LOM" in text for text in message_texts(request, "warning")) is (selected_port_id == "98")
 
-    def test_oob_port_does_not_adopt_an_unbound_host_interface_by_name(self):
+    @pytest.mark.parametrize("viewable", [True, False])
+    def test_oob_port_does_not_adopt_an_unbound_host_interface_by_name(self, viewable):
         from types import SimpleNamespace
 
         from dcim.models import Device, Interface
@@ -3593,6 +3594,8 @@ class TestSyncInterfacesViewPost:
             "oob-name-collision",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
+        if viewable:
+            user = grant(user, "view", Interface)
         request = _make_request(
             post_data={"select": ["98"], "exclude_columns": ["vlans", "mac_address"]},
             user=user,
@@ -3604,7 +3607,6 @@ class TestSyncInterfacesViewPost:
             cache_key,
             {
                 "ports": [
-                    {"ifName": "lom0", "port_id": 99, "ifAdminStatus": "up", "_source": "host"},
                     {
                         "ifName": "lom0",
                         "port_id": 98,
@@ -3625,7 +3627,10 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         assert host_interface.description == "host interface"
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
-        assert any("host interface already uses this name" in text for text in message_texts(request, "warning"))
+        assert (
+            any("host interface already uses this name" in text for text in message_texts(request, "warning"))
+            is viewable
+        )
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from types import SimpleNamespace

@@ -1212,6 +1212,8 @@ class SyncInterfacesView(
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
         if oob and not created:
             # The controller row has no claim on an existing host interface by name.
+            if not self.restricted_queryset(Interface).filter(pk=interface.pk).exists():
+                return None
             raise _HostInterfaceNameConflict
         if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
             return None
