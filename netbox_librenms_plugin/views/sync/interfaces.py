@@ -37,7 +37,6 @@ from netbox_librenms_plugin.interface_rules import (
     rule_names,
 )
 from netbox_librenms_plugin.interface_sync import (
-    LOOK_UP_PORT_OWNER,
     assign_interface_mac,
     interface_owner_platform_id,
     update_interface_from_port,
@@ -50,6 +49,8 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
+    LibreNMSPortBindingConflict,
+    claim_librenms_port_binding,
     build_migrated_context,
     coerce_model_pk,
     convert_speed_to_kbps,
@@ -247,6 +248,11 @@ class SyncInterfacesView(
                     )
                 finally:
                     self.__dict__.pop("_locked_target_devices", None)
+        except LibreNMSPortBindingConflict as conflict:
+            self._synced_count = 0
+            self._mutated = False
+            messages.warning(request, str(conflict))
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         except _DuplicatedSelectionError:
             # The walk reached a duplicated port before anything was written; the atomic block rolled back.
             messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
@@ -1489,7 +1495,8 @@ class SyncInterfacesView(
             device_for=self._target_device_for,
         )
 
-    def sync_interface(
+    @transaction.atomic
+    def sync_interface(  # noqa: C901
         self,
         obj,
         librenms_interface,
@@ -1526,7 +1533,9 @@ class SyncInterfacesView(
         except PortSyncBlocked as blocked:
             self._record_skipped_conflict(interface_name or librenms_interface.get(interface_name_field), str(blocked))
             return
-        # One ownership check serves the resolver and the field writer for this row.
+        if port_id is not None:
+            claim_librenms_port_binding(port_id, server_key)
+        # Resolve the owner only after claiming the cross-model identity.
         try:
             port_owner = find_interface_by_librenms_port_id(port_id, server_key) if port_id is not None else None
             port_owner_is_ambiguous = False
@@ -1585,7 +1594,6 @@ class SyncInterfacesView(
                 interface_name_field,
                 synced_name,
                 created=created,
-                port_owner=port_owner,
             )
             or created
         )
@@ -1742,7 +1750,6 @@ class SyncInterfacesView(
         synced_name,
         *,
         created,
-        port_owner=LOOK_UP_PORT_OWNER,
     ):
         """Update interface fields from LibreNMS data, respecting excluded columns (``created`` as in the writer)."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
@@ -1756,7 +1763,6 @@ class SyncInterfacesView(
             created=created,
             exclude_columns=exclude_columns,
             speed_converter=convert_speed_to_kbps,
-            port_owner=port_owner,
         )
 
     def _sync_interface_vlans(self, interface, librenms_port):
@@ -1882,6 +1888,11 @@ class RebindInterfacePortView(SyncInterfacesView):
         try:
             with transaction.atomic():
                 interface = self._rebind(obj, ports_data, port_id, expected_port_id, interface_name_field, server_key)
+        except LibreNMSPortBindingConflict as conflict:
+            messages.error(request, str(conflict))
+            response = self._tab_response(request, object_type, interface_name_field, server_key)
+            response.status_code = 409
+            return response
         except _RebindRefusedError as refusal:
             messages.error(request, str(refusal))
             return self._tab_response(request, object_type, interface_name_field, server_key)
@@ -1963,6 +1974,7 @@ class RebindInterfacePortView(SyncInterfacesView):
             )
         if owner.status != NAME_OWNER_STALE:
             raise _RebindRefusedError(f"Rebind is refused. {owner.explanation()}")
+        claim_librenms_port_binding(port_id, server_key)
         try:
             port_is_bound = find_interface_by_librenms_port_id(port_id, server_key) is not None
         except AmbiguousLibreNMSIdError:

@@ -24,6 +24,8 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
+    LibreNMSPortBindingConflict,
+    claim_librenms_port_binding,
     acquire_advisory_transaction_lock,
     find_interface_by_librenms_port_id,
     get_librenms_device_id,
@@ -741,6 +743,7 @@ def _format_vc_adjustment_summary(adjustments):
     return ", ".join(parts)
 
 
+@transaction.atomic
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):  # noqa: C901
     """
     Bind LibreNMS ``port_id`` to the best matching NetBox interface.
@@ -766,6 +769,10 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     if not port_id:
         return None
 
+    try:
+        claim_librenms_port_binding(port_id, server_key)
+    except LibreNMSPortBindingConflict as conflict:
+        return {"status": "conflict", "reason": str(conflict)}
     try:
         existing_owner = find_interface_by_librenms_port_id(port_id, server_key)
     except AmbiguousLibreNMSIdError:

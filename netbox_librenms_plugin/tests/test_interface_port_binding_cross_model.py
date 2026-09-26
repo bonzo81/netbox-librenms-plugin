@@ -140,15 +140,20 @@ class TestTheSyncWriter:
         vm_interface = _vm_interface("writer", PORT)
         interface = make_interface(make_device("writer-device"), "eth0")
 
-        update_interface_from_port(
-            interface,
-            _port(PORT, "eth0"),
-            rules=InterfaceRuleMatcher.load(),
-            synced_name="eth0",
-            server_key=SERVER_KEY,
-            interface_name_field="ifName",
-            created=False,
-        )
+        before = (interface.name, interface.description, interface.enabled, interface.custom_field_data.copy())
+        with pytest.raises(ValueError, match="already assigned"):
+            update_interface_from_port(
+                interface,
+                {**_port(PORT, "eth1"), "ifAlias": "must not change", "ifAdminStatus": "down"},
+                rules=InterfaceRuleMatcher.load(),
+                synced_name="eth1",
+                server_key=SERVER_KEY,
+                interface_name_field="ifName",
+                created=False,
+            )
+        assert (interface.name, interface.description, interface.enabled, interface.custom_field_data) == before
+        interface.refresh_from_db()
+        assert (interface.name, interface.description, interface.enabled, interface.custom_field_data) == before
 
         assert _binding(interface) is None
         assert _binding(vm_interface) == PORT

@@ -31,6 +31,8 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
+    LibreNMSPortBindingConflict,
+    claim_librenms_port_binding,
     apply_cable_manual_picks,
     build_librenms_id_qs,
     cable_path_reaches,
@@ -1455,6 +1457,11 @@ class CableRemoteCreateView(SyncCablesView):
                             "conflict": "The local interface is already connected. Refresh the Cables tab.",
                         }.get(result["status"], "The cable row changed. Refresh the cable data and try again.")
                     )
+        except LibreNMSPortBindingConflict as conflict:
+            messages.error(request, str(conflict))
+            response = self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
+            response.status_code = 409
+            return response
         except _RemoteCreateAborted as exc:
             if str(exc):
                 messages.error(request, str(exc))
@@ -1597,6 +1604,7 @@ class CableRemoteCreateView(SyncCablesView):
         remote_device = context["remote_device"]
         name = context["proposed_name"]
         port_key = context["row"].get("remote_port_key")
+        claim_librenms_port_binding(port_key, context["server_key"])
         try:
             port_is_bound = find_interface_by_librenms_port_id(port_key, context["server_key"]) is not None
         except AmbiguousLibreNMSIdError:

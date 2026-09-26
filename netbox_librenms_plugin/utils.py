@@ -266,6 +266,29 @@ def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None =
         cursor.execute("SELECT pg_advisory_xact_lock(%s)", [advisory_lock_key(lock_identity)])
 
 
+class LibreNMSPortBindingConflict(ValueError):
+    """A port cannot be claimed safely by this transaction."""
+
+
+def claim_librenms_port_binding(port_id, server_key, *, using=None):
+    """Claim one cross-model port identity until commit, or refuse without waiting."""
+    from django.db import DEFAULT_DB_ALIAS, connections
+
+    server_key = require_server_key(server_key)
+    port_id = normalize_librenms_port_id(port_id)
+    if port_id is None:
+        raise ValueError("The LibreNMS port ID is missing or invalid.")
+    connection = connections[using or DEFAULT_DB_ALIAS]
+    if not connection.in_atomic_block:
+        raise RuntimeError("claim_librenms_port_binding() requires an open transaction")
+    identity = json.dumps(["librenms-port-binding", server_key, port_id], separators=(",", ":"))
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [advisory_lock_key(identity)])
+        acquired = cursor.fetchone()[0]
+    if not acquired:
+        raise LibreNMSPortBindingConflict("Another operation is binding this LibreNMS port. Refresh and retry.")
+
+
 def is_list_of_dicts(value) -> bool:
     """
     Return True only when *value* is a list whose every element is a dict.
