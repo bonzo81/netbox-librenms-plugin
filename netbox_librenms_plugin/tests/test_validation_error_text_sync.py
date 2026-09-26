@@ -21,6 +21,50 @@ from netbox_librenms_plugin.utils import mark_librenms_migrated
 HIDDEN = "(only a superuser sees the message)"
 
 
+@pytest.mark.django_db
+def test_ambiguous_identity_text_does_not_disclose_other_owners(caplog):
+    from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, exception_text_for, find_by_librenms_id
+
+    owners = [make_device(name, librenms_cf={"default": 7201}) for name in ("identity-first", "identity-second")]
+    viewer = make_user_with_perms("identity-viewer", [("view", Device)], constraints={"pk": owners[0].pk})
+    with pytest.raises(AmbiguousLibreNMSIdError) as caught:
+        find_by_librenms_id(Device, 7201, "default")
+
+    text = exception_text_for(caught.value, Device, viewer)
+
+    assert "multiple" in text.lower()
+    assert "pk=" not in text
+    assert str(owners[1].pk) not in text
+    assert str(owners[1].pk) in caplog.text
+
+
+@pytest.mark.django_db
+def test_module_constraint_failure_keeps_database_details_in_the_log(caplog):
+    from dcim.models import ModuleBay, Module
+    from django.db import IntegrityError, transaction
+
+    from netbox_librenms_plugin.tests.conftest import make_module_bay, make_module_type
+    from netbox_librenms_plugin.views.sync.modules import _module_write_failure
+
+    device = make_device("constraint-detail-owner")
+    parent = Module.objects.create(
+        device=device,
+        module_bay=make_module_bay(device, "Parent bay"),
+        module_type=make_module_type("Constraint module"),
+        status="active",
+    )
+    ModuleBay.objects.create(device=device, module=parent, name="Private bay label")
+    with pytest.raises(IntegrityError) as caught, transaction.atomic():
+        ModuleBay.objects.create(device=device, module=parent, name="Private bay label")
+
+    text = _module_write_failure(caught.value, ModuleBay, None)
+
+    assert "constraint" in text.lower()
+    assert "Private bay label" not in text
+    assert "DETAIL" not in text
+    assert "Private bay label" in caplog.text
+
+
 class _Refuses(CustomValidator):
     """An admin validator that refuses every clean() with *text* and no field."""
 

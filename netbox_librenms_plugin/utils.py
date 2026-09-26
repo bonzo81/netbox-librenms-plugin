@@ -4991,7 +4991,8 @@ def exception_text_for(exc: Exception, model, user) -> str:
     NetBox's ``clean()`` messages can name related objects, and admin ``CUSTOM_VALIDATORS`` or
     ``post_clean`` and ``pre_save`` receivers can add any text under any key. So only a superuser
     gets the message of a ValidationError. Every other viewer gets the concrete *model* fields
-    that the error keys name, or the model. Any other exception keeps its own text.
+    that the error keys name, or the model. Identity conflicts and database constraints use
+    generic text because their details can identify objects outside the viewer's scope.
 
     Args:
         exc (Exception): The caught error.
@@ -4999,10 +5000,14 @@ def exception_text_for(exc: Exception, model, user) -> str:
         user (User | None): The viewer.
 
     Returns:
-        str: ``str(exc)`` for an exception that is not a ValidationError, ``validation_error_detail(exc)``
-            for a superuser, else ``hidden_refusal_text``.
+        str: Safe identity or constraint text, scoped validation text, or the other exception's text.
 
     """
+    if isinstance(exc, AmbiguousLibreNMSIdError):
+        return "Multiple records use this LibreNMS ID. Ask an administrator to correct the mappings."
+    if isinstance(exc, IntegrityError):
+        logger.warning("Database constraint rejected %s: %s", model.__name__, exc)
+        return "A database constraint rejected the change. Refresh the data and try again."
     if not isinstance(exc, ValidationError):
         return str(exc)
     if is_active_superuser(user):

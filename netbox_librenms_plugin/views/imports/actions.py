@@ -62,7 +62,7 @@ from netbox_librenms_plugin.import_utils import (
     visible_object_label,
 )
 from netbox_librenms_plugin.import_utils.bulk_import import ambiguous_stack_groups, stack_identity
-from netbox_librenms_plugin.interface_sync import keep_change_log_before_state
+from netbox_librenms_plugin.interface_sync import copy_before_change, keep_change_log_before_state
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -652,25 +652,30 @@ def _save_device(device, update_fields: list[str], request=None) -> HttpResponse
             return _htmx_error_response(msg)
         return HttpResponse(escape(msg), status=status)
 
+    stored = type(device).objects.select_for_update().filter(pk=device.pk).first()
+    if stored is None:
+        return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
+    before = copy_before_change(stored)
+    for name in update_fields:
+        field = device._meta.get_field(name)
+        setattr(stored, field.attname, getattr(device, field.attname))
+
     # full_clean() is intentionally skipped here (it would abort on unrelated legacy field
     # values), but a device_type/platform write still carries the platform/manufacturer
     # cross-field constraint with no DB backstop — validate just that one rule so an
     # inconsistent pairing can't be persisted silently with a success toast.
     if {"device_type", "platform"} & set(update_fields):
-        if mismatch := _platform_device_type_mismatch(device):
+        if mismatch := _platform_device_type_mismatch(stored):
             return mismatch
     # A device_type write also bypasses Device.clean()'s rack-fit check; re-validate just that rule
     # so a taller device_type can't overflow the rack elevation with a success toast.
     if "device_type" in update_fields:
-        if rack_fit := _device_type_rack_fit_error(device):
+        if rack_fit := _device_type_rack_fit_error(stored):
             return rack_fit
 
-    stored = type(device).objects.select_for_update().filter(pk=device.pk).first()
-    if stored is None:
-        return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
-    keep_change_log_before_state(device, stored)
+    keep_change_log_before_state(stored, before)
     try:
-        device.save(update_fields=[*update_fields, "last_updated"])
+        stored.save(update_fields=[*update_fields, "last_updated"])
     except IntegrityError:
         logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
         return _err("Could not save: a database integrity constraint was violated.", 409)

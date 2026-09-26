@@ -31,6 +31,55 @@ from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableVi
 
 pytestmark = pytest.mark.django_db
 
+
+def test_partial_device_save_validates_the_current_manufacturer():
+    from dcim.models import Device, DeviceType, Manufacturer, Platform
+
+    from netbox_librenms_plugin.views.imports.actions import _save_device
+
+    stale = make_device("partial-save-manufacturer")
+    platform = Platform.objects.create(
+        name="Restricted platform", slug="restricted-platform", manufacturer=stale.device_type.manufacturer
+    )
+    other_type = DeviceType.objects.create(
+        manufacturer=Manufacturer.objects.create(name="Other manufacturer", slug="other-manufacturer"),
+        model="Other type",
+        slug="other-type",
+    )
+    Device.objects.filter(pk=stale.pk).update(device_type=other_type)
+    stale.platform = platform
+
+    response = _save_device(stale, ["platform"])
+
+    assert response is not None
+    stale.refresh_from_db()
+    assert stale.device_type_id == other_type.pk
+    assert stale.platform_id is None
+
+
+def test_partial_device_save_validates_the_current_rack_position():
+    from dcim.models import Device, DeviceType, Rack
+
+    from netbox_librenms_plugin.views.imports.actions import _save_device
+
+    stale = make_device("partial-save-rack-position")
+    rack = Rack.objects.create(name="Partial save rack", site=stale.site, u_height=42)
+    taller = DeviceType.objects.create(
+        manufacturer=stale.device_type.manufacturer, model="Two units", slug="two-units", u_height=2
+    )
+    Device.objects.filter(pk=stale.pk).update(rack=rack, position=1, face="front")
+    stale.refresh_from_db()
+    Device.objects.filter(pk=stale.pk).update(position=42)
+    stale.device_type = taller
+
+    response = _save_device(stale, ["device_type"])
+
+    assert response is not None
+    stale.refresh_from_db()
+    assert stale.position == 42
+    assert stale.device_type_id != taller.pk
+
+
 SERVER_KEY = "default"
 ENT_INDEX = 710
 
