@@ -1312,6 +1312,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             ignore_rules (list[dict] | None): The optional inventory ignore rules.
             device_serial (str): The device serial used to evaluate ignore rules.
             index_map (dict | None): The inventory items keyed by index.
+            ignore_contexts (dict | None): The owner and ignore policy for each inventory item.
 
         Returns:
             list[dict]: The collected items in parent-first install order.
@@ -1384,6 +1385,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             ignore_rules (list[dict] | None): The optional inventory ignore rules.
             device_serial (str): The device serial used to evaluate ignore rules.
             index_map (dict | None): The inventory items keyed by index.
+            ignore_contexts (dict | None): The owner and ignore policy for each inventory item.
 
         """
         if visited is None:
