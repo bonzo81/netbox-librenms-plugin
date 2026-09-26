@@ -25,6 +25,7 @@ classifiers=[
 ]
 
 requires-python = ">=3.12.0"
+dependencies = ["google-re2>=1.1.20251105"]
 
 [project.urls]
 "Homepage" = "https://github.com/bonzo81/netbox-librenms-plugin/"

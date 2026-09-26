@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
-from netbox_librenms_plugin.data_shapes.ports import compile_sap_patterns
+from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
 
 from netbox_librenms_plugin.tests.recordings import iter_recording_paths, iter_recordings
 
@@ -553,11 +553,11 @@ def _assert_port_relationships(api, device_id, recording, expected):
         ports_data["ports"],
         port_stack,
         # Normalize missing and explicit null patterns so resolution never touches the DB.
-        lag_patterns=recording.get("lag_patterns") or {},
+        compiled_lag_patterns=compile_lag_patterns(recording),
         # `(meta or {})` not `meta, {}`: an explicit "meta": null (a shape recording_schema_errors()
         # doesn't reject) returns None, and the chained .get("os") would then AttributeError.
         device_os=(recording.get("meta") or {}).get("os"),
-        # Supplying lag_patterns keeps resolution off the DB, which also means the stored SAP
+        # Supplying compiled LAG patterns keeps resolution off the DB, so the stored SAP
         # rule is not read; feed the recording's own snapshot so replay matches production.
         compiled_sap_patterns=compile_sap_patterns(recording),
     )
@@ -628,8 +628,8 @@ def test_assert_port_relationships_tolerates_explicit_null_lag_patterns():
         def get_port_stack(self, device_id):
             return True, []
 
-        def resolve_port_relationships(self, ports, stack, lag_patterns=None, **kwargs):
-            self.lag_patterns = lag_patterns
+        def resolve_port_relationships(self, ports, stack, compiled_lag_patterns=None, **kwargs):
+            self.lag_patterns = compiled_lag_patterns
             self.sap_patterns = kwargs.get("compiled_sap_patterns")
             return {}
 
@@ -638,7 +638,7 @@ def test_assert_port_relationships_tolerates_explicit_null_lag_patterns():
 
     _assert_port_relationships(api, 1, recording, expected={})
 
-    assert api.lag_patterns == {}
+    assert api.lag_patterns == []
     # A null lag_patterns must not pull the stored SAP rule from the database either.
     assert api.sap_patterns == []
 
@@ -674,3 +674,14 @@ def test_serial_outcome_without_patterns_replays_as_empty(recording_server):
     recording.pop("serial_type_patterns", None)
 
     test_recording_outcomes(recording, recording_server)
+
+
+def test_arcos_recording_preserves_breakout_port_names():
+    """The fresh source retains ArcOS breakout names needed by interface inference."""
+    from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+
+    recording = load_recording("arcos-lag-transceivers")
+    ports = unwrap_response(recording["responses"]["GET /api/v0/devices/1/ports"])[1]["ports"]
+    import re
+
+    assert any(re.fullmatch(r"swp[0-9]+s[0-9]+", port.get("ifName", "")) for port in ports)

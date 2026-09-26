@@ -305,7 +305,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             meta_out["oob_id"] = oob_id
 
     # 10. LAG name patterns. compute_shape_signature and the replay's
-    #    resolve_port_relationships(lag_patterns=recording["lag_patterns"]) both read this key —
+    #    replay through compile_lag_patterns(recording) both read this key —
     #    without it a LAG detected only via a configured PortStackLagPattern regex (ifType not
     #    ieee8023adLag) fingerprints as lag.present=False and the fixture can never reproduce the
     #    pattern-based behavior it was captured for. Mirrors compiled_patterns_for_os exactly:

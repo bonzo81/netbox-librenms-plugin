@@ -648,82 +648,24 @@ def test_signature_normalizes_salted_interface_pseudonym_sub_units():
     assert first == second
 
 
-def test_is_redos_prone_flags_nested_quantifiers_but_not_real_lag_patterns():
-    """The ReDoS guard flags nested unbounded quantifiers (the ^(a+)+$ class), not real LAG patterns."""
-    from netbox_librenms_plugin.data_shapes import ports
+@pytest.mark.parametrize(
+    "pattern,name",
+    [
+        (r"^(a+)+$", "aaaa"),
+        (r"^((a+))+$", "aaaa"),
+        (r"^(a|aa)+$", "aaaa"),
+        (r"^(a+){20}$", "a" * 20),
+        (r"^(a+){20,20}$", "a" * 20),
+        (r"^(a|aa){100}$", "a" * 100),
+        (r"^(Po|Te)\d+$", "Po42"),
+        (r"^(Bundle-Ether|Port-channel)\d+$", "Bundle-Ether7"),
+    ],
+)
+def test_recording_regex_accepts_supported_patterns_without_a_backtracking_heuristic(pattern, name):
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
 
-    for evil in (
-        r"^(a+)+$",
-        r"(a*)*",
-        r"(a+)*",
-        r"(.*x)+",
-        r"(ab+)+",
-        # {n,} is unbounded in either position, so it belongs on both sides of the nesting.
-        r"(a{2,})+",
-        r"(a{1,}){2,}",
-        r"(a+){2,}",
-        # A wrapper group hid the nesting from the old bounded scan, and a 26-character
-        # near-match already took seconds to fail.
-        r"^((a+))+$",
-        r"^(((a+)))+$",
-        r"^((a+)b)+$",
-        r"^(a|aa)+$",
-    ):
-        assert ports.is_redos_prone(evil) is True, evil
-    for ok in (
-        r"^Po\d+$",
-        r"^Port-channel\d+$",
-        r"^ae\d+$",
-        r"^Bundle-Ether\d+$",
-        r"^(Po|Te)\d+$",
-        r"bond\d+",
-        # Repeating an unambiguous group is fine, and a quantifier inside a character class
-        # is a literal, not a repeat.
-        r"^(Po)+$",
-        r"^[a+]+$",
-    ):
-        assert ports.is_redos_prone(ok) is False, ok
-    # A non-string and an over-long (garbage/suspect) pattern are also refused — the latter bounds the
-    # detector's own scan cost on an adversarial input.
-    assert ports.is_redos_prone(None) is True
-    assert ports.is_redos_prone("(" * 500) is True
-
-
-def test_is_redos_prone_flags_overlapping_alternation_in_a_quantified_group():
-    """
-    ``^(a|aa)+$`` backtracks catastrophically without any nested quantifier.
-
-    The group holds alternatives that can match the same text, so an unbounded quantifier over it
-    explores exponentially many splits. Matching 255 characters plus one non-matching character
-    takes over a second, which a community recording can trigger during --validate.
-    """
-    from netbox_librenms_plugin.data_shapes import ports
-
-    for evil in (r"^(a|aa)+$", r"(a|a)*", r"(ab|a|b)+", r"(x|xy){2,}"):
-        assert ports.is_redos_prone(evil) is True, evil
-    # An alternation that is NOT unbounded-quantified stays usable: this is the real LAG shape.
-    for ok in (r"^(Po|Te)\d+$", r"^(Bundle-Ether|Port-channel)\d+$", r"^(ae|bond)\d+$"):
-        assert ports.is_redos_prone(ok) is False, ok
-
-
-@pytest.mark.parametrize("pattern", [r"^(a+)+$", r"^(a{1,999})+$", r"^(a+){1,999}$", r"^(a|aa){1,999}$"])
-def test_signature_skips_redos_prone_untrusted_lag_pattern(pattern):
-    """A ReDoS-prone untrusted LAG pattern is skipped, not applied — the port isn't classified a LAG."""
-    rec = {
-        "schema_version": 1,
-        "name": "x",
-        "device_id": 1,
-        "lag_patterns": {"evil": pattern},
-        "responses": {
-            "GET /api/v0/devices/1/ports": {
-                "status": "ok",
-                # "aaaa" MATCHES ^(a+)+$ instantly — if the pattern were applied the port would be a
-                # LAG; skipping it (the fix) leaves present=False. No pathological input needed.
-                "ports": [{"port_id": 1, "ifName": "aaaa", "ifType": "propVirtual"}],
-            }
-        },
-    }
-    assert compute_shape_signature(rec)["lag"]["present"] is False
+    [compiled] = compile_lag_patterns({"lag_patterns": {"example": pattern}})
+    assert compiled.fullmatch(name)
 
 
 @pytest.mark.parametrize("pattern", [r"^(a{2})+$", r"^(a{2,2})+$", r"^a{1,999}$"])
@@ -736,23 +678,15 @@ def test_fixed_or_unnested_bounded_patterns_remain_usable(pattern):
     assert name_matches_lag_pattern("aaaa", compiled)
 
 
-@pytest.mark.parametrize("pattern", [r"^(a+){20}$", r"^(a+){20,20}$", r"^(a|aa){100}$"])
-def test_compiler_rejects_fixed_outer_repeats_of_ambiguous_groups(pattern):
-    """A fixed outer repeat still permits many partitions of an ambiguous group."""
-    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
-
-    assert compile_lag_patterns({"lag_patterns": {"example": pattern}}) == []
-
-
 def test_signature_skips_uncompilable_lag_pattern():
-    """A schema-valid recording can contain a repetition that Python cannot compile."""
+    """A schema-valid recording can contain a repetition outside RE2 limits."""
     from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
 
     recording = {
         "schema_version": 1,
         "name": "example",
         "device_id": 1,
-        "lag_patterns": {"example": r"^a{99999999999999999999}$"},
+        "lag_patterns": {"example": r"^a{1001}$"},
         "responses": {
             "GET /api/v0/devices/1/ports": {
                 "status": "ok",
@@ -769,9 +703,121 @@ def test_sap_compiler_keeps_valid_patterns_after_an_uncompilable_repeat():
     """An oversized repetition does not discard another usable SAP pattern."""
     from netbox_librenms_plugin.data_shapes.ports import compile_sap_patterns
 
-    patterns = compile_sap_patterns(
-        {"sap_patterns": {"oversized": r"^a{99999999999999999999}$", "usable": r"^sap-[0-9]+$"}}
-    )
+    patterns = compile_sap_patterns({"sap_patterns": {"oversized": r"^a{1001}$", "usable": r"^sap-[0-9]+$"}})
 
     assert len(patterns) == 1
     assert patterns[0].fullmatch("sap-42") is not None
+
+
+@pytest.mark.parametrize("pattern,name", [(r"^(a?){30}a{30}$", "a" * 30), (r"^((a|aa))+$", "a" * 45 + "!")])
+@pytest.mark.parametrize("pipeline", ["signature", "replay"])
+@pytest.mark.parametrize("map_name", ["lag_patterns", "sap_patterns"])
+def test_recording_regex_pipeline_completes_with_ambiguous_patterns(pattern, name, pipeline, map_name):
+    """Untrusted patterns cannot exhaust either classification or real HTTP replay."""
+    import json
+    import subprocess
+    import sys
+
+    script = r"""
+import json, sys
+import django
+django.setup()
+from django.conf import settings
+from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+from netbox_librenms_plugin.data_shapes.compress import compress_recording
+from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+from netbox_librenms_plugin.tests.test_recordings import _assert_port_relationships
+pattern, name, pipeline, map_name = json.loads(sys.argv[1])
+recording = {
+    "schema_version": 1, "name": "bounded-regex", "device_id": 1,
+    map_name: {"example": pattern},
+    "responses": {
+        "GET /api/v0/devices/1/ports": {"status": "ok", "ports": [
+            {"port_id": 1, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
+            {"port_id": 2, "ifName": name, "ifType": "propVirtual"},
+        ]},
+        "GET /api/v0/devices/1/port_stack": {"status": "ok", "mappings": [
+            {"high_port_id": 2, "low_port_id": 1},
+        ]},
+    },
+}
+if pipeline == "signature":
+    assert compute_shape_signature(recording)["lag"]["present"] is (map_name == "lag_patterns" and not name.endswith("!"))
+    compress_recording(recording)
+    anonymize_recording(recording)
+else:
+    server = MockLibreNMSServer()
+    server.start()
+    try:
+        server.load_recording(recording)
+        settings.PLUGINS_CONFIG["netbox_librenms_plugin"] = {
+            "servers": {"bounded-regex": {"librenms_url": server.url, "api_token": "token", "verify_ssl": False}},
+            "enable_caching": False,
+        }
+        api = LibreNMSAPI(server_key="bounded-regex")
+        expected = {"lag_members": {1: 2} if map_name == "lag_patterns" and not name.endswith("!") else {}}
+        _assert_port_relationships(api, 1, recording, expected)
+    finally:
+        server.stop()
+"""
+    subprocess.run(
+        [sys.executable, "-c", script, json.dumps([pattern, name, pipeline, map_name])],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+@pytest.mark.parametrize("map_name", ["lag_patterns", "sap_patterns"])
+def test_recording_regex_compilation_has_a_backend_memory_budget(map_name):
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
+
+    compile_patterns = compile_lag_patterns if map_name == "lag_patterns" else compile_sap_patterns
+    recording = {map_name: {"exhausted": "(abcdefghij){1000}" * 9, "valid": r"^bond[0-9]+$"}}
+    patterns = compile_patterns(recording)
+    assert len(patterns) == 1
+    assert patterns[0].fullmatch("bond42")
+
+
+@pytest.mark.parametrize("pattern", [r"(?=bond)bond", r"(bond)\1"])
+def test_recording_regex_excludes_unsupported_python_features(pattern):
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
+
+    assert compile_lag_patterns({"lag_patterns": {"unsupported": pattern}}) == []
+
+
+def test_recording_regex_states_unicode_and_newline_semantics():
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
+
+    [compiled] = compile_lag_patterns({"lag_patterns": {"example": r"^bond\d+$"}})
+    assert compiled.search("bond42")
+    assert compiled.search("bond\u0661") is None
+    assert compiled.search("bond42\n") is None
+    with pytest.raises(UnicodeEncodeError):
+        compiled.search("bond" + chr(0xD800))
+
+
+def test_recording_regex_skips_malformed_unicode_but_keeps_later_patterns():
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
+
+    patterns = compile_lag_patterns({"lag_patterns": {"malformed": chr(0xD800), "valid": "^bond[0-9]+$"}})
+    assert len(patterns) == 1
+    assert patterns[0].fullmatch("bond7")
+
+
+def test_recording_regex_uses_native_re2_literal_repeat_semantics():
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
+
+    [compiled] = compile_lag_patterns({"lag_patterns": {"example": r"^a{99999999999999999999}$"}})
+    assert compiled.fullmatch("a{99999999999999999999}")
+    assert compiled.search("aaaa") is None
+
+
+def test_recording_regex_bounds_pattern_count_and_length():
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
+
+    assert len(compile_lag_patterns({"lag_patterns": {str(i): "^bond[0-9]+$" for i in range(101)}})) == 100
+    assert compile_lag_patterns({"lag_patterns": {"long": "a" * 201, "nonstring": 3}}) == []
