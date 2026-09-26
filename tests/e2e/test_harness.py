@@ -15,6 +15,7 @@ def test_chromium_arguments_keep_quoted_values(monkeypatch):
 
 
 def test_live_fixture_identifiers_share_a_run_specific_suffix(monkeypatch):
+    pytest.importorskip("playwright.sync_api")
     monkeypatch.setenv("E2E_TESTS_ENABLED", "1")
     from . import test_module_actions_in_place as module
 
@@ -30,7 +31,7 @@ def test_live_fixture_identifiers_share_a_run_specific_suffix(monkeypatch):
 
 
 def test_playwright_stops_when_browser_launch_fails(monkeypatch):
-    from playwright import sync_api
+    sync_api = pytest.importorskip("playwright.sync_api")
 
     class FailedPlaywright:
         def __init__(self):
@@ -88,3 +89,20 @@ def test_browser_context_closes_when_login_fails():
         next(page.__wrapped__(Browser(context)))
 
     assert context.closed
+
+
+@pytest.mark.parametrize(
+    "check",
+    [test_live_fixture_identifiers_share_a_run_specific_suffix, test_playwright_stops_when_browser_launch_fails],
+)
+def test_browser_harness_checks_skip_when_playwright_is_unavailable(monkeypatch, check):
+    """An optional browser dependency must not break harness test collection."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "playwright", None)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
+    module_name = f"{__package__}.test_module_actions_in_place"
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    monkeypatch.delattr(sys.modules[__package__], "test_module_actions_in_place", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        check(monkeypatch)

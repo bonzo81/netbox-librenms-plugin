@@ -170,7 +170,8 @@ class TestSingleInterfaceVerifyView:
         assert data["status"] == "error"
 
     @pytest.mark.django_db
-    def test_verify_response_hides_vlan_metadata_from_a_user_without_ipam_view_rights(self):
+    @pytest.mark.parametrize("source", ["host", "oob"])
+    def test_verify_response_hides_vlan_metadata_from_a_user_without_ipam_view_rights(self, source):
         """The gate only checks view_device, so the IPAM reads must be scoped to the caller."""
         from dcim.models import Device, Site
         from django.contrib.contenttypes.models import ContentType
@@ -210,7 +211,7 @@ class TestSingleInterfaceVerifyView:
                         "ifMtu": 1500,
                         "ifAdminStatus": "up",
                         "untagged_vlan": 100,
-                        "_source": "host",
+                        "_source": source,
                     }
                 ],
                 "port_stack_relationships": {},

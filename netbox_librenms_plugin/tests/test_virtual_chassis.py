@@ -48,6 +48,8 @@ class TestLoadVcMemberNamePattern:
 
     def test_returns_default_on_exception(self, monkeypatch):
         """A DB error while loading settings falls back to the default."""
+        self._store_pattern("-STACK{position}")
+        assert self._call() == "-STACK{position}"
         settings_model = self._settings_model()
 
         def fail_query(*_args, **_kwargs):
