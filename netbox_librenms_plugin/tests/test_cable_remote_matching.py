@@ -1588,7 +1588,8 @@ class TestCheckAndCreateTheRemoteEnd:
             {"expected_local_id": near.pk, "row_id": row_id, "server_key": server_key},
             follow=True,
         )
-        assert response.status_code == 200
+        assert response.status_code == 404
+        assert response.content.decode() == "Cable row not found."
         assert list(Interface.objects.filter(device=remote).values_list("pk", flat=True)) == [existing.pk]
         assert not Cable.objects.exists()
         assert "renamed-port" not in response.content.decode()

@@ -4004,7 +4004,6 @@ class TestSyncInterfacesViewPost:
             cache_key,
             {
                 "ports": [
-                    {"ifName": "lom0", "port_id": 99, "ifAdminStatus": "up", "_source": "host"},
                     {
                         **_PORT_KEYS_UNSET,
                         "ifName": "lom0",
@@ -4027,8 +4026,10 @@ class TestSyncInterfacesViewPost:
         assert host_interface.description == "host interface"
         assert get_librenms_device_id(host_interface, "default", auto_save=False) is None
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
-        assert Interface.objects.filter(device=device, name="lom0-oob").exists()
-        assert message_texts(request, "warning") == []
+        assert not Interface.objects.filter(device=device, name="lom0-oob").exists()
+        assert (
+            "host interface already uses this name" in " ".join(message_texts(request, "warning"))
+        ) is viewable
 
     def test_an_oob_row_uses_a_derived_name_when_only_it_is_selected(self):
         """The host owns its bare name even when only the OOB row is selected.
