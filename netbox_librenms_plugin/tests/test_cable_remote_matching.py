@@ -2101,7 +2101,7 @@ def test_remote_creation_locks_all_owners_before_inserting_an_interface(librenms
             _row(remote_device=remote.name, remote_port="Gi2/0/1", remote_port_key=500),
             server_key,
         )
-    owners = [local, remote, evidence_owner] if remote_chassis else [local, remote]
+    owners = [local, evidence_owner] if remote_chassis else [local, remote]
     client = _logged_in(make_superuser("create-owner-lock-user"))
     observed = []
 
