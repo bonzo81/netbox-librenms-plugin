@@ -1588,6 +1588,8 @@ class BaseCableTableView(
         # verify response, which both gate the action on can_create_cable).
         link["can_create_cable"] = False
         actionable = link.get("_source") != OOB_INVENTORY_SOURCE
+        if link.get("manual_remote") and not remote_interface_id:
+            return link
 
         if local_interface_id and remote_interface_id:
             if normal_context is not None:
@@ -1726,6 +1728,14 @@ class BaseCableTableView(
             None
 
         """
+        if link.get("cable_status") not in (
+            None,
+            "Device Not Found in NetBox",
+            "Both Interfaces Not Found in Netbox",
+            "Local Interface Not Found in Netbox",
+            "Remote Interface Not Found in Netbox",
+        ):
+            return
         if not interface_id:
             return
         if normal_context is not None:
@@ -2309,6 +2319,7 @@ class BaseCableTableView(
             or link.get("_multi_termination_unsupported")
             or not link.get("netbox_local_interface_id")
             or not link.get("netbox_remote_device_id")
+            or not link.get("remote_port_owner_id")
             or link.get("netbox_remote_interface_id")
         ):
             return
@@ -2628,6 +2639,9 @@ class BaseCableTableView(
                     link = self.check_cable_status(link, normal_context=normal_context)
             if not link.get("netbox_remote_device_id"):
                 self._report_one_sided_cable(link, link.get("netbox_local_interface_id"), normal_context)
+            link["remote_port_owner_id"] = getattr(
+                self._remote_port_owner(link, server_key, normal_context), "pk", None
+            )
             self._set_remote_picker_affordance(link, obj, server_key)
             self._set_remote_create_affordance(link, obj, server_key)
 
@@ -2673,6 +2687,27 @@ class BaseCableTableView(
             else None,
         )
         return links_data
+
+    def _remote_port_owner(self, link, server_key, normal_context=None):
+        """
+        Return the NetBox device that owns the row's advertised remote port, or None.
+
+        This is the neighbour the row names, or its chassis member for a VC, resolved the way the
+        remote end is. A manual pick does not change it.
+        """
+        if normal_context is not None:
+            return normal_context["remote_owner_by_link"].get(id(link))
+        device, found, _error = self.get_device_by_id_or_name(
+            link.get("remote_device_id"),
+            link.get("remote_device"),
+            server_key=server_key,
+            queryset=self._viewable_queryset(Device),
+        )
+        if not found:
+            return None
+        if device.virtual_chassis_id is None:
+            return device
+        return get_virtual_chassis_member(device, link.get("remote_port"), return_device_on_failure=False)
 
     def get_table(self, data, obj):
         """Return the cable table for *data*; concrete subclasses choose the table class."""
@@ -3140,6 +3175,9 @@ class SingleCableVerifyView(BaseCableTableView):
                         link_data = self.process_remote_device(
                             link_data, remote_hostname, link_data.get("remote_device_id"), server_key=server_key
                         )
+                    link_data["remote_port_owner_id"] = getattr(
+                        self._remote_port_owner(link_data, server_key), "pk", None
+                    )
 
                     # `or ""` (not a .get default): the OOB-merge path stores local_port=None when
                     # the port name can't be resolved, and a present-but-None value would otherwise

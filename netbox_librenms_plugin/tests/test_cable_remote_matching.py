@@ -912,6 +912,7 @@ def _create_setup(name, *, remote_port_key=500, local="eth0", remote_iface=None)
         netbox_local_interface_id=local_interface.pk,
         netbox_local_device_id=local_device.pk,
         netbox_remote_device_id=remote_device.pk,
+        remote_port_owner_id=remote_device.pk,
         device_id=local_device.pk,
     )
     return server_key, local_device, local_interface, remote_device, row
@@ -1846,3 +1847,93 @@ def test_remote_creation_locks_both_devices_before_inserting_an_interface(libren
         response = client.post(_remote_create_url(local), {"row_id": row_id, "server_key": server_key})
     assert response.status_code == 302
     assert len(observed) == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("failure", ["manual", "ambiguous"])
+def test_specific_remote_failure_survives_a_visible_local_cable(failure):
+    from django.core.cache import cache
+    from netbox_librenms_plugin.utils import cable_manual_pick_cache_key
+    from netbox_librenms_plugin.tests.conftest import cable_together, make_superuser
+
+    key = configured_server_key()
+    local = make_device("failure-status-local")
+    interface = make_interface(local, "eth0")
+    cable_together(interface, make_interface(make_device("failure-status-peer"), "eth1"))
+    user = make_superuser("failure-status-user")
+    row = _row(remote_device="failure-status-remote", remote_device_id=9)
+    if failure == "ambiguous":
+        for name in ("failure-status-first", "failure-status-second"):
+            map_device_to_librenms(make_device(name), 9, server_key=key)
+        expected = "Multiple devices found with the same LibreNMS ID"
+    else:
+        expected = "Selected remote port is no longer available"
+    row_id = _seed_cable_row(local, row, key)
+    if failure == "manual":
+        raw_key = _make_view().get_cache_key(local, "links", key)
+        payload = cache.get(raw_key)
+        cache.set(
+            cable_manual_pick_cache_key(raw_key, payload["snapshot_token"], user.pk, row_id),
+            {"manual_remote_id": 999999999},
+            timeout=300,
+        )
+        enriched = _make_view().enrich_links_data([{**row, "manual_remote_id": 999999999}], local, server_key=key)[0]
+        assert enriched["cable_status"] == expected
+    formatted = _verify(_logged_in(user), local, row_id, key)
+    assert expected in formatted["cable_status"]
+    assert "Cabled to" not in formatted["cable_status"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("port_name", ["Gi2/0/1", "unresolved-port"])
+def test_remote_create_uses_the_resolved_chassis_member(librenms_server, settings, port_name):
+    from dcim.models import Interface, VirtualChassis
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    key, local, local_interface, advertised, _ = TestCheckAndCreateTheRemoteEnd()._scenario(
+        "create-resolved-member", librenms_server, settings
+    )
+    chassis = VirtualChassis.objects.create(name="create-resolved-chassis")
+    advertised.virtual_chassis, advertised.vc_position = chassis, 1
+    advertised.save()
+    member = make_device("create-resolved-member-two")
+    member.virtual_chassis, member.vc_position = chassis, 2
+    member.save()
+    row = _row(remote_device=advertised.name, remote_device_id=9, remote_port=port_name, remote_port_key=500)
+    row_id = _seed_cable_row(local, row, key)
+    enriched = _make_view().enrich_links_data([dict(row)], local, server_key=key)[0]
+    client = _logged_in(make_superuser("create-resolved-member-user"))
+    if port_name == "unresolved-port":
+        assert not enriched.get("remote_create_url")
+    else:
+        assert enriched.get("remote_create_url")
+    response = client.post(_remote_create_url(local), {"row_id": row_id, "server_key": key})
+    assert not Interface.objects.filter(device=advertised).exists()
+    local_interface.refresh_from_db()
+    if port_name == "unresolved-port":
+        assert response.status_code == 404
+        assert local_interface.cable_id is None
+    else:
+        created = Interface.objects.get(device=member, name="Gi0/1")
+        assert created.cable_id == local_interface.cable_id is not None
+
+
+@pytest.mark.django_db
+def test_remote_create_refuses_a_port_already_bound_on_another_device(librenms_server, settings):
+    from dcim.models import Interface
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    key, local, local_interface, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
+        "create-foreign-port", librenms_server, settings
+    )
+    holder = make_interface(make_device("create-foreign-holder"), "private-held-port")
+    set_librenms_device_id(holder, 500, key)
+    holder.save()
+    response = _logged_in(make_superuser("create-foreign-port-user")).post(
+        _remote_create_url(local), {"row_id": row_id, "server_key": key}
+    )
+    assert response.status_code in (302, 404)
+    assert not Interface.objects.filter(device=remote).exists()
+    local_interface.refresh_from_db()
+    assert local_interface.cable_id is None
