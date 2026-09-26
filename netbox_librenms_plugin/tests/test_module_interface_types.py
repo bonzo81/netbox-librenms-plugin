@@ -252,6 +252,35 @@ class TestModuleInterfaceTypeTab:
         assert 'hx-sync="#htmx-modal-content:replace"' in content
         assert 'hx-disabled-elt="this"' in content
 
+    @pytest.mark.parametrize("view_interfaces", [False, True])
+    def test_type_review_action_requires_interface_view_permission(self, settings, view_interfaces):
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.core.cache import cache
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        configure_default_librenms_server(settings)
+        device, module = _module_with_templates("type-preview-scope", [("Ethernet1", "10gbase-x-sfpp")])
+        Interface.objects.create(device=device, module=module, name="Ethernet1", type="1000base-t")
+        user = make_user_with_perms(
+            "type-preview-scope",
+            [
+                ("view", Device),
+                ("view", Module),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("change", Interface),
+            ],
+        )
+        if view_interfaces:
+            user = grant(user, "view", Interface)
+        key = _seed_module_tab(device, module)
+        try:
+            content = _render_module_tab(device, user)
+        finally:
+            cache.delete(key)
+        assert ('data-action="review-interface-types"' in content) is view_interfaces
+
     @pytest.mark.parametrize("template_type", ["", "1000base-t"], ids=["untyped-template", "matching-type"])
     def test_real_tab_omits_action_when_no_template_type_differs(self, settings, template_type):
         from dcim.models import Interface

@@ -23,7 +23,7 @@ def module_action_control(tag, action, css, attrs, title, icon, label):
     """Render one actions-column control; a secondary action is icon-only and named by aria-label."""
     if action in LABELLED_MODULE_ACTIONS:
         return format_html(
-            '<{} class="btn btn-sm {}" data-action="{}"{} title="{}"><i class="mdi {}"></i> {}</{}>',
+            '<{} class="btn btn-sm {}" data-action="{}"{} title="{}"><i class="mdi {}" aria-hidden="true"></i> {}</{}>',
             tag,
             css,
             action,

@@ -634,6 +634,7 @@ class TestActionRendering:
                 attrs = next(iter(open_tags(control.group(0), name)))
                 visible_text = re.sub(r"<[^>]*>", "", control.group(2)).strip()
                 assert attrs["title"]
+                assert all(icon.get("aria-hidden") == "true" for icon in open_tags(control.group(0), "i"))
                 if attrs["data-action"] in LABELLED_MODULE_ACTIONS:
                     assert visible_text
                 else:

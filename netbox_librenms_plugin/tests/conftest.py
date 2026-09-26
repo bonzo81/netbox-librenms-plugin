@@ -582,7 +582,7 @@ def stamp_rule_decision(record, *, platform_id=None, rules=None):
     from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 
     matcher = InterfaceRuleMatcher.load() if rules is None else rules
-    record["rule_decision"] = matcher.decide(record, platform_id=platform_id)
+    record["rule_decision"] = matcher.check_interface_write(record, platform_id=platform_id)
     return record
 
 

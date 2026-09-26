@@ -936,9 +936,7 @@ class TestInterfaceTableFields:
     @pytest.mark.parametrize("value", ["up", "UP", True, None])
     def test_enabled_values_normalize_to_enabled(self, value):
         """An absent ifAdminStatus reads as enabled: that is the value a sync writes."""
-        record = stamp_rule_decision(
-            {"exists_in_netbox": False, "ifAdminStatus": value}, rules=InterfaceRuleMatcher(())
-        )
+        record = _port(exists_in_netbox=False, ifAdminStatus=value)
         html = str(_interface_table().render_enabled(value, record))
 
         assert "Enabled" in html
@@ -946,9 +944,7 @@ class TestInterfaceTableFields:
 
     @pytest.mark.parametrize("value", ["down", False])
     def test_disabled_values_normalize_to_disabled(self, value):
-        record = stamp_rule_decision(
-            {"exists_in_netbox": False, "ifAdminStatus": value}, rules=InterfaceRuleMatcher(())
-        )
+        record = _port(exists_in_netbox=False, ifAdminStatus=value)
         html = str(_interface_table().render_enabled(value, record))
 
         assert "Disabled" in html
@@ -1112,14 +1108,7 @@ class TestInterfaceTableFields:
 
         def _row(iface):
             # port_id is the column accessor, so the rendered value and the row carry the same id.
-            return stamp_rule_decision(
-                {
-                    "port_id": 42,
-                    "exists_in_netbox": True,
-                    "netbox_interface": iface,
-                    "synced_name": "Ethernet1",
-                }
-            )
+            return _port(port_id=42, exists_in_netbox=True, netbox_interface=iface, synced_name="Ethernet1")
 
         missing = str(table.render_librenms_id(42, _row(interface)))
         set_librenms_device_id(interface, 99, "default")

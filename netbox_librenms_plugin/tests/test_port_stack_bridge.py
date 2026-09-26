@@ -764,7 +764,9 @@ def test_relationship_column_renders_bridge_in_the_existing_column():
             None,
             stamp_rule_decision(
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 103,
+                    "ifName": member.name,
                     "netbox_interface": member,
                     "bridge_sync_status": "missing_nb",
                     "librenms_bridge_name": "vmbr0",

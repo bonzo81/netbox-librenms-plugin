@@ -444,3 +444,15 @@ class TestLoading:
         InterfaceTypeMapping.objects.filter(pk=rule.pk).update(name_pattern=stored)
         with pytest.raises(RuleConfigurationError, match=f"Interface rule {rule.pk} "):
             InterfaceRuleMatcher.load()
+
+
+@pytest.mark.parametrize("missing", ["ifName", "ifDescr", "ifType", "ifSpeed"])
+def test_stamped_fixture_decision_rejects_the_same_incomplete_row_as_the_writer(missing):
+    from netbox_librenms_plugin.tests.conftest import stamp_rule_decision
+
+    matcher = InterfaceRuleMatcher(())
+    row = _port()
+    del row[missing]
+    stamped = stamp_rule_decision(row, rules=matcher)["rule_decision"]
+    assert stamped.kind == RuleDecisionKind.INCOMPLETE
+    assert stamped == matcher.check_interface_write(row, platform_id=None)
