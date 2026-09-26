@@ -104,35 +104,44 @@ class TestTheSharedLookup:
 
 
 class TestTheSyncWriter:
-    """The interfaces tab sync refuses a row whose port the other model holds, and says so."""
+    """The interfaces tab refuses every foreign port owner before creating or changing a row."""
 
+    @pytest.mark.parametrize("object_type", ["device", "virtualmachine"])
+    @pytest.mark.parametrize("holder_type", ["device", "virtualmachine"])
     @pytest.mark.parametrize("same_name_exists", [False, True], ids=["create", "adopt"])
-    def test_a_device_sync_does_not_bind_a_port_a_vm_interface_holds(self, client, settings, same_name_exists):
+    def test_sync_refuses_a_foreign_port_before_creating_or_changing_an_interface(
+        self, client, settings, object_type, holder_type, same_name_exists
+    ):
         configure_default_librenms_server(settings)
-        vm_interface = _vm_interface(f"sync-device-{same_name_exists}", PORT)
-        device = make_device(f"sync-device-{same_name_exists}", librenms_cf={SERVER_KEY: {"id": 71}})
-        existing = make_interface(device, "eth0") if same_name_exists else None
-        client.force_login(make_superuser(f"sync-device-{same_name_exists}-user"))
+        if holder_type == "device":
+            holder = _bind(make_interface(make_device("foreign-port-owner"), "private-port-name"), PORT)
+        else:
+            holder = _vm_interface("foreign-port-owner", PORT)
+        if object_type == "device":
+            owner = make_device("requested-port-owner", librenms_cf={SERVER_KEY: {"id": 71}})
+            model = Interface
+            owner_filter = {"device": owner}
+        else:
+            owner = make_vm("requested-port-owner", make_cluster("requested-port-cluster"))
+            model = VMInterface
+            owner_filter = {"virtual_machine": owner}
+        existing = (
+            model.objects.create(**owner_filter, name="eth0", description="keep description", enabled=False, mtu=9000)
+            if same_name_exists
+            else None
+        )
+        before_holder = type(holder).objects.filter(pk=holder.pk).values().get()
+        before_existing = model.objects.filter(pk=existing.pk).values().get() if existing else None
+        client.force_login(make_superuser("foreign-port-request-user"))
 
-        response = _sync(client, device, "device", PORT)
+        response = _sync(client, owner, object_type, PORT)
 
-        assert _binding(vm_interface) == PORT
-        assert not Interface.objects.filter(device=device).exclude(pk=getattr(existing, "pk", None)).exists()
+        assert response.status_code == 302
+        assert _warnings(response) == ["The LibreNMS port ID is already assigned to another NetBox interface."]
+        assert type(holder).objects.filter(pk=holder.pk).values().get() == before_holder
+        assert not model.objects.filter(**owner_filter).exclude(pk=getattr(existing, "pk", None)).exists()
         if existing is not None:
-            assert _binding(existing) is None
-        assert any("eth0 (port already mapped elsewhere or ambiguous)" in text for text in _warnings(response))
-
-    def test_a_vm_sync_does_not_bind_a_port_a_device_interface_holds(self, client, settings):
-        configure_default_librenms_server(settings)
-        device_interface = _bind(make_interface(make_device("sync-vm-holder"), "eth0"), PORT)
-        vm = make_vm("sync-vm", make_cluster("sync-vm-cluster"))
-        client.force_login(make_superuser("sync-vm-user"))
-
-        response = _sync(client, vm, "virtualmachine", PORT)
-
-        assert _binding(device_interface) == PORT
-        assert not VMInterface.objects.filter(virtual_machine=vm).exists()
-        assert any("eth0 (port already mapped elsewhere or ambiguous)" in text for text in _warnings(response))
+            assert model.objects.filter(pk=existing.pk).values().get() == before_existing
 
     def test_the_field_writer_does_not_bind_a_port_the_other_model_holds(self):
         from netbox_librenms_plugin.interface_sync import update_interface_from_port

@@ -4547,9 +4547,11 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert iface.type  # a real NetBox type was resolved from ifType (non-empty)
 
     @pytest.mark.django_db
-    def test_foreign_port_id_falls_back_to_local_same_named_interface(self):
-        """A port_id owned by another device's interface still updates this device's own same-named interface."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+    def test_foreign_port_id_refuses_local_same_named_interface(self):
+        """A foreign port binding prevents every local field change, even when names match."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, set_librenms_device_id
 
         view = self._make_view()
 
@@ -4574,19 +4576,13 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifAdminStatus": "up",
         }
 
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
+        before_local = Interface.objects.filter(pk=own_iface.pk).values().get()
+        before_holder = Interface.objects.filter(pk=other_iface.pk).values().get()
+        with pytest.raises(LibreNMSPortBindingConflict, match="already assigned to another NetBox interface"):
+            view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
 
-        own_iface.refresh_from_db()
-        other_iface.refresh_from_db()
-        # The current device's own interface was updated (not skipped).
-        assert own_iface.mtu == 9000
-        assert own_iface.description == "uplink-desc"
-        assert own_iface.speed == 1000000
-        # The other device's interface (the real owner of port_id 77) is untouched...
-        assert other_iface.mtu != 9000
-        assert get_librenms_device_id(other_iface, "default") == 77
-        # ...and the port_id is NOT reassigned onto the current device's interface.
-        assert get_librenms_device_id(own_iface, "default") is None
+        assert Interface.objects.filter(pk=own_iface.pk).values().get() == before_local
+        assert Interface.objects.filter(pk=other_iface.pk).values().get() == before_holder
 
     def test_device_selection_with_vc_valid(self):
         """A posted sibling of the same chassis receives the interface."""
@@ -4684,11 +4680,11 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert Interface.objects.filter(device=dev, name="Gi0/1").count() == 1
 
     @pytest.mark.django_db
-    def test_device_port_id_conflict_without_local_name_match_skips(self):
+    def test_device_port_id_conflict_without_local_name_match_refuses(self):
         """A port_id owned by another device with no same-named local interface is skipped, not created."""
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, set_librenms_device_id
 
         view = self._make_view()
         view._skipped_conflicts = []
@@ -4708,10 +4704,8 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "port_id": 77,
             "ifAdminStatus": "up",
         }
-        view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
-
-        # No same-named local interface to fall back to, and we never get_or_create one here.
-        assert view._skipped_conflicts == ["Gi0/1 (port already mapped elsewhere or ambiguous)"]
+        with pytest.raises(LibreNMSPortBindingConflict, match="already assigned to another NetBox interface"):
+            view.sync_interface(dev, librenms_port, ["vlans"], "ifName", "Gi0/1")
         assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
 
 
@@ -4875,10 +4869,10 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         interface = Interface.objects.get(pk=interface.pk)
         assert get_librenms_device_id(interface, "default", auto_save=False) == 42
 
-    def test_port_id_conflict_does_not_overwrite(self):
-        from dcim.models import Interface
+    def test_port_id_conflict_refuses_before_any_field_change(self):
+        from dcim.models import Interface, MACAddress
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, set_librenms_device_id
 
         view = self._make_view()
         conflicting_owner = make_interface(make_device("port-id-owner"), "Gi0/0")
@@ -4894,13 +4888,19 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifMtu": None,
             "port_id": 42,
             "ifAdminStatus": "up",
+            "ifPhysAddress": "02:00:00:00:00:42",
         }
 
-        view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
+        before = Interface.objects.filter(pk=interface.pk).values().get()
+        before_holder = Interface.objects.filter(pk=conflicting_owner.pk).values().get()
+        mac_count = MACAddress.objects.count()
+        with pytest.raises(LibreNMSPortBindingConflict, match="already assigned to another NetBox interface"):
+            view.update_interface_attributes(interface, librenms_port, [], "ifName", "Gi0/1", created=False)
 
-        interface = Interface.objects.get(pk=interface.pk)
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
-        assert get_librenms_device_id(conflicting_owner, "default", auto_save=False) == 42
+        assert {field: getattr(interface, field) for field in before} == before
+        assert Interface.objects.filter(pk=interface.pk).values().get() == before
+        assert Interface.objects.filter(pk=conflicting_owner.pk).values().get() == before_holder
+        assert MACAddress.objects.count() == mac_count
 
     def test_ifalias_not_set_when_same_as_name(self):
         """IfAlias should not overwrite when equal to interface name."""

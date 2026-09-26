@@ -1656,35 +1656,12 @@ class SyncInterfacesView(
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, port_owner, oob=False):
         """Resolve a device interface from the port's owner first, then safe name fallback."""
         changeable = self.restricted_queryset(Interface, "change")
-        if port_id:
-            by_id = port_owner
-            if by_id is not None:
-                # A VM interface that holds the port is its owner; a device interface is never a second one.
-                if not isinstance(by_id, Interface):
-                    return None
-                if not changeable.filter(pk=by_id.pk).exists():
-                    return None
-                if by_id.device_id == target_device.id:
-                    return by_id
-                if oob:
-                    return None
-                # The port_id resolves to an interface on a DIFFERENT device (a stale or
-                # duplicate stored port_id, e.g. after a device replacement). The LibreNMS row
-                # still describes THIS device's interface, and the rendered table binds it to the
-                # current device's same-named interface, so fall back to that and update it —
-                # but only if it already exists. Don't get_or_create here: spawning a new
-                # interface when the id really belongs elsewhere would create a duplicate.
-                # update_interface_attributes won't reassign the port_id off the other
-                # interface (its existing_owner guard), so the foreign binding stays intact.
-                existing_by_name = Interface.objects.filter(device=target_device, name=interface_name).first()
-                if existing_by_name:
-                    return (
-                        existing_by_name
-                        if interface_name_fallback_matches_port(existing_by_name, port_id, server_key)
-                        and changeable.filter(pk=existing_by_name.pk).exists()
-                        else None
-                    )
-                return None
+        if port_id and port_owner is not None:
+            if not isinstance(port_owner, Interface) or port_owner.device_id != target_device.pk:
+                raise LibreNMSPortBindingConflict(
+                    "The LibreNMS port ID is already assigned to another NetBox interface."
+                )
+            return port_owner if changeable.filter(pk=port_owner.pk).exists() else None
         if interface_name is None:
             return None
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
@@ -1702,31 +1679,12 @@ class SyncInterfacesView(
     def _resolve_vm_interface(self, vm, interface_name, port_id, server_key, *, port_owner):
         """Resolve a VM interface from the port's owner first, then safe name fallback."""
         changeable = self.restricted_queryset(VMInterface, "change")
-        if port_id:
-            by_id = port_owner
-            if by_id is not None:
-                # A device interface that holds the port is its owner; a VM interface is never a second one.
-                if not isinstance(by_id, VMInterface):
-                    return None
-                if not changeable.filter(pk=by_id.pk).exists():
-                    return None
-                if by_id.virtual_machine_id == vm.id:
-                    return by_id
-                # The port_id resolves to an interface on a DIFFERENT VM (a stale or duplicate
-                # stored port_id). The LibreNMS row still describes THIS VM's interface, and the
-                # rendered table binds it to this VM's same-named interface, so fall back to that
-                # and update it — but only if it already exists (don't get_or_create a duplicate
-                # for an id that really belongs elsewhere). update_interface_attributes won't
-                # reassign the port_id off the other interface (its existing_owner guard).
-                existing_by_name = VMInterface.objects.filter(virtual_machine=vm, name=interface_name).first()
-                if existing_by_name:
-                    return (
-                        existing_by_name
-                        if interface_name_fallback_matches_port(existing_by_name, port_id, server_key)
-                        and changeable.filter(pk=existing_by_name.pk).exists()
-                        else None
-                    )
-                return None
+        if port_id and port_owner is not None:
+            if not isinstance(port_owner, VMInterface) or port_owner.virtual_machine_id != vm.pk:
+                raise LibreNMSPortBindingConflict(
+                    "The LibreNMS port ID is already assigned to another NetBox interface."
+                )
+            return port_owner if changeable.filter(pk=port_owner.pk).exists() else None
         if interface_name is None:
             return None
         interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
