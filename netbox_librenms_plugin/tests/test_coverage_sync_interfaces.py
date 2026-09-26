@@ -4291,7 +4291,9 @@ class TestSyncInterfacesViewPost:
         warnings = message_texts(request, "warning")
         if bound_elsewhere:
             assert not Interface.objects.filter(device=device, name="eno1-oob").exists()
-            assert any("port already mapped elsewhere or ambiguous" in text for text in warnings)
+            assert warnings == ["The LibreNMS port ID is already assigned to another NetBox interface."]
+            foreign.refresh_from_db()
+            assert get_librenms_device_id(foreign, "default", auto_save=False) == 8902
         else:
             oob_interface = Interface.objects.get(device=device, name="eno1-oob")
             assert get_librenms_device_id(oob_interface, "default", auto_save=False) == 8902

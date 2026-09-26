@@ -2085,19 +2085,29 @@ def test_one_sided_rows_to_one_peer_read_its_device_once():
 
 
 @transactional_db_with_all_apps()
-def test_remote_creation_locks_both_devices_before_inserting_an_interface(librenms_server, settings):
+@pytest.mark.parametrize("remote_chassis", [False, True])
+def test_remote_creation_locks_all_owners_before_inserting_an_interface(librenms_server, settings, remote_chassis):
     from django.db import DatabaseError, connection, connections
-    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis
 
+    evidence_owner = make_device("create-owner-evidence") if remote_chassis else None
     server_key, local, local_interface, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
         "create-owner-lock", librenms_server, settings
     )
+    if remote_chassis:
+        make_virtual_chassis("create-owner-chassis", remote, evidence_owner)
+        row_id = _seed_cable_row(
+            local,
+            _row(remote_device=remote.name, remote_port="Gi2/0/1", remote_port_key=500),
+            server_key,
+        )
+    owners = [local, remote, evidence_owner] if remote_chassis else [local, remote]
     client = _logged_in(make_superuser("create-owner-lock-user"))
     observed = []
 
     def inspect_owner_locks(execute, sql, params, many, context):
         if sql.startswith('INSERT INTO "dcim_interface"'):
-            for owner in (local, remote):
+            for owner in owners:
                 other = connections.create_connection("default")
                 other.set_autocommit(False)
                 try:
@@ -2108,7 +2118,7 @@ def test_remote_creation_locks_both_devices_before_inserting_an_interface(libren
                 finally:
                     other.rollback()
                     other.close()
-            assert observed == [(local.pk, "55P03"), (remote.pk, "55P03")]
+            assert observed == [(owner.pk, "55P03") for owner in owners]
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(inspect_owner_locks):
@@ -2117,7 +2127,7 @@ def test_remote_creation_locks_both_devices_before_inserting_an_interface(libren
             {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
     assert response.status_code == 302
-    assert len(observed) == 2
+    assert len(observed) == len(owners)
 
 
 @pytest.mark.django_db
