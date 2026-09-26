@@ -1183,6 +1183,7 @@ class CableRemoteCreateView(SyncCablesView):
         "POST": [
             ("view", Device),
             ("add", Interface),
+            ("change", Interface),
             ("add", Cable),
             ("change", Cable),
         ],
@@ -1226,6 +1227,12 @@ class CableRemoteCreateView(SyncCablesView):
             return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
         try:
             with transaction.atomic():
+                # Lock owners before the insert can take a foreign-key lock on the remote device.
+                owner_ids = {obj.pk, context["local_interface"].device_id, context["remote_device"].pk}
+                if cache_device := getattr(self, "_cache_device", None):
+                    owner_ids.add(cache_device.pk)
+                if self._lock_owner_devices(owner_ids) is None:
+                    raise _RemoteCreateAborted("The cable row changed. Refresh the cable data and try again.")
                 interface = self._create_remote_interface(request, context)
                 self._initial_device = obj
                 self._origin_device = context["local_interface"].device
@@ -1238,7 +1245,14 @@ class CableRemoteCreateView(SyncCablesView):
                     context["local_interface"], interface, row, context["local_interface"].name, force=False
                 )
                 if result["status"] != "valid":
-                    raise _RemoteCreateAborted("The cable row changed. Refresh the cable data and try again.")
+                    raise _RemoteCreateAborted(
+                        {
+                            "failed": "",  # create_cable already reported the failure.
+                            "denied": "You do not have permission to change these interfaces or cables.",
+                            "unsupported": "Multi-termination cables cannot be changed by cable sync.",
+                            "conflict": "The local interface is already connected. Refresh the Cables tab.",
+                        }.get(result["status"], "The cable row changed. Refresh the cable data and try again.")
+                    )
         except _RemoteCreateAborted as exc:
             if str(exc):
                 messages.error(request, str(exc))

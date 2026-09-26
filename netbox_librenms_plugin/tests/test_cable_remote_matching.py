@@ -23,6 +23,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     map_device_to_librenms,
+    transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
@@ -1365,6 +1366,25 @@ class TestCheckAndCreateTheRemoteEnd:
         assert not Interface.objects.filter(device=remote_device).exists()
         local_interface.refresh_from_db()
         assert local_interface.cable_id is None
+        errors = _messages(response)
+        assert errors == ["Failed to create cable: You may not add this cable."]
+
+    def test_remote_creation_without_interface_change_permission_reports_the_permission(
+        self, librenms_server, settings
+    ):
+        from dcim.models import Cable, Device, Interface
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        server_key, local, _, remote, row_id = self._scenario("create-no-change", librenms_server, settings)
+        user = make_user_with_perms(
+            "create-no-change",
+            [("view", Device), ("view", Interface), ("add", Interface), ("add", Cable), ("change", Cable)],
+        )
+        response = _logged_in(user).post(
+            _remote_create_url(local), {"row_id": row_id, "server_key": server_key}, follow=True
+        )
+        assert any("change_interface" in text for text in _messages(response))
+        assert not Interface.objects.filter(device=remote).exists()
 
     def test_the_interface_is_named_from_the_port_record(self, librenms_server, settings):
         """CDP can advertise a string the device does not use; create the port's own name."""
@@ -1754,3 +1774,75 @@ class TestTheRemotePortCellHasOneDefinition:
         from netbox_librenms_plugin.utils import remote_port_html
 
         assert remote_port_html("<b>x</b>", {}) == "&lt;b&gt;x&lt;/b&gt;"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hostname", ["missing-neighbour.example.test", ""])
+@pytest.mark.parametrize("cabled", [True, False])
+def test_an_unmodelled_neighbour_keeps_the_local_cable_report(client, hostname, cabled):
+    from django.urls import reverse
+    from netbox_librenms_plugin.tests.conftest import cable_together, make_superuser
+
+    server_key = configured_server_key()
+    local_device = make_device("unmodelled-cable-local")
+    local = make_interface(local_device, "eth0")
+    peer = make_interface(make_device("unmodelled-cable-peer"), "eth1")
+    cable = cable_together(local, peer) if cabled else None
+    row = _row(remote_device=hostname, remote_device_id=None)
+    row_id = _seed_cable_row(local_device, row, server_key)
+    enriched = _make_view().enrich_links_data([dict(row)], local_device, server_key=server_key)[0]
+    if cabled:
+        assert enriched["cable_url"] == cable.get_absolute_url()
+        assert enriched["cable_status"] == f"Cabled to {peer.device.name}"
+    else:
+        assert not enriched.get("cable_url")
+        if hostname:
+            assert enriched["cable_status"] == "Device Not Found in NetBox"
+    assert not enriched.get("can_create_cable")
+
+    client.force_login(make_superuser("unmodelled-cable-user"))
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_cable"),
+        data=json.dumps({"device_id": local_device.pk, "row_id": row_id, "server_key": server_key}),
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    formatted = response.json()["formatted_row"]
+    if cabled:
+        assert formatted["cable_status"] == f'<a href="{cable.get_absolute_url()}">Cabled to {peer.device.name}</a>'
+    else:
+        assert "Cabled to" not in formatted["cable_status"]
+    assert not formatted["can_create_cable"]
+
+
+@transactional_db_with_all_apps()
+def test_remote_creation_locks_both_devices_before_inserting_an_interface(librenms_server, settings):
+    from django.db import DatabaseError, connection, connections
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    server_key, local, _, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
+        "create-owner-lock", librenms_server, settings
+    )
+    client = _logged_in(make_superuser("create-owner-lock-user"))
+    observed = []
+
+    def inspect_owner_locks(execute, sql, params, many, context):
+        if sql.startswith('INSERT INTO "dcim_interface"'):
+            for owner in (local, remote):
+                other = connections.create_connection("default")
+                other.set_autocommit(False)
+                try:
+                    with other.cursor() as cursor:
+                        cursor.execute('SELECT id FROM "dcim_device" WHERE id = %s FOR UPDATE NOWAIT', [owner.pk])
+                except DatabaseError as exc:
+                    observed.append((owner.pk, exc.__cause__.sqlstate))
+                finally:
+                    other.rollback()
+                    other.close()
+            assert observed == [(local.pk, "55P03"), (remote.pk, "55P03")]
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(inspect_owner_locks):
+        response = client.post(_remote_create_url(local), {"row_id": row_id, "server_key": server_key})
+    assert response.status_code == 302
+    assert len(observed) == 2

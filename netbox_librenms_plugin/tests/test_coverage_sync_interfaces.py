@@ -4071,11 +4071,15 @@ class TestSyncInterfacesViewPost:
             "an unselected row must not be reported as skipped"
         )
 
-    def test_a_collision_with_a_host_interface_no_longer_in_librenms_is_still_a_collision(self):
+    @pytest.mark.parametrize("viewable", [True, False])
+    @pytest.mark.parametrize("bound_elsewhere", [True, False])
+    def test_a_collision_with_a_host_interface_no_longer_in_librenms_is_still_a_collision(
+        self, viewable, bound_elsewhere
+    ):
         """The host port can drop out of the snapshot while its NetBox interface remains.
 
         No host row is left to own the name, so the pre-loop guard cannot see the collision.
-        The row still must not be reported as a generic ambiguous mapping.
+        Only callers who can view the host interface may receive its collision reason.
         """
         from types import SimpleNamespace
 
@@ -4089,11 +4093,19 @@ class TestSyncInterfacesViewPost:
         host_interface = make_interface(device, "eno1")
         set_librenms_device_id(host_interface, 8901, "default")
         host_interface.save()
+        if bound_elsewhere:
+            foreign = make_interface(make_device("oob-foreign-owner"), "eth9")
+            set_librenms_device_id(foreign, 8902, "default")
+            foreign.save()
 
         user = make_user_with_perms(
             "oob-collision-host-gone",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
+        if viewable:
+            from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+            user = grant(user, "view", Interface)
         request = _make_request(
             post_data={
                 "select": ["8902"],
@@ -4120,9 +4132,14 @@ class TestSyncInterfacesViewPost:
             "the host interface keeps its own port binding"
         )
         warnings = message_texts(request, "warning")
-        assert any("host" in text.lower() for text in warnings), (
-            f"the collision must be named as one, not reported as an ambiguous mapping; got {warnings}"
+        reason = (
+            "name already owned by the host interface" if bound_elsewhere else "host interface already uses this name"
         )
+        if viewable:
+            assert any(reason in text.lower() for text in warnings)
+        else:
+            assert not any(reason in text.lower() for text in warnings)
+            assert any("port already mapped elsewhere or ambiguous" in text for text in warnings)
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from types import SimpleNamespace
