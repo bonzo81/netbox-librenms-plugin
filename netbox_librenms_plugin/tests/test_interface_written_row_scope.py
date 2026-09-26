@@ -313,7 +313,7 @@ def test_a_relationship_pass_that_cannot_lock_its_owner_is_not_a_silent_success(
 
 
 # ---------------------------------------------------------------------------
-# A port bound to an interface of another owner keeps its rule
+# A port bound to another owner is refused without disclosure
 # ---------------------------------------------------------------------------
 
 
@@ -333,12 +333,12 @@ def _row_of(owner, name, *, description, port_id=None):
 @pytest.mark.django_db
 @OWNERS
 @pytest.mark.parametrize(
-    "foreign_view, foreign_change, writes_the_local_row",
-    [(True, True, True), (True, False, False), (False, True, True), (False, False, False)],
+    "foreign_view, foreign_change",
+    [(True, True), (True, False), (False, True), (False, False)],
     ids=["view-change", "view-only", "change-only", "neither"],
 )
-def test_a_port_bound_to_another_owner_keeps_the_rule_of_its_change_scope(
-    client, object_type, owner_model, interface_model, foreign_view, foreign_change, writes_the_local_row
+def test_a_port_bound_to_another_owner_is_refused_in_every_change_scope(
+    client, object_type, owner_model, interface_model, foreign_view, foreign_change
 ):
     """A stale binding: port 1 is bound to an interface of another owner, and this owner has an unbound ``eth0``."""
     case = f"{object_type}-{foreign_view}-{foreign_change}"
@@ -367,12 +367,8 @@ def test_a_port_bound_to_another_owner_keeps_the_rule_of_its_change_scope(
     local.refresh_from_db()
     foreign.refresh_from_db()
     texts = messages_on(response.wsgi_request)
-    if writes_the_local_row:
-        assert texts == [("success", SYNCED)]
-        assert local.description == "remote-new"
-    else:
-        assert texts == [("warning", "1 interface(s) skipped: eth0 (port already mapped elsewhere or ambiguous).")]
-        assert local.description == "local-old"
+    assert texts == [("warning", "The LibreNMS port ID is already assigned to another NetBox interface.")]
+    assert local.description == "local-old"
     assert get_librenms_device_id(local, SERVER_KEY, auto_save=False) is None
     assert (foreign.description, get_librenms_device_id(foreign, SERVER_KEY, auto_save=False)) == ("foreign-old", 1)
     assert "private-foreign" not in response.content.decode()

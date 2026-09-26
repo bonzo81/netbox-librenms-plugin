@@ -975,6 +975,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
                 interface_name_field="ifName",
                 changeable_queryset=winner_model.objects.all(),
                 viewable_queryset=winner_model.objects.all(),
+                addable_queryset=winner_model.objects.all(),
             )
             response = executor.submit(competing_write).result(timeout=10)
             if loser_path == "module":
