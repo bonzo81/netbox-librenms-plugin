@@ -1500,18 +1500,6 @@ class SyncInterfacesView(
             viewable_names=dict(interfaces.restrict(user, "view").values_list("pk", "name")),
         )
 
-    def _port_owner_may_change(self, port_owner):
-        """
-        Return whether the user may change *port_owner*, the interface that holds the port of a row.
-
-        The selection decides for an interface of its owners. An interface of another owner (a stale
-        binding) is outside the attempt: the sync never writes it, and its change scope decides, as it
-        always did, whether the row can fall back to the local interface of the same name.
-        """
-        if self._attempt_selection.covers(port_owner):
-            return self._attempt_selection.may_change(port_owner)
-        return self.restricted_queryset(type(port_owner), "change").filter(pk=port_owner.pk).exists()
-
     def _shown_name(self, model, pk):
         """
         Return the name that a text of the sync may show for row *pk* of *model*, or None: the one display rule.

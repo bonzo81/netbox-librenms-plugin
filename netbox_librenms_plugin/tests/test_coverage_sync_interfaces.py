@@ -4789,6 +4789,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
         from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
         from netbox_librenms_plugin.interface_sync import update_interface_from_port
+
         conflicting_owner = make_interface(make_device("port-id-owner"), "Gi0/0")
         set_librenms_device_id(conflicting_owner, 42, "default")
         conflicting_owner.save(update_fields=["custom_field_data"])
@@ -4810,8 +4811,13 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         mac_count = MACAddress.objects.count()
         with pytest.raises(LibreNMSPortBindingConflict, match="already assigned to another NetBox interface"):
             update_interface_from_port(
-                interface, librenms_port, rules=InterfaceRuleMatcher(()), synced_name="Gi0/1",
-                server_key="default", interface_name_field="ifName", created=False,
+                interface,
+                librenms_port,
+                rules=InterfaceRuleMatcher(()),
+                synced_name="Gi0/1",
+                server_key="default",
+                interface_name_field="ifName",
+                created=False,
                 fresh_read_queryset=Interface.objects.all(),
             )
 
