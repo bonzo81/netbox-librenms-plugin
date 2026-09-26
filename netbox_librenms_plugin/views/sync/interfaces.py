@@ -947,6 +947,9 @@ class SyncInterfacesView(
         """
         related_port_id = str(related_raw)
         normalized_related_port_id = normalize_librenms_port_id(related_raw)
+        refused_ids = getattr(self, "_foreign_bound_port_ids", set())
+        if normalize_librenms_port_id(port_id) in refused_ids or normalized_related_port_id in refused_ids:
+            return None, None
         related_expected_owner = None
         if normalized_related_port_id in getattr(self, "_selected_port_ids", set()):
             related_target = self._resolve_row_target_device(obj, port_id=normalized_related_port_id)
@@ -1088,6 +1091,7 @@ class SyncInterfacesView(
         keep_locked_targets=False,
     ):
         """Create or update NetBox interfaces from LibreNMS port data."""
+        self._foreign_bound_port_ids = set()
         selected_port_ids = getattr(self, "_selected_port_ids", set())
         with transaction.atomic():
             locked_obj = self._lock_sync_scope(obj, ports_data, interface_name_field)
@@ -1553,6 +1557,7 @@ class SyncInterfacesView(
                 and (not isinstance(port_owner, VMInterface) or port_owner.virtual_machine_id != obj.pk)
             )
         ):
+            self.__dict__.setdefault("_foreign_bound_port_ids", set()).add(port_id)
             self._record_skipped_conflict(
                 interface_name, "LibreNMS port ID is already assigned to another NetBox interface"
             )

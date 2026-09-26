@@ -363,3 +363,48 @@ def test_a_persistent_foreign_binding_skips_only_its_row(client, settings, objec
         "conflicting-port" in text and "already assigned to another NetBox interface" in text for text in warnings
     )
     assert all(holder.name not in text for text in warnings)
+
+
+@pytest.mark.parametrize("holder_type", ["device", "virtualmachine"])
+@pytest.mark.parametrize("relation", ["lag", "parent", "bridge"])
+def test_a_foreign_bound_related_row_cannot_use_a_local_name_fallback(client, settings, holder_type, relation):
+    configure_default_librenms_server(settings)
+    holder = (
+        _bind(make_interface(make_device("related-foreign-holder"), "private-related-holder"), PORT)
+        if holder_type == "device"
+        else _vm_interface("related-foreign-holder", PORT)
+    )
+    owner = make_device("related-conflict-owner", librenms_cf={SERVER_KEY: {"id": 71}})
+    member = make_interface(owner, "eth0", iface_type="1000base-t")
+    related = make_interface(owner, "Po1", iface_type="other")
+    related_before = Interface.objects.filter(pk=related.pk).values().get()
+    client.force_login(make_superuser("related-conflict-user"))
+    relationship_key = {"lag": "lag_members", "parent": "sub_interfaces", "bridge": "bridge_members"}[relation]
+    related_port = _port(PORT, related.name)
+    related_port["ifType"] = {"lag": "ieee8023adLag", "parent": "ethernetCsmacd", "bridge": "bridge"}[relation]
+    cache.set(
+        SyncInterfacesView().get_cache_key(owner, "ports", SERVER_KEY),
+        {
+            "ports": [_port(PORT + 1, member.name), related_port],
+            "port_stack_relationships": {relationship_key: {PORT + 1: PORT}},
+        },
+        timeout=300,
+    )
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+            kwargs={"object_type": "device", "object_id": owner.pk},
+        ),
+        {
+            "server_key": SERVER_KEY,
+            "interface_name_field": "ifName",
+            "select": [str(PORT + 1), str(PORT)],
+            "exclude_columns": ["vlans", "mac_address"],
+        },
+    )
+    assert response.status_code == 302
+    assert _binding(member) == PORT + 1
+    assert getattr(member, f"{relation}_id") is None
+    assert Interface.objects.filter(pk=related.pk).values().get() == related_before
+    assert _binding(holder) == PORT
+    assert any("Po1" in text and "already assigned" in text for text in _warnings(response))
