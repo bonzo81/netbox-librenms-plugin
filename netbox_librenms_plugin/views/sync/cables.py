@@ -1295,7 +1295,7 @@ class CableRemoteCreateView(SyncCablesView):
         # never offered this on, so the endpoint refuses it rather than re-deriving the rule.
         if row is None or not row.get("remote_create_url"):
             return None, HttpResponse("Cable row not found.", status=404)
-        remote_device = self.restricted_queryset(Device, "view").filter(pk=row["netbox_remote_device_id"]).first()
+        remote_device = self.restricted_queryset(Device, "view").filter(pk=row["remote_port_owner_id"]).first()
         local_interface = (
             self.restricted_queryset(Interface, "change")
             .filter(pk=row["netbox_local_interface_id"])
@@ -1395,7 +1395,7 @@ class CableRemoteCreateView(SyncCablesView):
         port_key = coerce_librenms_id(context["row"].get("remote_port_key"))
         if port_key is not None:
             host_q, oob_q = build_librenms_id_qs(context["server_key"], port_key)
-            if Interface.objects.filter(host_q | oob_q, device=remote_device).exists():
+            if Interface.objects.filter(host_q | oob_q).exists():
                 raise _RemoteCreateAborted("The remote port is already mapped. Refresh the cable data and try again.")
         interface = Interface(device=remote_device, name=name, type=context["proposed_type"])
         try:
