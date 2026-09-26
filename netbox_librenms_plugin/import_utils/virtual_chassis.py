@@ -8,7 +8,12 @@ from django.core.cache import cache
 from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
-from ..utils import find_devices_by_serial, normalize_inventory_serial, normalize_serial, preload_normalization_rules
+from ..utils import (
+    find_devices_by_serial,
+    normalize_inventory_serial,
+    normalize_stack_serial,
+    preload_normalization_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +266,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         # LibreNMS corresponds to the active/master switch in the stack.
         device_serial = ""
         if device_found and device_info:
-            device_serial = _norm_serial(device_info.get("serial"))
+            device_serial = normalize_stack_serial(device_info.get("serial"))
 
         # Load naming pattern once to avoid a DB query per member.
         vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
@@ -277,7 +282,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
                 position = idx + 1
 
             serial = chassis.get("entPhysicalSerialNum", "")
-            is_master = bool(device_serial and _norm_serial(serial) == device_serial)
+            is_master = bool(device_serial and normalize_stack_serial(serial) == device_serial)
 
             member_data = {
                 "serial": serial,
@@ -293,7 +298,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             # position is already 1-based, so pass it directly (no +1).
             if master_name:
                 member_data["suggested_name"] = _generate_vc_member_name(
-                    master_name, position, serial=_norm_serial(serial), pattern=vc_name_pattern
+                    master_name, position, serial=normalize_stack_serial(serial), pattern=vc_name_pattern
                 )
             else:
                 member_data["suggested_name"] = f"Member-{position}"
@@ -423,7 +428,7 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
             position = idx + 1
         member["position"] = position
         member["suggested_name"] = _generate_vc_member_name(
-            master_name, position, serial=_norm_serial(member.get("serial")), pattern=vc_pattern
+            master_name, position, serial=normalize_stack_serial(member.get("serial")), pattern=vc_pattern
         )
 
     return vc_data
@@ -435,12 +440,6 @@ def _safe_pos(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _norm_serial(s) -> str:
-    """Normalize serial via normalize_serial (only None means missing); additionally treat '-' as absent."""
-    s = normalize_serial(s)
-    return "" if s == "-" else s
 
 
 def _sync_module_bay_counter(device: Device) -> None:
@@ -504,11 +503,11 @@ def create_virtual_chassis_with_members(  # noqa: C901
 
     def _member_serial(value):
         """Return a member's serial normalized the way the stored device serial was written."""
-        return _norm_serial(
+        return normalize_stack_serial(
             normalize_inventory_serial(value, manufacturer=member_manufacturer, preloaded_rules=serial_rules)
         )
 
-    _master_serial = _norm_serial(master_device.serial)
+    _master_serial = normalize_stack_serial(master_device.serial)
     _master_pos = 1
     _master_member = next((m for m in members_info if m.get("is_master")), None)
     if _master_member:

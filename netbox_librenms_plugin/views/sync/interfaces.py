@@ -343,15 +343,18 @@ class SyncInterfacesView(
         if not isinstance(obj, Device) or not port_ids:
             return {}
 
-        if members is None:
-            members = list(obj.virtual_chassis.members.all()) if obj.virtual_chassis else [obj]
+        locked_members = {member.pk: member for member in members or ()}
+        members = (
+            [locked_members.get(member.pk, member) for member in obj.virtual_chassis.members.all()]
+            if obj.virtual_chassis_id is not None
+            else [locked_members.get(obj.pk, obj)]
+        )
         members_by_position = {member.vc_position: member for member in members if member.vc_position is not None}
         members_by_id = {member.pk: member for member in members}
         ports_by_id = {
             port_id: port
             for port in ports_data
             if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
-            and port.get("_source") != OOB_INVENTORY_SOURCE
         }
         candidate_port_ids = [
             ports_by_id[port_id].get("port_id", port_id)
@@ -381,7 +384,7 @@ class SyncInterfacesView(
                 interfaces_by_port_id=interface_index["by_lnms_id"],
                 members_by_position=members_by_position,
                 members_by_id=members_by_id,
-                return_device_on_failure=False,
+                return_device_on_failure=port.get("_source") == OOB_INVENTORY_SOURCE,
             )
             if target is not None:
                 targets[port_id] = target.pk
@@ -917,28 +920,26 @@ class SyncInterfacesView(
                     return
                 self.object = obj
                 vlan_scope_devices = [obj]
-            default_host_owner_ids = {}
+            default_owner_ids = {}
             if isinstance(obj, Device) and obj.virtual_chassis_id is not None:
-                host_port_ids = {
+                snapshot_port_ids = {
                     port_id
                     for port in ports_data
-                    if port.get("_source") != OOB_INVENTORY_SOURCE
-                    and (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
+                    if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
                 }
-                default_host_owner_ids = self._resolve_auto_selected_target_ids(
+                default_owner_ids = self._resolve_auto_selected_target_ids(
                     obj,
                     ports_data,
-                    host_port_ids,
+                    snapshot_port_ids,
                     interface_name_field,
                     self._post_server_key,
                     members=list(self._locked_target_devices.values()),
                 )
-                # Use the same inferred owner for a selected host row that the table
-                # displayed. Explicit device selections still take precedence.
+                # Use the displayed owner for each source. Explicit selections still win.
                 self._auto_selected_target_ids.update(
                     {
                         port_id: owner_id
-                        for port_id, owner_id in default_host_owner_ids.items()
+                        for port_id, owner_id in default_owner_ids.items()
                         if port_id in selected_port_ids
                     }
                 )
@@ -952,7 +953,7 @@ class SyncInterfacesView(
                 if self._selected_row_target_id(port_id):
                     target = self._resolve_row_target_device(obj, port_id)
                     return target.pk if target is not None else None
-                return default_host_owner_ids.get(port_id, obj.pk)
+                return default_owner_ids.get(port_id, obj.pk)
 
             host_owned_names = host_owned_interface_names(ports_data, interface_name_field, owner_id_for_port)
             try:

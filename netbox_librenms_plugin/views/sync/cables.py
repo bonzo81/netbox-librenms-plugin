@@ -29,6 +29,7 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
+    build_librenms_id_qs,
     cable_path_reaches,
     classify_cable_action,
     coerce_librenms_id,
@@ -1271,7 +1272,10 @@ class CableRemoteCreateView(SyncCablesView):
         row_id = data.get("row_id", "")
         links = self.get_cached_links_data(request, obj)
         if links is None:
-            return None, render_sync_cache_miss(request, "Cables")
+            error = render_sync_cache_miss(request, "Cables")
+            if error is None:
+                error = HttpResponse("Cached cable data expired. Refresh the Cables tab.", status=409)
+            return None, error
         row = next((link for link in links if link.get("row_id") == row_id), None)
         # The affordance is the eligibility rule. A row that does not carry it is one the table
         # never offered this on, so the endpoint refuses it rather than re-deriving the rule.
@@ -1286,6 +1290,8 @@ class CableRemoteCreateView(SyncCablesView):
         )
         if remote_device is None or local_interface is None:
             return None, HttpResponse("The row's NetBox objects are no longer available.", status=404)
+        if local_interface.cable_id is not None:
+            return None, HttpResponse("The local interface is already connected. Refresh the Cables tab.", status=409)
         port = self._remote_port_record(row)
         name = self._proposed_interface_name(request, obj, row, port)
         if not name:
@@ -1372,6 +1378,11 @@ class CableRemoteCreateView(SyncCablesView):
             raise _RemoteCreateAborted(
                 f"{remote_device.name} already has an interface named {name}. Refresh the cable data and try again."
             )
+        port_key = coerce_librenms_id(context["row"].get("remote_port_key"))
+        if port_key is not None:
+            host_q, oob_q = build_librenms_id_qs(context["server_key"], port_key)
+            if Interface.objects.filter(host_q | oob_q, device=remote_device).exists():
+                raise _RemoteCreateAborted("The remote port is already mapped. Refresh the cable data and try again.")
         interface = Interface(device=remote_device, name=name, type=context["proposed_type"])
         try:
             # Nested savepoint: an IntegrityError caught without one poisons the outer

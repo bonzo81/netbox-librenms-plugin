@@ -24,6 +24,7 @@ from ..utils import (
     find_by_librenms_id,
     find_devices_by_serial,
     normalize_serial,
+    normalize_stack_serial,
     preload_normalization_rules,
     row_identity_matches,
 )
@@ -285,6 +286,7 @@ class BulkPrecheckOutcome:
         blocked: True when either whole-batch blocker exists; import nothing.
         collisions: The collision groups (for the HTMX modal / job log).
         stack_ambiguities: Serial-less stack fingerprint groups that block the batch.
+        stack_block_message: Stack-only copy for the separate modal alert.
         block_message: Shared collision-block copy (``""`` when not blocked).
         skipped_ids: Unresolved ids to skip (import the rest).
         skip_message: Shared copy naming skipped rows in an unblocked batch (``""`` otherwise).
@@ -297,6 +299,7 @@ class BulkPrecheckOutcome:
     collisions: list
     stack_ambiguities: list
     block_message: str
+    stack_block_message: str
     skipped_ids: list
     skip_message: str
     importable_device_ids: list
@@ -337,6 +340,7 @@ def classify_bulk_precheck(collisions, unresolved, stack_ambiguities, device_ids
         )
 
     block_messages = []
+    stack_block_message = ""
     if stack_ambiguities:
         if len(stack_ambiguities) == 1:
             ids = ", ".join(str(device_id) for device_id in stack_ambiguities[0]["device_ids"])
@@ -346,10 +350,11 @@ def classify_bulk_precheck(collisions, unresolved, stack_ambiguities, device_ids
                 f"[{', '.join(str(device_id) for device_id in group['device_ids'])}]" for group in stack_ambiguities
             )
             subject = f"LibreNMS device id groups {groups}"
-        block_messages.append(
+        stack_block_message = (
             f"Bulk import blocked: {subject} are serial-less stacks whose members are indistinguishable. "
             "Import these devices individually, or populate chassis serials in LibreNMS."
         )
+        block_messages.append(stack_block_message)
     if collisions:
         scoped = any("target_visible" in group for group in collisions)
         visible_pks = [group["nb_device_pk"] for group in collisions if group.get("target_visible") is True]
@@ -371,27 +376,12 @@ def classify_bulk_precheck(collisions, unresolved, stack_ambiguities, device_ids
         collisions=collisions,
         stack_ambiguities=stack_ambiguities,
         block_message=block_message,
+        stack_block_message=stack_block_message,
         skipped_ids=list(unresolved),
         skip_message=skip_message,
         importable_device_ids=importable_device_ids,
         importable_vm_imports=importable_vm_imports,
     )
-
-
-# "0" is deliberately absent: normalize_serial documents zero as a real-but-falsey serial.
-_STACK_SERIAL_PLACEHOLDERS = frozenset(
-    {
-        "-",
-        "n/a",
-        "na",
-        "none",
-        "not available",
-        "notavailable",
-        "null",
-        "unknown",
-        "unspecified",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -416,9 +406,7 @@ def stack_identity(vc_data, device_id) -> StackIdentity:
         return StackIdentity(f"librenms-stack-unknown-{device_id}", "unknown")
 
     member_serials = sorted(
-        serial
-        for m in vc_data.get("members", [])
-        if (serial := normalize_serial(m.get("serial"))) and serial.casefold() not in _STACK_SERIAL_PLACEHOLDERS
+        serial for m in vc_data.get("members", []) if (serial := normalize_stack_serial(m.get("serial")))
     )
     if member_serials:
         return StackIdentity(f"librenms-stack-{','.join(member_serials)}", "serials")

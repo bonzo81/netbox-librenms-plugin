@@ -376,3 +376,54 @@ def test_an_empty_inventory_reads_as_empty_through_the_client_side_fallback(libr
     # still see the 404 as a failure rather than an empty inventory.
     success, _payload = api.get_inventory_filtered(device_id, ent_physical_contained_in=0)
     assert success is False
+
+
+@pytest.mark.django_db
+def test_single_writer_refuses_failed_stack_detection_with_manual_mappings(librenms_server, settings):
+    from dcim.models import Device
+    from netbox_librenms_plugin.import_utils.device_operations import import_single_device, validate_device_for_import
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
+
+    configure_librenms_servers(settings, {"default": {"librenms_url": librenms_server.url, "api_token": "test-token"}})
+    infrastructure = make_device("single-stack-fault-infrastructure")
+    row = {
+        **_row(97150, "single-stack-fault-target"),
+        "hardware": infrastructure.device_type.model,
+        "location": infrastructure.site.name,
+    }
+    librenms_server.register("/api/v0/devices/97150", {"status": "ok", "devices": [row]})
+    librenms_server.register("/api/v0/inventory/97150", {"status": "error"}, status=500)
+    result = import_single_device(
+        97150,
+        server_key="default",
+        libre_device=row,
+        manual_mappings={
+            "site_id": infrastructure.site_id,
+            "device_type_id": infrastructure.device_type_id,
+            "device_role_id": infrastructure.role_id,
+        },
+        sync_options={"sync_interfaces": False, "sync_cables": False, "sync_fields": False},
+        user=make_superuser("single-stack-fault-importer"),
+    )
+    assert result["success"] is False
+    assert "stack" in result["error"].lower()
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+    validation = validate_device_for_import(row, api=LibreNMSAPI(server_key="default"))
+    assert validation["can_import"] is False
+    assert any("stack" in issue.lower() for issue in validation["issues"])
+
+
+@pytest.mark.django_db
+def test_stack_alert_does_not_repeat_the_separate_object_collision_message():
+    import re
+    from dataclasses import asdict
+    from django.template.loader import render_to_string
+
+    collisions = [{"nb_device_pk": 1, "nb_kind": "device", "target_visible": False, "librenms_rows": []}]
+    outcome = classify_bulk_precheck(collisions, [], [{"device_ids": [1, 2]}], [1, 2], {})
+    rendered = render_to_string("netbox_librenms_plugin/htmx/bulk_import_collision.html", asdict(outcome))
+    alert = re.search(r'<div class="alert alert-danger[^"]*">(.*?)</div>', rendered, re.S).group(1)
+    assert "serial-less stacks" in alert
+    assert "NetBox object collision" not in alert
+    assert "same NetBox object" in rendered

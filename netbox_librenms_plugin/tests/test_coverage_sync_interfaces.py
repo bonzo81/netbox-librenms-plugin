@@ -3644,49 +3644,75 @@ class TestSyncInterfacesViewPost:
         assert get_librenms_device_id(master_interface, "default", auto_save=False) == 9402
         assert get_librenms_device_id(member_interface, "default", auto_save=False) == 9401
 
-    def test_unbound_host_and_oob_rows_follow_the_displayed_chassis_owners(self):
-        from types import SimpleNamespace
-
+    @pytest.mark.parametrize(
+        "case",
+        ["host_both", "host_unselected", "alone", "explicit_page", "bound_page", "bound_member", "hidden_member"],
+    )
+    def test_oob_writes_and_collisions_use_the_displayed_chassis_owner(self, case):
+        from copy import deepcopy
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        _chassis, (page_device, member_device) = make_virtual_chassis_members("unbound-host-oob-owner")
+        _chassis, (page, member) = make_virtual_chassis_members("oob-displayed-owner")
         user = make_user_with_perms(
-            "unbound-host-oob-owner", [("view", Device), ("add", Interface), ("change", Interface)]
+            "oob-displayed-owner", [("view", Interface), ("add", Interface), ("change", Interface)]
         )
-        request = _make_request(
-            post_data={
-                "select": ["9411", "9412"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
+        user = grant(user, "view", Device, constraints={"pk": page.pk} if case == "hidden_member" else None)
+        name = "Gi1/0/1" if case == "bound_member" else "Gi2/0/1"
+        rows = [{"ifName": name, "port_id": 9412, "ifType": "ethernetCsmacd", "_source": "oob"}]
+        if case in ("host_both", "host_unselected", "explicit_page"):
+            rows.insert(0, {"ifName": name, "port_id": 9411, "ifType": "ethernetCsmacd"})
+        bound = None
+        if case in ("bound_page", "bound_member"):
+            bound = make_interface(page if case == "bound_page" else member, "old-port-name")
+            set_librenms_device_id(bound, 9412, "default")
+            bound.save()
+        post_data = {
+            "select": ["9411", "9412"] if case == "host_both" else ["9412"],
+            "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
+        }
+        if case == "explicit_page":
+            post_data["device_selection_9412"] = str(page.pk)
+        request = _make_request(post_data=post_data, user=user)
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        display = DeviceInterfaceTableView()
+        display._librenms_api = api
+        display.request = request
+        snapshot = {"ports": deepcopy(rows)}
+        context = display.get_context_data(request, page, "ifName", "default", fresh_data=snapshot, sync_device=page)
+        assert context["table"] is not None
+        if case != "hidden_member":
+            oob_row = next(row for row in snapshot["ports"] if row["port_id"] == 9412)
+            assert oob_row["selected_object_id"] == (page.pk if case == "bound_page" else member.pk)
+
         view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {"ifName": "Gi2/0/1", "port_id": 9411, "ifType": "ethernetCsmacd"},
-                    {"ifName": "Gi2/0/1", "port_id": 9412, "ifType": "ethernetCsmacd", "_source": "oob"},
-                ]
-            },
-        )
-
+        view._librenms_api = api
+        key = view.get_cache_key(page, "ports", "default")
+        cache.set(key, {"ports": rows})
         try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
+            response = _post(view, request, object_type="device", object_id=page.pk)
         finally:
-            cache.delete(cache_key)
-
+            cache.delete(key)
         assert response.status_code == 302
-        page_interface = Interface.objects.get(device=page_device, name="Gi2/0/1")
-        member_interface = Interface.objects.get(device=member_device, name="Gi2/0/1")
-        assert get_librenms_device_id(page_interface, "default", auto_save=False) == 9412
-        assert get_librenms_device_id(member_interface, "default", auto_save=False) == 9411
+        if case in ("host_both", "host_unselected", "hidden_member"):
+            assert not Interface.objects.filter(device=page).exists()
+            assert Interface.objects.filter(device=member).count() == (1 if case == "host_both" else 0)
+            if case == "host_both":
+                assert get_librenms_device_id(Interface.objects.get(device=member), "default", auto_save=False) == 9411
+        else:
+            owner = page if case in ("explicit_page", "bound_page") else member
+            interface = Interface.objects.get(device=owner, name=name)
+            assert get_librenms_device_id(interface, "default", auto_save=False) == 9412
+            if bound is not None:
+                assert interface.pk == bound.pk
+            assert Interface.objects.filter(device__in=[page, member]).count() == 1
 
     def test_a_synced_oob_interface_shows_as_matched(self):
         """Once synced, the OOB row must stop reading as "not in NetBox".

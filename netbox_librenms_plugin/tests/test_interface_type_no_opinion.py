@@ -199,14 +199,16 @@ class TestSeededLagMappingReverse:
             .apps
         )
         with connection.schema_editor() as editor:
-            mod.remove_lag_mapping(historical_apps, editor)
+            operation = mod.Migration.operations[0]
+            operation.code(historical_apps, editor)
+            operation.reverse_code(historical_apps, editor)
 
-    def test_the_untouched_seed_row_is_removed(self):
+    def test_the_untouched_seed_row_survives_an_unidentifiable_reverse(self):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
         self._run_reverse()
 
-        assert not InterfaceTypeMapping.objects.filter(librenms_type="ieee8023adLag").exists()
+        assert InterfaceTypeMapping.objects.filter(librenms_type="ieee8023adLag").exists()
 
     def test_a_repointed_row_survives(self):
         """The operator changed what the mapping means, so it is their row now."""
@@ -217,3 +219,14 @@ class TestSeededLagMappingReverse:
         self._run_reverse()
 
         assert InterfaceTypeMapping.objects.filter(librenms_type="ieee8023adLag", netbox_type="virtual").exists()
+
+
+@pytest.mark.django_db
+def test_lag_seed_roundtrip_keeps_a_preexisting_matching_mapping():
+    from netbox_librenms_plugin.models import InterfaceTypeMapping
+
+    InterfaceTypeMapping.objects.filter(librenms_type="ieee8023adLag").update(description="Operator mapping")
+    TestSeededLagMappingReverse._run_reverse()
+    assert InterfaceTypeMapping.objects.filter(
+        librenms_type="ieee8023adLag", netbox_type="lag", description="Operator mapping"
+    ).exists()

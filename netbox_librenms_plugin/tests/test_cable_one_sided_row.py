@@ -5,8 +5,8 @@ remote_interface_id``. When only one end resolved it fell to the bare "… Not F
 status with no ``cable_url``, so a real NetBox cable on a port whose LibreNMS neighbour is not
 modelled (a management switch, the fxp0 case) read as "nothing is connected".
 
-The report is scoped: it names the peer device only when the request may view it, and it says
-nothing at all about a cable the request may not view.
+The report is scoped: it names the peer device only when the request may view it, and it uses
+a generic unavailable status for a cable the request may not view.
 """
 
 import pytest
@@ -122,7 +122,7 @@ class TestOneSidedCableReportRespectsViewScope:
 
         link = self._view_for(user).check_cable_status(_one_sided_link(local=local))
 
-        assert hidden_device.name not in link["cable_status"]
+        assert link["cable_status"] == "Cabled in Netbox"
 
     def test_a_hidden_cable_is_not_linked(self):
         """A cable outside the request's scope must not leak its pk through cable_url."""
@@ -131,7 +131,7 @@ class TestOneSidedCableReportRespectsViewScope:
         from netbox_librenms_plugin.tests.view_test_helpers import grant
 
         local = make_interface(make_device("scope-hidden-cable"), "fxp0")
-        cable = cable_together(local, make_interface(make_device("scope-hidden-cable-peer"), "ge-0/0/5"))
+        cable_together(local, make_interface(make_device("scope-hidden-cable-peer"), "ge-0/0/5"))
         local.refresh_from_db()
 
         # Devices and interfaces are viewable; Cable is not granted at all.
@@ -142,4 +142,4 @@ class TestOneSidedCableReportRespectsViewScope:
         link = self._view_for(user).check_cable_status(_one_sided_link(local=local))
 
         assert not link.get("cable_url")
-        assert str(cable.pk) not in link["cable_status"]
+        assert link["cable_status"] == "Cable State Not Available"

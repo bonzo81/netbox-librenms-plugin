@@ -331,7 +331,9 @@ class DeviceImportTable(tables.Table):
         vc_data = validation.get("virtual_chassis") or {}
         vc_html = (
             self.render_virtual_chassis(None, record)
-            if vc_data.get("is_stack") and vc_data.get("member_count", 0) > 1
+            if (vc_data.get("is_stack") and vc_data.get("member_count", 0) > 1)
+            or vc_data.get("detection_failed")
+            or vc_data.get("detection_error")
             else ""
         )
         return format_html(

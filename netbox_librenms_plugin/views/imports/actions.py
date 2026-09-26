@@ -1307,9 +1307,9 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 {
                     "collisions": collisions,
                     "stack_ambiguities": stack_ambiguities,
-                    "block_message": classify_bulk_precheck(
+                    "stack_block_message": classify_bulk_precheck(
                         collisions, [], stack_ambiguities, [entry["device_id"] for entry in devices], {}
-                    ).block_message,
+                    ).stack_block_message,
                 },
             )
 
@@ -1558,7 +1558,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         request,
                         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
                         {
-                            "block_message": outcome.block_message,
+                            "stack_block_message": outcome.stack_block_message,
                             "collisions": outcome.collisions,
                             "oob": True,
                             "stack_ambiguities": outcome.stack_ambiguities,
