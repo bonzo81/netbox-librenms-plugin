@@ -1570,6 +1570,7 @@ class TestViewTestHelpers:
             _message_level("add_message")
 
 
+@pytest.mark.django_db
 class TestModuleWriteViewPermissionDeclarations:
     @pytest.mark.parametrize(
         ("view_name", "expected"),

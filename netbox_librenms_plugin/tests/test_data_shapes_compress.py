@@ -6,6 +6,8 @@ the full and compressed recordings (verified by replaying both over real HTTP), 
 high-cardinality ports are dropped.
 """
 
+import pytest
+
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
 
@@ -570,3 +572,19 @@ def test_compression_preserves_ip_and_link_presence_per_port_shape():
         == recording["responses"]["GET /api/v0/devices/1/links"]["links"]
     )
     assert len(responses["GET /api/v0/devices/1/ports"]["ports"]) == 3
+
+
+@pytest.mark.parametrize("suffix,field", [("ip", "addresses"), ("links", "links")])
+@pytest.mark.parametrize("rows", [1, True, {"unexpected": "mapping"}, "error", None])
+def test_compression_preserves_error_responses_with_non_list_rows(suffix, field, rows):
+    from netbox_librenms_plugin.data_shapes.envelope import wrap_response
+    from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+    recording = _vrf_compression_recording()
+    route = f"GET /api/v0/devices/5/{suffix}"
+    error = wrap_response(404, {"status": "error", field: rows})
+    recording["responses"][route] = error
+    assert recording_schema_errors(recording) == []
+    compressed = compress_recording(recording)
+    assert compressed["responses"][route] == error
+    assert len(compressed["responses"]["GET /api/v0/devices/5/ports"]["ports"]) < 62

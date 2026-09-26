@@ -285,7 +285,8 @@ def compress_recording(recording):
         key = _route_key(recording, suffix)
         body = _unwrap(recording["responses"][key]) if key else None
         rows = body.get(rows_key, []) if isinstance(body, dict) else []
-        route_port_ids.append({str(row.get(port_key)) for row in rows or [] if isinstance(row, dict)})
+        rows = rows if isinstance(rows, list) else []
+        route_port_ids.append({str(row.get(port_key)) for row in rows if isinstance(row, dict)})
     seen_fingerprints = set()
     for p in dict_ports:
         fp = _fingerprint(p, compiled_lag_patterns) + tuple(str(p.get("port_id")) in ids for ids in route_port_ids)
