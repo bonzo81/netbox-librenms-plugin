@@ -7,7 +7,7 @@ body:
     attributes:
       value: >
         Thanks for contributing a data shape! Use the **Capture data shape** button on a device's
-        LibreNMS sync page to generate an *anonymized* recording, then paste it below. The plugin
+        LibreNMS sync page to generate an *anonymized* recording, then paste it below or attach the downloaded JSON file. The plugin
         scrubs IPs/MACs/serials/hostnames automatically, but **please review the JSON before
         submitting** — only you can confirm it carries nothing sensitive.
   - type: input
@@ -29,8 +29,9 @@ body:
   - type: textarea
     attributes:
       label: Anonymized recording (JSON)
-      description: Paste the JSON copied from the plugin's *Capture data shape* modal.
-      render: json
+      description: >
+        Paste the JSON copied from the plugin's *Capture data shape* modal, or use Download
+        and attach the JSON file here if it exceeds the issue character limit.
     validations:
       required: true
   - type: checkboxes

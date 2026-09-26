@@ -481,3 +481,20 @@ def test_capture_view_rejects_an_invalid_linked_controller(recording_server, oob
     html = response.content.decode()
     assert "invalid LibreNMS id" in html
     assert "Anonymized recording" not in html
+
+
+def test_recording_issue_field_accepts_downloaded_attachments():
+    from pathlib import Path
+
+    import yaml
+
+    import netbox_librenms_plugin
+
+    root = Path(netbox_librenms_plugin.__file__).parent.parent
+    template = yaml.safe_load((root / ".github/ISSUE_TEMPLATE/data-shape.yml").read_text(encoding="utf-8"))
+    field = next(
+        item for item in template["body"] if item.get("attributes", {}).get("label") == "Anonymized recording (JSON)"
+    )
+    assert "render" not in field["attributes"]
+    assert "attach" in field["attributes"]["description"].lower()
+    assert "Download" in field["attributes"]["description"]
