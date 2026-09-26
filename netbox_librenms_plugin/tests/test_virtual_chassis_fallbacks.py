@@ -514,3 +514,78 @@ class TestCreateVirtualChassisWithMembers:
         assert master.vc_position is None
         assert not VirtualChassis.objects.filter(name=original_name).exists()
         assert Device.objects.get(pk=master.pk).virtual_chassis is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "serial", ["-", " N/A ", "NA", "none", "not available", "notavailable", "null", "UnKnOwN", "unspecified"]
+)
+def test_placeholder_stack_detection_and_creation_preserve_distinct_members(settings, librenms_server, serial):
+    from netbox_librenms_plugin.import_utils.bulk_import import stack_identity
+    from netbox_librenms_plugin.import_utils.virtual_chassis import (
+        create_virtual_chassis_with_members,
+        detect_virtual_chassis_from_inventory,
+    )
+    from netbox_librenms_plugin.utils import normalize_serial
+
+    api = _api(settings, librenms_server, "placeholder-stack")
+    _seed_stack(librenms_server, 981, serials=(serial, serial, serial))
+    detected = detect_virtual_chassis_from_inventory(api, 981)
+    assert detected["member_count"] == 3
+    assert not any(member["is_master"] for member in detected["members"])
+    assert stack_identity(detected, 981).basis == "fingerprint"
+    master = make_device("placeholder-stack-master", serial=serial)
+    unrelated = make_device("placeholder-stack-unrelated", serial=serial)
+    vc = create_virtual_chassis_with_members(master, detected["members"], {"device_id": 981})
+    assert sorted(vc.members.values_list("vc_position", flat=True)) == [1, 2, 3]
+    assert list(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == ["", ""]
+    unrelated.refresh_from_db()
+    assert unrelated.virtual_chassis_id is None
+    assert normalize_serial(serial) == serial.strip()
+
+
+@pytest.mark.django_db
+def test_zero_stack_serial_remains_identity_evidence(settings, librenms_server):
+    from netbox_librenms_plugin.import_utils.bulk_import import stack_identity
+    from netbox_librenms_plugin.import_utils.virtual_chassis import (
+        create_virtual_chassis_with_members,
+        detect_virtual_chassis_from_inventory,
+    )
+    from netbox_librenms_plugin.utils import normalize_serial
+
+    api = _api(settings, librenms_server, "zero-stack")
+    _seed_stack(librenms_server, 982, serials=(0, "REAL-MEMBER"))
+    detected = detect_virtual_chassis_from_inventory(api, 982)
+    assert [member["is_master"] for member in detected["members"]] == [True, False]
+    assert stack_identity(detected, 982).basis == "serials"
+    master = make_device("zero-stack-master", serial="0")
+    vc = create_virtual_chassis_with_members(master, detected["members"], {"device_id": 982})
+    assert sorted(vc.members.values_list("serial", flat=True)) == ["0", "REAL-MEMBER"]
+    assert normalize_serial(0) == "0"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("use_manufacturer_rule", [False, True])
+def test_placeholder_members_do_not_match_an_unrelated_device(use_manufacturer_rule):
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    master = make_device("placeholder-members-master", serial="REAL-MASTER")
+    make_device("placeholder-members-other", serial="unknown")
+    serial = "unknown"
+    if use_manufacturer_rule:
+        serial = "VENDOR-PLACEHOLDER"
+        NormalizationRule.objects.create(
+            scope="serial",
+            manufacturer=master.device_type.manufacturer,
+            match_pattern="^VENDOR-PLACEHOLDER$",
+            replacement="N/A",
+        )
+    members = [
+        {"serial": master.serial, "position": 1, "is_master": True},
+        {"serial": serial, "position": 2},
+        {"serial": serial, "position": 3},
+    ]
+    vc = create_virtual_chassis_with_members(master, members, {"device_id": 983})
+    assert sorted(vc.members.values_list("vc_position", flat=True)) == [1, 2, 3]
+    assert list(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == ["", ""]

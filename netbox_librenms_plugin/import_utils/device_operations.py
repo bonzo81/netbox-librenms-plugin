@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 # not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
 # apart — a silent text change would otherwise defeat the fail-closed guarantee.
 VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
+STACK_DETECTION_FAILED_MESSAGE = "Stack detection failed. Refresh LibreNMS data and try again."
 
 
 def _resolve_rack_for_import(site, rack_token):
@@ -1560,7 +1561,9 @@ def validate_device_for_import(  # noqa: C901
                     )
                     if vc_detection:
                         result["virtual_chassis"] = vc_detection
-                        if vc_detection["is_stack"]:
+                        if vc_detection.get("detection_failed"):
+                            result["issues"].append(STACK_DETECTION_FAILED_MESSAGE)
+                        elif vc_detection["is_stack"]:
                             logger.debug(
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
@@ -1569,6 +1572,8 @@ def validate_device_for_import(  # noqa: C901
                 except Exception as e:
                     logger.exception(f"Exception during VC detection for device {hostname}: {e}")
                     result["virtual_chassis"]["detection_error"] = str(e)
+                    result["virtual_chassis"]["detection_failed"] = True
+                    result["issues"].append(STACK_DETECTION_FAILED_MESSAGE)
             else:
                 logger.debug(f"No device_id found for {hostname}")
 
@@ -1700,6 +1705,15 @@ def import_single_device(  # noqa: C901
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
             )
+
+        if validation.get("virtual_chassis", {}).get("detection_failed"):
+            return {
+                "success": False,
+                "device": None,
+                "message": "",
+                "error": STACK_DETECTION_FAILED_MESSAGE,
+                "synced": {},
+            }
 
         # Check if device already exists
         if validation.get("existing_device"):

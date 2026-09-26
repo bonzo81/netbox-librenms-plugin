@@ -24,22 +24,11 @@ def seed_lag_mapping(apps, schema_editor):
     )
 
 
-def remove_lag_mapping(apps, schema_editor):
-    db_alias = schema_editor.connection.alias
-    InterfaceTypeMapping = apps.get_model("netbox_librenms_plugin", "InterfaceTypeMapping")
-    # Match the seeded value too, so a row the user has since repointed survives the reverse.
-    InterfaceTypeMapping.objects.using(db_alias).filter(
-        librenms_type=SEEDED_MAPPING["librenms_type"],
-        librenms_speed__isnull=True,
-        netbox_type=SEEDED_MAPPING["netbox_type"],
-    ).delete()
-
-
 class Migration(migrations.Migration):
     dependencies = [
         ("netbox_librenms_plugin", "0019_inventoryignorerule_manufacturer"),
     ]
 
     operations = [
-        migrations.RunPython(seed_lag_mapping, remove_lag_mapping),
+        migrations.RunPython(seed_lag_mapping, migrations.RunPython.noop),
     ]

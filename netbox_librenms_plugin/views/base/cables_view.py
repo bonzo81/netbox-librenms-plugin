@@ -1577,6 +1577,7 @@ class BaseCableTableView(
             dict: The cable row with its status and sync affordance.
 
         """
+        link.pop("_local_end_cabled", None)
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
 
@@ -1739,11 +1740,14 @@ class BaseCableTableView(
         cable = interface.cable
         if cable is None:
             return
+        if interface.pk == link.get("netbox_local_interface_id"):
+            link["_local_end_cabled"] = True
         if normal_context is not None:
             cable_visible = cable.pk in normal_context["visible_cable_ids"]
         else:
             cable_visible = self._object_is_viewable(cable)
         if not cable_visible:
+            link["cable_status"] = "Cable State Not Available"
             return
 
         link["cable_url"] = reverse("dcim:cable", args=[cable.pk])
@@ -2296,10 +2300,12 @@ class BaseCableTableView(
             server_key: The active LibreNMS server key, carried in the URL.
 
         """
+        link.pop("remote_create_url", None)
         if (
             not self.has_write_permission()
             or link.get("_source") == OOB_INVENTORY_SOURCE
             or link.get("manual_remote")
+            or link.get("_local_end_cabled")
             or link.get("_multi_termination_unsupported")
             or not link.get("netbox_local_interface_id")
             or not link.get("netbox_remote_device_id")

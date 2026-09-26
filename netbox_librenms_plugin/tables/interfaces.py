@@ -895,6 +895,10 @@ class LibreNMSInterfaceTable(tables.Table):
         # A migrated donor renders no form at all, so a submit button here would do nothing.
         if self.migrated_to_marker or not record.get("sync_target_resolvable", True):
             return ""
+        if record.get("_source") == OOB_INVENTORY_SOURCE and (
+            record.get("host_name_collision") or record.get("_dedup_conflict")
+        ):
+            return ""
         if self.row_sync_state(record).state == ROW_IN_SYNC:
             return ""
         port_id = normalize_librenms_port_id(record.get("port_id"))

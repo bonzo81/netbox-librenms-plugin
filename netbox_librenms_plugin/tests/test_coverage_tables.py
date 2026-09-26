@@ -1617,3 +1617,23 @@ class TestSharedOobBadges:
 
         for html in (interface_html, module_html, cable_html):
             assert "From OOB controller" not in html
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("failure", [{"detection_failed": True}, {"detection_error": "Inventory unavailable"}])
+def test_import_summary_displays_stack_detection_failures(failure):
+    from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+
+    record = _import_record(virtual_chassis={"is_stack": False, "member_count": 0, **failure})
+    table = DeviceImportTable(data=[record], user=make_superuser())
+    assert "Stack Error" in str(table.render_netbox_object(None, record))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("refusal", ["host_name_collision", "_dedup_conflict"])
+def test_oob_rows_that_cannot_sync_have_no_row_sync_action(refusal):
+    table = _interface_table(make_device("oob-row-action"))
+    row = _port(_source="oob", exists_in_netbox=False, **{refusal: True})
+    assert table.render_actions(None, row) == ""
+    row["_source"] = "main"
+    assert 'name="sync_one"' in str(table.render_actions(None, row))

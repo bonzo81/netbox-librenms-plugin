@@ -17,7 +17,7 @@
   {% if stack_ambiguities %}
   <div class="alert alert-danger {% if collisions %}mb-3{% else %}mb-0{% endif %}">
     <i class="mdi mdi-alert-octagon me-1"></i>
-    {{ block_message }}
+    {{ stack_block_message }}
   </div>
   {% endif %}
   {% if collisions %}

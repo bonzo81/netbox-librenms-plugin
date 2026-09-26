@@ -2708,6 +2708,28 @@ def normalize_serial(value) -> str:
     return "" if value is None else str(value).strip()
 
 
+# "0" is deliberately absent: normalize_serial documents zero as a real-but-falsey serial.
+_STACK_SERIAL_PLACEHOLDERS = frozenset(
+    {
+        "-",
+        "n/a",
+        "na",
+        "none",
+        "not available",
+        "notavailable",
+        "null",
+        "unknown",
+        "unspecified",
+    }
+)
+
+
+def normalize_stack_serial(value) -> str:
+    """Return a serial usable as stack identity evidence, preserving numeric zero."""
+    serial = normalize_serial(value)
+    return "" if serial.casefold() in _STACK_SERIAL_PLACEHOLDERS else serial
+
+
 def find_devices_by_serial(serial: str, limit: int = 2) -> list:
     """
     Return up to *limit* Devices whose stored serial matches an already-normalized *serial*.

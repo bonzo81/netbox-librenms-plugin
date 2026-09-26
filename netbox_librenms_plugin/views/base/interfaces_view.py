@@ -30,6 +30,7 @@ from netbox_librenms_plugin.utils import (
     normalize_librenms_port_id,
     normalize_relationship_maps,
     resolve_interface_row_device,
+    syncable_interface_name,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -850,7 +851,7 @@ class BaseInterfaceTableView(
             for port in ports_data:
                 if port.get("_source") == OOB_INVENTORY_SOURCE:
                     owner_names = host_owned_names.get(port.get("selected_object_id"), set())
-                    port["host_name_collision"] = port.get(interface_name_field) in owner_names
+                    port["host_name_collision"] = syncable_interface_name(port, interface_name_field) in owner_names
 
             table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
             table.allowed_vc_member_ids = actionable_owner_ids

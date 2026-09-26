@@ -761,3 +761,18 @@ class TestVlanGroupOverrideScope:
 
         assert {value["group_id"] for value in port["vlan_group_map"].values()} == {str(in_scope.pk)}
         assert groups.iterations == 1
+
+
+@pytest.mark.parametrize("name", [["Ethernet1"], {"name": "Ethernet1"}])
+def test_oob_name_collision_check_rejects_unhashable_names(live_librenms, name):
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+    device = _mapped_device("oob-malformed-name")
+    request = _request()
+    view = _view(DeviceInterfaceTableView, live_librenms, request)
+    ports = _register_ports(live_librenms)
+    ports.append({**ports[0], "port_id": 102, "_source": "oob", "ifName": name})
+    cache.set(view.get_cache_key(device, "ports", "default"), {"status": "ok", "ports": ports}, timeout=300)
+    context = view.get_context_data(request, device, "ifName", server_key="default")
+    assert context.get("table") is not None, context.get("error")
+    assert len(context["table"].rows) == 2
