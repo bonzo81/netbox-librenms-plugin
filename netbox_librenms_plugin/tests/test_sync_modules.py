@@ -1561,7 +1561,6 @@ class TestInstallAndUpdateViews:
         assert hidden.module_id is None
 
 
-
 class TestModulesRedirectResponse:
     """_modules_redirect_response: the classic (non-HTMX) redirect back to the modules tab."""
 
