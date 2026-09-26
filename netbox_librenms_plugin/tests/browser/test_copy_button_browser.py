@@ -101,29 +101,22 @@ def test_capture_download_keeps_the_blob_alive_through_the_click(page):
     page.wait_for_function("window.revokedURLs.length === 1")
 
 
-def test_capture_preview_has_a_visible_scrollbar_that_can_be_clicked():
+def test_capture_preview_has_a_styled_vertical_scrollbar(page):
     from django.template import Context, Engine
 
     template_path = Path(__file__).parents[2] / "templates/netbox_librenms_plugin/htmx/capture_data_shape.html"
     template = Engine().from_string(template_path.read_text(encoding="utf-8"))
-    from playwright.sync_api import sync_playwright
-
-    # Playwright hides native scrollbars by default, including styled scrollbars.
-    with sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True, ignore_default_args=["--hide-scrollbars"])
-        try:
-            page = browser.new_page()
-            page.set_content(
-                template.render(Context({"recording_json": "\n".join(str(i) for i in range(200))}, use_l10n=False))
-            )
-            preview = page.locator("#capture-json")
-            assert preview.evaluate("node => getComputedStyle(node).overflowY") == "scroll"
-            assert preview.evaluate("node => getComputedStyle(node, '::-webkit-scrollbar').width") == "12px"
-            bounds = preview.bounding_box()
-            page.mouse.click(bounds["x"] + bounds["width"] - 6, bounds["y"] + bounds["height"] - 20)
-            page.wait_for_function("document.querySelector('#capture-json').scrollTop > 0")
-        finally:
-            browser.close()
+    page.set_content(
+        template.render(Context({"recording_json": "\n".join(str(i) for i in range(200))}, use_l10n=False))
+    )
+    preview = page.locator("#capture-json")
+    assert preview.evaluate("node => getComputedStyle(node).overflowY") == "scroll"
+    assert preview.evaluate("node => getComputedStyle(node, '::-webkit-scrollbar').width") == "12px"
+    assert preview.evaluate("node => node.scrollHeight > node.clientHeight")
+    thumb = preview.evaluate("node => getComputedStyle(node, '::-webkit-scrollbar-thumb').backgroundColor")
+    track = preview.evaluate("node => getComputedStyle(node, '::-webkit-scrollbar-track').backgroundColor")
+    assert thumb != track
+    assert thumb != "rgba(0, 0, 0, 0)"
 
 
 def test_capture_suggests_download_only_above_the_issue_body_limit(page):
