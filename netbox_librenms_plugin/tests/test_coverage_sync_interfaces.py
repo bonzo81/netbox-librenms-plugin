@@ -3816,9 +3816,9 @@ class TestSyncInterfacesViewPost:
         )
         user = grant(user, "view", Device, constraints={"pk": page.pk} if case == "hidden_member" else None)
         name = "Gi1/0/1" if case == "bound_member" else "Gi2/0/1"
-        rows = [{"ifName": name, "port_id": 9412, "ifType": "ethernetCsmacd", "_source": "oob"}]
+        rows = [{**_PORT_KEYS_UNSET, "ifName": name, "port_id": 9412, "ifType": "ethernetCsmacd", "_source": "oob"}]
         if case in ("host_both", "host_unselected", "explicit_page"):
-            rows.insert(0, {"ifName": name, "port_id": 9411, "ifType": "ethernetCsmacd"})
+            rows.insert(0, {**_PORT_KEYS_UNSET, "ifName": name, "port_id": 9411, "ifType": "ethernetCsmacd"})
         bound = None
         if case in ("bound_page", "bound_member"):
             bound = make_interface(page if case == "bound_page" else member, "old-port-name")
@@ -3852,11 +3852,16 @@ class TestSyncInterfacesViewPost:
         finally:
             cache.delete(key)
         assert response.status_code == 302
-        if case in ("host_both", "host_unselected", "hidden_member"):
+        if case == "hidden_member":
+            assert not Interface.objects.filter(device__in=[page, member]).exists()
+        elif case in ("host_both", "host_unselected"):
             assert not Interface.objects.filter(device=page).exists()
-            assert Interface.objects.filter(device=member).count() == (1 if case == "host_both" else 0)
+            oob = Interface.objects.get(device=member, name=f"{name}-oob")
+            assert get_librenms_device_id(oob, "default", auto_save=False) == 9412
+            assert Interface.objects.filter(device=member).count() == (2 if case == "host_both" else 1)
             if case == "host_both":
-                assert get_librenms_device_id(Interface.objects.get(device=member), "default", auto_save=False) == 9411
+                host = Interface.objects.get(device=member, name=name)
+                assert get_librenms_device_id(host, "default", auto_save=False) == 9411
         else:
             owner = page if case in ("explicit_page", "bound_page") else member
             interface = Interface.objects.get(device=owner, name=name)

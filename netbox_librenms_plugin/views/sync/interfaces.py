@@ -511,7 +511,6 @@ class SyncInterfacesView(
             if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
         }
         oob_port_ids = getattr(self, "_oob_port_ids", set())
-        host_inferred = {port_id: target for port_id, target in inferred_ids.items() if port_id not in oob_port_ids}
         visible_port_ids = set(self._selected_port_ids)
 
         def refusal(port_id, *, auto_added):
@@ -522,7 +521,7 @@ class SyncInterfacesView(
                 obj,
                 port_id,
                 auto_added=auto_added,
-                inferred_ids=inferred_ids if auto_added else host_inferred,
+                inferred_ids=inferred_ids,
                 oob_port_ids=oob_port_ids,
                 device_for=device_for,
             )
@@ -1214,7 +1213,7 @@ class SyncInterfacesView(
         self._auto_selected_target_ids = {
             port_id: target_id
             for port_id, target_id in self._snapshot_target_ids.items()
-            if port_id in self._auto_selected_port_ids or (port_id in selected_port_ids and port_id in host_port_ids)
+            if port_id in self._auto_selected_port_ids or port_id in selected_port_ids
         }
         return obj
 
@@ -1423,7 +1422,7 @@ class SyncInterfacesView(
             auto_added (bool): The walk added the row: only its inferred member counts, never a
                 posted member value.
             inferred_ids (dict[int, int]): Inferred member IDs by port ID.
-            oob_port_ids (set[int]): OOB rows, which belong to the page device.
+            oob_port_ids (set[int]): OOB rows with a page-owner fallback when inference finds no member.
             device_for (callable | None): Returns the chassis member Device the caller may target
                 for an ID, or None.
 
