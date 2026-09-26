@@ -290,3 +290,48 @@ def test_a_primary_ip_set_on_its_own_records_the_previous_address():
     assert _stored_last_updated(device) > before
     change = _update(device)
     assert (change.prechange_data["primary_ip4"], change.postchange_data["primary_ip4"]) == (None, address.pk)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_partial_device_save_protects_the_audit_snapshot_from_a_concurrent_edit():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from dcim.models import Device
+    from django.db import OperationalError, connection, connections, transaction
+
+    from netbox_librenms_plugin.views.imports.actions import _save_device
+
+    device = make_device("audit-lock-device")
+    device.name = "audit-lock-renamed"
+    concurrent_edits = []
+
+    def concurrent_edit():
+        try:
+            with transaction.atomic():
+                other = Device.objects.select_for_update(nowait=True).get(pk=device.pk)
+                other.name = "intervening-edit"
+                other.save(update_fields=["name"])
+            return True
+        except OperationalError as error:
+            assert getattr(error.__cause__, "sqlstate", None) == "55P03"
+            return False
+        finally:
+            connections.close_all()
+
+    def edit_after_snapshot_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not concurrent_edits and sql.startswith("SELECT") and 'FROM "dcim_device"' in sql:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                concurrent_edits.append(executor.submit(concurrent_edit).result(timeout=10))
+        return result
+
+    with _change_logging("audit-lock-user"), connection.execute_wrapper(edit_after_snapshot_read):
+        response = _save_device(device, update_fields=["name"])
+
+    assert response is None
+    assert concurrent_edits == [False]
+    change = _update(device)
+    assert (change.prechange_data["name"], change.postchange_data["name"]) == (
+        "audit-lock-device",
+        "audit-lock-renamed",
+    )

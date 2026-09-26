@@ -624,6 +624,7 @@ def _device_type_rack_fit_error(device) -> HttpResponse | None:
     return None
 
 
+@transaction.atomic
 def _save_device(device, update_fields: list[str], request=None) -> HttpResponse | None:
     """
     Save the columns *update_fields* of a Device or VirtualMachine row, returning an HttpResponse on failure or None on success.
@@ -664,7 +665,7 @@ def _save_device(device, update_fields: list[str], request=None) -> HttpResponse
         if rack_fit := _device_type_rack_fit_error(device):
             return rack_fit
 
-    stored = type(device).objects.filter(pk=device.pk).first()
+    stored = type(device).objects.select_for_update().filter(pk=device.pk).first()
     if stored is None:
         return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
     keep_change_log_before_state(device, stored)
