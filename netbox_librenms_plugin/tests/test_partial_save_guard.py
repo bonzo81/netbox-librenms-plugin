@@ -56,7 +56,7 @@ ALLOWED = [
     (
         "views/imports/actions.py",
         "_save_device",
-        "device",
+        "stored",
         NOT_A_LITERAL,
         "The callers pass Device and VirtualMachine columns, which have no _name; last_updated is added here.",
     ),
