@@ -248,6 +248,7 @@ _SYNTH_MAC_PREFIX = "02:00:00"
 # and followed by a non-word, non-dot boundary — still matches.
 _OCTET = r"(?:25[0-5]|2[0-4]\d|1?\d?\d)"
 _IPV4_RE = re.compile(rf"(?<![\w.]){_OCTET}(?:\.{_OCTET}){{3}}(?![\w.])")
+_INTERFACE_IPV4_RE = re.compile(rf"(?<![\d.]){_OCTET}(?:\.{_OCTET}){{3}}(?![\d.])")
 # Match full AND compressed (::) IPv6 — the old "3+ groups, all present" form missed compressed
 # literals like 2001:4860::1, which then slipped past the residual-PII safety net. This is the
 # standard comprehensive grammar: it requires either 8 groups or a "::" compression marker, so a
@@ -346,6 +347,7 @@ _LINUX_TUNNEL_IF_RE = r"(?:ip6gretap|ip6gre|ip6tnl|gretap|erspan|tunl|sit|ipip|g
 
 _PORT_TOKEN_RE = re.compile(
     rf"^(?:(?:{_DIGITLESS_IF_NAMES})(?:\.\d+)?(?![\w/.:-])"
+    rf"|(?:swp\d+s\d+)[\d/.:-]*"
     rf"|(?:{_LINUX_TUNNEL_IF_RE})[\d/.:-]*"
     rf"|(?:{_LINUX_PREDICTABLE_IF_RE})[\d/.:-]*"
     rf"|(?:[A-Za-z]?\d+(?:/[A-Za-z]*\d+)+|[A-Za-z]/\d+|(?:{_IF_PREFIXES})-?\d)[\d/.:-]*)"
@@ -435,7 +437,11 @@ def _doc_ip(value, rules):
 
     """
     raw_addr, sep, prefix = value.partition("/")
-    addr = str(ipaddress.ip_address(raw_addr.strip()))
+    try:
+        addr = str(ipaddress.ip_address(raw_addr.strip()))
+    except ValueError:
+        # LibreNMS also accepts a hostname as the device target.
+        addr = raw_addr.strip().lower()
     assigned = rules.doc_ips if rules.doc_ips is not None else {}
     if addr not in assigned:
         taken = set(assigned.values())
@@ -486,6 +492,8 @@ def _anon_interface_name(value, rules):
     """
     if ANON_INTERFACE_NAME_RE.fullmatch(value):
         return value
+    if _INTERFACE_IPV4_RE.search(value):
+        return f"{ANON_INTERFACE_NAME_PREFIX}{_hash(value, rules.salt)}"
     match = _PORT_TOKEN_RE.match(value)
     if match:
         token = match.group(0)

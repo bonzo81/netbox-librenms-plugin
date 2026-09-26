@@ -159,13 +159,16 @@ class TestLibreNMSAPIInit:
             "https://librenms.example.test:99999",
         ],
     )
-    def test_a_server_with_an_unusable_port_is_neither_offered_nor_built(self, mock_librenms_config, url):
+    def test_a_server_with_an_unusable_port_is_neither_offered_nor_built(self, mock_librenms_config, url, caplog):
         """The picker must not offer a server the constructor then refuses to bind."""
         mock_librenms_config["mock_config"].return_value = {"default": {"librenms_url": url, "api_token": "test-token"}}
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         assert LibreNMSAPI.get_available_servers() == {}
+        assert "valid HTTP(S) librenms_url" in caplog.text
+        assert url not in caplog.text
+        assert "test-token" not in caplog.text
         with pytest.raises(ValueError, match="must use a valid port"):
             LibreNMSAPI(server_key="default")
 

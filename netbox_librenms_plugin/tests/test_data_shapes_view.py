@@ -32,7 +32,7 @@ def test_capture_button_reads_server_key_from_url_in_shipped_template():
         / "templates"
         / "netbox_librenms_plugin"
         / "librenms_sync_base.html"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     # Scope to the capture button block (assert on the SHIPPED source so the test fails if the wiring
     # regresses, rather than a hand-copied snippet that can drift — mirrors TestMigratedTransferIpDeviceOnlyGate).
     idx = source.find("capture_data_shape")
@@ -468,3 +468,16 @@ def test_capture_view_salts_every_capture_freshly(recording_server):
     second_pseudonyms = set(re.findall(r"SN-[0-9a-f]{6}", second))
     assert first_pseudonyms and second_pseudonyms
     assert first_pseudonyms.isdisjoint(second_pseudonyms)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("oob_id", ["invalid", True, -1])
+def test_capture_view_rejects_an_invalid_linked_controller(recording_server, oob_id):
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("invalid-oob", librenms_cf={"test": {"id": 1000, "oob": {"id": oob_id, "type": "drac"}}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = response.content.decode()
+    assert "invalid LibreNMS id" in html
+    assert "Anonymized recording" not in html

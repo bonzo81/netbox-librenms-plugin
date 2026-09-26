@@ -477,7 +477,7 @@ class TestVirtualChassisInventory:
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
         # One preload reads the scoped and unscoped rows; per-call lookups would scale with the
         # five components instead.
-        assert len(rule_queries) <= 2, f"expected one preload for the loop, saw {len(rule_queries)} queries"
+        assert 0 < len(rule_queries) <= 2, f"expected one preload for the loop, saw {len(rule_queries)} queries"
 
     def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-failure", count=1)

@@ -382,9 +382,8 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     assert "GET /api/v0/devices/1000" in keys
     assert any("inventory/1000?entPhysicalContainedIn=0" in k for k in keys)
     assert any("entPhysicalClass=chassis" in k for k in keys)
-    # The seed serves real (empty) ports/port_stack, so capture records them verbatim as ok
-    # responses — NOT the [404, error] entries it would store if the seed omitted those routes
-    # (capture requests both with required=True, and the mock 404s unregistered routes).
+    # The seed serves real empty ports and port_stack responses. Both routes are required,
+    # so an omitted route would abort capture instead of storing its 404 response.
     assert captured["responses"]["GET /api/v0/devices/1000/ports"] == {"status": "ok", "ports": []}
     assert captured["responses"]["GET /api/v0/devices/1000/port_stack"] == {"status": "ok", "mappings": []}
 

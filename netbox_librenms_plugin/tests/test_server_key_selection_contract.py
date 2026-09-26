@@ -54,7 +54,7 @@ def test_no_view_rebinds_from_a_single_raw_server_key_value():
     offenders = [
         f"{path.name}:{lineno}"
         for path in sorted(_views_root().rglob("*.py"))
-        for lineno in _loose_rebind_lines(ast.parse(path.read_text()))
+        for lineno in _loose_rebind_lines(ast.parse(path.read_text(encoding="utf-8")))
     ]
 
     assert offenders == []

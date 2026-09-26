@@ -37,16 +37,32 @@ def test_recordings_present():
     assert iter_recording_paths(), "no recording JSON files found in data_shapes/recordings/"
 
 
-def test_bundled_inventory_display_text_is_anonymized():
-    from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_inventory_display_text_is_anonymized(recording):
+    import re
 
-    recording = load_recording("arcos-lag-transceivers")
-    inventory = recording["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"]["inventory"]
+    allowed = re.compile(r"(?:entity-[0-9a-f]{6}(?: \d+(?:/(?:\d+|[xc]\d+))+)?)|(?:\d+(?:/(?:\d+|[xc]\d+))+)")
+    for key, value in recording.get("responses", {}).items():
+        body = unwrap_response(value)[1]
+        if "/inventory/" not in key or not isinstance(body, dict):
+            continue
+        for item in body.get("inventory") or []:
+            for field in ("entPhysicalName", "entPhysicalDescr"):
+                if isinstance(item, dict) and item.get(field):
+                    assert allowed.fullmatch(item[field]), (recording["name"], field, item[field])
 
-    for item in inventory:
-        for key in ("entPhysicalName", "entPhysicalDescr"):
-            if item.get(key):
-                assert item[key].startswith("entity-"), key
+
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_ipv6_representations_name_the_same_address(recording):
+    from ipaddress import ip_address
+
+    for key, value in recording.get("responses", {}).items():
+        body = unwrap_response(value)[1]
+        if not key.endswith("/ip") or not isinstance(body, dict):
+            continue
+        for row in body.get("addresses", []):
+            if row.get("ipv6_address") and row.get("ipv6_compressed"):
+                assert ip_address(row["ipv6_address"]) == ip_address(row["ipv6_compressed"])
 
 
 def test_load_recording_rejects_path_traversal():
@@ -432,9 +448,11 @@ def test_concurrent_manifest_rebuilds_do_not_share_a_temporary_file(monkeypatch,
     manifest_path = tmp_path / "manifest.json"
     original_replace = type(manifest_path).replace
     writers_ready = Barrier(2)
+    synchronized_writes = []
 
     def synchronized_replace(path, target):
-        if path.name == "manifest.json.tmp":
+        if target == manifest_path:
+            synchronized_writes.append(path)
             writers_ready.wait(timeout=5)
         return original_replace(path, target)
 
@@ -446,6 +464,8 @@ def test_concurrent_manifest_rebuilds_do_not_share_a_temporary_file(monkeypatch,
                 future.result(timeout=10)
 
     assert manifest_path.exists()
+    assert len(synchronized_writes) == 2
+    assert len(set(synchronized_writes)) == 2
 
 
 def test_load_manifest_fails_when_file_is_unreadable(tmp_path):

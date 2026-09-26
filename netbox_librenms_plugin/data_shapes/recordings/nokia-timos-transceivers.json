@@ -1852,7 +1852,7 @@
         },
         {
           "ipv6_address_id": 109,
-          "ipv6_address": "2001:db8::9ca2",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:f1e6",
           "ipv6_compressed": "2001:db8::f1e6",
           "ipv6_prefixlen": 128,
           "ipv6_origin": "manual",
@@ -1862,7 +1862,7 @@
         },
         {
           "ipv6_address_id": 8769,
-          "ipv6_address": "2001:db8::7575",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:9741",
           "ipv6_compressed": "2001:db8::9741",
           "ipv6_prefixlen": 48,
           "ipv6_origin": "manual",
@@ -1872,7 +1872,7 @@
         },
         {
           "ipv6_address_id": 8770,
-          "ipv6_address": "2001:db8::c066",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:2c8c",
           "ipv6_compressed": "2001:db8::2c8c",
           "ipv6_prefixlen": 64,
           "ipv6_origin": "linklayer",
@@ -1882,7 +1882,7 @@
         },
         {
           "ipv6_address_id": 111,
-          "ipv6_address": "2001:db8::a3ca",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:18cc",
           "ipv6_compressed": "2001:db8::18cc",
           "ipv6_prefixlen": 126,
           "ipv6_origin": "manual",
@@ -1892,7 +1892,7 @@
         },
         {
           "ipv6_address_id": 118,
-          "ipv6_address": "2001:db8::d9e4",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:19a5",
           "ipv6_compressed": "2001:db8::19a5",
           "ipv6_prefixlen": 64,
           "ipv6_origin": "linklayer",
@@ -1902,7 +1902,7 @@
         },
         {
           "ipv6_address_id": 107,
-          "ipv6_address": "2001:db8::998a",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:e213",
           "ipv6_compressed": "2001:db8::e213",
           "ipv6_prefixlen": 126,
           "ipv6_origin": "manual",
@@ -1912,7 +1912,7 @@
         },
         {
           "ipv6_address_id": 115,
-          "ipv6_address": "2001:db8::f3bb",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:5e03",
           "ipv6_compressed": "2001:db8::5e03",
           "ipv6_prefixlen": 64,
           "ipv6_origin": "linklayer",
@@ -1922,7 +1922,7 @@
         },
         {
           "ipv6_address_id": 108,
-          "ipv6_address": "2001:db8::d01a",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:5bac",
           "ipv6_compressed": "2001:db8::5bac",
           "ipv6_prefixlen": 64,
           "ipv6_origin": "manual",
@@ -1932,7 +1932,7 @@
         },
         {
           "ipv6_address_id": 119,
-          "ipv6_address": "2001:db8::0a60",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:a67b",
           "ipv6_compressed": "2001:db8::a67b",
           "ipv6_prefixlen": 64,
           "ipv6_origin": "linklayer",
@@ -1942,7 +1942,7 @@
         },
         {
           "ipv6_address_id": 106,
-          "ipv6_address": "2001:db8::27a8",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:a236",
           "ipv6_compressed": "2001:db8::a236",
           "ipv6_prefixlen": 64,
           "ipv6_origin": "manual",
@@ -1952,7 +1952,7 @@
         },
         {
           "ipv6_address_id": 120,
-          "ipv6_address": "2001:db8::0a60",
+          "ipv6_address": "2001:0db8:0000:0000:0000:0000:0000:a67b",
           "ipv6_compressed": "2001:db8::a67b",
           "ipv6_prefixlen": 64,
           "ipv6_origin": "linklayer",

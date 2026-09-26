@@ -1494,3 +1494,42 @@ def test_transceiver_oui_is_masked():
     assert rows[0]["oui"] != rows[1]["oui"]
     # 0 means "no OUI" in LibreNMS, so masking it would invent a vendor where there was none.
     assert rows[2]["oui"] == 0
+
+
+def test_breakout_names_remain_distinct_after_anonymization():
+    recording = _ports(
+        {"port_id": 1, "ifName": "swp1s0", "ifDescr": "swp1s0"},
+        {"port_id": 2, "ifName": "swp1s1", "ifDescr": "swp1s1"},
+    )
+
+    anonymized = anonymize_recording(recording)
+
+    ports = anonymized["responses"]["GET /api/v0/devices/1/ports"]["ports"]
+    assert [(port["ifName"], port["ifDescr"]) for port in ports] == [("swp1s0", "swp1s0"), ("swp1s1", "swp1s1")]
+
+
+@pytest.mark.parametrize("name", ["tun-198.18.1.2", "tun198.18.1.2", "198.18.1.2-tunnel"])
+def test_dotted_address_names_are_pseudonymized_as_a_whole(name):
+    import re
+
+    recording = _ports({"port_id": 1, "ifName": name, "ifDescr": name})
+    recording["responses"]["GET /api/v0/devices/1/links"] = {"links": [{"remote_port": name}]}
+
+    anonymized = anonymize_recording(recording)
+
+    port = anonymized["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
+    remote = anonymized["responses"]["GET /api/v0/devices/1/links"]["links"][0]["remote_port"]
+    assert re.fullmatch(r"iface-[0-9a-f]{6}", port["ifName"])
+    assert port["ifName"] == port["ifDescr"] == remote
+
+
+def test_anonymization_accepts_a_hostname_device_target():
+    recording = _ports({"port_id": 1, "ifName": "eth0"})
+    recording["responses"]["GET /api/v0/devices/1"] = {"devices": [{"overwrite_ip": "target.example.invalid"}]}
+
+    anonymized = anonymize_recording(recording)
+
+    target = anonymized["responses"]["GET /api/v0/devices/1"]["devices"][0]["overwrite_ip"]
+    assert target != "target.example.invalid"
+    assert _is_doc_address(target)
+    assert find_pii(anonymized) == []

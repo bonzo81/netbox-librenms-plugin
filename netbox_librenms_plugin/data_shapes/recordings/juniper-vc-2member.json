@@ -33,8 +33,8 @@
         {
           "entPhysicalIndex": 10,
           "entPhysicalClass": "chassis",
-          "entPhysicalName": "Virtual Chassis",
-          "entPhysicalDescr": "EX4300 Virtual Chassis",
+          "entPhysicalName": "entity-275655",
+          "entPhysicalDescr": "entity-74648f",
           "entPhysicalSerialNum": "",
           "entPhysicalModelName": "",
           "entPhysicalContainedIn": 0
@@ -49,8 +49,8 @@
           "entPhysicalClass": "chassis",
           "entPhysicalSerialNum": "SN-aa11bb",
           "entPhysicalModelName": "EX4300-48T",
-          "entPhysicalName": "FPC 0",
-          "entPhysicalDescr": "EX4300-48T",
+          "entPhysicalName": "entity-6c5d81",
+          "entPhysicalDescr": "entity-d40007",
           "entPhysicalParentRelPos": 0,
           "entPhysicalContainedIn": 10
         },
@@ -59,8 +59,8 @@
           "entPhysicalClass": "chassis",
           "entPhysicalSerialNum": "SN-cc22dd",
           "entPhysicalModelName": "EX4300-48T",
-          "entPhysicalName": "FPC 1",
-          "entPhysicalDescr": "EX4300-48T",
+          "entPhysicalName": "entity-dea8b1",
+          "entPhysicalDescr": "entity-d40007",
           "entPhysicalParentRelPos": 1,
           "entPhysicalContainedIn": 10
         }

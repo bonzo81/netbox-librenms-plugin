@@ -77,8 +77,10 @@
         a.download = pre.getAttribute("data-filename") || "data-shape.json";
         document.body.appendChild(a);
         a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(a.href);
+        window.setTimeout(function () {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(a.href);
+        }, 1000);
       });
     }
   })();

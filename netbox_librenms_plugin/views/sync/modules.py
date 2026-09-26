@@ -41,7 +41,7 @@ from netbox_librenms_plugin.utils import (
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
 )
-from netbox_librenms_plugin.views.base.modules_view import _PLACEHOLDER_VALUES
+from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _PLACEHOLDER_VALUES, _inventory_item_key
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -1054,6 +1054,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a module and all its installable descendants from LibreNMS inventory."""
 
+    @transaction.atomic
     def post(self, request, pk):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
@@ -1072,13 +1073,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         module_bays = self.restricted_queryset(ModuleBay)
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
@@ -1099,7 +1093,17 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, "Invalid parent inventory index.")
             return _modules_action_response(request, page_device, server_key)
 
-        # Get cached inventory data
+        _lock_page_device_serials(page_device)
+        # The advisory lock does not refresh model instances loaded before its wait.
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        target_device, invalid_selected_device = _resolve_target_device_with_validation(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if invalid_selected_device:
+            messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
+            return _modules_action_response(request, page_device, server_key)
+
+        # Read and authenticate the snapshot through the current inventory owner.
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
         if cached_data is None:
@@ -1122,14 +1126,34 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
-        ignore_rules = get_enabled_ignore_rules(
-            getattr(getattr(target_device, "device_type", None), "manufacturer", None)
-        )
-        device_serial = (getattr(target_device, "serial", None) or "").strip()
-
-        # Build index map and collect the branch to install
         index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
-        branch_items = self._collect_branch(parent_index, cached_data, ignore_rules, device_serial, index_map)
+        vc_members = (
+            list(page_device.virtual_chassis.members.select_related("device_type__manufacturer"))
+            if page_device.virtual_chassis_id
+            else []
+        )
+        default_context, ignore_contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+            page_device, cached_data, index_map, vc_members, get_enabled_ignore_rules
+        )
+        root = index_map.get(parent_index)
+        if root is not None and ignore_contexts[_inventory_item_key(root)]["selected_device"].pk != target_device.pk:
+            messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
+            return _modules_action_response(request, page_device, server_key)
+        branch_items = self._collect_branch(
+            parent_index,
+            cached_data,
+            default_context["ignore_rules"],
+            default_context["device_serial"],
+            index_map,
+            ignore_contexts=ignore_contexts,
+        )
+        destination_ids = {ignore_contexts[_inventory_item_key(item)]["selected_device"].pk for item in branch_items}
+        permitted_ids = set(
+            self.restricted_queryset(Device).filter(pk__in=destination_ids).values_list("pk", flat=True)
+        )
+        if destination_ids != permitted_ids:
+            messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
+            return _modules_action_response(request, page_device, server_key)
 
         if not branch_items:
             messages.warning(request, "No installable items found in this branch.")
@@ -1143,12 +1167,29 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Filter by device manufacturer so vendor-scoped mappings only apply to
         # matching vendors and mismatched ones are skipped.
         from netbox_librenms_plugin.utils import load_bay_mappings
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         exact_mappings, regex_mappings = load_bay_mappings()
-        mfr_id = getattr(getattr(target_device, "device_type", None), "manufacturer_id", None)
-        exact_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(exact_mappings, mfr_id)
-        regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(regex_mappings, mfr_id)
+        member_index_maps = {
+            device_id: {
+                idx: item
+                for idx, item in index_map.items()
+                if ignore_contexts[_inventory_item_key(item)]["selected_device"].pk == device_id
+            }
+            for device_id in destination_ids
+        }
+        manufacturer_contexts = {}
+        for item in branch_items:
+            manufacturer = ignore_contexts[_inventory_item_key(item)]["manufacturer"]
+            if manufacturer.pk not in manufacturer_contexts:
+                manufacturer_contexts[manufacturer.pk] = {
+                    "exact_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
+                        exact_mappings, manufacturer.pk
+                    ),
+                    "regex_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
+                        regex_mappings, manufacturer.pk
+                    ),
+                    "manufacturer": manufacturer,
+                }
 
         # Preload module_bay normalization rules once so _match_bay considers the
         # same normalized candidate names as the table/UI matcher. The serial scope is
@@ -1156,7 +1197,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
-        norm_rules_serial = preload_normalization_rules("serial", target_device.device_type.manufacturer)
+        for context in manufacturer_contexts.values():
+            context["serial_rules"] = preload_normalization_rules("serial", context["manufacturer"])
 
         # Install top-down: each install may create new child bays
         installed = []
@@ -1166,18 +1208,20 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         try:
             with transaction.atomic():
-                _lock_page_device_serials(page_device)
                 for item in branch_items:
+                    target_device = ignore_contexts[_inventory_item_key(item)]["selected_device"]
+                    mfr_id = target_device.device_type.manufacturer_id
+                    policy = manufacturer_contexts[mfr_id]
                     result = self._install_single(
                         target_device,
                         item,
-                        index_map,
+                        member_index_maps[target_device.pk],
                         module_types,
-                        exact_mappings=exact_mappings,
-                        regex_mappings=regex_mappings,
+                        exact_mappings=policy["exact_mappings"],
+                        regex_mappings=policy["regex_mappings"],
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
-                        norm_rules_serial=norm_rules_serial,
+                        norm_rules_serial=policy["serial_rules"],
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
                         changeable_components=changeable_components,
@@ -1210,7 +1254,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             _schedule_module_cache_mutation(request, page_device, server_key)
         return _modules_action_response(request, page_device, server_key)
 
-    def _collect_branch(self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None):
+    def _collect_branch(
+        self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None, *, ignore_contexts=None
+    ):
         """
         Collect all items in a branch depth-first, parent first.
 
@@ -1232,11 +1278,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         items = []
         parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
         if parent:
-            if ignore_rules:
+            item_rules, item_serial = BaseModuleTableView._ignore_policy_for_item(
+                parent, ignore_contexts, ignore_rules, device_serial
+            )
+            if item_rules:
                 from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
                 ancestor = index_map.get(parent.get("entPhysicalContainedIn")) if index_map else None
-                action = _check_ignore_rules(parent, ancestor, ignore_rules, index_map, device_serial)
+                action = _check_ignore_rules(parent, ancestor, item_rules, index_map, item_serial)
                 if action == "skip":
                     return []
                 if action == "transparent":
@@ -1248,6 +1297,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         ignore_rules=ignore_rules,
                         device_serial=device_serial,
                         index_map=index_map,
+                        ignore_contexts=ignore_contexts,
                     )
                     return items
             model = (parent.get("entPhysicalModelName") or "").strip()
@@ -1261,11 +1311,21 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 ignore_rules=ignore_rules,
                 device_serial=device_serial,
                 index_map=index_map,
+                ignore_contexts=ignore_contexts,
             )
         return items
 
     def _collect_children(
-        self, parent_idx, inventory_data, items, visited=None, ignore_rules=None, device_serial="", index_map=None
+        self,
+        parent_idx,
+        inventory_data,
+        items,
+        visited=None,
+        ignore_rules=None,
+        device_serial="",
+        index_map=None,
+        *,
+        ignore_contexts=None,
     ):
         """
         Recursively collect children with models, depth-first.
@@ -1294,25 +1354,43 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             if child_idx in visited:
                 continue
             visited.add(child_idx)
-            # Apply ignore rules when provided
-            if ignore_rules:
+            item_rules, item_serial = BaseModuleTableView._ignore_policy_for_item(
+                child, ignore_contexts, ignore_rules, device_serial
+            )
+            if item_rules:
                 from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
                 parent_item = index_map.get(child.get("entPhysicalContainedIn")) if index_map else None
-                action = _check_ignore_rules(child, parent_item, ignore_rules, index_map, device_serial)
+                action = _check_ignore_rules(child, parent_item, item_rules, index_map, item_serial)
                 if action == "skip":
                     continue
                 if action == "transparent":
                     # Don't install this item but still collect its children
                     self._collect_children(
-                        child_idx, inventory_data, items, visited, ignore_rules, device_serial, index_map
+                        child_idx,
+                        inventory_data,
+                        items,
+                        visited,
+                        ignore_rules,
+                        device_serial,
+                        index_map,
+                        ignore_contexts=ignore_contexts,
                     )
                     continue
             model = (child.get("entPhysicalModelName") or "").strip()
             if model:
                 items.append(child)
             # Always recurse to find deeper items (containers may lack models)
-            self._collect_children(child_idx, inventory_data, items, visited, ignore_rules, device_serial, index_map)
+            self._collect_children(
+                child_idx,
+                inventory_data,
+                items,
+                visited,
+                ignore_rules,
+                device_serial,
+                index_map,
+                ignore_contexts=ignore_contexts,
+            )
 
     @staticmethod
     def _install_single(

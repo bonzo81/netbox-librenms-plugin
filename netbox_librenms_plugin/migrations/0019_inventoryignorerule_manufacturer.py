@@ -43,12 +43,27 @@ def scope_include_rule_to_juniper(apps, schema_editor):
     # Both Juniper slugs can exist in one NetBox. A rule scoped to one of them does not apply to
     # devices of the other, so give every matching manufacturer its own copy of the rule.
     seeded = _seeded_include_rules(apps, db_alias)
+    template = seeded.order_by("pk").first()
+    if template is None:
+        return
+    values = {
+        field: getattr(template, field)
+        for field in (
+            "name",
+            "match_type",
+            "pattern",
+            "action",
+            "enabled",
+            "description",
+            "require_serial_match_parent",
+        )
+    }
     for manufacturer in juniper_manufacturers:
         if seeded.filter(manufacturer=manufacturer).exists():
             continue
         unscoped = seeded.filter(manufacturer__isnull=True).order_by("pk").first()
         if unscoped is None:
-            InventoryIgnoreRule.objects.using(db_alias).create(**_INCLUDE_RULE.DEFAULT_RULE, manufacturer=manufacturer)
+            InventoryIgnoreRule.objects.using(db_alias).create(**values, manufacturer=manufacturer)
         else:
             seeded.filter(pk=unscoped.pk).update(manufacturer=manufacturer)
 
@@ -83,7 +98,7 @@ class Migration(migrations.Migration):
                 help_text="Optional: only apply this rule to devices from this manufacturer. "
                 "Leave blank for vendor-agnostic rules.",
                 null=True,
-                on_delete=django.db.models.deletion.SET_NULL,
+                on_delete=django.db.models.deletion.PROTECT,
                 related_name="inventory_ignore_rules",
                 to="dcim.manufacturer",
             ),

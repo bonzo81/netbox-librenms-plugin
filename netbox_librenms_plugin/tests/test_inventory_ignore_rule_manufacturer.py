@@ -191,6 +191,51 @@ class TestSeededRuleScoping:
         assert _class_is_included(item, get_enabled_ignore_rules(juniper)) is True
         assert _class_is_included(item, get_enabled_ignore_rules(juniper_networks)) is True
 
+    def test_scoping_preserves_operator_edits_in_every_clone(self):
+        import importlib
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        include = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+        manufacturers = [_manufacturer(slug.title(), slug) for slug in ("juniper", "juniper-networks")]
+        edits = {"enabled": False, "description": "Operator preference", "require_serial_match_parent": True}
+        InventoryIgnoreRule.objects.filter(name=include.DEFAULT_RULE["name"]).update(manufacturer=None, **edits)
+
+        self._run_migration_scoping()
+
+        for manufacturer in manufacturers:
+            rule = InventoryIgnoreRule.objects.get(name=include.DEFAULT_RULE["name"], manufacturer=manufacturer)
+            assert {field: getattr(rule, field) for field in edits} == edits
+
+    def test_scoping_preserves_an_operator_deleted_seed(self):
+        import importlib
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        include = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
+        _manufacturer("Juniper", "juniper")
+        InventoryIgnoreRule.objects.filter(name=include.DEFAULT_RULE["name"]).delete()
+
+        self._run_migration_scoping()
+
+        assert not InventoryIgnoreRule.objects.filter(name=include.DEFAULT_RULE["name"]).exists()
+
+    def test_deleting_a_manufacturer_does_not_make_its_rule_global(self):
+        from django.db.models.deletion import ProtectedError
+
+        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
+
+        vendor = _manufacturer("Protected Vendor", "protected-vendor")
+        other = _manufacturer("Other Vendor", "other-vendor")
+        rule = _include_rule("protected-vendor-only", vendor)
+
+        with pytest.raises(ProtectedError):
+            vendor.delete()
+
+        rule.refresh_from_db()
+        assert rule.manufacturer_id == vendor.pk
+        assert rule not in get_enabled_ignore_rules(other)
+
     def test_the_seeded_rule_is_left_enabled_when_juniper_is_absent(self):
         """
         With nothing to scope to, the rule keeps working.

@@ -373,7 +373,7 @@ class LibreNMSAPI:
                 # and then failing the moment it is chosen.
                 if not cls._is_usable_server_config(config):
                     logger.warning(
-                        "Skipping unusable LibreNMS server config %r (needs a librenms_url and api_token).",
+                        "Skipping unusable LibreNMS server config %r (needs a valid HTTP(S) librenms_url and a non-empty api_token).",
                         key,
                     )
                     continue

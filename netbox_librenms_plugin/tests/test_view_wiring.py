@@ -295,7 +295,7 @@ class TestSourceMarkerConvention:
         for source_file in sorted(package.rglob("*.py")):
             if "tests" in source_file.parts or "migrations" in source_file.parts:
                 continue
-            lines = self._bare_marker_lines(ast.parse(source_file.read_text()))
+            lines = self._bare_marker_lines(ast.parse(source_file.read_text(encoding="utf-8")))
             if lines:
                 offenders[str(source_file.relative_to(package))] = lines
 
@@ -598,7 +598,7 @@ class TestTemplateSyntax:
     )
     def test_template_compiles(self, template_path):
         """Each template must parse without TemplateSyntaxError."""
-        source = template_path.read_text()
+        source = template_path.read_text(encoding="utf-8")
         # Compile the template — raises TemplateSyntaxError on bad tags
         self._engine.from_string(source)
 
@@ -610,7 +610,7 @@ class TestHtmxSwapConvention:
 
     def test_only_the_recorded_exception_swaps_outerhtml(self):
         """A second outerHTML swap has to be argued in the guideline, not added quietly."""
-        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap="outerHTML"' in path.read_text()]
+        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap="outerHTML"' in path.read_text(encoding="utf-8")]
 
         assert swapping == [self.EXCEPTION], (
             "frontend.instructions.md records one outerHTML swap; update it before adding another"
@@ -618,7 +618,7 @@ class TestHtmxSwapConvention:
 
     def test_out_of_band_swaps_preserve_their_target_elements(self):
         """Out-of-band updates must keep stable targets for later refreshes."""
-        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap-oob="outerHTML"' in path.read_text()]
+        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap-oob="outerHTML"' in path.read_text(encoding="utf-8")]
 
         assert swapping == []
 

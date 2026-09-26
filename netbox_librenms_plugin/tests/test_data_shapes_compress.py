@@ -543,3 +543,30 @@ def test_pattern_matched_lag_port_is_never_deduped_away():
     # The invariant this module promises: the signature is unchanged by compression.
     assert compute_shape_signature(out)["lag"] == compute_shape_signature(recording)["lag"]
     assert compute_shape_signature(out)["lag"]["present"] is True
+
+
+def test_compression_preserves_ip_and_link_presence_per_port_shape():
+    ports = [_port(i, f"eth{i}", "ethernetCsmacd") for i in range(1, 7)]
+    recording = {
+        "schema_version": 1,
+        "name": "referenced-ports",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ports": {"ports": ports},
+            "GET /api/v0/devices/1/ip": {"addresses": [{"port_id": 2, "ipv4_address": "198.18.0.1"}]},
+            "GET /api/v0/devices/1/links": {"links": [{"local_port_id": 3, "remote_port": "eth1"}]},
+        },
+    }
+
+    compressed = compress_recording(recording)
+
+    responses = compressed["responses"]
+    assert (
+        responses["GET /api/v0/devices/1/ip"]["addresses"]
+        == recording["responses"]["GET /api/v0/devices/1/ip"]["addresses"]
+    )
+    assert (
+        responses["GET /api/v0/devices/1/links"]["links"]
+        == recording["responses"]["GET /api/v0/devices/1/links"]["links"]
+    )
+    assert len(responses["GET /api/v0/devices/1/ports"]["ports"]) == 3

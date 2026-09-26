@@ -674,7 +674,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     )
     manufacturer = models.ForeignKey(
         Manufacturer,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True,
         blank=True,
         related_name="inventory_ignore_rules",

@@ -33,8 +33,8 @@
         {
           "entPhysicalIndex": 1,
           "entPhysicalClass": "stack",
-          "entPhysicalName": "StackSub-0/0",
-          "entPhysicalDescr": "Cisco StackWise",
+          "entPhysicalName": "entity-a33df5 0/0",
+          "entPhysicalDescr": "entity-a457e9",
           "entPhysicalSerialNum": "",
           "entPhysicalModelName": "",
           "entPhysicalContainedIn": 0
@@ -49,8 +49,8 @@
           "entPhysicalClass": "chassis",
           "entPhysicalSerialNum": "SN-a1b2c3",
           "entPhysicalModelName": "WS-C3750X-48P",
-          "entPhysicalName": "Switch 1",
-          "entPhysicalDescr": "48-port PoE switch",
+          "entPhysicalName": "entity-0beaae",
+          "entPhysicalDescr": "entity-bf3b65",
           "entPhysicalParentRelPos": 1,
           "entPhysicalContainedIn": 1
         },
@@ -59,8 +59,8 @@
           "entPhysicalClass": "chassis",
           "entPhysicalSerialNum": "SN-d4e5f6",
           "entPhysicalModelName": "WS-C3750X-48P",
-          "entPhysicalName": "Switch 2",
-          "entPhysicalDescr": "48-port PoE switch",
+          "entPhysicalName": "entity-7fc92a",
+          "entPhysicalDescr": "entity-bf3b65",
           "entPhysicalParentRelPos": 2,
           "entPhysicalContainedIn": 1
         },
@@ -69,8 +69,8 @@
           "entPhysicalClass": "chassis",
           "entPhysicalSerialNum": "SN-789abc",
           "entPhysicalModelName": "WS-C3750X-24T",
-          "entPhysicalName": "Switch 3",
-          "entPhysicalDescr": "24-port switch",
+          "entPhysicalName": "entity-a2f6ed",
+          "entPhysicalDescr": "entity-6ebd1d",
           "entPhysicalParentRelPos": 3,
           "entPhysicalContainedIn": 1
         }

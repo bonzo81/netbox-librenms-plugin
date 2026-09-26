@@ -402,7 +402,7 @@ class TestCreateVirtualChassisWithMembers:
         with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
             create_virtual_chassis_with_members(master, members, {"device_id": 8104})
 
-        assert "Created 0 members but expected 1" not in caplog.text
+        assert "members but expected" not in caplog.text
 
     def test_a_member_serial_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device

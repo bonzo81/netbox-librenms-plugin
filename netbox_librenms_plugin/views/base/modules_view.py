@@ -341,7 +341,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return None
         return next((member for member in vc_members if getattr(member, "vc_position", None) == position), None)
 
-    def _infer_vc_member_for_item(self, obj, item, index_map, vc_members, inherited_member=None):
+    @classmethod
+    def _infer_vc_member_for_item(cls, obj, item, index_map, vc_members, inherited_member=None):
         """
         Infer VC member ownership for an inventory item using LibreNMS ENTITY data.
 
@@ -353,12 +354,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return obj, "default"
 
         member_by_serial = {
-            self._normalize_serial(getattr(member, "serial", "")): member
+            cls._normalize_serial(getattr(member, "serial", "")): member
             for member in vc_members
-            if self._normalize_serial(getattr(member, "serial", ""))
+            if cls._normalize_serial(getattr(member, "serial", ""))
         }
 
-        item_serial = self._normalize_serial(item.get("entPhysicalSerialNum"))
+        item_serial = cls._normalize_serial(item.get("entPhysicalSerialNum"))
         if item_serial and item_serial in member_by_serial:
             return member_by_serial[item_serial], "serial"
 
@@ -368,7 +369,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         while parent_idx and parent_idx in index_map and parent_idx not in visited:
             visited.add(parent_idx)
             parent = index_map[parent_idx]
-            parent_serial = self._normalize_serial(parent.get("entPhysicalSerialNum"))
+            parent_serial = cls._normalize_serial(parent.get("entPhysicalSerialNum"))
             if parent_serial and parent_serial in member_by_serial:
                 return member_by_serial[parent_serial], "ancestor-serial"
             parent_idx = parent.get("entPhysicalContainedIn", 0)
@@ -379,7 +380,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return inherited_member, "parent-context"
 
         # Position-based fallback from ENTITY parentRelPos.
-        positioned_member = self._vc_member_at_position(vc_members, item.get("entPhysicalParentRelPos"))
+        positioned_member = cls._vc_member_at_position(vc_members, item.get("entPhysicalParentRelPos"))
         if positioned_member is not None:
             return positioned_member, "position"
 
@@ -395,7 +396,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             match = re.match(r"^\D*([1-9]\d*)[/:\-].*", hint)
             if not match:
                 continue
-            hinted_member = self._vc_member_at_position(vc_members, match.group(1))
+            hinted_member = cls._vc_member_at_position(vc_members, match.group(1))
             if hinted_member is not None:
                 return hinted_member, "name-hint"
 
@@ -855,8 +856,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 transparent_indices.add(idx)
         return transparent_indices
 
+    @classmethod
     def _build_inventory_ignore_contexts(
-        self,
+        cls,
         obj,
         inventory_data,
         index_map,
@@ -903,7 +905,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 if parent_context["resolution_source"] != "default":
                     inherited_member = parent_context["selected_device"]
 
-            selected_device, resolution_source = self._infer_vc_member_for_item(
+            selected_device, resolution_source = cls._infer_vc_member_for_item(
                 obj,
                 item,
                 index_map,
