@@ -364,7 +364,9 @@ class SingleInterfaceVerifyView(
         members = (
             list(origin_device.virtual_chassis.members.all()) if origin_device.virtual_chassis_id else [origin_device]
         )
-        interfaces_by_device = {member.pk: view._build_interface_lookup_maps(member) for member in members}
+        interfaces_by_device = {
+            member.pk: view._build_interface_lookup_maps(member, metadata_only=True) for member in members
+        }
         interfaces_by_port_id = {}
         for interface_maps in interfaces_by_device.values():
             for port_id, interface in interface_maps["by_librenms_id"].items():

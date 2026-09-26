@@ -1,5 +1,6 @@
 import json
 import logging
+from types import SimpleNamespace
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -162,7 +163,7 @@ class BaseInterfaceTableView(
             return None
         return normalize_librenms_port_id(librenms_id)
 
-    def _build_interface_lookup_maps(self, obj):
+    def _build_interface_lookup_maps(self, obj, *, metadata_only=False):
         """
         Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
 
@@ -171,6 +172,7 @@ class BaseInterfaceTableView(
 
         Args:
             obj: The NetBox device (or VM) whose interfaces are indexed.
+            metadata_only: Read identity fields without constructing interface models or related objects.
 
         Returns:
             dict: Name and LibreNMS ID indexes plus the number of interfaces carrying each ID.
@@ -187,12 +189,17 @@ class BaseInterfaceTableView(
         # assignment and MAC addresses); without this each rendered interface row issues its own
         # queries for these. Also select related relationship FKs that render_parent dereferences.
         related_field = self.get_select_related_field(obj)
-        extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
-        interfaces = (
-            self.get_interfaces(obj)
-            .select_related(related_field, "untagged_vlan", *extra_related)
-            .prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
-        )
+        queryset = self.get_interfaces(obj)
+        if metadata_only:
+            interfaces = (
+                SimpleNamespace(_meta=queryset.model._meta, **row)
+                for row in queryset.values("pk", "name", f"{related_field}_id", "custom_field_data")
+            )
+        else:
+            extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
+            interfaces = queryset.select_related(related_field, "untagged_vlan", *extra_related).prefetch_related(
+                "tagged_vlans", "tagged_vlans__group", "mac_addresses"
+            )
         for interface in interfaces:
             by_name[interface.name] = interface
             librenms_id = self._get_object_librenms_id(interface)
