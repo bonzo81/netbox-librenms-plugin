@@ -1889,9 +1889,7 @@ class RebindInterfacePortView(SyncInterfacesView):
                 interface = self._rebind(obj, ports_data, port_id, expected_port_id, interface_name_field, server_key)
         except LibreNMSPortBindingConflict as conflict:
             messages.error(request, str(conflict))
-            response = self._tab_response(request, object_type, interface_name_field, server_key)
-            response.status_code = 409
-            return response
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         except _RebindRefusedError as refusal:
             messages.error(request, str(refusal))
             return self._tab_response(request, object_type, interface_name_field, server_key)

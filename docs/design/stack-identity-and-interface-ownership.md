@@ -79,7 +79,9 @@ Interface sync, IP interface resolution, rebind, remote cable creation and modul
 inventory binding claim before checking ownership or creating a row. The shared
 field writer claims and reads current ownership before changing fields or MACs.
 It cannot accept a precomputed absent owner. Bulk sync rolls back its attempt and
-resets counters on contention. Rebind and remote creation return HTTP 409. Module
+resets counters on contention. Rebind and remote creation deliver the retry message
+through the existing response helpers: HTTP 302 for an ordinary request and HTTP
+200 with a rendered fragment for HTMX. Module
 binding reports a conflict through its existing partial-binding result. The IP
 path keeps its existing per-row rollback and error ledger.
 

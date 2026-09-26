@@ -1459,9 +1459,7 @@ class CableRemoteCreateView(SyncCablesView):
                     )
         except LibreNMSPortBindingConflict as conflict:
             messages.error(request, str(conflict))
-            response = self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
-            response.status_code = 409
-            return response
+            return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
         except _RemoteCreateAborted as exc:
             if str(exc):
                 messages.error(request, str(exc))

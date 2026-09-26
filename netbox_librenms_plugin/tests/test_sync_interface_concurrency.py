@@ -1092,13 +1092,14 @@ def test_port_claims_are_reentrant_isolated_by_server_and_released_on_rollback()
 
 
 @pytest.mark.parametrize("action", ["rebind", "cable"])
-def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(settings, librenms_server, action):
-    """Real HTTP actions return a retryable conflict while another transaction owns the port."""
+@pytest.mark.parametrize("htmx", [False, True])
+def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(settings, librenms_server, action, htmx):
+    """Both browser response paths deliver the retry message without partial writes."""
     from dcim.models import Interface
-    from django.contrib.messages import get_messages
     from django.db import close_old_connections, connections, transaction
     from django.test import Client
-    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from django.urls import reverse
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_superuser
     from netbox_librenms_plugin.tests.test_interface_name_owner_rebind import (
         HOST_PORT,
         STALE_PORT,
@@ -1106,30 +1107,40 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         _bound_interface,
         _device,
         _port,
-        _rebind,
         _seed,
     )
-    from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _cable_scenario, _post_cable_create
+    from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _cable_scenario
     from netbox_librenms_plugin.utils import claim_librenms_port_binding
 
     server_key = configure_default_librenms_server(settings)
+    bind_librenms_server(settings, librenms_server, server_key=server_key)
+    client = Client()
+    client.force_login(make_superuser("claim-response-user"))
     if action == "rebind":
         owner = _device("claim-rebind")
         existing = _bound_interface(owner, "eth0", STALE_PORT)
         _seed(owner, [_port(HOST_PORT, "eth0")])
         port_id = HOST_PORT
-        client = Client()
-        client.force_login(make_superuser("claim-rebind-user"))
+        url = reverse(
+            "plugins:netbox_librenms_plugin:rebind_interface_port",
+            kwargs={"object_type": "device", "object_id": owner.pk},
+        )
+        data = {
+            "server_key": server_key,
+            "interface_name_field": "ifName",
+            "rebind_one": str(port_id),
+            f"rebind_expected_port_{port_id}": str(STALE_PORT),
+        }
     else:
         server_key, owner, existing, remote, row_id = _cable_scenario(librenms_server, settings, "claim-cable")
         port_id = 500
+        url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[owner.pk])
+        data = {"row_id": row_id, "server_key": server_key}
 
     def compete():
         close_old_connections()
         try:
-            if action == "rebind":
-                return _rebind(client, owner, port_id)
-            return _post_cable_create(owner, row_id, server_key, "claim-cable-user")
+            return client.post(url, data, follow=not htmx, HTTP_HX_REQUEST="true" if htmx else "false")
         finally:
             connections.close_all()
 
@@ -1137,8 +1148,14 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         with transaction.atomic():
             claim_librenms_port_binding(port_id, server_key)
             response = executor.submit(compete).result(timeout=10)
-            assert response.status_code == 409
-            assert any("retry" in str(message).lower() for message in get_messages(response.wsgi_request))
+            assert response.status_code == 200
+            assert "Another operation is binding this LibreNMS port. Refresh and retry." in response.content.decode()
+            if not htmx:
+                assert len(response.redirect_chain) == 1
+                destination, status = response.redirect_chain[0]
+                assert status == 302
+                assert f"tab={'interfaces' if action == 'rebind' else 'cables'}" in destination
+                assert f"server_key={server_key}" in destination
     if action == "rebind":
         assert _binding(existing) == STALE_PORT
     else:
