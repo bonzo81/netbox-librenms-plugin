@@ -2626,6 +2626,8 @@ class BaseCableTableView(
                 )
                 if link.get("netbox_remote_device_id"):
                     link = self.check_cable_status(link, normal_context=normal_context)
+            if not link.get("netbox_remote_device_id"):
+                self._report_one_sided_cable(link, link.get("netbox_local_interface_id"), normal_context)
             self._set_remote_picker_affordance(link, obj, server_key)
             self._set_remote_create_affordance(link, obj, server_key)
 
@@ -3175,6 +3177,8 @@ class SingleCableVerifyView(BaseCableTableView):
                         # Check cable status if remote side was resolved
                         if link_data.get("netbox_remote_device_id"):
                             link_data = self.check_cable_status(link_data)
+                        else:
+                            self._report_one_sided_cable(link_data, interface.pk, None)
 
                         self._apply_termination_change_scope([link_data])
                         if read_only_origin:

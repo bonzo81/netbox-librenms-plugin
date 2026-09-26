@@ -1231,7 +1231,7 @@ class SyncInterfacesView(
         if (
             port.get("_source") == OOB_INVENTORY_SOURCE
             and target_device is not None
-            and Interface.objects.filter(device=target_device, name=interface_name).exists()
+            and self.restricted_queryset(Interface).filter(device=target_device, name=interface_name).exists()
         ):
             return HOST_NAME_COLLISION_REASON
         return "port already mapped elsewhere or ambiguous"
