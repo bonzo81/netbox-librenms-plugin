@@ -189,9 +189,10 @@ class _RowsOutsideScopeError(Exception):
             # Nothing identifies a row that the user may not view: not its name, not its actions.
             unnamed = f"{hidden} interface{'s' if hidden > 1 else ''} you cannot view"
             rows = f"{rows} and {unnamed}" if rows else unnamed
-        super().__init__(
+        self.user_message = (
             f"Nothing was saved. These interfaces are outside the scope of your permissions after the sync: {rows}."
         )
+        super().__init__(self.user_message)
 
 
 _DUPLICATED_SELECTION_MESSAGE = (
@@ -357,7 +358,7 @@ class SyncInterfacesView(
             messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
             return self._tab_response(request, object_type, interface_name_field, server_key)
         except _RowsOutsideScopeError as refused:
-            messages.error(request, str(refused))
+            messages.error(request, refused.user_message)
             return self._tab_response(request, object_type, interface_name_field, server_key)
         except IntegrityError:
             # The runner checks Django's deferred foreign keys as the attempt's last step. A related
@@ -2822,7 +2823,7 @@ class _BaseRelationshipSyncView(
                 lambda: self._link_attempt(request, obj, server_key, port_id, related_port_id, current_edge)
             )
         except _RowsOutsideScopeError as refused:
-            return JsonResponse({"error": str(refused)}, status=403)
+            return JsonResponse({"error": refused.user_message}, status=403)
         except IntegrityError as exc:
             source_iface, related_iface = self._attempt_ends
             logger.warning(

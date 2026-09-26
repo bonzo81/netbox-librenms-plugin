@@ -343,3 +343,11 @@ def test_a_database_conflict_names_only_the_interfaces_that_the_user_may_view(cl
         "a concurrent change interrupted the update. Refresh and retry."
     )
     _assert_link_refused(response, error, member, aggregate, hidden_end)
+
+
+def test_scope_refusal_separates_the_user_message_from_exception_details():
+    """Backend diagnostic changes must not replace the permission-scoped response text."""
+    refusal = interfaces_view._RowsOutsideScopeError([("eth1", ("change",))], 1)
+    refusal.args = ("internal diagnostic detail",)
+
+    assert refusal.user_message == _refused("eth1 (change) and 1 interface you cannot view")["error"]
