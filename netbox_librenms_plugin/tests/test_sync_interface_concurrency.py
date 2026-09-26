@@ -1145,3 +1145,30 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         assert not Interface.objects.filter(device=remote).exists()
         existing.refresh_from_db()
         assert existing.cable is None
+
+
+def test_opposite_order_port_claims_refuse_without_deadlock():
+    from threading import Barrier
+    from django.db import close_old_connections, connections, transaction
+    from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, claim_librenms_port_binding
+
+    first_claims_ready = Barrier(2)
+    second_claims_done = Barrier(2)
+
+    def claim_in_order(first, second):
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                claim_librenms_port_binding(first, "default")
+                first_claims_ready.wait(timeout=5)
+                with pytest.raises(LibreNMSPortBindingConflict, match="retry"):
+                    claim_librenms_port_binding(second, "default")
+                # Both transactions retain their first claim until both try the second.
+                second_claims_done.wait(timeout=5)
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(claim_in_order, 9301, 9302), executor.submit(claim_in_order, 9302, 9301)]
+        for future in futures:
+            future.result(timeout=10)
