@@ -367,7 +367,9 @@ def test_a_port_bound_to_another_owner_is_refused_in_every_change_scope(
     local.refresh_from_db()
     foreign.refresh_from_db()
     texts = messages_on(response.wsgi_request)
-    assert texts == [("warning", "The LibreNMS port ID is already assigned to another NetBox interface.")]
+    assert texts == [
+        ("warning", "1 interface(s) skipped: eth0 (LibreNMS port ID is already assigned to another NetBox interface).")
+    ]
     assert local.description == "local-old"
     assert get_librenms_device_id(local, SERVER_KEY, auto_save=False) is None
     assert (foreign.description, get_librenms_device_id(foreign, SERVER_KEY, auto_save=False)) == ("foreign-old", 1)
