@@ -169,8 +169,9 @@ def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, atte
     # Port 11 reports the name of another interface on the device, so its bound interface keeps its name.
     bound_interface(device, "old11", 11)
     make_interface(device, "eth12")
-    # Port 7 is bound to another device's interface, so every attempt skips its row.
-    bound_interface(make_device("sync-retry-report-elsewhere"), "eth7", 7)
+    # Port 7 has no binding, but its reported name belongs to port 8, so every attempt skips it.
+    skipped = bound_interface(device, "eth7", 8)
+    skipped_before = Interface.objects.filter(pk=skipped.pk).values().get()
     # A VLAN the user cannot view, so every attempt warns that the VLAN scope is incomplete.
     VLAN.objects.create(vid=812, name="sync-retry-report-hidden")
     user = make_user_with_perms(
@@ -196,14 +197,14 @@ def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, atte
     assert committed_outcomes == [
         _outcome(
             synced_count=2,
-            skipped_conflicts=("eth7 (port already mapped elsewhere or ambiguous)",),
+            skipped_conflicts=("eth7 (reported name belongs to a different LibreNMS port 8)",),
             kept_name_conflicts=(("old11", "eth12", None),),
             warnings=(vlan_warning,),
         )
     ]
     assert messages_on(response.wsgi_request) == [
         ("warning", vlan_warning),
-        ("warning", "1 interface(s) skipped: eth7 (port already mapped elsewhere or ambiguous)."),
+        ("warning", "1 interface(s) skipped: eth7 (reported name belongs to a different LibreNMS port 8)."),
         (
             "warning",
             "Interface 'old11' kept its current name because the reported name is in use on the same "
@@ -213,14 +214,15 @@ def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, atte
     ]
     interface.refresh_from_db()
     assert interface.description == "uplink"
+    assert Interface.objects.filter(pk=skipped.pk).values().get() == skipped_before
 
 
-def _seed_relationship_sync(device, base, mac, elsewhere):
+def _seed_relationship_sync(device, base, mac):
     """Seed one device for a sync whose attribute pass writes every row before the relationship pass runs."""
     aggregate = bound_interface(device, "Po1", base + 100, iface_type="lag")
     bound_interface(device, "old11", base + 11)
     make_interface(device, "eth12")
-    bound_interface(elsewhere, f"x{base + 7}", base + 7)
+    bound_interface(device, "eth7", base + 8)
     ports = [
         sync_port(base + 7, "eth7"),
         sync_port(base + 11, "eth12", alias="kept"),
@@ -259,11 +261,11 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
     # Its own session, so the control's messages do not carry over into the retried sync's messages.
     control_client = Client()
     control_client.force_login(user)
-    elsewhere = make_device("sync-relationship-retry-elsewhere")
     control = make_device("sync-relationship-control", librenms_cf={SERVER_KEY: {"id": 97}})
-    control_aggregate, control_ports = _seed_relationship_sync(control, 1000, "00:11:22:33:44:01", elsewhere)
+    control_aggregate, control_ports = _seed_relationship_sync(control, 1000, "00:11:22:33:44:01")
     device = make_device("sync-relationship-retry", librenms_cf={SERVER_KEY: {"id": 98}})
-    aggregate, ports = _seed_relationship_sync(device, 2000, "00:11:22:33:44:01", elsewhere)
+    aggregate, ports = _seed_relationship_sync(device, 2000, "00:11:22:33:44:01")
+    skipped_before = list(Interface.objects.filter(device__in=[control, device], name="eth7").order_by("pk").values())
     real_relationships = SyncInterfacesView._sync_interface_relationships
     relationship_passes = []
 
@@ -288,23 +290,23 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
 
     assert attempts.count == 2
     assert relationship_passes == [True, True], "each attempt wrote the member before its relationship pass"
-    assert (
-        committed_outcomes[1]
-        == committed_outcomes[0]
-        == _outcome(
+    assert committed_outcomes == [
+        _outcome(
             synced_count=2,
-            skipped_conflicts=("eth7 (port already mapped elsewhere or ambiguous)",),
+            skipped_conflicts=(f"eth7 (reported name belongs to a different LibreNMS port {base + 8})",),
             kept_name_conflicts=(("old11", "eth12", None),),
         )
-    )
+        for base in (1000, 2000)
+    ]
     assert _one_sync_result(device, aggregate) == _one_sync_result(control, control_aggregate)
     assert _one_sync_result(device, aggregate)["lag"] is True
     assert _one_sync_result(device, aggregate)["macs"] == 1
-    assert (
-        messages_on(response.wsgi_request)
-        == messages_on(control_response.wsgi_request)
-        == [
-            ("warning", "1 interface(s) skipped: eth7 (port already mapped elsewhere or ambiguous)."),
+    for sync_response, base in ((control_response, 1000), (response, 2000)):
+        assert messages_on(sync_response.wsgi_request) == [
+            (
+                "warning",
+                f"1 interface(s) skipped: eth7 (reported name belongs to a different LibreNMS port {base + 8}).",
+            ),
             (
                 "warning",
                 "Interface 'old11' kept its current name because the reported name is in use on the same "
@@ -312,6 +314,9 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
             ),
             ("success", SYNCED),
         ]
+    assert (
+        list(Interface.objects.filter(device__in=[control, device], name="eth7").order_by("pk").values())
+        == skipped_before
     )
 
 

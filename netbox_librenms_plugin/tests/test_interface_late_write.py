@@ -437,7 +437,7 @@ def test_a_stale_row_version_that_a_broad_handler_swallows_is_still_retried(clie
 
 @transactional_db_with_all_apps()
 def test_a_row_that_left_its_owner_after_the_read_is_not_written(client, attempts, monkeypatch):
-    """The fresh read finds no row of the expected owner; the retry resolves the port again and skips it."""
+    """The fresh read finds no row of the expected owner; the retry refuses its new foreign binding."""
     device = make_device("late-write-moved", librenms_cf={SERVER_KEY: {"id": 7}})
     elsewhere = make_device("late-write-moved-elsewhere")
     interface = bound_interface(device, "eth10", 10)
@@ -456,7 +456,7 @@ def test_a_row_that_left_its_owner_after_the_read_is_not_written(client, attempt
 
     assert attempts.count == 2
     assert messages_on(response.wsgi_request) == [
-        ("warning", "1 interface(s) skipped: eth10 (port already mapped elsewhere or ambiguous).")
+        ("warning", "The LibreNMS port ID is already assigned to another NetBox interface.")
     ]
     assert _column_values(interface, ["device_id", "description"]) == {"device_id": elsewhere.pk, "description": ""}
 
