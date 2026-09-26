@@ -201,7 +201,8 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
         ok, addresses = api.get_device_ips(1)
         assert ok is True
         assert addresses
-        assert addresses[0]["ipv4_address"] == "192.0.2.94"
+        recorded_device = load_recording("arcos-lag-transceivers")["responses"]["GET /api/v0/devices/1"]["devices"][0]
+        assert addresses[0]["ipv4_address"] == recorded_device["ip"]
         assert addresses[0]["port_id"] is not None
 
         ok, vlans = api.get_device_vlans(1)

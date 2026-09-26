@@ -3496,7 +3496,7 @@ def test_module_database_conflict_details_are_preserved():
 
 
 @pytest.mark.django_db
-def test_install_branch_non_numeric_parent_index(self, client):
+def test_install_branch_non_numeric_parent_index(client):
     from django.urls import reverse
     from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 
