@@ -3625,7 +3625,7 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         assert host_interface.description == "host interface"
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
-        assert any("ambiguous" in text for text in message_texts(request, "warning"))
+        assert any("host interface already uses this name" in text for text in message_texts(request, "warning"))
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from types import SimpleNamespace

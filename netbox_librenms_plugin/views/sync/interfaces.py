@@ -84,6 +84,10 @@ class _BulkRelationshipContext:
     excluded_columns: set
 
 
+class _HostInterfaceNameConflict(Exception):
+    """An OOB row cannot claim a host interface by its name."""
+
+
 class SyncInterfacesView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, VlanAssignmentMixin, CacheMixin, View
 ):
@@ -1108,13 +1112,17 @@ class SyncInterfacesView(
                 # caller's grant, do not silently sync the row onto the page device.
                 self._record_skipped_conflict(interface_name, "selected target unavailable")
                 return
-            interface = self._resolve_device_interface(
-                target_device,
-                interface_name,
-                lookup_port_id,
-                server_key,
-                oob=librenms_interface.get("_source") == OOB_INVENTORY_SOURCE,
-            )
+            try:
+                interface = self._resolve_device_interface(
+                    target_device,
+                    interface_name,
+                    lookup_port_id,
+                    server_key,
+                    oob=librenms_interface.get("_source") == OOB_INVENTORY_SOURCE,
+                )
+            except _HostInterfaceNameConflict:
+                self._record_skipped_conflict(interface_name, "host interface already uses this name")
+                return
         elif isinstance(obj, VirtualMachine):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             interface = self._resolve_vm_interface(obj, interface_name, lookup_port_id, server_key)
@@ -1204,7 +1212,7 @@ class SyncInterfacesView(
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
         if oob and not created:
             # The controller row has no claim on an existing host interface by name.
-            return None
+            raise _HostInterfaceNameConflict
         if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
             return None
         if created:

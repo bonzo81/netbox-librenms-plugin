@@ -107,7 +107,7 @@ def test_no_test_module_registers_a_session_wide_plugin():
 
     assert offenders == [], (
         "pytest_plugins registers a plugin session-wide. Bind the fixture into the module "
-        "instead, e.g. `mock_librenms_config = test_librenms_api_helpers.mock_librenms_config`. "
+        "instead, or put shared fixtures in conftest.py. "
         f"Found: {', '.join(offenders)}"
     )
 
