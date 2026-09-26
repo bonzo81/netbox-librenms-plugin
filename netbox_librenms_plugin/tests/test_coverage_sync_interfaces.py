@@ -3816,6 +3816,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-name-collision")
@@ -3835,6 +3836,8 @@ class TestSyncInterfacesViewPost:
         view = SyncInterfacesView()
         view._librenms_api = SimpleNamespace(server_key="default")
         cache_key = view.get_cache_key(device, "ports", "default")
+        # The host row is absent from LibreNMS, but its unbound NetBox interface remains.
+        # This reaches the existing-interface guard after the snapshot collision check.
         cache.set(
             cache_key,
             {
@@ -3858,6 +3861,7 @@ class TestSyncInterfacesViewPost:
         host_interface.refresh_from_db()
         assert response.status_code == 302
         assert host_interface.description == "host interface"
+        assert get_librenms_device_id(host_interface, "default", auto_save=False) is None
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
         assert (
             any("host interface already uses this name" in text for text in message_texts(request, "warning"))
