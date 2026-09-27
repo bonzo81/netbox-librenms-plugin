@@ -1077,10 +1077,13 @@ class TestCheckAndCreateTheRemoteEnd:
         from django.core.cache import cache
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local, _, _, row_id = self._scenario("expired-create", librenms_server, settings)
+        server_key, local, local_interface, _, row_id = self._scenario("expired-create", librenms_server, settings)
         cache.delete(_make_view().get_cache_key(local, "links", server_key))
         client = _logged_in(make_superuser("expired-create-user"))
-        response = getattr(client, method)(_remote_create_url(local), {"row_id": row_id, "server_key": server_key})
+        response = getattr(client, method)(
+            _remote_create_url(local),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+        )
         assert response.status_code == 409
         assert "Refresh" in response.content.decode()
 
@@ -1088,11 +1091,13 @@ class TestCheckAndCreateTheRemoteEnd:
         """Step one: the far end is not modelled, so say what creating it would mean."""
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, remote_device, row_id = self._scenario("chk-a", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "chk-a", librenms_server, settings
+        )
 
         response = _logged_in(make_superuser("remote-create-chk-a")).get(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert response.status_code == 200
@@ -1105,7 +1110,7 @@ class TestCheckAndCreateTheRemoteEnd:
         from netbox_librenms_plugin.models import InterfaceTypeMapping
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, _, row_id = self._scenario(
+        server_key, local_device, local_interface, _, row_id = self._scenario(
             "chk-b",
             librenms_server,
             settings,
@@ -1117,7 +1122,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         response = _logged_in(make_superuser("remote-create-chk-b")).get(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert "1000base-t" in response.content.decode()
@@ -1126,11 +1131,14 @@ class TestCheckAndCreateTheRemoteEnd:
         """Nothing maps it, so the interface would be created as "other": say so, do not hide it."""
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, _, row_id = self._scenario("chk-c", librenms_server, settings)
+        server_key, local_device, local_interface, _, row_id = self._scenario("chk-c", librenms_server, settings)
 
         body = (
             _logged_in(make_superuser("remote-create-chk-c"))
-            .get(_remote_create_url(local_device), {"row_id": row_id, "server_key": server_key})
+            .get(
+                _remote_create_url(local_device),
+                {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+            )
             .content.decode()
         )
 
@@ -1139,12 +1147,12 @@ class TestCheckAndCreateTheRemoteEnd:
     def test_the_check_reports_missing_port_without_claiming_a_mapping_failure(self, librenms_server, settings):
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, _, row_id = self._scenario("chk-no-port", librenms_server, settings)
+        server_key, local_device, local_interface, _, row_id = self._scenario("chk-no-port", librenms_server, settings)
         librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": []})
 
         response = _logged_in(make_superuser("remote-create-chk-no-port")).get(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert response.status_code == 200
@@ -1159,11 +1167,13 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, remote_device, row_id = self._scenario("chk-d", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "chk-d", librenms_server, settings
+        )
 
         _logged_in(make_superuser("remote-create-chk-d")).get(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert not Interface.objects.filter(device=remote_device).exists()
@@ -1180,7 +1190,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         _logged_in(make_superuser("remote-create-mk-a")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         created = Interface.objects.get(device=remote_device, name="Gi0/1")
@@ -1215,7 +1225,8 @@ class TestCheckAndCreateTheRemoteEnd:
 
         monkeypatch.setattr(CableRemoteCreateView, "_remote_port_record", drift_after_proposal)
         _logged_in(make_superuser(f"remote-create-mk-owner-drift-{drift}")).post(
-            _remote_create_url(local_device), {"row_id": row_id, "server_key": server_key}
+            _remote_create_url(local_device),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert not Interface.objects.filter(device=remote_device, name="Gi0/1").exists()
@@ -1230,14 +1241,16 @@ class TestCheckAndCreateTheRemoteEnd:
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-        server_key, local_device, _, _, row_id = self._scenario("mk-cache-transition", librenms_server, settings)
+        server_key, local_device, local_interface, _, row_id = self._scenario(
+            "mk-cache-transition", librenms_server, settings
+        )
         snapshot_key = BaseCableTableView().get_cache_key(local_device, "ip_addresses", server_key)
         cache.set(snapshot_key, {"ip_addresses": []}, timeout=300)
 
         with django_capture_on_commit_callbacks(execute=True):
             response = _logged_in(make_superuser("remote-create-mk-cache-transition")).post(
                 _remote_create_url(local_device),
-                {"row_id": row_id, "server_key": server_key},
+                {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
                 HTTP_HX_REQUEST="true",
             )
 
@@ -1250,13 +1263,15 @@ class TestCheckAndCreateTheRemoteEnd:
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
-        server_key, local_device, _, remote_device, row_id = self._scenario("mk-migrated", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-migrated", librenms_server, settings
+        )
         mark_librenms_migrated(local_device, remote_device.pk, server_key)
         local_device.save(update_fields=["custom_field_data"])
 
         response = _logged_in(make_superuser("remote-create-mk-migrated")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
             follow=True,
         )
 
@@ -1270,7 +1285,7 @@ class TestCheckAndCreateTheRemoteEnd:
         from netbox_librenms_plugin.utils import mark_librenms_migrated
         from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
 
-        server_key, local_device, _, remote_device, row_id = self._scenario(
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-cache-migrated", librenms_server, settings
         )
         cache_device = make_device("mk-cache-migrated-owner")
@@ -1286,7 +1301,7 @@ class TestCheckAndCreateTheRemoteEnd:
         monkeypatch.setattr(CableRemoteCreateView, "get_cached_links_data", cached_from_migrated_owner)
         response = _logged_in(make_superuser("remote-create-mk-cache-migrated")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
             follow=True,
         )
 
@@ -1296,11 +1311,11 @@ class TestCheckAndCreateTheRemoteEnd:
     def test_remote_create_closes_its_htmx_modal_after_the_action(self, librenms_server, settings):
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, _, row_id = self._scenario("mk-modal", librenms_server, settings)
+        server_key, local_device, local_interface, _, row_id = self._scenario("mk-modal", librenms_server, settings)
 
         response = _logged_in(make_superuser("remote-create-mk-modal")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
             HTTP_HX_REQUEST="true",
         )
 
@@ -1334,14 +1349,22 @@ class TestCheckAndCreateTheRemoteEnd:
         )
         cable = cable_together(local_interface, make_interface(make_device("existing-peer"), "eth0"))
         view = _make_view(server_key)
-        request = _make_request({"device_id": local_device.pk, "row_id": row_id, "server_key": server_key})
+        request = _make_request(
+            {
+                "expected_local_id": local_interface.pk,
+                "device_id": local_device.pk,
+                "row_id": row_id,
+                "server_key": server_key,
+            }
+        )
         response = view.post(request)
         assert response.status_code == 200
         actions = json.loads(response.content)["formatted_row"]["actions"]
         assert "Create the remote interface and the cable" not in actions
 
         response = getattr(_logged_in(make_superuser()), method)(
-            _remote_create_url(local_device), {"row_id": row_id, "server_key": server_key}
+            _remote_create_url(local_device),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
         assert response.status_code in (404, 409)
         assert not Interface.objects.filter(device=remote_device).exists()
@@ -1361,7 +1384,9 @@ class TestCheckAndCreateTheRemoteEnd:
         )
         user = grant(user, "add", Cable, constraints={"label__startswith": "permitted-"})
         response = _logged_in(user).post(
-            _remote_create_url(local_device), {"row_id": row_id, "server_key": server_key}, follow=True
+            _remote_create_url(local_device),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+            follow=True,
         )
         assert response.status_code == 200
         assert not Interface.objects.filter(device=remote_device).exists()
@@ -1376,13 +1401,17 @@ class TestCheckAndCreateTheRemoteEnd:
         from dcim.models import Cable, Device, Interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        server_key, local, _, remote, row_id = self._scenario("create-no-change", librenms_server, settings)
+        server_key, local, local_interface, remote, row_id = self._scenario(
+            "create-no-change", librenms_server, settings
+        )
         user = make_user_with_perms(
             "create-no-change",
             [("view", Device), ("view", Interface), ("add", Interface), ("add", Cable), ("change", Cable)],
         )
         response = _logged_in(user).post(
-            _remote_create_url(local), {"row_id": row_id, "server_key": server_key}, follow=True
+            _remote_create_url(local),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+            follow=True,
         )
         assert any("change_interface" in text for text in _messages(response))
         assert not Interface.objects.filter(device=remote).exists()
@@ -1393,7 +1422,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, remote_device, row_id = self._scenario(
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-h",
             librenms_server,
             settings,
@@ -1403,7 +1432,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         _logged_in(make_superuser("remote-create-mk-h")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert list(Interface.objects.filter(device=remote_device).values_list("name", flat=True)) == ["Gi0/1"]
@@ -1415,11 +1444,13 @@ class TestCheckAndCreateTheRemoteEnd:
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        server_key, local_device, _, remote_device, row_id = self._scenario("mk-b", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-b", librenms_server, settings
+        )
 
         _logged_in(make_superuser("remote-create-mk-b")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         created = Interface.objects.get(device=remote_device, name="Gi0/1")
@@ -1447,7 +1478,9 @@ class TestCheckAndCreateTheRemoteEnd:
         )
         user = grant(user, "view", Interface, constraints={"pk": near.pk})
         response = _logged_in(user).post(
-            _remote_create_url(local), {"row_id": row_id, "server_key": server_key}, follow=True
+            _remote_create_url(local),
+            {"expected_local_id": near.pk, "row_id": row_id, "server_key": server_key},
+            follow=True,
         )
         assert response.status_code == 200
         assert list(Interface.objects.filter(device=remote).values_list("pk", flat=True)) == [existing.pk]
@@ -1464,7 +1497,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, remote_device, row_id = self._scenario(
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-c", librenms_server, settings, aliases=["GigabitEthernet0/1"]
         )
         make_interface(remote_device, "Gi0/1", iface_type="10gbase-x-sfpp")
@@ -1472,7 +1505,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         _logged_in(make_superuser("remote-create-mk-c")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert Interface.objects.filter(device=remote_device).count() == 2
@@ -1484,7 +1517,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, remote_device, row_id = self._scenario(
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-i",
             librenms_server,
             settings,
@@ -1493,7 +1526,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         response = _logged_in(make_superuser("remote-create-mk-i")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
             follow=True,
         )
 
@@ -1514,7 +1547,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         _logged_in(make_superuser("remote-create-mk-d")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert not Interface.objects.filter(device=remote_device, name="Gi0/1").exists()
@@ -1525,7 +1558,9 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        server_key, local_device, _, remote_device, row_id = self._scenario("mk-e", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-e", librenms_server, settings
+        )
         user = make_user_with_perms(
             "remote-create-mk-e",
             [("view", Device), ("view", Interface), ("change", Interface), ("add", Cable), ("change", Cable)],
@@ -1533,7 +1568,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         response = _logged_in(user).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
             follow=True,
         )
 
@@ -1550,7 +1585,9 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-        server_key, local_device, _, remote_device, row_id = self._scenario("mk-f", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-f", librenms_server, settings
+        )
         user = make_user_with_perms(
             "remote-create-mk-f",
             [("view", Device), ("view", Interface), ("change", Interface), ("add", Cable), ("change", Cable)],
@@ -1560,7 +1597,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         response = _logged_in(user).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
             follow=True,
         )
 
@@ -1573,13 +1610,15 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, remote_device, row_id = self._scenario("mk-g", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-g", librenms_server, settings
+        )
         # An interface the row resolves to: the row becomes syncable, so the action is absent.
         make_interface(remote_device, "Gi0/1")
 
         response = _logged_in(make_superuser("remote-create-mk-g")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         assert response.status_code == 404
@@ -1821,7 +1860,7 @@ def test_remote_creation_locks_both_devices_before_inserting_an_interface(libren
     from django.db import DatabaseError, connection, connections
     from netbox_librenms_plugin.tests.conftest import make_superuser
 
-    server_key, local, _, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
+    server_key, local, local_interface, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
         "create-owner-lock", librenms_server, settings
     )
     client = _logged_in(make_superuser("create-owner-lock-user"))
@@ -1844,7 +1883,10 @@ def test_remote_creation_locks_both_devices_before_inserting_an_interface(libren
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(inspect_owner_locks):
-        response = client.post(_remote_create_url(local), {"row_id": row_id, "server_key": server_key})
+        response = client.post(
+            _remote_create_url(local),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+        )
     assert response.status_code == 302
     assert len(observed) == 2
 
@@ -1907,7 +1949,9 @@ def test_remote_create_uses_the_resolved_chassis_member(librenms_server, setting
         assert not enriched.get("remote_create_url")
     else:
         assert enriched.get("remote_create_url")
-    response = client.post(_remote_create_url(local), {"row_id": row_id, "server_key": key})
+    response = client.post(
+        _remote_create_url(local), {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": key}
+    )
     assert not Interface.objects.filter(device=advertised).exists()
     local_interface.refresh_from_db()
     if port_name == "unresolved-port":
@@ -1931,9 +1975,79 @@ def test_remote_create_refuses_a_port_already_bound_on_another_device(librenms_s
     set_librenms_device_id(holder, 500, key)
     holder.save()
     response = _logged_in(make_superuser("create-foreign-port-user")).post(
-        _remote_create_url(local), {"row_id": row_id, "server_key": key}
+        _remote_create_url(local), {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": key}
     )
     assert response.status_code in (302, 404)
     assert not Interface.objects.filter(device=remote).exists()
     local_interface.refresh_from_db()
     assert local_interface.cable_id is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("different_member", [False, True])
+def test_remote_create_binds_the_verified_local_interface(librenms_server, settings, different_member):
+    import html
+    import re
+    from urllib.parse import parse_qs, urlsplit
+
+    from dcim.models import Interface, VirtualChassis
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    key, page, first, remote, _ = TestCheckAndCreateTheRemoteEnd()._scenario(
+        "verified-local-owner", librenms_server, settings
+    )
+    chassis = VirtualChassis.objects.create(name="verified-local-chassis", master=page)
+    page.virtual_chassis, page.vc_position = chassis, 1
+    page.save()
+    first.name = "Gi1/0/1"
+    first.save()
+    member = make_device("verified-local-second")
+    member.virtual_chassis, member.vc_position = chassis, 2
+    member.save()
+    second = make_interface(member, first.name)
+    row_id = _seed_cable_row(page, _row(local_port=first.name, remote_device=remote.name, remote_port_key=500), key)
+    client = _logged_in(make_superuser("verified-local-user"))
+    selected = member if different_member else page
+    formatted = _verify(client, selected, row_id, key)
+    action = html.unescape(re.search(r'data-cable-picker-url="([^"]+)"', formatted["actions"])[1])
+    data = {k: values[0] for k, values in parse_qs(urlsplit(action).query).items()}
+    expected = second if different_member else first
+    # Both steps must refuse a row that now resolves to a different local end.
+    response = client.get(action)
+    if different_member:
+        assert response.status_code == 409
+        response = client.post(urlsplit(action).path, data)
+        assert response.status_code == 409
+        assert not Interface.objects.filter(device=remote).exists()
+        for interface in (first, second):
+            interface.refresh_from_db()
+            assert interface.cable_id is None
+    else:
+        assert response.status_code == 200
+        assert data["expected_local_id"] == str(expected.pk)
+        assert f'name="expected_local_id" value="{expected.pk}"' in response.content.decode()
+        response = client.post(urlsplit(action).path, data)
+        assert response.status_code == 302
+        expected.refresh_from_db()
+        assert Interface.objects.get(device=remote).cable_id == expected.cable_id is not None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("expected", [None, "", "invalid", "999999999"])
+def test_remote_create_requires_a_valid_local_precondition(librenms_server, settings, expected):
+    from dcim.models import Interface
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    key, local, interface, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
+        "local-precondition", librenms_server, settings
+    )
+    data = {"row_id": row_id, "server_key": key}
+    if expected is not None:
+        data["expected_local_id"] = expected
+    client = _logged_in(make_superuser("local-precondition-user"))
+    for method in (client.get, client.post):
+        response = method(_remote_create_url(local), data)
+        assert response.status_code == 409
+    assert not Interface.objects.filter(device=remote).exists()
+    interface.refresh_from_db()
+    assert interface.cable_id is None

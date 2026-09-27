@@ -2329,6 +2329,7 @@ class BaseCableTableView(
             return
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk])
         query = f"row_id={quote_plus(str(link.get('row_id', '')))}"
+        query += f"&expected_local_id={link['netbox_local_interface_id']}"
         if server_key:
             query += f"&server_key={quote_plus(server_key)}"
         link["remote_create_url"] = f"{url}?{query}"
