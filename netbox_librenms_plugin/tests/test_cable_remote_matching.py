@@ -1775,6 +1775,48 @@ class TestTheVerifiedRowRendersLikeTheTable:
         assert "&lt;img" in formatted["remote_port"]
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("advertised_id", [None, 501])
+@pytest.mark.parametrize("patch_path", [False, True])
+def test_remote_port_identity_resolves_a_renamed_interface(client, advertised_id, patch_path):
+    from netbox_librenms_plugin.tests.conftest import cable_together, make_patch_panel, make_superuser
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    key = configured_server_key()
+    local = make_device("port-identity-local")
+    near = make_interface(local, "eth0")
+    remote = make_device("port-identity-remote")
+    map_device_to_librenms(remote, 9, server_key=key)
+    far = make_interface(remote, "renamed-interface")
+    set_librenms_device_id(far, advertised_id or 500, key)
+    far.save()
+    if advertised_id is not None:
+        other = make_interface(remote, "other-interface")
+        set_librenms_device_id(other, 500, key)
+        other.save()
+    if patch_path:
+        _panel, front, rear = make_patch_panel("port-identity-panel")
+        cable_together(near, front)
+        cable_together(rear, far)
+    row = _row(remote_device=remote.name, remote_port_id=advertised_id, remote_port_key=500)
+    row_id = _seed_cable_row(local, row, key)
+    user = make_superuser("port-identity-user")
+    client.force_login(user)
+
+    formatted = _verify(client, local, row_id, key)
+
+    assert far.get_absolute_url() in formatted["remote_port"]
+    assert far.name in formatted["remote_port"]
+    if patch_path:
+        assert "Connected via Patch Path" in formatted["cable_status"]
+    else:
+        assert formatted["can_create_cable"]
+
+    direct = dict(row)
+    _make_view().enrich_remote_port(direct, remote, server_key=key)
+    assert direct["netbox_remote_interface_id"] == far.pk
+
+
 class TestTheRemotePortCellHasOneDefinition:
     """The table column and the verify formatter must read the same renderer."""
 
