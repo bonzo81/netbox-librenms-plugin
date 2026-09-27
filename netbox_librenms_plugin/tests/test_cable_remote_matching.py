@@ -1348,11 +1348,13 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, remote_device, row_id = self._scenario("mk-log", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-log", librenms_server, settings
+        )
 
         _logged_in(make_superuser("remote-create-mk-log")).post(
             _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
         )
 
         created = Interface.objects.get(device=remote_device, name="Gi0/1")

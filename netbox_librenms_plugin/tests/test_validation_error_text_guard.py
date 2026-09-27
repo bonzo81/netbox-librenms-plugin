@@ -74,7 +74,7 @@ ALLOWED = [
         ("views/sync/modules.py", function, "_module_write_failure", "It applies exception_text_for.")
         for function in (
             "InstallModuleView.post",
-            "InstallBranchView.post",
+            "InstallBranchView._install_branch",
             "InstallBranchView._install_single",
             "InstallSelectedView.post",
             "UpdateModuleSerialView.post",
