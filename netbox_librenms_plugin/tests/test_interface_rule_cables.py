@@ -356,8 +356,8 @@ def _cable_render_queries(client, tag, count, first_port):
         local = _bound(local_device, f"Te1/{index}", first_port + index)
         _bound(remote_device, f"Gi0/{index}", first_port + 500 + index)
         row = _row(local, remote_device, local_port_id=first_port + index, remote_port=f"Gi0/{index}")
-        # The remote port is named by its record (remote_port_key) only, so the existing interface
-        # catalog, which chunks advertised ids by 32, reads both sizes in one chunk.
+        # Each row contributes two identities to the catalog's batches of 32 IDs.
+        # The remote identity comes from the matched record, without an advertised ID.
         row.update(remote_port_id=None, remote_port_key=first_port + 500 + index, link_id=index)
         row["local_port_record"] = port_record(_port(first_port + index, local.name))
         row["remote_port_record"] = port_record(_port(first_port + 500 + index, f"Gi0/{index}"))
@@ -377,8 +377,11 @@ def _cable_render_queries(client, tag, count, first_port):
 
 
 @pytest.mark.django_db
-def test_the_cable_table_decides_blocking_rows_in_a_fixed_number_of_queries(settings, librenms_server):
-    """The rule check adds the same queries for 2 blocking rows as for 20 (no query per row)."""
+@pytest.mark.parametrize(("row_count", "extra_batches"), [(16, 0), (20, 1)])
+def test_the_cable_table_batches_identity_queries_for_blocking_rows(
+    settings, librenms_server, row_count, extra_batches
+):
+    """Rule checks stay constant; another 32-ID catalog batch adds one query."""
     from dcim.models import Device, Interface
     from django.test import Client
 
@@ -402,10 +405,9 @@ def test_the_cable_table_decides_blocking_rows_in_a_fixed_number_of_queries(sett
     _cable_render_queries(client, "cable-rule-queries-warm", 2, 1000)
 
     two = _cable_render_queries(client, "cable-rule-queries-2", 2, 2000)
-    twenty = _cable_render_queries(client, "cable-rule-queries-20", 20, 3000)
+    many = _cable_render_queries(client, f"cable-rule-queries-{row_count}", row_count, 3000)
 
-    print(f"Cable table queries: N=2 -> {two}, N=20 -> {twenty}")
-    assert twenty == two
+    assert many == two + extra_batches
 
 
 @pytest.mark.django_db
