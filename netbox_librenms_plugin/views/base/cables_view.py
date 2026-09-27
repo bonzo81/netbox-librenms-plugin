@@ -243,6 +243,12 @@ def _endpoint_group_key(row):
     return (row.get("_source"), neighbour, endpoint)
 
 
+def _remote_port_ref(link):
+    """Use the advertised port ID, or the identity resolved from its names."""
+    advertised = coerce_librenms_id(link.get("remote_port_id"))
+    return advertised if advertised is not None else coerce_librenms_id(link.get("remote_port_key"))
+
+
 def _remote_port_name_candidates(row):
     """Every LibreNMS name the far end of *row* is known by: advertised first, then the aliases."""
     names = [row.get("remote_port"), *(row.get("remote_port_aliases") or [])]
@@ -640,7 +646,7 @@ class BaseCableTableView(
             remote_owner = remote_owner_by_link.get(id(link))
             if remote_owner is not None:
                 candidate_specs[remote_owner.pk]["names"].update(_remote_port_name_candidates(link))
-                if (remote_id := coerce_librenms_id(link.get("remote_port_id"))) is not None:
+                if (remote_id := _remote_port_ref(link)) is not None:
                     candidate_specs[remote_owner.pk]["ids"].add(remote_id)
         return manual_ids, candidate_specs
 
@@ -715,7 +721,7 @@ class BaseCableTableView(
                 remote_interface = self._resolve_context_interface(
                     context,
                     remote_owner_by_link.get(id(link)),
-                    link.get("remote_port_id"),
+                    _remote_port_ref(link),
                     _remote_port_name_candidates(link),
                 )
             if self._link_ends_conflict(local_interface, remote_interface, context["visible_cable_ids"]):
@@ -1497,7 +1503,7 @@ class BaseCableTableView(
         if isinstance(remote_port, str) and remote_port:
             remote_name_candidates = _remote_port_name_candidates(link)
             netbox_remote_interface = None
-            librenms_remote_port_id = link.get("remote_port_id")
+            librenms_remote_port_id = _remote_port_ref(link)
             if server_key is None:
                 server_key = self._render_server_key()
 
