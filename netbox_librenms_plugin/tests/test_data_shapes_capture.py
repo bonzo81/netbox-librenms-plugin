@@ -325,6 +325,21 @@ def test_capture_records_only_this_devices_vrfs(recording_server):
     assert "someone-elses" not in str(recorded)
 
 
+@pytest.mark.parametrize("missing_owner", [{}, {"device_id": None}])
+def test_capture_rejects_vrfs_without_a_device(missing_owner, recording_server):
+    seed = _vrf_seed(
+        ports=[{"port_id": 1, "ifName": "eth0", "ifVrf": 7}],
+        vrfs=[
+            {"vrf_id": 7, "vrf_name": "customer-a", "device_id": 3100},
+            {"vrf_id": 9, "vrf_name": "unknown-owner", **missing_owner},
+        ],
+    )
+    _server, api = recording_server(seed)
+
+    with pytest.raises(RuntimeError, match="VRF.*device_id"):
+        capture_device_recording(api, 3100)
+
+
 def test_capture_skips_the_vrf_route_when_no_port_is_vrf_tagged(recording_server):
     """Most devices have no VRF, and the instance-wide route must not reach their recordings."""
     seed = _vrf_seed(

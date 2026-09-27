@@ -104,35 +104,13 @@ The standard test run (`.github/workflows/test.yaml`) covers data shapes: every 
 schema and outcomes are asserted, every bundled recording is checked to carry no residual PII,
 and `manifest.json` is checked to be in sync with the recordings (so it never goes stale).
 
-## Module branch ownership
-
-The module table and branch installer use one inventory attribution context. Each item uses
-its destination member's manufacturer rules and serial. Transparent parents retain their
-children's attribution. Installation resets the parent-bay search at an owner transition.
-A hidden destination blocks the branch before any module is installed.
-
-The installer reloads the page device and inventory after the existing page advisory lock.
-It checks the signed snapshot and root destination before it plans writes. This gives the
-planner current inputs after a lock wait. It does not freeze virtual-chassis membership
-against unrelated edits through commit. All branch installs use one transaction.
-
-
-### Recording regular expressions
+## Recording regular expressions
 
 Recording LAG and SAP patterns use RE2 for signature generation, compression,
-anonymization and replay. They never fall back to Python's regex engine. Lookaround
-and backreferences are not supported. Invalid patterns are excluded. RE2 treats
-`\d` as ASCII digits and `$` as the end of the text, including when it ends in a
-newline. Repetition parsing follows RE2 syntax.
+anonymization and replay. Lookaround and backreferences are not supported. Invalid
+patterns are excluded. RE2 treats `\d` as ASCII digits and `$` as the end of the
+text, including when it ends in a newline.
 
-At most 100 patterns per map and 200 characters per pattern are compiled. Each
-program has a 1 MiB RE2 memory budget. This is not a process RSS limit. Backend
-errors do not log submitted patterns. Malformed Unicode patterns are excluded;
+Use at most 100 patterns per map and 200 characters per pattern. Each compiled
+program has a 1 MiB RE2 memory budget. Malformed Unicode patterns are excluded;
 malformed Unicode name strings are rejected by the engine.
-
-The selected design replaces the heuristic scanner with one compilation seam.
-Independent review ratified revision 3 after adding the replay compiler path and
-explicit Unicode and repetition semantics. Deadline tests exercise signature,
-compression, anonymization and real HTTP replay. Compiler tests cover memory
-exhaustion, unsupported syntax and limits. Stored operator configuration outside
-recordings continues to use its existing engine.

@@ -1562,8 +1562,10 @@ class LibreNMSAPI:
         rows = result.get("vrfs")
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             return False, "Unexpected response format: 'vrfs' must be a list of objects"
+        if any(row.get("device_id") is None for row in rows):
+            return False, "Unexpected response format: VRF rows must include 'device_id'"
         wanted = str(device_id)
-        return True, [row for row in rows if str(row.get("device_id")) == wanted]
+        return True, [row for row in rows if str(row["device_id"]) == wanted]
 
     @staticmethod
     def _classify_missing_vrfs(error):
