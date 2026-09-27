@@ -1295,6 +1295,9 @@ class CableRemoteCreateView(SyncCablesView):
         # never offered this on, so the endpoint refuses it rather than re-deriving the rule.
         if row is None or not row.get("remote_create_url"):
             return None, HttpResponse("Cable row not found.", status=404)
+        expected_local_id = coerce_librenms_id(data.get("expected_local_id"))
+        if expected_local_id is None or expected_local_id != row.get("netbox_local_interface_id"):
+            return None, HttpResponse("The local interface changed. Refresh the Cables tab.", status=409)
         remote_device = self.restricted_queryset(Device, "view").filter(pk=row["remote_port_owner_id"]).first()
         local_interface = (
             self.restricted_queryset(Interface, "change")
