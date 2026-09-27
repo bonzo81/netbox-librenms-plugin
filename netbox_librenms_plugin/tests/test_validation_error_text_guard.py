@@ -87,10 +87,12 @@ ALLOWED = [
 ]
 
 
-def _caught_names(handler_type):
+def _caught_names(handler_type, aliases):
     """Return the class names that an ``except`` clause names, alone or in a tuple."""
     names = handler_type.elts if isinstance(handler_type, ast.Tuple) else [handler_type]
-    return {name.id if isinstance(name, ast.Name) else getattr(name, "attr", None) for name in names}
+    return {
+        aliases.get(name.id, name.id) if isinstance(name, ast.Name) else getattr(name, "attr", None) for name in names
+    }
 
 
 def _is_log_call(node):
@@ -133,7 +135,8 @@ def _sink(read, parents):
 class _CaughtErrorReadScan(ast.NodeVisitor):
     """Collect each read of a caught error that can hold a ValidationError and is not safe."""
 
-    def __init__(self):
+    def __init__(self, aliases):
+        self.aliases = aliases
         self.scope = []
         self.reads = []
 
@@ -147,7 +150,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
     def visit_Try(self, node):
         validation_error_caught = False
         for handler in node.handlers:
-            caught = set() if handler.type is None else _caught_names(handler.type)
+            caught = set() if handler.type is None else _caught_names(handler.type, self.aliases)
             # A handler after one that catches ValidationError never gets a ValidationError.
             if handler.name and caught & CAUGHT and not (validation_error_caught and "ValidationError" not in caught):
                 self._scan_handler(handler)
@@ -167,8 +170,16 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
 
 def caught_error_reads(source):
     """Return ``(function, sink)`` for each read of a caught error in *source* that is not safe."""
-    scan = _CaughtErrorReadScan()
-    scan.visit(ast.parse(source))
+    tree = ast.parse(source)
+    aliases = {
+        name.asname: name.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for name in node.names
+        if name.asname and name.name in CAUGHT
+    }
+    scan = _CaughtErrorReadScan(aliases)
+    scan.visit(tree)
     return scan.reads
 
 
@@ -271,3 +282,31 @@ def test_the_scan_skips_a_handler_that_cannot_catch_a_validation_error():
     )
 
     assert caught_error_reads(source) == [("View.post", "str")]
+
+
+@pytest.mark.parametrize("caught", ["DjangoValidationError", "(ValueError, DjangoValidationError)"])
+def test_the_scan_resolves_imported_validation_error_aliases(caught):
+    source = (
+        "from django.core.exceptions import ValidationError as DjangoValidationError\n"
+        f"def view():\n    try:\n        save()\n    except {caught} as exc:\n        detail = str(exc)\n"
+    )
+
+    assert caught_error_reads(source) == [("view", "str")]
+
+
+def test_an_aliased_validation_handler_excludes_the_later_broad_handler():
+    source = textwrap.dedent(
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        def view():
+            try:
+                save()
+            except DjangoValidationError as exc:
+                return exception_text_for(exc, Device, request.user)
+            except Exception as exc:
+                return str(exc)
+        """
+    )
+
+    assert caught_error_reads(source) == []
