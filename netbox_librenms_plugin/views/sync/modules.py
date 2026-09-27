@@ -892,6 +892,10 @@ def _record_bind_outcome(bind_result, result, skipped):
     return _module_bind_result_changed(bind_result)
 
 
+class _ModuleInstallRefused(Exception):
+    """Leave the install transaction before rendering a reported refusal."""
+
+
 class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
 
@@ -973,10 +977,10 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 )
                 if not locked_bay:
                     messages.error(request, "Module bay no longer exists.")
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleInstallRefused
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleInstallRefused
                 if _module_already_on_device(target_device, serial):
                     # The bay is deliberately not named: the conflicting module may be outside
                     # this operator's scope, and its existence is what blocks the install.
@@ -984,7 +988,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         request,
                         f"Serial '{serial}' is already installed on this device. Nothing was installed.",
                     )
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleInstallRefused
                 module = Module(
                     device=target_device,
                     module_bay=locked_bay,
@@ -1043,6 +1047,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
             _schedule_module_cache_mutation(request, page_device, server_key)
+        except _ModuleInstallRefused:
+            pass
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
@@ -1186,19 +1192,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             }
             for device_id in destination_ids
         }
-        manufacturer_contexts = {}
-        for item in branch_items:
-            manufacturer = ignore_contexts[_inventory_item_key(item)]["manufacturer"]
-            if manufacturer.pk not in manufacturer_contexts:
-                manufacturer_contexts[manufacturer.pk] = {
-                    "exact_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
-                        exact_mappings, manufacturer.pk
-                    ),
-                    "regex_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
-                        regex_mappings, manufacturer.pk
-                    ),
-                    "manufacturer": manufacturer,
-                }
+        manufacturer_contexts = self._build_manufacturer_contexts(
+            branch_items, ignore_contexts, exact_mappings, regex_mappings
+        )
 
         # Preload module_bay normalization rules once so _match_bay considers the
         # same normalized candidate names as the table/UI matcher. The serial scope is
@@ -1261,6 +1257,24 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         _report_install_results(request, installed, skipped, failed)
         if installed or bound_any:
             _schedule_module_cache_mutation(request, page_device, server_key)
+
+    @staticmethod
+    def _build_manufacturer_contexts(branch_items, ignore_contexts, exact_mappings, regex_mappings):
+        """Share one bay-mapping policy for each destination manufacturer."""
+        manufacturer_contexts = {}
+        for item in branch_items:
+            manufacturer = ignore_contexts[_inventory_item_key(item)]["manufacturer"]
+            if manufacturer.pk not in manufacturer_contexts:
+                manufacturer_contexts[manufacturer.pk] = {
+                    "exact_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
+                        exact_mappings, manufacturer.pk
+                    ),
+                    "regex_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
+                        regex_mappings, manufacturer.pk
+                    ),
+                    "manufacturer": manufacturer,
+                }
+        return manufacturer_contexts
 
     def _collect_branch(
         self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None, *, ignore_contexts=None

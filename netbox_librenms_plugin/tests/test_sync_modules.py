@@ -148,24 +148,30 @@ class TestInstallSerialRulePreloading:
         assert len(self._rule_queries(preloaded)) == 2, self._rule_queries(preloaded)
 
     def test_both_install_views_forward_the_serial_rules(self):
-        """A behavioural test cannot reach the two post() loops, so pin their call shape."""
+        """Every install loop must forward preloaded serial rules to the shared writer."""
         import ast
         import inspect
 
         from netbox_librenms_plugin.views.sync import modules as modules_module
 
         tree = ast.parse(inspect.getsource(modules_module))
-        posts = [
-            child
+        views = [
+            node
             for node in ast.walk(tree)
             if isinstance(node, ast.ClassDef) and node.name in {"InstallBranchView", "InstallSelectedView"}
-            for child in node.body
-            if isinstance(child, ast.FunctionDef) and child.name == "post"
         ]
-
-        assert len(posts) == 2, "both install views must define post()"
-        for install_post in posts:
-            assert "norm_rules_serial=" in ast.unparse(install_post), "a post() does not forward norm_rules_serial"
+        assert len(views) == 2
+        for view in views:
+            installs = [
+                node
+                for node in ast.walk(view)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_install_single"
+            ]
+            assert installs, f"{view.name} must install its selected inventory"
+            for install in installs:
+                assert "norm_rules_serial" in {keyword.arg for keyword in install.keywords}
 
 
 def pytest_generate_tests(metafunc):
@@ -9290,3 +9296,108 @@ def test_branch_install_releases_its_lock_before_rendering(client, valid_binding
     assert Module.objects.filter(device=page).count() == int(valid_binding)
     assert observed
     assert set(observed) == {(False, 0)}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("refusal", ["occupied", "duplicate_serial", "missing"])
+def test_single_module_refusal_releases_its_lock_before_rendering(client, refusal):
+    from dcim.models import Module, ModuleBay
+    from django.core.cache import cache
+    from django.db import connection
+    from django.test.signals import template_rendered
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    page = make_device_with_module_bays("single-render-page", ["Target", "Existing"])
+    bay = page.modulebays.get(name="Target")
+    module_type = make_module_type("Single Render Card", manufacturer=page.device_type.manufacturer)
+    if refusal != "missing":
+        Module.objects.create(
+            device=page,
+            module_bay=bay if refusal == "occupied" else page.modulebays.get(name="Existing"),
+            module_type=module_type,
+            serial="RENDER-CARD",
+        )
+    row = {
+        "entPhysicalIndex": 1,
+        "entPhysicalContainedIn": 0,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Target",
+        "entPhysicalModelName": module_type.model,
+        "entPhysicalSerialNum": "RENDER-CARD",
+    }
+    key = CacheMixin().get_cache_key(page, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(page, [row]))
+    binding = module_inventory_binding_token(
+        page.pk,
+        "default",
+        "install_module",
+        {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+        1,
+        module_inventory_row_digest(row),
+    )
+    observed = []
+    acquired = []
+
+    def remove_bay_at_lock(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if "pg_advisory_xact_lock" in sql and not acquired:
+            acquired.append(True)
+            if refusal == "missing":
+                ModuleBay.objects.filter(pk=bay.pk).delete()
+        return result
+
+    def record_transaction(sender, **kwargs):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'advisory'")
+            observed.append((connection.in_atomic_block, cursor.fetchone()[0]))
+
+    client.force_login(make_superuser("single-render-user"))
+    template_rendered.connect(record_transaction)
+    try:
+        with connection.execute_wrapper(remove_bay_at_lock):
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:install_module", args=[page.pk]),
+                {
+                    "module_bay_id": bay.pk,
+                    "module_type_id": module_type.pk,
+                    "ent_index": 1,
+                    "server_key": "default",
+                    "inventory_binding": binding,
+                },
+                HTTP_HX_REQUEST="true",
+            )
+    finally:
+        template_rendered.disconnect(record_transaction)
+        cache.delete(key)
+    assert response.status_code == 200
+    assert Module.objects.filter(device=page).count() == (0 if refusal == "missing" else 1)
+    assert acquired == [True]
+    assert observed
+    assert set(observed) == {(False, 0)}
+
+
+def test_module_advisory_lock_sections_do_not_render_responses():
+    """Keep response rendering out of the transactions that hold page advisory locks."""
+    import ast
+    import inspect
+
+    from netbox_librenms_plugin.views.sync import modules
+
+    tree = ast.parse(inspect.getsource(modules))
+    violations = set()
+    for node in ast.walk(tree):
+        atomic = isinstance(node, ast.With) or (
+            isinstance(node, ast.FunctionDef)
+            and any(ast.unparse(decorator) == "transaction.atomic" for decorator in node.decorator_list)
+        )
+        if not atomic:
+            continue
+        calls = [item for item in ast.walk(node) if isinstance(item, ast.Call)]
+        if not any(ast.unparse(call.func) == "_lock_page_device_serials" for call in calls):
+            continue
+        violations.update(call.lineno for call in calls if ast.unparse(call.func) == "_modules_action_response")
+    assert not violations, f"Response rendering holds a page advisory lock at lines {sorted(violations)}"
