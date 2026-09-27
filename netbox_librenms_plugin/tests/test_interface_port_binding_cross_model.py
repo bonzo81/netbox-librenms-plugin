@@ -259,11 +259,13 @@ def _hold_cable_port(name, holder, server_key):
     held_by.save()
 
 
-def _post_cable_create(local_device, row_id, server_key, user_name):
+def _post_cable_create(local_device, local_interface, row_id, server_key, user_name):
     from netbox_librenms_plugin.tests.test_cable_remote_matching import _logged_in, _remote_create_url
 
     return _logged_in(make_superuser(user_name)).post(
-        _remote_create_url(local_device), {"row_id": row_id, "server_key": server_key}, follow=True
+        _remote_create_url(local_device),
+        {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+        follow=True,
     )
 
 
@@ -293,7 +295,7 @@ class TestTheCableFarEndCreate:
             librenms_server, settings, f"cable-held-{holder}", holder=holder
         )
 
-        _post_cable_create(local_device, row_id, server_key, f"cable-held-{holder}-user")
+        _post_cable_create(local_device, local_interface, row_id, server_key, f"cable-held-{holder}-user")
 
         assert not Interface.objects.filter(device=remote_device).exists()
         local_interface.refresh_from_db()
@@ -314,7 +316,7 @@ class TestTheCableFarEndCreate:
 
         monkeypatch.setattr(CableRemoteCreateView, "_remote_port_record", bind_the_port_after_the_offer)
 
-        response = _post_cable_create(local_device, row_id, server_key, "cable-held-late-user")
+        response = _post_cable_create(local_device, local_interface, row_id, server_key, "cable-held-late-user")
 
         assert not Interface.objects.filter(device=remote_device).exists()
         assert any("LibreNMS port 500 is already bound" in text for text in _messages(response))

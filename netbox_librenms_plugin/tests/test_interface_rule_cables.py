@@ -637,7 +637,7 @@ def test_the_far_end_create_is_not_offered_when_the_local_port_is_ignored(client
 
     offer = client.get(
         reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[link.local_device.pk]),
-        {"row_id": row_id, "server_key": SERVER_KEY},
+        {"expected_local_id": link.local.pk, "row_id": row_id, "server_key": SERVER_KEY},
     )
 
     assert "remote_create_url" not in record

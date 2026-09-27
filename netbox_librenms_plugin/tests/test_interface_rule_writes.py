@@ -1021,7 +1021,7 @@ class TestTheCableFarEndCreate:
         if ignored:
             InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Gi")
         local_device = make_device(f"{name}-local")
-        make_interface(local_device, "eth0")
+        local_interface = make_interface(local_device, "eth0")
         remote_device = make_device(f"{name}-remote")
         remote_device.platform = platform
         remote_device.save()
@@ -1033,7 +1033,7 @@ class TestTheCableFarEndCreate:
             local_device, _row(local_port="eth0", remote_device=remote_device.name, remote_port_key=500), server_key
         )
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[local_device.pk])
-        return url, {"row_id": row_id, "server_key": server_key}, remote_device
+        return url, {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key}, remote_device
 
     @pytest.mark.parametrize("ignored", [True, False], ids=["remote-ignored", "control"])
     def test_an_ignored_remote_port_is_not_offered_or_created(self, client, librenms_server, settings, ignored):

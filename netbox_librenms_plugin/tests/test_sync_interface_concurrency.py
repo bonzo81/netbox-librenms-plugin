@@ -1135,7 +1135,7 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         server_key, owner, existing, remote, row_id = _cable_scenario(librenms_server, settings, "claim-cable")
         port_id = 500
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[owner.pk])
-        data = {"row_id": row_id, "server_key": server_key}
+        data = {"expected_local_id": existing.pk, "row_id": row_id, "server_key": server_key}
 
     def compete():
         close_old_connections()

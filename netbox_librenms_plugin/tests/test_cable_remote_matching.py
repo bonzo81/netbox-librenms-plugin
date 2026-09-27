@@ -1255,7 +1255,9 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, local_interface, remote_device, row_id = self._scenario("chk-no-port", librenms_server, settings)
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "chk-no-port", librenms_server, settings
+        )
         librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": []})
         client = _logged_in(make_superuser("remote-create-chk-no-port"))
 
