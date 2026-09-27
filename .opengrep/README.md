@@ -21,7 +21,7 @@ CodeRabbit backs off from opengrep in two separate cases, and this repo avoids b
    **`.opengrep/librenms-rules.yaml`**, so CodeRabbit keeps running its own default packs.
 2. **An opengrep step in GitHub Actions.** When CodeRabbit sees CI already running opengrep, it
    skips its own opengrep analysis and leaves the finding to the workflow. There is therefore
-   deliberately **no opengrep job** in `.github/workflows/`, even though one used to exist here.
+   deliberately **no opengrep job** in `.github/workflows/`.
 
 The cost of (2) is that these rules have no CI gate. They are enforced by the pre-push hook below,
 and CodeRabbit runs opengrep over the pull request itself. A push that bypasses the hook lands

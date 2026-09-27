@@ -2,7 +2,7 @@
 
 ## Overview
 
-The NetBox LibreNMS plugin now supports multiple LibreNMS servers. This allows you to:
+The NetBox LibreNMS plugin supports multiple LibreNMS servers. This allows you to:
 
 - Configure multiple LibreNMS instances in your NetBox configuration
 - Switch between different LibreNMS servers through the web interface

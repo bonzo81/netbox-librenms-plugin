@@ -52,7 +52,7 @@ The OOB IP is then created (or re-homed) assigned to the chosen interface and se
 
 Use when the existing NetBox device is currently linked to the **OOB controller** (its `librenms_id` points at the controller) and the incoming LibreNMS device is the **host** side.
 
-**Promote to host of *device*** re-points the linkage: the incoming host's LibreNMS ID becomes the device's `id`, and the previously-linked controller ID is demoted into the `oob` slot. No new device is created. A pre-promote modal lets you optionally override the device's **name**, **device type**, and **platform** — all default to **Keep current**, so the original promote behaviour is unchanged unless you explicitly choose **Use new**.
+**Promote to host of *device*** re-points the linkage: the incoming host's LibreNMS ID becomes the device's `id`, and the previously-linked controller ID is demoted into the `oob` slot. No new device is created. A pre-promote modal lets you optionally override the device's **name**, **device type**, and **platform**. Each field defaults to **Keep current**. Choose **Use new** to replace that value.
 
 ### Merge NetBox devices
 
