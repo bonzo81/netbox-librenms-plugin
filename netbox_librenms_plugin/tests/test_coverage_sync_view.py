@@ -447,6 +447,41 @@ class TestVirtualChassisInventory:
         assert result[0]["serial"] == "BCFB9793"
         assert result[0]["assigned_member"] == members[0]
 
+    @pytest.mark.parametrize("has_master", [True, False])
+    def test_member_inventory_uses_the_master_serial_rules(self, librenms_server, has_master):
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        vc, members = make_virtual_chassis_members("inventory-vendor", count=2)
+        master, member = members
+        other = Manufacturer.objects.create(name="Other inventory vendor", slug="other-inventory-vendor")
+        member.device_type = DeviceType.objects.create(manufacturer=other, model="Other member", slug="other-member")
+        member.serial = "MEMBER-SERIAL"
+        member.save()
+        if has_master:
+            vc.master = master
+            vc.save()
+        NormalizationRule.objects.create(
+            scope="serial",
+            manufacturer=master.device_type.manufacturer if has_master else other,
+            match_pattern=r"^VENDOR:(.+)$",
+            replacement=r"\1",
+        )
+        _register_device(
+            librenms_server,
+            6646,
+            master.name,
+            inventory=[{"entPhysicalClass": "chassis", "entPhysicalSerialNum": "VENDOR:MEMBER-SERIAL"}],
+        )
+        view = _device_view()
+        view.librenms_id = 6646
+
+        result = view._get_vc_inventory_serials(member)
+
+        assert result[0]["serial"] == member.serial
+        assert result[0]["assigned_member"] == member
+
     def test_the_serial_rules_load_once_for_the_whole_chassis_loop(self, librenms_server):
         """normalize_inventory_serial re-queries NormalizationRule per call unless rules are preloaded.
 

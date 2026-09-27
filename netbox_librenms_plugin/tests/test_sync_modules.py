@@ -9401,3 +9401,95 @@ def test_module_advisory_lock_sections_do_not_render_responses():
             continue
         violations.update(call.lineno for call in calls if ast.unparse(call.func) == "_modules_action_response")
     assert not violations, f"Response rendering holds a page advisory lock at lines {sorted(violations)}"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("selected_member, deleted", [(False, False), (True, False), (True, True)])
+def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(client, selected_member, deleted):
+    """An edit before lock acquisition must reach the selected install's ignore-policy planning."""
+    from concurrent.futures import ThreadPoolExecutor
+    from dcim.models import Device, Module
+    from django.core.cache import cache
+    from django.db import close_old_connections, connection
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    page = make_device_with_module_bays("selected-fresh-page", ["System"], serial="OLD-PAGE-SERIAL")
+    target = page
+    if selected_member:
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        target = make_device_with_module_bays("selected-fresh-member", ["System"], serial="OLD-MEMBER-SERIAL")
+        make_virtual_chassis("selected-fresh-chassis", page, target)
+    module_type = make_module_type("Branch System", manufacturer=page.device_type.manufacturer)
+    InventoryIgnoreRule.objects.all().delete()
+    InventoryIgnoreRule.objects.create(
+        name="Skip device system",
+        manufacturer=page.device_type.manufacturer,
+        match_type="serial_matches_device",
+        pattern="",
+        action="skip",
+    )
+    rows = [
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "System",
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "CURRENT-PAGE-SERIAL",
+        }
+    ]
+    key = CacheMixin().get_cache_key(page, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(page, rows))
+    changed = []
+
+    def change_serial():
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '2s'")
+            if deleted:
+                Device.objects.filter(pk=target.pk).delete()
+            else:
+                Device.objects.filter(pk=target.pk).update(serial="CURRENT-PAGE-SERIAL")
+        finally:
+            close_old_connections()
+
+    def edit_before_lock(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql and not changed:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(change_serial).result(timeout=5)
+            changed.append(True)
+        return execute(sql, params, many, context)
+
+    client.force_login(make_superuser("selected-fresh-page-user"))
+    try:
+        with connection.execute_wrapper(edit_before_lock):
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:install_selected", args=[page.pk]),
+                {
+                    "select": ["1"],
+                    "device_selection_1": str(target.pk),
+                    "server_key": "default",
+                    "inventory_binding": module_inventory_binding_token(
+                        page.pk,
+                        "default",
+                        "install_selected",
+                        {},
+                        None,
+                        module_inventory_snapshot_digest(rows),
+                    ),
+                },
+            )
+    finally:
+        cache.delete(key)
+    assert changed == [True]
+    assert response.status_code == 302
+    assert not Module.objects.filter(device__in=[page, target]).exists()
+    if deleted:
+        assert any("no longer available" in str(message) for message in response.wsgi_request._messages)

@@ -21,8 +21,9 @@ parametrizes over them, so **a new JSON with an `expected` block is a new passin
    - a **residual-PII warning** if the safety-net found anything to review,
    - an **Open prefilled issue** link.
 4. **Review the JSON.** Then open the issue and paste the JSON into the *Anonymized recording*
-   field of the data-shape issue form. If the JSON exceeds the 65,536-character issue limit,
-   use **Download** and attach the file to that field instead.
+   field of the data-shape issue form. Above 60,000 JSON characters, use **Download** and attach
+   the file to that field instead. This leaves room for the other fields within the
+   65,536-character issue-body limit.
 
 The plugin never submits on your behalf — you stay in control of what leaves your browser.
 

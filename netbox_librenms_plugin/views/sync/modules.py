@@ -1948,7 +1948,12 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             with transaction.atomic():
                 _lock_page_device_serials(page_device)
+                target_ids = {device.pk for _, device, _ in resolved_items}
+                current_serials = dict(Device.objects.filter(pk__in=target_ids).values_list("pk", "serial"))
+                if current_serials.keys() != target_ids:
+                    raise ValidationError("A selected device is no longer available. Refresh Modules and try again.")
                 for item, target_device, ignore_rules in resolved_items:
+                    target_device.serial = current_serials[target_device.pk]
                     if ignore_rules:
                         target_serial = (getattr(target_device, "serial", None) or "").strip()
                         rule_action = _check_ignore_rules(

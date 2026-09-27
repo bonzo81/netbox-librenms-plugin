@@ -119,16 +119,16 @@ def test_capture_preview_has_a_styled_vertical_scrollbar(page):
     assert thumb != "rgba(0, 0, 0, 0)"
 
 
-def test_capture_suggests_download_only_above_the_issue_body_limit(page):
+def test_capture_suggests_download_with_room_for_other_issue_fields(page):
     from django.template import Context, Engine
 
     template_path = Path(__file__).parents[2] / "templates/netbox_librenms_plugin/htmx/capture_data_shape.html"
     template = Engine().from_string(template_path.read_text(encoding="utf-8"))
-    for length in (65536, 65537):
+    for length in (60000, 60001, 65500):
         payload = '{"text":"' + "x" * (length - 11) + '"}'
         assert len(payload) == length
         page.set_content(template.render(Context({"recording_json": payload}, use_l10n=False)))
         assert page.locator("#capture-json").text_content() == payload
         assert page.locator("#capture-copy-btn").is_visible()
         assert page.locator("#capture-download-btn").is_visible()
-        assert page.locator("#capture-large-recording").count() == int(length > 65536)
+        assert page.locator("#capture-large-recording").count() == int(length > 60000)

@@ -36,9 +36,9 @@
       #capture-json::-webkit-scrollbar-track { background: var(--bs-secondary-bg, #e9ecef); }
       #capture-json::-webkit-scrollbar-thumb { background: var(--bs-secondary-color, #6c757d); border-radius: 6px; }
     </style>
-    {% if recording_json|length > 65536 %}
+    {% if recording_json|length > 60000 %}
     <div id="capture-large-recording" class="alert alert-info py-2 small">
-      This JSON exceeds GitHub's 65,536-character issue limit. Use Download, then attach the file to your issue.
+      This JSON is close to or above GitHub's 65,536-character issue-body limit. Use Download, then attach the file to your issue.
       You can still read and copy the JSON here.
     </div>
     {% endif %}

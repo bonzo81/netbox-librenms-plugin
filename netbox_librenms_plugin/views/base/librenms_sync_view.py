@@ -819,7 +819,8 @@ class BaseLibreNMSSyncView(
 
         # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
         # the stored member serial does not, so compare and display the normalized value.
-        manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
+        master = obj.virtual_chassis.master or obj
+        manufacturer = getattr(getattr(master, "device_type", None), "manufacturer", None)
         # One lazy cache for the whole loop: apply_normalization_rules fills it on the first
         # component that needs normalizing and reuses it for the rest, so a stack costs one read
         # instead of one per component and an inventory with no serials costs none.
