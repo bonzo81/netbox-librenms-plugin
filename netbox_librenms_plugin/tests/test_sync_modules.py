@@ -9236,3 +9236,57 @@ def test_branch_install_rejects_a_signed_root_whose_destination_changed(client):
     assert response.status_code == 302
     assert not Module.objects.filter(device__in=[page, member]).exists()
     assert any("destination changed" in str(message) for message in response.wsgi_request._messages)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("valid_binding", [True, False])
+def test_branch_install_releases_its_lock_before_rendering(client, valid_binding):
+    from dcim.models import Module
+    from django.core.cache import cache
+    from django.db import connection
+    from django.test.signals import template_rendered
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    page = make_device_with_module_bays("branch-render-page", ["Line Card"])
+    module_type = make_module_type("Branch Render Card", manufacturer=page.device_type.manufacturer)
+    rows = [
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Line Card",
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "RENDER-CARD",
+        }
+    ]
+    key = CacheMixin().get_cache_key(page, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(page, rows))
+    binding = module_inventory_binding_token(
+        page.pk, "default", "install_branch", {"parent_index": 1}, 1, module_inventory_snapshot_digest(rows)
+    )
+    observed = []
+
+    def record_transaction(sender, **kwargs):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'advisory'")
+            observed.append((connection.in_atomic_block, cursor.fetchone()[0]))
+
+    client.force_login(make_superuser("branch-render-user"))
+    template_rendered.connect(record_transaction)
+    try:
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:install_branch", args=[page.pk]),
+            {"parent_index": "1", "server_key": "default", "inventory_binding": binding if valid_binding else "stale"},
+            HTTP_HX_REQUEST="true",
+        )
+    finally:
+        template_rendered.disconnect(record_transaction)
+        cache.delete(key)
+    assert response.status_code == 200
+    assert Module.objects.filter(device=page).count() == int(valid_binding)
+    assert observed
+    assert set(observed) == {(False, 0)}

@@ -1054,7 +1054,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a module and all its installable descendants from LibreNMS inventory."""
 
-    @transaction.atomic
     def post(self, request, pk):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
@@ -1073,10 +1072,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        module_bays = self.restricted_queryset(ModuleBay)
-        changeable_components = _restricted_module_component_querysets(self)
-        changeable_interfaces = changeable_components[Interface]
-        deletable_interfaces = self.restricted_queryset(Interface, "delete")
         parent_index = request.POST.get("parent_index")
         server_key = self.resolve_posted_server_key_or_none(request.POST)
         if server_key is None:
@@ -1093,21 +1088,35 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, "Invalid parent inventory index.")
             return _modules_action_response(request, page_device, server_key)
 
+        self._install_branch(request, page_device, server_key, parent_index)
+        page_device.refresh_from_db()
+        return _modules_action_response(request, page_device, server_key)
+
+    @transaction.atomic
+    def _install_branch(self, request, page_device, server_key, parent_index):
+        """Plan and write under the page lock, then commit before response rendering."""
+        from dcim.models import Device, Interface, ModuleBay, ModuleType
+
+        module_bays = self.restricted_queryset(ModuleBay)
+        changeable_components = _restricted_module_component_querysets(self)
+        changeable_interfaces = changeable_components[Interface]
+        deletable_interfaces = self.restricted_queryset(Interface, "delete")
         _lock_page_device_serials(page_device)
         # The advisory lock does not refresh model instances loaded before its wait.
-        page_device = self.restrict_object_or_404(Device, pk=pk)
+        page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
         target_device, invalid_selected_device = _resolve_target_device_with_validation(
             page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
         )
         if invalid_selected_device:
             messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
-            return _modules_action_response(request, page_device, server_key)
+            return
 
         # Read and authenticate the snapshot through the current inventory owner.
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
         if cached_data is None:
-            return _modules_cache_missing_response(request, page_device, server_key)
+            messages.error(request, "No cached inventory data. Please refresh modules first.")
+            return
         if not module_inventory_binding_matches(
             request.POST.get("inventory_binding"),
             target_device.pk,
@@ -1121,7 +1130,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 request,
                 "Inventory action is stale or does not match this snapshot. Refresh Modules and try again.",
             )
-            return _modules_action_response(request, page_device, server_key)
+            return
 
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
@@ -1138,7 +1147,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         root = index_map.get(parent_index)
         if root is not None and ignore_contexts[_inventory_item_key(root)]["selected_device"].pk != target_device.pk:
             messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
-            return _modules_action_response(request, page_device, server_key)
+            return
         branch_items = self._collect_branch(
             parent_index,
             cached_data,
@@ -1153,11 +1162,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         )
         if destination_ids != permitted_ids:
             messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
-            return _modules_action_response(request, page_device, server_key)
+            return
 
         if not branch_items:
             messages.warning(request, "No installable items found in this branch.")
-            return _modules_action_response(request, page_device, server_key)
+            return
 
         # Load module types (with mappings)
         module_types = get_module_types_indexed()
@@ -1247,12 +1256,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Branch install failed: {e}")
-            return _modules_action_response(request, page_device, server_key)
+            return
 
         _report_install_results(request, installed, skipped, failed)
         if installed or bound_any:
             _schedule_module_cache_mutation(request, page_device, server_key)
-        return _modules_action_response(request, page_device, server_key)
 
     def _collect_branch(
         self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None, *, ignore_contexts=None

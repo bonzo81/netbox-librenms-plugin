@@ -498,3 +498,9 @@ def test_recording_issue_field_accepts_downloaded_attachments():
     assert "render" not in field["attributes"]
     assert "attach" in field["attributes"]["description"].lower()
     assert "Download" in field["attributes"]["description"]
+
+    guide = (root / "docs/development/contributing-data-shapes.md").read_text(encoding="utf-8")
+    capture_steps = guide.split("## Capturing a shape (contributors)")[1].split("## What gets anonymized")[0]
+    assert "paste" in capture_steps
+    assert "65,536" in capture_steps
+    assert "attach" in capture_steps

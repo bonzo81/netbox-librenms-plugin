@@ -712,11 +712,14 @@ def test_sap_compiler_keeps_valid_patterns_after_an_uncompilable_repeat():
 @pytest.mark.parametrize("pattern,name", [(r"^(a?){30}a{30}$", "a" * 30), (r"^((a|aa))+$", "a" * 45 + "!")])
 @pytest.mark.parametrize("pipeline", ["signature", "replay"])
 @pytest.mark.parametrize("map_name", ["lag_patterns", "sap_patterns"])
-def test_recording_regex_pipeline_completes_with_ambiguous_patterns(pattern, name, pipeline, map_name):
+def test_recording_regex_pipeline_completes_with_ambiguous_patterns(pattern, name, pipeline, map_name, monkeypatch):
     """Untrusted patterns cannot exhaust either classification or real HTTP replay."""
     import json
+    import os
     import subprocess
     import sys
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
 
     script = r"""
 import json, sys
@@ -768,6 +771,7 @@ else:
         capture_output=True,
         text=True,
         timeout=15,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path)},
     )
 
 
