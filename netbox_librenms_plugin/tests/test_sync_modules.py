@@ -9493,3 +9493,5 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
     assert not Module.objects.filter(device__in=[page, target]).exists()
     if deleted:
         assert any("no longer available" in str(message) for message in response.wsgi_request._messages)
+    else:
+        assert any("matched ignore rule" in str(message) for message in response.wsgi_request._messages)

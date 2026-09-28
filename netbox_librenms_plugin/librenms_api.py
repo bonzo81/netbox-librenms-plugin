@@ -377,8 +377,6 @@ class LibreNMSAPI:
                         key,
                     )
                     continue
-                if not config.get("librenms_url") or not config.get("api_token"):
-                    continue
                 result[key] = config.get("display_name", key)
             return result
         else:
