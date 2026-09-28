@@ -504,3 +504,44 @@ def test_recording_issue_field_accepts_downloaded_attachments():
     assert "paste" in capture_steps
     assert "65,536" in capture_steps
     assert "attach" in capture_steps
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["ifName", "ifDescr"])
+@pytest.mark.parametrize("surrogate", [0xD800, 0xDC00])
+def test_capture_anonymizes_unencodable_port_names(client, settings, recording_server, field, surrogate):
+    import json
+    from copy import deepcopy
+
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    recording = load_recording("cisco-stackwise-3member")
+    recording["responses"]["GET /api/v0/devices/1000/ports"]["ports"].append(
+        {
+            "port_id": 1,
+            "ifName": "Ethernet1",
+            "ifDescr": "Ethernet1",
+            "ifType": "ethernetCsmacd",
+            field: "Po" + chr(surrogate),
+        }
+    )
+    server, _api = recording_server(recording)
+    config = deepcopy(settings.PLUGINS_CONFIG)
+    config["netbox_librenms_plugin"]["servers"] = {
+        "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
+    }
+    settings.PLUGINS_CONFIG = config
+    device = make_device("capture-unencodable", librenms_cf={"test": {"id": 1000}})
+    client.force_login(make_superuser("capture-unencodable-user"))
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": device.pk}),
+        {"server_key": "test"},
+    )
+    assert response.status_code == 200
+    assert b"Anonymized recording" in response.content
+    anonymized = json.loads(response.context["recording_json"])
+    ports = anonymized["responses"]["GET /api/v0/devices/1000/ports"]["ports"]
+    assert any(port[field].startswith("iface-") for port in ports)
+    json.dumps(anonymized, ensure_ascii=False).encode("utf-8")

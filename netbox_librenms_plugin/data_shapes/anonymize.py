@@ -364,7 +364,8 @@ def _anon_oui(value, salt):
 
 def _hash(value, salt, length=6):
     """Return a stable short hex digest of *value* (salted), for deterministic pseudonyms."""
-    return hashlib.sha256(f"{salt}::{value}".encode()).hexdigest()[:length]
+    # Preserve lone surrogates in the hash input without exposing them in the output.
+    return hashlib.sha256(f"{salt}::{value}".encode("utf-8", errors="surrogatepass")).hexdigest()[:length]
 
 
 # A pseudonymized OS token, e.g. "os-1a2b3c". Used to recognize an already-anonymized value.
