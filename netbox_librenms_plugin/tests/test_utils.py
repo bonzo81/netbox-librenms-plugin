@@ -418,11 +418,11 @@ class TestConversionHelpers:
             {"port_id": 20, "ifDescr": "Duplicate ID"},
             {"port_id": 30, "ifDescr": "Unique"},
             {"port_id": 40, "ifDescr": "Unique", "_source": "oob"},
+            {"port_id": 50, "ifDescr": "Distinct"},
         ]
 
-        # Port 40 is the OOB controller's own "Unique": a different LibreNMS device, so it
-        # neither collides with host port 30 nor costs port 30 its unambiguous name.
-        assert get_interface_port_identity_sets(ports, "ifDescr") == ({10, 11, 30, 40}, {30, 40})
+        # Shared names require a port-ID binding even when their source devices differ.
+        assert get_interface_port_identity_sets(ports, "ifDescr") == ({10, 11, 30, 40, 50}, {50})
 
     def test_normalize_relationship_maps_normalizes_and_guards(self):
         from netbox_librenms_plugin.utils import normalize_relationship_maps

@@ -3819,7 +3819,6 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         return view
 
     @pytest.mark.django_db
-    @pytest.mark.django_db
     def test_an_oob_controller_port_syncs_onto_the_host_device(self):
         """A server and its BMC are two LibreNMS devices but ONE device in NetBox.
 
@@ -5756,3 +5755,53 @@ def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
     aggregate.refresh_from_db()
     assert member.lag_id == aggregate.pk
     assert aggregate.type == "lag"
+
+
+@pytest.mark.parametrize("endpoint", ["inline", "bulk"])
+@pytest.mark.parametrize("same_oob_name, bound_parent", [(True, False), (True, True), (False, False)])
+def test_relationship_name_fallback_checks_host_and_oob_rows(client, settings, endpoint, same_oob_name, bound_parent):
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser, map_device_to_librenms
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
+
+    configure_default_librenms_server(settings)
+    device = map_device_to_librenms(make_device("cross-source-parent"), 1, server_key="default")
+    child = make_interface(device, "Ethernet1.100", iface_type="virtual")
+    parent = make_interface(device, "Ethernet1")
+    set_librenms_device_id(child, 10, "default")
+    child.save()
+    if bound_parent:
+        set_librenms_device_id(parent, 20, "default")
+        parent.save()
+    view = SyncInterfaceParentView()
+    key = _cache_relationship(view, device, "sub_interfaces", 10, 20, child.name, parent.name)
+    snapshot = cache.get(key)
+    snapshot["ports"].append(
+        {"port_id": 30, "ifName": parent.name if same_oob_name else "Management", "_source": "oob"}
+    )
+    for port in snapshot["ports"]:
+        port.update(ifDescr=port["ifName"], ifType="ethernetCsmacd", ifSpeed=1_000_000_000)
+    cache.set(key, snapshot)
+    client.force_login(make_superuser("cross-source-parent-user"))
+    try:
+        action = "sync_interface_parent" if endpoint == "inline" else "sync_selected_interfaces"
+        data = (
+            {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName"}
+            if endpoint == "inline"
+            else {"select": ["10"], "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"]}
+        )
+        response = client.post(
+            reverse(
+                f"plugins:netbox_librenms_plugin:{action}", kwargs={"object_type": "device", "object_id": device.pk}
+            ),
+            {**data, "server_key": "default"},
+        )
+    finally:
+        cache.delete(key)
+    allowed = bound_parent or not same_oob_name
+    assert response.status_code == (302 if endpoint == "bulk" else 200 if allowed else 404)
+    child.refresh_from_db()
+    assert child.parent_id == (parent.pk if allowed else None)
