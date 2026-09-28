@@ -314,3 +314,43 @@ class TestInheritedVlansAreMarkedInTheTable:
         )
 
         assert "Inherited from" not in rendered
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "modes, tagged, expected_mode",
+    [
+        (("access", "tagged"), [], None),
+        (("tagged", "access"), [], None),
+        ((None, "access"), [], "access"),
+        (("access", "tagged"), [200], "tagged"),
+        (("tagged", "access"), [200], "tagged"),
+        (("tagged", "tagged"), [], "tagged"),
+    ],
+)
+def test_lag_vlan_rollup_agrees_with_the_database_writer(modes, tagged, expected_mode):
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.utils import apply_lag_vlan_fill
+
+    writer, aggregate, maps, vlans = _fixture("effective-rollup", [100, 200])
+    aggregate.type = "lag"
+    aggregate.save()
+    members = [make_interface(aggregate.device, f"Ethernet{index}") for index in (1, 2)]
+    rows = [
+        _port(1, aggregate.name),
+        _port(2, members[0].name, mode=modes[0], untagged_vlan=100, tagged_vlans=tagged),
+        _port(3, members[1].name, mode=modes[1], untagged_vlan=100, tagged_vlans=tagged),
+    ]
+    apply_lag_vlan_fill(rows, {2: 1, 3: 1})
+    for interface, row in zip([aggregate, *members], rows, strict=True):
+        writer._update_interface_vlan_assignment(interface, row, None, maps)
+        interface.refresh_from_db()
+    assert aggregate.mode == expected_mode
+    assert aggregate.untagged_vlan_id == (vlans[0].pk if expected_mode else None)
+    assert list(aggregate.tagged_vlans.values_list("vid", flat=True)) == tagged
+    if expected_mode:
+        assert all(member.mode == aggregate.mode for member in members)
+        assert rows[0]["vlan_inherited_from"] == members[0].name
+    else:
+        assert {member.mode for member in members} == {"access", "tagged"}
+        assert "vlan_inherited_from" not in rows[0]

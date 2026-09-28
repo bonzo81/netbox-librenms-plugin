@@ -5131,6 +5131,15 @@ def select_interface_type_mapping(mappings, speed):
     return best or wildcard
 
 
+def effective_vlan_mode(vlan_data):
+    """Return the NetBox mode implied by the reported mode and VLAN assignment."""
+    if vlan_data.get("tagged_vlans") or vlan_data.get("mode") == "tagged":
+        return "tagged"
+    if vlan_data.get("untagged_vlan"):
+        return "access"
+    return None
+
+
 def _row_vlan_shape(port):
     """Return one row's VLAN assignment as a hashable, comparable ``(untagged, tagged)`` pair."""
     return port.get("untagged_vlan"), tuple(sorted(port.get("tagged_vlans") or []))
@@ -5200,6 +5209,6 @@ def apply_lag_vlan_fill(ports, lag_members, *, interface_name_field="ifName"):
         # members that have none, so every member must agree on one set.
         if any(row is None for row in member_rows) or not all(carries_own.get(mid) for mid in member_ids):
             continue
-        if len({_row_vlan_shape(row) for row in member_rows}) != 1:
+        if len({(_row_vlan_shape(row), effective_vlan_mode(row)) for row in member_rows}) != 1:
             continue
         _copy_row_vlan_data(member_rows[0], aggregate, interface_name_field)
