@@ -349,7 +349,9 @@ def test_lag_vlan_rollup_agrees_with_the_database_writer(modes, tagged, expected
     ]
     apply_lag_vlan_fill(rows, {2: 1, 3: 1})
     for interface, row in zip([aggregate, *members], rows, strict=True):
-        writer._update_interface_vlan_assignment(interface, row, None, maps)
+        writer._update_interface_vlan_assignment(
+            interface, row, None, maps, fresh_read_queryset=Interface.objects.all()
+        )
         interface.refresh_from_db()
     assert aggregate.mode == expected_mode
     assert aggregate.untagged_vlan_id == (vlans[0].pk if expected_mode else None)
