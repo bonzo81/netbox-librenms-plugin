@@ -737,7 +737,10 @@ class LibreNMSStubServer(MockLibreNMSServer):
             field = field_by_type.get(filter_type)
             if field:
                 needle = str(filter_value).casefold()
-                devices = [device for device in devices if needle in str(device.get(field, "")).casefold()]
+                if filter_type == "hostname":
+                    devices = [device for device in devices if needle in str(device.get(field, "")).casefold()]
+                else:
+                    devices = [device for device in devices if needle == str(device.get(field, "")).casefold()]
 
         return 200, {"status": "ok", "count": len(devices), "devices": devices}
 

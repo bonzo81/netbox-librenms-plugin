@@ -980,3 +980,26 @@ def test_stub_rejected_alias_update_does_not_create_a_location():
         assert _request(server, "GET", "/api/v0/resources/locations").json() == before
     finally:
         server.stop()
+
+
+@pytest.mark.parametrize("field", ["device_id", "location_id", "os", "sysName", "type"])
+def test_stub_device_filters_match_complete_values(field):
+    recordings = [_location_recording(device_id, f"Room {device_id}") for device_id in [*range(1, 13), 1000]]
+    for recording in recordings:
+        device_id = recording["device_id"]
+        device = recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]
+        device.update(os=f"os-{device_id}", sysName=f"node-{device_id}", type=f"type-{device_id}")
+    server = LibreNMSStubServer(recordings=recordings, api_token=TOKEN).start()
+    try:
+        target = _request(server, "GET", "/api/v0/devices/1").json()["devices"][0]
+        response = _request(server, "GET", "/api/v0/devices", params={"type": field, "query": target[field]})
+        assert response.status_code == 200
+        assert [device["device_id"] for device in response.json()["devices"]] == [1]
+        assert response.json()["count"] == 1
+        if field in {"device_id", "location_id"}:
+            missing = _request(server, "GET", "/api/v0/devices", params={"type": field, "query": "99"})
+            assert missing.json()["devices"] == []
+        hostname = _request(server, "GET", "/api/v0/devices", params={"type": "hostname", "query": "DEVICE-1"})
+        assert len(hostname.json()["devices"]) > 1
+    finally:
+        server.stop()

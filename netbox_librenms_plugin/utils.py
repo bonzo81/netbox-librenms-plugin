@@ -470,13 +470,12 @@ def interface_name_fallback_matches_port(interface, port_id, server_key) -> bool
 
 
 def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[int], set[int]]:
-    """Return unique host and OOB port IDs and the subset with a unique display name per source."""
+    """Return unique host and OOB port IDs and the subset with a unique display name across all rows."""
     if not is_list_of_dicts(ports):
         return set(), set()
 
     port_id_counts = {}
     port_names = {}
-    port_sources = {}
     name_counts = {}
     for port in ports:
         # OOB rows count here too: they sync onto this device, and port_id being a LibreNMS
@@ -485,15 +484,11 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
         interface_name = port.get(interface_name_field)
         if port_id is None:
             continue
-        source = port.get("_source")
         port_id_counts[port_id] = port_id_counts.get(port_id, 0) + 1
         port_names[port_id] = interface_name
-        port_sources[port_id] = source
         if isinstance(interface_name, str) and interface_name.strip():
-            # Count names WITHIN a source. The host and its OOB controller are separate LibreNMS
-            # devices, so the same name on both is two namespaces, not one ambiguous name; a
-            # shared count would strip the host row of its own unambiguous name.
-            name_counts[(source, interface_name)] = name_counts.get((source, interface_name), 0) + 1
+            # Host and OOB rows share the target NetBox device's interface namespace.
+            name_counts[interface_name] = name_counts.get(interface_name, 0) + 1
 
     unique_port_ids = {port_id for port_id, count in port_id_counts.items() if count == 1}
     unambiguous_name_port_ids = {
@@ -501,7 +496,7 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
         for port_id in unique_port_ids
         if isinstance(port_names[port_id], str)
         and port_names[port_id].strip()
-        and name_counts.get((port_sources[port_id], port_names[port_id])) == 1
+        and name_counts.get(port_names[port_id]) == 1
     }
     return unique_port_ids, unambiguous_name_port_ids
 
