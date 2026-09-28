@@ -13,7 +13,7 @@ from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
-from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, is_list_of_dicts
+from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, effective_vlan_mode, is_list_of_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -1679,16 +1679,7 @@ class VlanAssignmentMixin:
                 return vlan_group_map.get(str(vid), "")
             return single_group_id or ""
 
-        # Determine mode. LibreNMS states it in ifTrunk (parse_port_vlan_data puts it on the
-        # row as "mode"); the VLAN lists only refine it. Deriving the mode from the lists alone
-        # wrote "access" for a trunk that happened to carry one untagged VLAN and no tagged ones.
-        if tagged_vids or vlan_data.get("mode") == "tagged":
-            interface.mode = "tagged"
-        elif untagged_vid:
-            interface.mode = "access"
-        else:
-            # NetBox stores "no mode" as NULL, so clearing to "" would report a change every sync.
-            interface.mode = None
+        interface.mode = effective_vlan_mode(vlan_data)
 
         # Set untagged VLAN
         untagged_set = None
