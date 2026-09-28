@@ -153,7 +153,11 @@ def name_matches_lag_pattern(name, compiled_lag_patterns):
     """Return whether *name* matches any compiled LAG pattern (length-bounded — see _MAX_LAG_NAME_LEN)."""
     if not isinstance(name, str) or len(name) > _MAX_LAG_NAME_LEN:
         return False
-    return any(pat.search(name) for pat in compiled_lag_patterns)
+    try:
+        return any(pat.search(name) for pat in compiled_lag_patterns)
+    except UnicodeEncodeError:
+        # RE2 requires a UTF-8 subject, so a lone surrogate cannot match.
+        return False
 
 
 def port_is_lag(port, compiled_lag_patterns):

@@ -825,3 +825,56 @@ def test_recording_regex_bounds_pattern_count_and_length():
 
     assert len(compile_lag_patterns({"lag_patterns": {str(i): "^bond[0-9]+$" for i in range(101)}})) == 100
     assert compile_lag_patterns({"lag_patterns": {"long": "a" * 201, "nonstring": 3}}) == []
+
+
+@pytest.mark.parametrize("kind", ["lag", "sap", "bridge"])
+def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
+    from netbox_librenms_plugin.tests.conftest import make_recording_api
+    from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+
+    recording = {
+        "schema_version": 1,
+        "name": "unencodable-name",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [
+                    {"port_id": 10, "ifName": "Ethernet1", "ifDescr": "Ethernet1", "ifType": "ethernetCsmacd"},
+                    {
+                        "port_id": 20,
+                        "ifName": "Po" + chr(0xD800),
+                        "ifDescr": "Po" + chr(0xDC00),
+                        "ifType": "ieee8023adLag" if kind == "sap" else "propVirtual",
+                    },
+                ],
+            },
+            "GET /api/v0/devices/1/port_stack": {
+                "status": "ok",
+                "mappings": [
+                    {"high_port_id": 20, "low_port_id": 10},
+                ],
+            },
+        },
+    }
+    patterns = {f"compiled_{name}_patterns": [] for name in ("lag", "sap", "bridge")}
+    patterns[f"compiled_{kind}_patterns"] = compile_lag_patterns({"lag_patterns": {"example": r"^Po\d+$"}})
+    server = MockLibreNMSServer()
+    server.start()
+    try:
+        server.load_recording(recording)
+        api = make_recording_api(server.url)
+        ok, payload = api.get_ports(1)
+        assert ok
+        ok, stack = api.get_port_stack(1)
+        assert ok
+        result = api.resolve_port_relationships(payload["ports"], stack, **patterns)
+        assert result["lag_members"] == ({10: 20} if kind == "sap" else {})
+        assert result["bridge_members"] == {}
+        payload["ports"][1].update(ifName="Po12", ifDescr="Po12")
+        result = api.resolve_port_relationships(payload["ports"], stack, **patterns)
+        assert result["lag_members"] == ({10: 20} if kind == "lag" else {})
+        assert result["bridge_members"] == ({10: 20} if kind == "bridge" else {})
+    finally:
+        server.stop()

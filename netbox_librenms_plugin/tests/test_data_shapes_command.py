@@ -245,3 +245,27 @@ def test_rebuild_manifest_refuses_to_write_a_manifest_it_could_not_load(tmp_path
         _run(**{"rebuild_manifest": True})
 
     assert json.loads(manifest_path.read_text()) == original
+
+
+@pytest.mark.parametrize("field", ["ifName", "ifDescr"])
+@pytest.mark.parametrize("surrogate", [0xD800, 0xDC00])
+@pytest.mark.parametrize("pipeline", ["validate", "compress"])
+def test_recording_pipeline_treats_unencodable_port_names_as_non_matches(tmp_path, field, surrogate, pipeline):
+    from netbox_librenms_plugin.data_shapes.compress import compress_recording
+    from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, name_matches_lag_pattern
+
+    recording = anonymize_recording(load_recording("cisco-stackwise-3member"))
+    recording["lag_patterns"] = {"example": r"^Po\d+$"}
+    ports = recording["responses"]["GET /api/v0/devices/1000/ports"]["ports"]
+    ports.append({"port_id": 1, "ifName": "Ethernet1", "ifDescr": "Ethernet1", "ifType": "ethernetCsmacd"})
+    ports[0][field] = "Po" + chr(surrogate)
+    path = tmp_path / "unencodable-name.json"
+    path.write_text(json.dumps(recording), encoding="utf-8")
+    if pipeline == "validate":
+        assert "schema-valid and PII-clean" in _run(validate=str(path))
+    else:
+        compressed = compress_recording(json.loads(path.read_text(encoding="utf-8")))
+        assert compressed["responses"]["GET /api/v0/devices/1000/ports"]["ports"]
+    patterns = compile_lag_patterns(recording)
+    assert not name_matches_lag_pattern(ports[0][field], patterns)
+    assert name_matches_lag_pattern("Po12", patterns)

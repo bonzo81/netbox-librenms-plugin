@@ -1000,6 +1000,15 @@ class LibreNMSAPI:
                     except (_re.error, TypeError) as exc:
                         logger.warning("Skipping invalid bridge name pattern %r: %s", pattern_str, exc)
 
+        def _matches_name_patterns(name, patterns) -> bool:
+            if not isinstance(name, str):
+                return False
+            try:
+                return any(pattern.search(name) for pattern in patterns)
+            except UnicodeEncodeError:
+                # Recording patterns use RE2, which requires a UTF-8 subject.
+                return False
+
         def _has_sap_name(*ports) -> bool:
             """Return whether any name on these ports matches an excluded SAP pattern."""
             names = tuple(
@@ -1008,7 +1017,7 @@ class LibreNMSAPI:
                 for field in INTERFACE_NAME_FIELDS
                 if isinstance(name := port.get(field), str) and name
             )
-            return any(pattern.search(name) for pattern in compiled_sap_patterns for name in names)
+            return any(_matches_name_patterns(name, compiled_sap_patterns) for name in names)
 
         # Validate and remove SAP rows once so fallback cannot reconsider them.
         filtered_port_pairs = []
@@ -1068,14 +1077,12 @@ class LibreNMSAPI:
                 if port.get("ifType") == "ieee8023adLag":
                     return True
                 name = port.get(field)
-                return isinstance(name, str) and any(pattern.search(name) for pattern in compiled_patterns)
+                return _matches_name_patterns(name, compiled_patterns)
 
             def _is_bridge(port: dict) -> bool:
                 return any(
-                    pattern.search(name)
+                    _matches_name_patterns(port.get(name_field), compiled_bridge_patterns)
                     for name_field in INTERFACE_NAME_FIELDS
-                    if isinstance(name := port.get(name_field), str)
-                    for pattern in compiled_bridge_patterns
                 )
 
             def _relate(mapping: dict, conflicted_keys: set, key_port: dict, value_port: dict) -> None:
