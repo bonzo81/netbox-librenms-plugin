@@ -12,6 +12,7 @@ manager directly:
 
 import argparse
 import copy
+import ipaddress
 import json
 import threading
 from collections import deque
@@ -463,8 +464,16 @@ class LibreNMSStubServer(MockLibreNMSServer):
         normalised = copy.deepcopy(device) if isinstance(device, dict) else {}
         normalised["device_id"] = device_id
         normalised["hostname"] = normalised.get("hostname") or f"device-{device_id}.example.test"
-        normalised["sysName"] = normalised.get("sysName") or normalised["hostname"].split(".", 1)[0]
-        normalised["ip"] = normalised.get("ip") or f"198.51.100.{device_id % 254 + 1}"
+        hostname = normalised["hostname"]
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            inferred_name = hostname.split(".", 1)[0]
+            inferred_ip = f"198.51.100.{device_id % 254 + 1}"
+        else:
+            inferred_name = inferred_ip = hostname
+        normalised["sysName"] = normalised.get("sysName") or inferred_name
+        normalised["ip"] = normalised.get("ip") or inferred_ip
         normalised["hardware"] = normalised.get("hardware") or f"MODEL-STUB-{device_id}"
         normalised["os"] = normalised.get("os") or "stub-os"
         normalised["serial"] = normalised.get("serial") or f"SN-STUB-{device_id}"
@@ -574,7 +583,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
         if not isinstance(ports, list):
             raise ValueError(f"OOB recording for device_id {oob_id} has no ports response")
 
-        host_name = host_device.get("sysName") or host_device["hostname"].split(".", 1)[0]
+        host_name = host_device["sysName"]
         controller = self._normalise_device(
             {
                 "hostname": f"{host_name}-oob.example.test",
@@ -750,16 +759,11 @@ class LibreNMSStubServer(MockLibreNMSServer):
 
         hostname = body["hostname"].strip()
         with self._lock:
-            requested_aliases = (hostname, hostname.split(".", 1)[0])
-            if any(str(alias) in self._aliases for alias in requested_aliases):
-                return 409, {"status": "error", "message": "Device lookup alias already exists"}
-
             device_id = self._next_device_id
             for _ in range(254):
                 device = self._normalise_device(
                     {
                         "hostname": hostname,
-                        "sysName": hostname.split(".", 1)[0],
                         "os": "stub-os",
                         "hardware": "MODEL-STUB",
                         "location": "Lab",
@@ -768,6 +772,9 @@ class LibreNMSStubServer(MockLibreNMSServer):
                     },
                     device_id,
                 )
+                requested_aliases = (device["hostname"], device["sysName"])
+                if any(str(alias) in self._aliases for alias in requested_aliases):
+                    return 409, {"status": "error", "message": "Device lookup alias already exists"}
                 generated_aliases = (device_id, device["ip"])
                 if not any(str(alias) in self._aliases for alias in generated_aliases):
                     break

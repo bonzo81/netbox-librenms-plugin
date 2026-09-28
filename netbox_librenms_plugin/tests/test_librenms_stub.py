@@ -1003,3 +1003,33 @@ def test_stub_device_filters_match_complete_values(field):
         assert len(hostname.json()["devices"]) > 1
     finally:
         server.stop()
+
+
+@pytest.mark.parametrize("source", ["add", "recording"])
+@pytest.mark.parametrize("hostnames", [("198.18.0.1", "198.18.0.2"), ("2001:db8::1", "2001:db8::2")])
+def test_stub_preserves_ip_hostnames_as_complete_aliases(source, hostnames):
+    recordings = [_location_recording(198, "Lab")]
+    if source == "recording":
+        for device_id, hostname in enumerate(hostnames, start=199):
+            recording = _location_recording(device_id, "Lab")
+            device = recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]
+            device["hostname"] = hostname
+            device.pop("sysName", None)
+            device.pop("ip", None)
+            recordings.append(recording)
+    server = LibreNMSStubServer(recordings=recordings, api_token=TOKEN)
+    server.start()
+    try:
+        for hostname in hostnames:
+            if source == "add":
+                response = _request(server, "POST", "/api/v0/devices", json={"hostname": hostname})
+                assert response.status_code == 200, response.text
+            response = _request(server, "GET", f"/api/v0/devices/{hostname}")
+            assert response.status_code == 200, response.text
+            device = response.json()["devices"][0]
+            assert device["hostname"] == device["sysName"] == device["ip"] == hostname
+        assert _request(server, "POST", "/api/v0/devices", json={"hostname": hostnames[0]}).status_code == 409
+        assert len(_request(server, "GET", "/api/v0/devices").json()["devices"]) == 3
+        assert _request(server, "GET", "/api/v0/devices/198").json()["devices"][0]["device_id"] == 198
+    finally:
+        server.stop()
