@@ -370,6 +370,28 @@ class TestBulkImportVms:
         assert result["failed"] == []
         assert result["success"][0]["device"].name == "prefetched-vm"
 
+    def test_a_held_identity_claim_fails_the_row_with_the_fixed_busy_text(self, librenms_api):
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+        from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE
+        from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+
+        api, _server = librenms_api
+        cluster = make_cluster("bulk-busy-cluster")
+
+        with held_device_claim(SERVER_KEY, 6209):
+            result = bulk_import_vms(
+                {6209: {"placement": "cluster", "cluster_id": cluster.pk}},
+                api,
+                libre_devices_cache={6209: _payload(6209, hostname="busy-vm")},
+                user=_vm_writer("busy"),
+            )
+
+        assert result["success"] == []
+        assert result["failed"] == [{"device_id": 6209, "error": IDENTITY_BUSY_MESSAGE}]
+        assert not VirtualMachine.objects.filter(name="busy-vm").exists()
+
     def test_deleted_cluster_selection_fails_before_vm_creation(self, librenms_api):
         from virtualization.models import Cluster, VirtualMachine
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms

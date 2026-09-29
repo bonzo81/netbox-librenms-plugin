@@ -2363,6 +2363,44 @@ class TestDeviceValidationDetailsTemplate:
         )
 
 
+@pytest.mark.django_db
+def test_a_device_import_that_meets_a_held_claim_reports_the_fixed_busy_text(settings):
+    """The import result names no owner and no ID: it says only that another operation is assigning it."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+    from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE
+    from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+    from netbox_librenms_plugin.tests.conftest import _shared_infra
+    from netbox_librenms_plugin.tests.import_server_helpers import configure_servers
+
+    configure_servers(settings)
+    site, _manufacturer, device_type, role = _shared_infra()
+    validation = {
+        "existing_device": None,
+        "resolved_name": "held-claim-import-device",
+        "site": {"found": True, "site": site},
+        "device_type": {"matched": True, "device_type": device_type},
+        "device_role": {"found": True, "role": role},
+        "platform": {"found": False, "platform": None},
+        "rack": {"rack": None},
+    }
+    libre_device = {"device_id": 61004, "hostname": "held-claim-import-device", "serial": "-", "status": 1}
+
+    with held_device_claim("primary", 61004):
+        result = import_single_device(
+            61004,
+            server_key="primary",
+            validation=validation,
+            libre_device=libre_device,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+        )
+
+    assert result["success"] is False
+    assert result["error"] == IDENTITY_BUSY_MESSAGE
+    assert not Device.objects.filter(name="held-claim-import-device").exists()
+
+
 @pytest.mark.django_db(transaction=True)
 def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     """Concurrent Device and VM imports must leave one owner for a server-scoped ID."""
