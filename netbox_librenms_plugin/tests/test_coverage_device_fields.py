@@ -6,14 +6,22 @@ import pytest
 from django.core.cache import cache
 from django.urls import reverse
 
+from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
     make_virtual_chassis,
     make_vm,
+    transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, make_user_with_perms, message_texts
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_update_logged,
+    make_user_with_perms,
+    message_texts,
+    messages_on,
+)
 
 
 SERVER_KEY = "default"
@@ -631,6 +639,36 @@ class TestAssignVCSerialView:
         assert_update_logged(first, "serial", "", "FIRST-VC-SERIAL")
         assert_update_logged(second, "serial", "", "SECOND-VC-SERIAL")
 
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_on_one_member_changes_no_member(self, logged_in_client, librenms_server):
+        """Another session holds the second member's row, so the whole POST gives the try-again answer."""
+        from dcim.models import Device
+
+        first = make_device("vc-serial-lock-first")
+        second = make_device("vc-serial-lock-second")
+        make_virtual_chassis("vc-serial-lock", first, second)
+
+        with second_connection() as other:
+            lock_row(other, Device, second.pk)
+            with lock_timeout(200):
+                response = _post(
+                    logged_in_client,
+                    "assign_vc_serial",
+                    first,
+                    {
+                        "serial_1": "FIRST-LOCKED-SERIAL",
+                        "member_id_1": str(first.pk),
+                        "serial_2": "SECOND-LOCKED-SERIAL",
+                        "member_id_2": str(second.pk),
+                    },
+                )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("", "")
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+
     def test_wrong_chassis_and_missing_member_are_both_reported(self, logged_in_client, librenms_server):
         root = make_device("vc-serial-root")
         sibling = make_device("vc-serial-sibling")
@@ -647,6 +685,8 @@ class TestAssignVCSerialView:
                 "member_id_1": str(outsider.pk),
                 "serial_2": "MISSING-SERIAL",
                 "member_id_2": str(outsider.pk + 10000),
+                "serial_3": "GARBLED-SERIAL",
+                "member_id_3": "not-a-number",
             },
         )
 
@@ -654,7 +694,8 @@ class TestAssignVCSerialView:
         assert outsider.serial == ""
         errors = _messages(response, "error")
         assert any("not part of the same virtual chassis" in text for text in errors)
-        assert any("not found" in text for text in errors)
+        assert f"Device with ID {outsider.pk + 10000} not found" in errors
+        assert "Device with ID not-a-number not found" in errors
 
     def test_the_redirect_keeps_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """A multi-server user must land back on the server and tab the modal was opened from."""

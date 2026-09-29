@@ -25,7 +25,7 @@ from netbox_librenms_plugin.server_mappings import (
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings
 from netbox_librenms_plugin.sync_cache import SyncTab
-from netbox_librenms_plugin.transactions import update_existing_row
+from netbox_librenms_plugin.transactions import run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     find_by_librenms_id,
@@ -828,30 +828,8 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             messages.error(request, "Device is not part of a virtual chassis")
             return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
-        assignments_made = 0
-        errors = []
-
-        counter = 1
-        while f"serial_{counter}" in request.POST:
-            serial = normalize_serial(request.POST.get(f"serial_{counter}"))
-            member_id = request.POST.get(f"member_id_{counter}")
-
-            if not member_id:
-                counter += 1
-                continue
-
-            try:
-                if error := self._assign_member_serial(device, member_id, serial):
-                    errors.append(error)
-                else:
-                    assignments_made += 1
-            except Device.DoesNotExist:
-                errors.append(f"Device with ID {member_id} not found")
-            except Exception as exc:  # pragma: no cover - defensive guard
-                detail = exception_text_for(exc, Device, request.user)
-                errors.append(f"Error assigning serial to member {member_id}: {detail}")
-
-            counter += 1
+        # One transaction for all members: a lock conflict rolls back every member, and the runner retries once.
+        assignments_made, errors = run_transaction(lambda: self._assign_serials(device, request.POST))
 
         if assignments_made > 0:
             messages.success(
@@ -867,6 +845,33 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             messages.info(request, "No serial assignments were made")
 
         return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
+
+    def _assign_serials(self, device, data):
+        """Run one attempt: write each posted member serial; return the count of writes and the error texts."""
+        assignments_made = 0
+        errors = []
+        counter = 0
+        while f"serial_{counter + 1}" in data:
+            counter += 1
+            serial = normalize_serial(data.get(f"serial_{counter}"))
+            member_id = data.get(f"member_id_{counter}")
+            if not member_id:
+                continue
+            try:
+                member_pk = int(member_id)
+            except ValueError:
+                errors.append(f"Device with ID {member_id} not found")
+                continue
+            try:
+                error = self._assign_member_serial(device, member_pk, serial)
+            except Device.DoesNotExist:
+                errors.append(f"Device with ID {member_id} not found")
+                continue
+            if error:
+                errors.append(error)
+            else:
+                assignments_made += 1
+        return assignments_made, errors
 
     def _assign_member_serial(self, device, member_id, serial):
         """Write *serial* to the locked member *member_id* of the chassis of *device*; return the error text, or None."""
