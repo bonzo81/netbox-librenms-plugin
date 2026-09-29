@@ -13,7 +13,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, message_texts
+from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, make_user_with_perms, message_texts
 
 
 SERVER_KEY = "default"
@@ -106,6 +106,7 @@ class TestUpdateDeviceNameView:
         assert response.url.endswith(f"?server_key={SERVER_KEY}")
         assert device.name == "fresh-name"
         assert any("Device name updated" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "name", "old-live-name", "fresh-name")
 
     def test_missing_mapping_leaves_the_name_unchanged(self, logged_in_client, librenms_server):
         device = make_device("name-without-mapping")
@@ -199,6 +200,7 @@ class TestUpdateDeviceSerialView:
         device.refresh_from_db()
         assert device.serial == "NEW-SERIAL"
         assert any("updated from 'OLD-SERIAL'" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "serial", "OLD-SERIAL", "NEW-SERIAL")
 
     @pytest.mark.parametrize("serial", [None, "", "-"])
     def test_missing_live_serial_preserves_the_stored_value(self, logged_in_client, librenms_server, serial):
@@ -276,6 +278,7 @@ class TestUpdateDeviceTypeView:
 
     def test_exact_hardware_match_changes_the_real_device_type(self, logged_in_client, librenms_server):
         device = _linked_device("device-type-update", 6521)
+        original = device.device_type
         replacement = self._device_type("replacement", "Replacement Router")
         librenms_server.device_info_response(
             device_id=6521,
@@ -288,6 +291,7 @@ class TestUpdateDeviceTypeView:
         device.refresh_from_db()
         assert device.device_type == replacement
         assert any("Device type updated" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "device_type", original.pk, replacement.pk)
 
     def test_unmatched_hardware_preserves_the_device_type(self, logged_in_client, librenms_server):
         device = _linked_device("device-type-unmatched", 6522)
@@ -416,6 +420,7 @@ class TestUpdateDevicePlatformView:
         device.refresh_from_db()
         assert device.platform == new_platform
         assert any("updated from 'Old exact platform'" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "platform", old_platform.pk, new_platform.pk)
 
 
 @pytest.mark.django_db
@@ -446,6 +451,7 @@ class TestCreateAndAssignPlatformView:
         assert device.platform == platform
         assert PlatformMapping.objects.get(librenms_os="created-os").netbox_platform == platform
         assert any("Created platform" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "platform", None, platform.pk)
 
     def test_existing_platform_is_reused_without_changing_manufacturer(self, logged_in_client, librenms_server):
         from dcim.models import Platform
@@ -622,6 +628,8 @@ class TestAssignVCSerialView:
         assert first.serial == "FIRST-VC-SERIAL"
         assert second.serial == "SECOND-VC-SERIAL"
         assert any("assigned 2 serial" in text for text in _messages(response, "success"))
+        assert_update_logged(first, "serial", "", "FIRST-VC-SERIAL")
+        assert_update_logged(second, "serial", "", "SECOND-VC-SERIAL")
 
     def test_wrong_chassis_and_missing_member_are_both_reported(self, logged_in_client, librenms_server):
         root = make_device("vc-serial-root")
@@ -986,6 +994,7 @@ class TestConvertLegacyLibreNMSIdView:
         device.refresh_from_db()
         assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6561}
         assert any("Converted legacy librenms_id" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "custom_fields.librenms_id", " 6561 ", {SERVER_KEY: 6561})
 
     def test_serial_mismatch_preserves_the_legacy_id(self, logged_in_client, librenms_server):
         device = make_device("legacy-mismatch", serial="NETBOX-SERIAL", librenms_cf=6562)

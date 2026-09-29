@@ -158,6 +158,28 @@ def message_texts(request, level=None):
     return [str(m.message) for m in get_messages(request) if wanted is None or m.level == wanted]
 
 
+def update_change(obj):
+    """Return the one change-log record of an update of *obj*."""
+    from core.models import ObjectChange
+    from django.contrib.contenttypes.models import ContentType
+
+    return ObjectChange.objects.get(
+        changed_object_type=ContentType.objects.get_for_model(obj), changed_object_id=obj.pk, action="update"
+    )
+
+
+def assert_update_logged(obj, field, before, after):
+    """Assert the one change-log record of the update of *obj* holds *field* (a dotted path) before and after."""
+    change = update_change(obj)
+    assert change.prechange_data is not None, "the update has no before-state"
+    logged = []
+    for data in (change.prechange_data, change.postchange_data):
+        for key in field.split("."):
+            data = data[key]
+        logged.append(data)
+    assert logged == [before, after]
+
+
 def missing_pk(model, offset=1000):
     """Return a primary key that is above every current row for *model*."""
     highest_pk = model.objects.order_by("-pk").values_list("pk", flat=True).first()
