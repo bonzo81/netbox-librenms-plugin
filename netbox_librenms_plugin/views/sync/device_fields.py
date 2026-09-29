@@ -1006,18 +1006,15 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                         f"Validation error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
                     )
                     return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-                except Exception as exc:
-                    transaction.set_rollback(True)
-                    logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
-                    messages.error(
-                        request,
-                        f"Unexpected error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
-                    )
-                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-                messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
+                removed = True
             else:
-                messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
+                removed = False
 
+        # After the commit: a lock conflict at COMMIT must not leave a success message behind.
+        if removed:
+            messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
+        else:
+            messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
         return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
 
@@ -1086,11 +1083,6 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                     request,
                     f"Validation error changing preferred server: {exception_text_for(exc, model, request.user)}",
                 )
-                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
-            except Exception:
-                transaction.set_rollback(True)
-                logger.exception("Could not save the preferred LibreNMS server %r", requested_key)
-                messages.error(request, "Could not change the preferred LibreNMS server. Try again.")
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
         messages.success(request, f"Preferred LibreNMS server changed to '{requested_key}'.")

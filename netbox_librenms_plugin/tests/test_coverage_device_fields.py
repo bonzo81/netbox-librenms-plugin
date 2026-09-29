@@ -1,5 +1,6 @@
 """Request-level coverage for device and VM field-sync actions."""
 
+from contextlib import ExitStack
 from copy import deepcopy
 
 import pytest
@@ -82,6 +83,30 @@ def _linked_device(name, device_id, **kwargs):
 
 def _messages(response, level=None):
     return message_texts(response.wsgi_request, level=level)
+
+
+def _post_while_the_user_row_is_locked(client, name, obj, data, *, check_at_save):
+    """
+    POST while another session holds the user row: the change record's user foreign key check meets a real 55P03.
+
+    The check is deferred to COMMIT, or with *check_at_save* made immediate at the owner's UPDATE, so it runs inside save().
+    """
+    from django.contrib.auth import get_user_model
+    from django.db import connection
+
+    def immediate_checks(execute, sql, params, many, context):
+        if sql.startswith('UPDATE "dcim_device"'):
+            with connection.cursor() as cursor:
+                cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        return execute(sql, params, many, context)
+
+    user_model = get_user_model()
+    with second_connection() as other, ExitStack() as stack:
+        lock_row(other, user_model, int(client.session["_auth_user_id"]))
+        stack.enter_context(lock_timeout(200))
+        if check_at_save:
+            stack.enter_context(connection.execute_wrapper(immediate_checks))
+        return _post(client, name, obj, data)
 
 
 @pytest.mark.django_db
@@ -813,6 +838,28 @@ class TestRemoveServerMappingView:
         assert change.prechange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6544, "retired": 9003}
         assert change.postchange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6544}
 
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("check_at_save", [True, False], ids=["in-save", "at-commit"])
+    def test_a_lock_conflict_of_the_write_gives_the_try_again_answer(
+        self, logged_in_client, librenms_server, caplog, check_at_save
+    ):
+        device = make_device("mapping-remove-locked", librenms_cf={SERVER_KEY: 6545, "retired": 9004})
+
+        with caplog.at_level("ERROR"):
+            response = _post_while_the_user_row_is_locked(
+                logged_in_client,
+                "remove_server_mapping",
+                device,
+                {"object_type": "device", "server_key": "retired"},
+                check_at_save=check_at_save,
+            )
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6545, "retired": 9004}
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+        assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == []
+
     def test_configured_mapping_cannot_be_removed(self, logged_in_client, librenms_server):
         device = _linked_device("mapping-configured", 6542)
 
@@ -879,20 +926,9 @@ class TestRemoveServerMappingView:
 
         assert any("No mapping found" in text for text in _messages(response, "warning"))
 
-    @pytest.mark.parametrize(
-        ("failure_type", "expected_message"),
-        [
-            ("validation", "Validation error removing LibreNMS mapping"),
-            ("unexpected", "Unexpected error removing LibreNMS mapping"),
-        ],
-    )
-    def test_save_failures_roll_back_the_mapping(
-        self,
-        logged_in_client,
-        librenms_server,
-        failure_type,
-        expected_message,
-    ):
+    @pytest.mark.parametrize("failure_type", ["validation", "unexpected"])
+    def test_save_failures_roll_back_the_mapping(self, logged_in_client, librenms_server, failure_type):
+        """A validation error is reported; any other error propagates, and both leave the mapping as it was."""
         from dcim.models import Device
         from django.core.exceptions import ValidationError
         from django.db.models.signals import pre_save
@@ -911,20 +947,30 @@ class TestRemoveServerMappingView:
 
         pre_save.connect(reject_save, sender=Device, weak=False)
         try:
-            response = _post(
-                logged_in_client,
-                "remove_server_mapping",
-                device,
-                {"object_type": "device", "server_key": "retired"},
-            )
+            if failure_type == "validation":
+                response = _post(
+                    logged_in_client,
+                    "remove_server_mapping",
+                    device,
+                    {"object_type": "device", "server_key": "retired"},
+                )
+            else:
+                with pytest.raises(RuntimeError, match="database write failed"):
+                    _post(
+                        logged_in_client,
+                        "remove_server_mapping",
+                        device,
+                        {"object_type": "device", "server_key": "retired"},
+                    )
         finally:
             pre_save.disconnect(reject_save, sender=Device)
 
         device.refresh_from_db()
-        rendered_messages = _messages(response)
         assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6546, "retired": 9003}
-        assert any(expected_message in text for text in rendered_messages)
-        assert not any("Removed LibreNMS mapping" in text for text in rendered_messages)
+        if failure_type == "validation":
+            rendered_messages = _messages(response)
+            assert any("Validation error removing LibreNMS mapping" in text for text in rendered_messages)
+            assert not any("Removed LibreNMS mapping" in text for text in rendered_messages)
 
 
 @pytest.mark.django_db
@@ -971,6 +1017,28 @@ class TestSetPreferredServerView:
         )
 
         assert any("requires at least two usable" in text for text in _messages(response, "error"))
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("check_at_save", [True, False], ids=["in-save", "at-commit"])
+    def test_a_lock_conflict_of_the_write_gives_the_try_again_answer(
+        self, logged_in_client, librenms_server, caplog, check_at_save
+    ):
+        device = make_device("preferred-locked", librenms_cf={SERVER_KEY: 6556, SECONDARY_KEY: 6557})
+
+        with caplog.at_level("ERROR"):
+            response = _post_while_the_user_row_is_locked(
+                logged_in_client,
+                "set_preferred_server",
+                device,
+                {"object_type": "device", "server_key": SECONDARY_KEY},
+                check_at_save=check_at_save,
+            )
+
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6556, SECONDARY_KEY: 6557}
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+        assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == []
 
     def test_unknown_preference_key_is_rejected(self, logged_in_client, librenms_server):
         device = make_device(
