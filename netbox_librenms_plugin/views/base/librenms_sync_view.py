@@ -287,6 +287,8 @@ class BaseLibreNMSSyncView(
             context.update(
                 {
                     "is_vc_member": True,
+                    # The page object's own mapping, not the sync owner's.
+                    "object_has_recorded_mapping": read_mapping(obj).has_recorded_state,
                     "sync_device_has_primary_ip": sync_device_has_primary_ip,
                     "librenms_sync_device": librenms_sync_device,
                     "sync_device_has_librenms_id": sync_device_has_librenms_id,
