@@ -21,6 +21,7 @@ from extras.validators import CustomValidator
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_serial_device, make_superuser
 from netbox_librenms_plugin.tests.test_background_jobs import librenms_server  # noqa: F401
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, queued_request
+from netbox_librenms_plugin.utils import set_librenms_device_id
 
 HIDDEN = "(only a superuser sees the message)"
 
@@ -119,7 +120,7 @@ def test_the_ip_address_sync(client, settings, live_librenms, superuser):
     tag = f"vetext-ipsync-{int(superuser)}"
     device, hidden = make_device(tag, librenms_cf={"default": {"id": 42}}), make_device(f"{tag}-hidden")
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    interface.custom_field_data["librenms_id"] = {"default": 7001}
+    set_librenms_device_id(interface, 7001, "default")
     interface.save(update_fields=["custom_field_data"])
     client.force_login(make_superuser(f"{tag}-refresher"))
     assert _refresh_ip_snapshot(client, device, "198.18.0.10/24", 24, live_librenms).status_code == 200
