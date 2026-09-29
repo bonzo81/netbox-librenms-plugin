@@ -20,7 +20,11 @@ from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    assign_own,
+    claim_librenms_port_binding,
     find_port_owner,
+    get_librenms_sync_device,
+    persist_mapping,
     read_mapping,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -31,9 +35,7 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
-    claim_librenms_port_binding,
     acquire_advisory_transaction_lock,
-    get_librenms_sync_device,
     get_module_template_interface_names,
     get_module_template_interface_specs,
     get_module_types_indexed,
@@ -49,7 +51,6 @@ from netbox_librenms_plugin.utils import (
     normalize_serial,
     prefetch_module_bay_types,
     rewrite_interface_name_for_vc_member,
-    set_librenms_device_id,
     exception_text_for,
 )
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
@@ -813,20 +814,22 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         }
 
     bind_port = current_port_id != port_id
-    if set_module or bind_port:
-        candidate.snapshot()
+    if not (set_module or bind_port):
+        return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": False}
+    candidate.snapshot()
     update_fields = []
     if set_module:
         candidate.module_id = module_pk
         update_fields.append("module")
+
+    def save(row, mapping_fields=frozenset()):
+        row.save(update_fields=[*update_fields, *mapping_fields, "last_updated"])
+
     if bind_port:
-        set_librenms_device_id(candidate, port_id, server_key)
-        update_fields.append("custom_field_data")
-
-    if update_fields:
-        candidate.save(update_fields=[*update_fields, "last_updated"])
-
-    return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": bool(update_fields)}
+        persist_mapping(candidate, assign_own(candidate, server_key, port_id), write=save)
+    else:
+        save(candidate)
+    return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": True}
 
 
 def _resolve_posted_inventory_row(

@@ -32,13 +32,12 @@ from netbox_librenms_plugin.transactions import (
     run_transaction,
     update_existing_row,
 )
-from netbox_librenms_plugin.utils import (
-    DATABASE_ERROR_MESSAGE,
+from netbox_librenms_plugin.server_mappings import (
     LibreNMSPortBindingBusy,
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
-    exception_text_for,
 )
+from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE, exception_text_for
 
 # Long enough for a blocked statement to be a real lock wait, short enough for two attempts.
 LOCK_TIMEOUT_MS = 200

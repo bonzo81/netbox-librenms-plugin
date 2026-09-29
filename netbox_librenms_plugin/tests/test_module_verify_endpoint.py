@@ -239,7 +239,7 @@ class TestSingleInterfaceVerifyChassisGuard:
         """A virtual chassis whose members resolve to no sync device returns the named 404."""
         from django.urls import reverse
         from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         _chassis, (device, _sibling) = make_virtual_chassis_members("iface-verify-vc")
         device.vc_position = None

@@ -469,10 +469,11 @@ class TestRefusals:
     def test_a_migrated_donor_is_refused(self, client, seeded):
         from ipam.models import VRF
 
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
 
         owner = seeded("vrf-migrated")
-        mark_librenms_migrated(owner, make_device("vrf-migrated-winner").pk, SERVER_KEY)
+        apply_mapping_change(owner, mark_migrated(owner, make_device("vrf-migrated-winner").pk, SERVER_KEY))
         owner.save()
 
         response = _create(_superuser_client(client), owner, RD_ROWS[0])

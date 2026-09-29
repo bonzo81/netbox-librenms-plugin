@@ -311,7 +311,7 @@ class TestSaveVlanGroupOverridesBranches:
         """A chassis with no resolvable sync member stores the overrides under the posted device."""
         from django.core.cache import cache
         from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
         from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
 
         _chassis, (device, _sibling) = make_virtual_chassis_members("vlan-overrides-vc")

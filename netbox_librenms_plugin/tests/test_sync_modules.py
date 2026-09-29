@@ -7,7 +7,7 @@ import pytest
 from django.core.cache import cache
 from django.db import OperationalError, transaction
 
-from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.server_mappings import LibreNMSPortBindingBusy, read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
@@ -38,7 +38,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 )
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict
 from netbox_librenms_plugin.utils import (
-    LibreNMSPortBindingBusy,
     module_inventory_binding_token,
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
@@ -1586,7 +1585,7 @@ class TestInstallAndUpdateViews:
         from dcim.models import Device, Interface, Module
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("module-interface-scope", librenms_cf={"default": 2})
@@ -1594,7 +1593,7 @@ class TestInstallAndUpdateViews:
         module = install_module(device, bay.name, "INTERFACE-SCOPE-CARD")
         hidden = make_interface(device, "Te1/1/1")
         allowed = make_interface(device, "Te1/1/2")
-        set_librenms_device_id(hidden, 42, "default")
+        seed_own_mapping(hidden, 42, "default")
         hidden.save(update_fields=["custom_field_data"])
         user = make_user_with_perms("module-interface-scope", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
@@ -3115,11 +3114,13 @@ def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_p
     """Negative OOB index fields prevent the refresh from caching an inventory snapshot."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.utils import set_librenms_oob
+    from netbox_librenms_plugin.server_mappings import attach_oob
+
+    from netbox_librenms_plugin.tests.conftest import apply_mapping_change
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     device = make_device("signed-inventory", librenms_cf={"default": 777})
-    set_librenms_oob(device, 999, "default", oob_type="idrac9")
+    apply_mapping_change(device, attach_oob(device, "default", 999, oob_type="idrac9"))
     device.save(update_fields=["custom_field_data"])
     # RFC 2737 defines entPhysicalIndex as 1..2147483647.
     # The old offset would shift the negative OOB index onto main index 1500.

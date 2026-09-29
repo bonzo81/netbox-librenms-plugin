@@ -1052,10 +1052,10 @@ def _two_server_keys(settings, server, prefix):
 def _mapped_device(name, server_key, librenms_id=777):
     """Create a real device carrying a real LibreNMS mapping under *server_key*."""
     from netbox_librenms_plugin.tests.conftest import make_device
-    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     device = make_device(name)
-    set_librenms_device_id(device, librenms_id, server_key)
+    seed_own_mapping(device, librenms_id, server_key)
     device.save(update_fields=["custom_field_data"])
     return device
 
@@ -1243,13 +1243,14 @@ class TestPostInventoryRefresh:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         active_key, _ = server_keys
         donor = make_device("module-refresh-stale-server-donor")
         winner = make_device("module-refresh-stale-server-winner")
-        mark_librenms_migrated(donor, winner.pk, active_key)
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, active_key))
         donor.save(update_fields=["custom_field_data"])
         view = DeviceModuleTableView()
         view._librenms_api = LibreNMSAPI(server_key=active_key)
@@ -1365,13 +1366,13 @@ class TestPostInventoryRefresh:
             make_request,
             trusted_module_inventory_payload,
         )
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         bound_key, scoped_key = server_keys
         _, members = make_virtual_chassis_members("module-cache-scoped-vc", count=2)
         bound_device, scoped_device = members
-        set_librenms_device_id(bound_device, 701, bound_key)
+        seed_own_mapping(bound_device, 701, bound_key)
         bound_device.save(update_fields=["custom_field_data"])
         payload = trusted_module_inventory_payload(scoped_device, [], server_key=scoped_key, librenms_id=777)
         view = DeviceModuleTableView()
@@ -1451,12 +1452,13 @@ class TestPostInventoryRefresh:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.server_mappings import attach_oob
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
         device = _mapped_device("module-refresh-oob-failure", server_key)
-        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
         device.save(update_fields=["custom_field_data"])
         view = DeviceModuleTableView()
         cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
@@ -1488,12 +1490,13 @@ class TestPostInventoryRefresh:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.server_mappings import attach_oob
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
         device = _mapped_device("module-refresh-oob-non-dict", server_key)
-        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
         device.save(update_fields=["custom_field_data"])
         view = DeviceModuleTableView()
         cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
@@ -1622,12 +1625,13 @@ class TestPostInventoryRefresh:
 
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.server_mappings import attach_oob
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
         device = _mapped_device("module-refresh-main-string-index", server_key)
-        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
         device.save(update_fields=["custom_field_data"])
         view = DeviceModuleTableView()
         cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
@@ -1668,12 +1672,13 @@ class TestPostInventoryRefresh:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.server_mappings import attach_oob
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
         device = _mapped_device("module-refresh-oob-string-index", server_key)
-        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
         device.save(update_fields=["custom_field_data"])
         view = DeviceModuleTableView()
         cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
@@ -1708,12 +1713,13 @@ class TestPostInventoryRefresh:
             make_request,
             trusted_module_inventory_payload,
         )
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.server_mappings import attach_oob
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
         device = _mapped_device("module-cache-oob-string-id", server_key, librenms_id=1)
-        set_librenms_oob(device, 5, server_key, oob_type="idrac9")
+        apply_mapping_change(device, attach_oob(device, server_key, 5, oob_type="idrac9"))
         device.save(update_fields=["custom_field_data"])
         payload = trusted_module_inventory_payload(device, [], server_key=server_key, librenms_id=1)
         payload["oob_librenms_id"] = 5
@@ -4908,14 +4914,14 @@ class TestMatchedInterfaceLinking:
 
     def _make_interface(self, device, name, *, port_id=None, module=None):
         from netbox_librenms_plugin.tests.conftest import make_interface
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         interface = make_interface(device, name)
         if module is not None:
             interface.module = module
             interface.save(update_fields=["module"])
         if port_id is not None:
-            set_librenms_device_id(interface, port_id, "test-server")
+            seed_own_mapping(interface, port_id, "test-server")
             interface.save(update_fields=["custom_field_data"])
         return interface
 
@@ -6169,12 +6175,13 @@ class TestGetContextDataOOBCacheFingerprint:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.server_mappings import attach_oob
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
         device = _mapped_device("module-cache-oob-relinked", server_key)
-        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
         device.save(update_fields=["custom_field_data"])
         view = DeviceModuleTableView()
         cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=998)
@@ -6281,12 +6288,13 @@ class TestGetContextDataOOBCacheFingerprint:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        from netbox_librenms_plugin.server_mappings import attach_oob
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
         device = _mapped_device("module-cache-oob-unchanged", server_key)
-        set_librenms_oob(device, 999, server_key, oob_type="idrac9")
+        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
         device.save(update_fields=["custom_field_data"])
         view = DeviceModuleTableView()
         cache_key, payload = _seed_snapshot(view, device, server_key, oob_librenms_id=999)

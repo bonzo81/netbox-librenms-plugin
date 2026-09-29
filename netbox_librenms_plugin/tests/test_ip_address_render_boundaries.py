@@ -10,9 +10,15 @@ import json
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser, make_vm
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_interface,
+    make_ip,
+    make_superuser,
+    make_vm,
+    seed_own_mapping,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
-from netbox_librenms_plugin.utils import set_librenms_device_id
 
 
 SERVER_KEY = "default"
@@ -36,7 +42,7 @@ def _messages(response, level=None):
 
 def _set_librenms_id(obj, value):
     """Store a LibreNMS id on a real object through the production writer."""
-    set_librenms_device_id(obj, value, SERVER_KEY)
+    seed_own_mapping(obj, value, SERVER_KEY)
     obj.save(update_fields=["custom_field_data"])
 
 
@@ -253,13 +259,14 @@ class TestRefreshWithAnUnknownServer:
 
     def test_unknown_server_key_re_renders_the_migrated_partial(self, client, live_librenms):
         """The error re-render keeps the migrated move card, resolved from the active server."""
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
 
         winner = make_device("ip-refresh-winner")
         donor = make_device("ip-refresh-donor", librenms_cf={SERVER_KEY: {"id": 4306}})
         interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
         make_ip("198.18.51.60/24", assigned_object=interface)
-        mark_librenms_migrated(donor, winner.pk, SERVER_KEY)
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, SERVER_KEY))
         donor.save()
         _login(client, "ip-refresh-unknown-server-user")
 

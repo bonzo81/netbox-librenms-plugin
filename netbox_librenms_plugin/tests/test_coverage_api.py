@@ -1099,6 +1099,7 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
     from virtualization.models import VirtualMachine
 
     from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+    from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE, IdentityBusy
     from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
 
@@ -1110,8 +1111,8 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
     def store_discovered_mapping():
         try:
             api._store_librenms_id(device, librenms_id)
-        except ValueError as exc:
-            assert "already assigned" in str(exc)
+        except (ValueError, IdentityBusy) as exc:
+            refusals.append(str(exc))
             return False
         return True
 
@@ -1131,11 +1132,12 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
                 validation,
                 server_key=api.server_key,
             )
-        except ValueError as exc:
-            assert "already assigned" in str(exc)
+        except (ValueError, IdentityBusy) as exc:
+            refusals.append(str(exc))
             return False
         return True
 
+    refusals = []
     outcomes, claim_keys = run_librenms_id_claim_race(store_discovered_mapping, import_vm)
 
     device.refresh_from_db()
@@ -1147,6 +1149,9 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
     assert sum(mapping.get(api.server_key) == librenms_id for mapping in mappings) == 1
+    # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
+    assert len(refusals) == 1
+    assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]
 
 
 class TestParsePortVlanData:

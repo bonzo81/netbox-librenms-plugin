@@ -13,7 +13,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.interface_sync import write_interface_row
+from netbox_librenms_plugin.interface_sync import ApplicationResult, write_interface_row
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import coerce_model_pk, effective_vlan_mode, is_list_of_dicts
@@ -1745,7 +1745,7 @@ class VlanAssignmentMixin:
             row.mode = mode
             if not (untagged_vid and untagged_set is None):
                 row.untagged_vlan = untagged_set
-            return False
+            return ApplicationResult(changed_elsewhere=False)
 
         # Save mode + untagged_vlan before M2M operations.
         # tagged_vlans.set() triggers a DB refresh that wipes unsaved

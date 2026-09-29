@@ -46,12 +46,25 @@ def configured_server_key():
     return next(iter(LibreNMSAPI.get_available_servers()))
 
 
+def apply_mapping_change(obj, change):
+    """Test setup: put a built mapping change on *obj*, with no claim, no owner check and no save."""
+    from netbox_librenms_plugin.server_mappings import _put_on
+
+    _put_on(obj, change)
+    return obj
+
+
+def seed_own_mapping(obj, identity, server_key="default"):
+    """Test setup: put the own ID that ``assign_own`` builds on *obj*, unsaved, as the old setter did."""
+    from netbox_librenms_plugin.server_mappings import assign_own
+
+    return apply_mapping_change(obj, assign_own(obj, server_key, identity))
+
+
 def persist_test_server_mapping(obj, server_key):
     """Persist the server mapping required by a real sync-page request."""
-    from netbox_librenms_plugin.utils import set_librenms_device_id
-
     if read_mapping(obj).own_id(server_key) is None:
-        set_librenms_device_id(obj, obj.pk, server_key)
+        seed_own_mapping(obj, obj.pk, server_key)
         obj.save(update_fields=["custom_field_data"])
 
 

@@ -25,7 +25,7 @@ from extras.validators import CustomValidator
 from ipam.models import IPAddress
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, read_mapping
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
@@ -33,9 +33,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_virtual_chassis_members,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-from netbox_librenms_plugin.utils import get_librenms_sync_device, set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -71,7 +71,7 @@ def _device(name, platform=None):
 
 def _bound(device, name, port_id, iface_type="other"):
     interface = make_interface(device, name, iface_type=iface_type)
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_own_mapping(interface, port_id, SERVER_KEY)
     interface.save()
     return interface
 

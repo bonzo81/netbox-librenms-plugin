@@ -9,7 +9,6 @@ from copy import deepcopy
 
 import pytest
 
-from netbox_librenms_plugin.server_mappings import decode_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -1103,26 +1102,25 @@ class TestLegacyLibreNMSIdMigration:
         ],
     )
     def test_migration_helper_updates_real_shape(self, stored_value, expected_changed, expected_value):
-        from types import SimpleNamespace
+        from netbox_librenms_plugin.server_mappings import convert_legacy
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, make_device
 
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+        device = make_device("legacy-shape-device", librenms_cf=stored_value)
+        change = convert_legacy(device, "primary")
 
-        custom_field_data = {} if stored_value is None else {"librenms_id": stored_value}
-        obj = SimpleNamespace(custom_field_data=custom_field_data)
-
-        assert migrate_legacy_librenms_id(obj, "primary") is expected_changed
-        assert obj.custom_field_data.get("librenms_id") == expected_value
+        assert change.changed is expected_changed
+        assert apply_mapping_change(device, change).custom_field_data.get("librenms_id") == expected_value
 
     def test_migration_gate_and_writer_agree(self):
-        from types import SimpleNamespace
+        from netbox_librenms_plugin.server_mappings import convert_legacy
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+        device = make_device("legacy-gate-device", librenms_cf=" 42 ")
+        change = convert_legacy(device, "primary")
 
-        obj = SimpleNamespace(custom_field_data={"librenms_id": " 42 "})
-
-        assert decode_stored_mapping(obj.custom_field_data["librenms_id"]).legacy.is_legacy is True
-        assert migrate_legacy_librenms_id(obj, "primary") is True
-        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+        assert change.before.legacy.is_legacy is True
+        assert change.changed is True
+        assert change.after.own_id("primary") == 42
 
 
 @pytest.mark.django_db
@@ -2373,6 +2371,7 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
 
     from netbox_librenms_plugin.import_utils.device_operations import import_single_device
     from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+    from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE, IdentityBusy
     from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
     from netbox_librenms_plugin.tests.conftest import _shared_infra, make_cluster
     from netbox_librenms_plugin.tests.import_server_helpers import configure_servers
@@ -2409,6 +2408,8 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
             libre_device=libre_device,
             sync_options={"sync_interfaces": False, "sync_cables": False},
         )
+        if not result["success"]:
+            refusals.append(result["error"])
         return result["success"]
 
     def import_vm():
@@ -2427,11 +2428,12 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
                 validation,
                 server_key="primary",
             )
-        except ValueError as exc:
-            assert "already assigned" in str(exc)
+        except (ValueError, IdentityBusy) as exc:
+            refusals.append(str(exc))
             return False
         return True
 
+    refusals = []
     outcomes, claim_keys = run_librenms_id_claim_race(import_device, import_vm)
 
     owners = list(Device.objects.filter(name="claim-race-device")) + list(
@@ -2442,3 +2444,6 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     assert sorted(outcomes) == [False, True]
     assert len(owners) == 1
     assert owners[0].custom_field_data["librenms_id"]["primary"] == librenms_id
+    # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
+    assert len(refusals) == 1
+    assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]
