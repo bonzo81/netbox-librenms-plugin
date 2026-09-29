@@ -1001,6 +1001,24 @@ class TestStorelibrenmsId:
         assert device.custom_field_data["librenms_id"]["default"] == 42
         assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
 
+    def test_the_store_builds_on_the_locked_row_not_the_callers_older_read(self, settings, librenms_server):
+        """A mapping that another operation added after the caller's read stays, and reaches the caller too."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-after-a-concurrent-link", librenms_cf={"default": None})
+        Device.objects.filter(pk=device.pk).update(
+            custom_field_data={"librenms_id": {"default": None, "secondary": 77}}
+        )
+        api = api_for(settings, librenms_server.url)
+
+        api._store_librenms_id(device, 42)
+
+        expected = {"default": 42, "secondary": 77}
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == expected
+        assert device.custom_field_data["librenms_id"] == expected
+
     def test_a_read_after_the_store_sees_the_mapping_on_the_callers_instance(self, settings, librenms_server):
         """The store copies the mapping onto the caller's object, and no earlier snapshot hides it."""
         from netbox_librenms_plugin.server_mappings import read_mapping
