@@ -16,6 +16,7 @@ from netbox_librenms_plugin.interface_relationships import (
     build_relationship_maps,
     resolve_relationship_row,
 )
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,
@@ -25,7 +26,6 @@ from netbox_librenms_plugin.tables.interfaces import (
     VCInterfaceTable,
 )
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleTable
-from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,

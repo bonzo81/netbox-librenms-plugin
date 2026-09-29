@@ -73,25 +73,25 @@ from netbox_librenms_plugin.import_validation_helpers import (
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    ContainerStatus,
     SameServerIdentityConflict,
-    iter_server_mapping_entries,
+    read_mapping,
 )
 from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
-from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import (
     IMPORT_CONTEXT_COLUMNS_PREFERENCE,
     acquire_advisory_transaction_lock,
     add_librenms_server_mapping,
     coerce_model_pk,
     get_librenms_sync_device,
-    is_legacy_librenms_id,
     lock_librenms_id_assignment,
     normalize_serial,
     resolve_naming_preferences,
-    resolve_server_mapping_display_id,
     same_host,
     save_interface_name_preference,
     save_user_pref,
@@ -453,8 +453,6 @@ def _write_mapping_rows(view, model, lookup, duplicate_message, *, field, target
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
     """Lock one server/ID claim and its target, then reject ownership across Devices and VMs."""
     from virtualization.models import VirtualMachine as NetBoxVM
-
-    from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError
 
     try:
         locked_target, id_conflict = lock_librenms_id_assignment(
@@ -2038,8 +2036,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         """
         from django.conf import settings
 
-        cf_value = existing_device.custom_field_data.get("librenms_id")
-        if not isinstance(cf_value, dict):
+        mapping = read_mapping(existing_device)
+        if mapping.container is not ContainerStatus.SCOPED:
             return None
 
         plugins_config = settings.PLUGINS_CONFIG.get("netbox_librenms_plugin") or {}
@@ -2047,14 +2045,11 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         if not isinstance(servers_config, dict):
             servers_config = {}
         result = []
-        for sk, did in iter_server_mapping_entries(cf_value):
-            # Resolve the host id, falling back to the OOB controller's id for an OOB-only entry
-            # ({"oob": {...}} with no usable host "id"). An OOB-only link is still a real link to
-            # this server, so surface it like the device-sync modal (_build_all_server_mappings)
-            # does — via the SAME shared helper — instead of dropping it and showing "no link"
-            # (which can prompt a duplicate re-import). The helper centralizes the bool/int/str/
-            # positive coercion, so 0 / negative / malformed ids can't slip through.
-            did, _is_oob_only = resolve_server_mapping_display_id(did)
+        for entry in mapping.servers:
+            # The display ID falls back to the OOB controller's id for an OOB-only entry. An
+            # OOB-only link is still a real link to this server, so surface it like the device-sync
+            # modal does instead of showing "no link" (which can prompt a duplicate re-import).
+            sk, did = entry.server, entry.display_id
             if did is None:
                 continue
             srv_cfg = servers_config.get(sk)
@@ -2233,13 +2228,13 @@ class DeviceConflictActionView(
                 # silently skips writes for legacy formats, leaving the device partially
                 # updated. User must run "Convert mapping" migration first. Shared predicate
                 # with AddAsOOBView and set_librenms_device_id so the three can't drift.
-                current_mapping = existing_device.custom_field_data.get("librenms_id")
-                if is_legacy_librenms_id(current_mapping):
+                current_mapping = read_mapping(existing_device)
+                if current_mapping.container is ContainerStatus.LEGACY:
                     return _htmx_error_response(
                         "Object has a legacy bare-integer librenms_id; use 'Convert mapping' "
                         "to migrate to the multi-server format before linking."
                     )
-                if current_mapping is not None and not isinstance(current_mapping, dict):
+                if current_mapping.container is ContainerStatus.INVALID:
                     return _htmx_error_response("The existing LibreNMS mapping has an invalid format.")
 
                 try:
@@ -2399,17 +2394,14 @@ class DeviceConflictActionView(
             # confirmed by serial match (or explicit force).
             from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
-            # Direct access needed to detect legacy integer format for migration prompt:
-            # LibreNMSAPI.get_librenms_id() returns an int in both formats; only the raw
-            # type check on custom_field_data reveals whether migration is needed.
-            cf_value = existing_device.custom_field_data.get("librenms_id")
-            if not is_legacy_librenms_id(cf_value):
+            legacy = read_mapping(existing_device).legacy
+            if not legacy.is_legacy:
                 return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-            # coerce_librenms_id, not int(): a reader-only form ("4_2") never matches the rival-owner lookup below.
-            cf_int = coerce_librenms_id(cf_value)
+            # The strict rule, not int(): a reader-only form ("4_2") never matches the rival-owner lookup below.
+            cf_int = legacy.queryable_id
             if cf_int is None:
                 return _htmx_error_response(
-                    f"Legacy librenms_id {cf_value!r} is not a plain positive integer; cannot migrate safely."
+                    "The stored legacy librenms_id is not a plain positive integer; cannot migrate safely."
                 )
             # Verify the stored legacy ID matches the active LibreNMS device_id so we don't
             # migrate a stale/incorrect association to the wrong server mapping.
@@ -2434,15 +2426,15 @@ class DeviceConflictActionView(
                 if lock_error is not None:
                     return lock_error
                 # Re-check under lock — another request may have already migrated it
-                cf_locked = locked_device.custom_field_data.get("librenms_id")
-                if not is_legacy_librenms_id(cf_locked):
+                locked_legacy = read_mapping(locked_device).legacy
+                if not locked_legacy.is_legacy:
                     return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-                cf_locked_int = coerce_librenms_id(cf_locked)
+                cf_locked_int = locked_legacy.queryable_id
                 if cf_locked_int != librenms_id:
                     return _htmx_error_response(
                         f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely."
                     )
-                # migrate_legacy_librenms_id refuses only the values is_legacy_librenms_id already
+                # migrate_legacy_librenms_id refuses only the values the legacy reader already
                 # rejects, and the locked value passed that gate above, so it cannot fail here.
                 locked_device.snapshot()
                 migrate_legacy_librenms_id(locked_device, server_key)
@@ -3054,7 +3046,7 @@ class AddAsOOBView(
         # (get_librenms_sync_device) — which may differ from the user-selected member the OOB
         # candidate matched (matched by the controller's shared chassis serial / primary IP).
         # Every reader (interfaces/cables/modules) resolves the sync device before
-        # get_librenms_oob, so the link — and the lock, guards, IP set, and save around it — must
+        # reading the OOB entry, so the link — and the lock, guards, IP set, and save around it — must
         # target the sync device too: writing to a non-sync member stores the OOB where no reader
         # looks and, since that member holds no host id, orphans it under no host link. For a
         # non-VC device (or when the selected member IS the sync device) this resolves to the same
@@ -3076,17 +3068,14 @@ class AddAsOOBView(
         if librenms_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id")
 
-        # Reject legacy bare-int librenms_id (shared predicate with DeviceConflictActionView and
+        # Reject legacy bare-int librenms_id (the reader's rule, shared with DeviceConflictActionView and
         # set_librenms_device_id, so the three can't drift on what counts as legacy).
-        if is_legacy_librenms_id(sync_device.custom_field_data.get("librenms_id")):
+        if read_mapping(sync_device).legacy.is_legacy:
             return _htmx_error_response(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
 
         from netbox_librenms_plugin.utils import (
-            AmbiguousLibreNMSIdError,
-            get_librenms_device_id,
-            get_librenms_oob,
             set_librenms_oob,
         )
 
@@ -3126,28 +3115,28 @@ class AddAsOOBView(
             # letting it reach set_librenms_oob would trigger its legacy-promotion branch —
             # silently namespacing the id under this server only and dropping the device's
             # LibreNMS linkage on all others.
-            if is_legacy_librenms_id(sync_device.custom_field_data.get("librenms_id")):
+            locked_mapping = read_mapping(sync_device)
+            if locked_mapping.legacy.is_legacy:
                 return _htmx_error_response(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
                 )
 
             # Reject if the locked OOB link differs from what this (possibly stale) modal
             # is about to write — by id OR by type. oob_type is already a canonical OOB_TYPES
-            # token (so is the stored current_oob["type"]), so this is a like-for-like compare
+            # token (so is the stored OOB type), so this is a like-for-like compare
             # that won't false-trip on an idempotent re-attach; it does catch a concurrent
             # re-detection that changed the controller type.
-            current_oob = get_librenms_oob(sync_device, server_key=server_key)
-            if current_oob and (
-                coerce_librenms_id(current_oob.get("id")) != coerce_librenms_id(librenms_id)
-                or (current_oob.get("type") or "") != oob_type
+            if locked_mapping.has_oob(server_key) and (
+                locked_mapping.oob_id(server_key) != librenms_id
+                or (locked_mapping.server(server_key).oob_type or "") != oob_type
             ):
                 return _htmx_error_response("OOB link was modified concurrently; refresh and retry.")
 
             # A concurrent change could have re-linked THIS device's host id to the incoming
             # OOB id; attaching it as OOB would then store it in both the host slot and oob.id
-            # — a self host/OOB conflict. Reject that explicitly (find_by_librenms_id below
+            # — a self host/OOB conflict. Reject that explicitly (find_mapping below
             # would match self and wave it through).
-            current_host_id = get_librenms_device_id(sync_device, server_key=server_key, auto_save=False)
+            current_host_id = locked_mapping.own_id(server_key)
             if coerce_librenms_id(current_host_id) == coerce_librenms_id(librenms_id):
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is this device's host link; it can't also be its "
@@ -3735,12 +3724,10 @@ class PromoteToHostView(
         server_key = self.librenms_api.server_key
 
         # Reject legacy bare-int librenms_id form (caller should migrate first).
-        if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+        if read_mapping(existing_device).legacy.is_legacy:
             return _htmx_error_response(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
-
-        from netbox_librenms_plugin.utils import get_librenms_device_id, get_librenms_oob
 
         with transaction.atomic():
             existing_device, lock_error = _lock_librenms_id_assignment_target(
@@ -3752,16 +3739,17 @@ class PromoteToHostView(
             )
             if lock_error is not None:
                 return lock_error
-            if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+            # Read the locked row before the setters below change it.
+            locked_mapping = read_mapping(existing_device)
+            if locked_mapping.legacy.is_legacy:
                 return _htmx_error_response(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
                 )
 
-            current_host_id = get_librenms_device_id(existing_device, server_key=server_key, auto_save=False)
-            current_oob = get_librenms_oob(existing_device, server_key=server_key)
+            current_host_id = locked_mapping.own_id(server_key)
             if coerce_librenms_id(current_host_id) != coerce_librenms_id(existing_libre_id):
                 return _htmx_error_response("LibreNMS host link changed concurrently; refresh and retry.")
-            if current_oob:
+            if locked_mapping.has_oob(server_key):
                 return _htmx_error_response(
                     "OOB link already set; this device may have been promoted by a concurrent request."
                 )
@@ -3988,7 +3976,7 @@ class MergeNetBoxDevicesView(
             # helpers reject legacy data either way; checking here preserves the actionable
             # convert-first message when the legacy link lives on a sibling.
             for label, obj in (("winner", winner_sync), ("donor", donor_sync)):
-                if is_legacy_librenms_id(obj.custom_field_data.get("librenms_id")):
+                if read_mapping(obj).legacy.is_legacy:
                     return _htmx_error_response(
                         f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
                         "use 'Convert mapping' to migrate before merging."

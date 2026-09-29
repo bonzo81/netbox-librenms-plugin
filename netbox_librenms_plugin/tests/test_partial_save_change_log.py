@@ -17,6 +17,7 @@ from django.core.cache import cache
 from django.urls import reverse
 from utilities.ordering import naturalize_interface
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
     configure_default_librenms_server,
@@ -310,19 +311,17 @@ def test_a_device_save_of_some_columns_records_the_stored_before_state():
     )
 
 
-def test_a_normalized_string_librenms_id_records_the_stored_string():
-    from netbox_librenms_plugin.utils import get_librenms_device_id
-
+def test_reading_a_string_librenms_id_saves_nothing_and_records_no_change():
     device = make_device("partial-save-string-id", librenms_cf={SERVER_KEY: "42"})
     before = _stored_last_updated(device)
 
     with _change_logging("partial-save-string-id-user"):
-        assert get_librenms_device_id(device, SERVER_KEY) == 42
+        assert read_mapping(device).own_id(SERVER_KEY) == 42
 
-    assert _stored_last_updated(device) > before
-    change = _update(device)
-    assert change.prechange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: "42"}
-    assert change.postchange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 42}
+    assert _stored_last_updated(device) == before
+    assert _changes(device, "update") == []
+    device.refresh_from_db()
+    assert device.custom_field_data["librenms_id"] == {SERVER_KEY: "42"}
 
 
 def test_a_primary_ip_set_on_its_own_records_the_previous_address():

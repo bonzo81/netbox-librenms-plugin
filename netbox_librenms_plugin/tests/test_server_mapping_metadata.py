@@ -6,10 +6,9 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 
 from netbox_librenms_plugin import LibreNMSSyncConfig
-from netbox_librenms_plugin.server_mappings import PREFERRED_SERVER_FIELD, iter_server_mapping_entries
-from netbox_librenms_plugin.sync_cache import _explicit_server_keys
-from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-from netbox_librenms_plugin.utils import get_librenms_device_id, get_librenms_sync_device, set_librenms_device_id
+from netbox_librenms_plugin.server_mappings import PREFERRED_SERVER_FIELD, decode_stored_mapping, mapped_device_servers
+from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
+from netbox_librenms_plugin.utils import get_librenms_sync_device, set_librenms_device_id
 
 
 def test_reserved_preference_key_is_rejected_in_server_configuration():
@@ -45,12 +44,14 @@ def test_unsafe_server_key_is_rejected_in_server_configuration(server_key):
         )
 
 
-def test_mapping_iteration_excludes_reserved_preference_metadata():
-    """Generic mapping iteration cannot treat preference metadata as an identity."""
+@pytest.mark.django_db
+def test_mapping_servers_exclude_reserved_preference_metadata():
+    """Server enumeration cannot treat preference metadata as an identity."""
     mapping = {"primary": 42, PREFERRED_SERVER_FIELD: "13521"}
+    device = make_device("reserved-metadata-servers", librenms_cf=mapping)
 
-    assert list(iter_server_mapping_entries(mapping)) == [("primary", 42)]
-    assert _explicit_server_keys(SimpleNamespace(custom_field_data={"librenms_id": mapping})) == {"primary"}
+    assert [(entry.server, entry.own_id) for entry in decode_stored_mapping(mapping).servers] == [("primary", 42)]
+    assert mapped_device_servers(device) == ("primary",)
 
 
 def test_identity_reader_and_writer_reject_reserved_metadata_key():
@@ -61,7 +62,7 @@ def test_identity_reader_and_writer_reject_reserved_metadata_key():
     )
 
     with pytest.raises(ValueError, match="reserved for object metadata"):
-        get_librenms_device_id(obj, PREFERRED_SERVER_FIELD, auto_save=False)
+        decode_stored_mapping(obj.custom_field_data["librenms_id"]).own_id(PREFERRED_SERVER_FIELD)
     with pytest.raises(ValueError, match="reserved for object metadata"):
         set_librenms_device_id(obj, 42, PREFERRED_SERVER_FIELD)
     assert obj.custom_field_data["librenms_id"] == {PREFERRED_SERVER_FIELD: "primary"}

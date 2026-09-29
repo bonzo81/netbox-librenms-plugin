@@ -6,6 +6,7 @@ import pytest
 from django.core.cache import cache
 from django.db import connection
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     ip_on,
     make_cluster,
@@ -1385,7 +1386,6 @@ class TestImportSingleDevice:
         from dcim.models import Location
 
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-        from netbox_librenms_plugin.utils import get_librenms_device_id
 
         _api, _server = librenms_api
         site, device_type, role = self._infrastructure("success")
@@ -1423,7 +1423,7 @@ class TestImportSingleDevice:
         assert result["device"].serial == "SERIAL-5602"
         assert result["device"].location == location
         assert result["device"].status == "active"
-        assert get_librenms_device_id(result["device"], SERVER_KEY) == 5602
+        assert read_mapping(result["device"]).own_id(SERVER_KEY) == 5602
         assert result["synced"] == {"interfaces": 0, "cables": 0, "ip_addresses": 0}
 
     def test_manual_mappings_use_real_objects(self, librenms_api):

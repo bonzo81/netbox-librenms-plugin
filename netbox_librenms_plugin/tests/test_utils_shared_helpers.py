@@ -10,10 +10,10 @@ Both are pure functions, so these exercise the real implementations directly wit
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import decode_stored_mapping
 from netbox_librenms_plugin.utils import (
     cached_row_matches,
     is_valid_ports_payload,
-    resolve_server_mapping_display_id,
     row_identity_matches,
 )
 
@@ -108,39 +108,45 @@ class TestIsValidPortsPayload:
         assert is_valid_ports_payload(payload) is False
 
 
-class TestResolveServerMappingDisplayId:
+def _display_id(entry):
+    """Return the display ID and the OOB-only flag of one stored server entry."""
+    state = decode_stored_mapping({"default": entry}).server("default")
+    return state.display_id, state.is_oob_only
+
+
+class TestServerEntryDisplayId:
     def test_scalar_valid_int(self):
-        assert resolve_server_mapping_display_id(42) == (42, False)
+        assert _display_id(42) == (42, False)
 
     def test_scalar_valid_digit_string(self):
-        assert resolve_server_mapping_display_id("42") == (42, False)
+        assert _display_id("42") == (42, False)
 
     @pytest.mark.parametrize("entry", [0, -1, "0", "abc", None, True, False])
     def test_scalar_invalid(self, entry):
-        assert resolve_server_mapping_display_id(entry) == (None, False)
+        assert _display_id(entry) == (None, False)
 
     def test_dict_host_id_wins(self):
-        assert resolve_server_mapping_display_id({"id": 10}) == (10, False)
+        assert _display_id({"id": 10}) == (10, False)
 
     def test_dict_host_id_wins_over_oob(self):
         # A valid host id is preferred; the OOB fallback is not consulted.
-        assert resolve_server_mapping_display_id({"id": 10, "oob": {"id": 7}}) == (10, False)
+        assert _display_id({"id": 10, "oob": {"id": 7}}) == (10, False)
 
     def test_dict_falls_back_to_oob_when_host_absent(self):
-        assert resolve_server_mapping_display_id({"oob": {"id": 7}}) == (7, True)
+        assert _display_id({"oob": {"id": 7}}) == (7, True)
 
     def test_dict_falls_back_to_oob_when_host_invalid(self):
         # Host id present but corrupt (0) -> still surface the real OOB-only linkage.
-        assert resolve_server_mapping_display_id({"id": 0, "oob": {"id": 7}}) == (7, True)
+        assert _display_id({"id": 0, "oob": {"id": 7}}) == (7, True)
 
     def test_dict_neither_host_nor_oob(self):
-        assert resolve_server_mapping_display_id({"_migrated_to": "prod"}) == (None, False)
+        assert _display_id({"_migrated_to": "prod"}) == (None, False)
 
     def test_dict_host_and_oob_both_invalid(self):
-        assert resolve_server_mapping_display_id({"id": 0, "oob": {"id": -1}}) == (None, False)
+        assert _display_id({"id": 0, "oob": {"id": -1}}) == (None, False)
 
     def test_dict_oob_not_a_dict(self):
-        assert resolve_server_mapping_display_id({"id": 0, "oob": 5}) == (None, False)
+        assert _display_id({"id": 0, "oob": 5}) == (None, False)
 
 
 class TestRenderVcMemberOptions:

@@ -27,6 +27,7 @@ from netbox_librenms_plugin import interface_sync
 from netbox_librenms_plugin.interface_sync import InterfaceWrite, update_interface_from_port
 from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
@@ -48,7 +49,6 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
-from netbox_librenms_plugin.utils import get_librenms_device_id
 from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -640,7 +640,7 @@ def test_a_stale_row_in_the_ip_tab_retries_the_batch_and_every_row_syncs(client,
     assert messages_on(response.wsgi_request) == [("success", "Created IP addresses: 198.18.20.10/24, 198.18.21.10/24")]
     stale.refresh_from_db()
     assert (stale.label, stale.description) == ("set by another operation", "Ethernet1 uplink")
-    assert get_librenms_device_id(stale, SERVER_KEY, auto_save=False) == 7020
+    assert read_mapping(stale).own_id(SERVER_KEY) == 7020
     assert IPAddress.objects.get(address="198.18.20.10/24").assigned_object == stale
     fine.refresh_from_db()
     assert fine.description == "Ethernet2 uplink"
@@ -674,9 +674,9 @@ def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_is_never_written(clien
     assert messages_on(response.wsgi_request) == [("success", "Created IP addresses: 198.18.22.10/24")]
     interface.refresh_from_db()
     assert (interface.name, interface.description) == ("private-link", "")
-    assert get_librenms_device_id(interface, SERVER_KEY, auto_save=False) is None
+    assert read_mapping(interface).own_id(SERVER_KEY) is None
     created = Interface.objects.get(device=device, name="eth1")
-    assert get_librenms_device_id(created, SERVER_KEY, auto_save=False) == 7022
+    assert read_mapping(created).own_id(SERVER_KEY) == 7022
     assert IPAddress.objects.get(address="198.18.22.10/24").assigned_object == created
 
 

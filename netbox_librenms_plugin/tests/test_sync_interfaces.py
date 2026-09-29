@@ -4,6 +4,7 @@ import pytest
 from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_sync import assign_interface_mac
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -29,7 +30,6 @@ class TestUpdateInterfaceAttributes:
 
     def test_updates_fields_and_stable_port_identity(self, client, settings):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
-        from netbox_librenms_plugin.utils import get_librenms_device_id
 
         interface = bound_interface(make_device("interface-fields"), "old-name", 77)
         InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
@@ -58,7 +58,7 @@ class TestUpdateInterfaceAttributes:
         assert interface.description == "uplink"
         assert interface.mtu == 1500
         assert interface.enabled is False
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 77
+        assert read_mapping(interface).own_id("default") == 77
 
     def test_excluded_fields_and_mac_remain_unchanged(self, client, settings):
         from dcim.models import MACAddress

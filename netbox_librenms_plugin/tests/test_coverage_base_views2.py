@@ -12,6 +12,7 @@ import pytest
 from django.core.cache import cache
 from django.http import Http404
 
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     make_device,
@@ -75,11 +76,11 @@ class TestLibreNMSIdentityQueries:
     def test_invalid_identity_matches_no_device(self, invalid):
         from dcim.models import Device
 
-        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
-
         make_device("id-invalid", librenms_cf={"default": {"id": 42, "oob": {"id": 99}}})
 
-        assert not Device.objects.filter(_librenms_id_q("default", invalid)).exists()
+        assert not Device.objects.filter(
+            identity_q(Device, server="default", identities=(invalid,), roles=(MappingRole.OWN, MappingRole.OOB))
+        ).exists()
 
     @pytest.mark.parametrize(
         ("mapping", "server_key", "value"),
@@ -94,11 +95,10 @@ class TestLibreNMSIdentityQueries:
     def test_supported_storage_shapes_resolve_the_real_device(self, mapping, server_key, value):
         from dcim.models import Device
 
-        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
-
         expected = make_device("id-shape", librenms_cf=mapping)
+        predicate = identity_q(Device, server=server_key, identities=(value,), roles=(MappingRole.OWN, MappingRole.OOB))
 
-        assert Device.objects.get(_librenms_id_q(server_key, value)) == expected
+        assert Device.objects.get(predicate) == expected
 
     def test_remote_identity_excludes_an_oob_reference(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView

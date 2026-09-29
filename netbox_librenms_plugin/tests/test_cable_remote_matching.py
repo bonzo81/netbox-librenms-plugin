@@ -18,6 +18,7 @@ import time
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configured_server_key,
@@ -1611,7 +1612,6 @@ class TestCheckAndCreateTheRemoteEnd:
         from dcim.models import Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.utils import get_librenms_device_id
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-b", librenms_server, settings
@@ -1623,7 +1623,7 @@ class TestCheckAndCreateTheRemoteEnd:
         )
 
         created = Interface.objects.get(device=remote_device, name="Gi0/1")
-        assert get_librenms_device_id(created, server_key, auto_save=False) == 500
+        assert read_mapping(created).own_id(server_key) == 500
 
     def test_a_hidden_renamed_remote_port_cannot_be_bound_twice(self, librenms_server, settings):
         from dcim.models import Cable, Device, Interface

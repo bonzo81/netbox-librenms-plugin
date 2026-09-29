@@ -1789,13 +1789,14 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device(f"id-form-{len(stored)}-{namespaced}")
         dev.custom_field_data["librenms_id"] = {"default": stored} if namespaced else stored
         dev.save()
 
-        found = find_by_librenms_id(Device, 42, "default")
+        found = find_mapping(Device.objects.all(), server="default", identity=42, roles=tuple(MappingRole))
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
@@ -1815,13 +1816,14 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device(f"id-number-{stored!r}")
         dev.custom_field_data["librenms_id"] = shape(stored)
         dev.save()
 
-        found = find_by_librenms_id(Device, 42, "default")
+        found = find_mapping(Device.objects.all(), server="default", identity=42, roles=tuple(MappingRole))
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
@@ -1831,7 +1833,8 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device("id-form-wide")
         dev.custom_field_data["librenms_id"] = {"default": wide}
@@ -1839,7 +1842,7 @@ class TestLibreNMSIdQueryMatchesDecoder:
         dev.refresh_from_db()
 
         assert coerce_librenms_id(dev.custom_field_data["librenms_id"]["default"]) is None
-        assert find_by_librenms_id(Device, wide, "default") is None
+        assert find_mapping(Device.objects.all(), server="default", identity=wide, roles=tuple(MappingRole)) is None
 
 
 @pytest.mark.django_db

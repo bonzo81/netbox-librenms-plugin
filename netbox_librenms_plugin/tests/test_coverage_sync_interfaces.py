@@ -12,6 +12,7 @@ from netbox_librenms_plugin.interface_relationships import (
     interface_owner_for_object,
     resolve_interface_by_port_id,
 )
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configure_default_librenms_server,
@@ -29,9 +30,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     message_texts,
     missing_pk,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import (
-    post as _post,
-)
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
@@ -3481,7 +3480,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("same-device-stable-selection")
@@ -3535,7 +3534,7 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         existing.refresh_from_db()
-        assert get_librenms_device_id(existing, "default") == 10
+        assert read_mapping(existing).own_id("default") == 10
         assert existing.description == "original port"
         assert Interface.objects.filter(device=device, name="Ethernet").count() == 1
 
@@ -3545,7 +3544,7 @@ class TestSyncInterfacesViewPost:
         from django.core.cache import cache
         from virtualization.models import VirtualMachine, VMInterface
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         vm = make_vm("same-vm-stable-selection")
@@ -3598,7 +3597,7 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         existing.refresh_from_db()
-        assert get_librenms_device_id(existing, "default") == 10
+        assert read_mapping(existing).own_id("default") == 10
         assert existing.description == "original port"
         assert VMInterface.objects.filter(virtual_machine=vm, name="Ethernet").count() == 1
 
@@ -3619,7 +3618,6 @@ class TestSyncInterfacesViewPost:
         from django.core.cache import cache
         from virtualization.models import VirtualMachine, VMInterface
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         if object_type == "device":
@@ -3675,7 +3673,7 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         existing.refresh_from_db()
         assert existing.custom_field_data["librenms_id"] == {"default": stored_entry}
-        assert get_librenms_device_id(existing, "default", auto_save=False) is None
+        assert read_mapping(existing).own_id("default") is None
         assert existing.description == "original description"
         assert interface_model.objects.filter(**owner_filter, name="Ethernet").count() == 1
 
@@ -3757,7 +3755,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface, VirtualChassis
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         master = make_device("oob-sync-scope-master")
@@ -3808,8 +3806,8 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         master_interface = Interface.objects.get(device=master, name="eth0")
         member_interface = Interface.objects.get(device=member, name="eth0")
-        assert get_librenms_device_id(master_interface, "default", auto_save=False) == 9402
-        assert get_librenms_device_id(member_interface, "default", auto_save=False) == 9401
+        assert read_mapping(master_interface).own_id("default") == 9402
+        assert read_mapping(member_interface).own_id("default") == 9401
 
     @pytest.mark.parametrize(
         "case",
@@ -3822,7 +3820,7 @@ class TestSyncInterfacesViewPost:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import grant
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -3873,15 +3871,15 @@ class TestSyncInterfacesViewPost:
         elif case in ("host_both", "host_unselected"):
             assert not Interface.objects.filter(device=page).exists()
             oob = Interface.objects.get(device=member, name=f"{name}-oob")
-            assert get_librenms_device_id(oob, "default", auto_save=False) == 9412
+            assert read_mapping(oob).own_id("default") == 9412
             assert Interface.objects.filter(device=member).count() == (2 if case == "host_both" else 1)
             if case == "host_both":
                 host = Interface.objects.get(device=member, name=name)
-                assert get_librenms_device_id(host, "default", auto_save=False) == 9411
+                assert read_mapping(host).own_id("default") == 9411
         else:
             owner = page if case in ("explicit_page", "bound_page") else member
             interface = Interface.objects.get(device=owner, name=name)
-            assert get_librenms_device_id(interface, "default", auto_save=False) == 9412
+            assert read_mapping(interface).own_id("default") == 9412
             if bound is not None:
                 assert interface.pk == bound.pk
             assert Interface.objects.filter(device__in=[page, member]).count() == 1
@@ -3994,7 +3992,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-name-collision")
@@ -4040,7 +4037,7 @@ class TestSyncInterfacesViewPost:
         host_interface.refresh_from_db()
         assert response.status_code == 302
         assert host_interface.description == "host interface"
-        assert get_librenms_device_id(host_interface, "default", auto_save=False) is None
+        assert read_mapping(host_interface).own_id("default") is None
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
         assert not Interface.objects.filter(device=device, name="lom0-oob").exists()
         assert ("host interface already uses this name" in " ".join(message_texts(request, "warning"))) is viewable
@@ -4058,7 +4055,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-name-collision-host")
@@ -4095,7 +4091,7 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         derived = Interface.objects.get(device=device, name="eth0-oob")
-        assert get_librenms_device_id(derived, "default", auto_save=False) == 8502
+        assert read_mapping(derived).own_id("default") == 8502
         assert not Interface.objects.filter(device=device, name="eth0").exists()
 
     def test_a_host_oob_name_collision_syncs_under_the_derived_name(self):
@@ -4105,7 +4101,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-reported")
@@ -4139,7 +4134,7 @@ class TestSyncInterfacesViewPost:
             cache.delete(cache_key)
 
         interface = Interface.objects.get(device=device, name="mgmt0-oob")
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 8602
+        assert read_mapping(interface).own_id("default") == 8602
         assert message_texts(request, "warning") == []
 
     def test_the_host_row_can_still_sync_its_own_name_after_an_oob_collision(self):
@@ -4149,7 +4144,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-host-wins")
@@ -4185,11 +4179,9 @@ class TestSyncInterfacesViewPost:
 
         host_interface = Interface.objects.filter(device=device, name="eth1").first()
         assert host_interface is not None, "the host row must still be able to create its interface"
-        assert get_librenms_device_id(host_interface, "default", auto_save=False) == 8701, (
-            "eth1 belongs to the host port, not the OOB port"
-        )
+        assert read_mapping(host_interface).own_id("default") == 8701, "eth1 belongs to the host port, not the OOB port"
         oob_interface = Interface.objects.get(device=device, name="eth1-oob")
-        assert get_librenms_device_id(oob_interface, "default", auto_save=False) == 8702
+        assert read_mapping(oob_interface).own_id("default") == 8702
 
     def test_an_unselected_shared_lom_row_is_not_reported_as_skipped(self):
         """A skip warning must describe a row the operator asked to sync.
@@ -4255,7 +4247,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-host-gone")
@@ -4301,9 +4293,7 @@ class TestSyncInterfacesViewPost:
             cache.delete(cache_key)
 
         host_interface.refresh_from_db()
-        assert get_librenms_device_id(host_interface, "default", auto_save=False) == 8901, (
-            "the host interface keeps its own port binding"
-        )
+        assert read_mapping(host_interface).own_id("default") == 8901, "the host interface keeps its own port binding"
         warnings = message_texts(request, "warning")
         if bound_elsewhere:
             assert not Interface.objects.filter(device=device, name="eno1-oob").exists()
@@ -4311,10 +4301,10 @@ class TestSyncInterfacesViewPost:
                 "1 interface(s) skipped: eno1-oob (LibreNMS port ID is already assigned to another NetBox interface)."
             ]
             foreign.refresh_from_db()
-            assert get_librenms_device_id(foreign, "default", auto_save=False) == 8902
+            assert read_mapping(foreign).own_id("default") == 8902
         else:
             oob_interface = Interface.objects.get(device=device, name="eno1-oob")
-            assert get_librenms_device_id(oob_interface, "default", auto_save=False) == 8902
+            assert read_mapping(oob_interface).own_id("default") == 8902
             assert warnings == []
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
@@ -4423,7 +4413,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("padded-stable-port-id")
@@ -4467,7 +4456,7 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         interface.refresh_from_db()
         assert interface.name == "newname"
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 10
+        assert read_mapping(interface).own_id("default") == 10
         assert Interface.objects.filter(device=device).count() == 1
 
 
@@ -4763,8 +4752,6 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         """An unbound interface that the row matches by name is bound to the row's port ID."""
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
         interface = make_interface(make_device("port-id-write"), "Gi0/1")
         librenms_port = {
             **_PORT_KEYS_UNSET,
@@ -4780,7 +4767,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         _post_sync(client, settings, interface.device, [librenms_port], [42])
 
         interface = Interface.objects.get(pk=interface.pk)
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 42
+        assert read_mapping(interface).own_id("default") == 42
 
     def test_port_id_conflict_refuses_before_any_field_change(self):
         from dcim.models import Interface, MACAddress

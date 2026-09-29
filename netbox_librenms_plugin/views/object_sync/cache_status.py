@@ -7,10 +7,10 @@ from django.http import Http404, JsonResponse
 from django.views import View
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.server_mappings import mapped_device_servers
 from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
-    mapped_server_keys,
     request_actor_id,
 )
 from netbox_librenms_plugin.utils import get_interface_name_field
@@ -35,7 +35,7 @@ class SyncCacheStatusView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         obj = self.restrict_object_or_404(model, pk=pk)
         server_key = request.GET.get("server_key")
-        if not server_key or server_key not in mapped_server_keys(obj, server_key):
+        if not server_key or server_key not in mapped_device_servers(obj, active_server=server_key):
             raise Http404("LibreNMS server is not mapped to this object.")
 
         coordinator = SyncCacheConsistency(obj)
@@ -101,7 +101,7 @@ class SyncCacheFragmentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
             raise Http404("Unsupported sync tab.") from None
 
         server_key = request.GET.get("server_key")
-        if not server_key or server_key not in mapped_server_keys(obj, server_key):
+        if not server_key or server_key not in mapped_device_servers(obj, active_server=server_key):
             raise Http404("LibreNMS server is not mapped to this object.")
 
         coordinator = SyncCacheConsistency(obj)

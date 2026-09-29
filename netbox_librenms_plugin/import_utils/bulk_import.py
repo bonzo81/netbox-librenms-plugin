@@ -21,10 +21,8 @@ from ..librenms_api import LibreNMSAPI
 from ..librenms_ids import coerce_librenms_id
 from ..transactions import classify_conflict
 from ..utils import (
-    AmbiguousLibreNMSIdError,
     cached_row_matches,
     exception_text_for,
-    find_by_librenms_id,
     find_devices_by_serial,
     normalize_serial,
     normalize_stack_serial,
@@ -52,6 +50,11 @@ from .virtual_chassis import (
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     prefetch_vc_data_for_devices,
+)
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    MappingRole,
+    find_mapping,
 )
 
 logger = logging.getLogger(__name__)
@@ -806,7 +809,7 @@ def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, serv
     validation["existing_librenms_link"] = link
 
     scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
-    # _describe_existing_librenms_link already read the OOB sub-object via get_librenms_oob and
+    # _describe_existing_librenms_link already read the OOB entry from the mapping snapshot and
     # exposes the coerced positive-int id as link["oob_id"]; reuse it instead of re-reading.
     oob_id = link["oob_id"]
 
@@ -1103,10 +1106,17 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         # consults CrossModel — so without this guard the refresh re-check would silently bind to
         # one model and disagree with the validation path that originally blocked the row. Check
         # both models and raise the existing ambiguous-id blocker when both resolve (single-model
-        # duplicates are already raised inside find_by_librenms_id).
+        # duplicates are already raised inside find_mapping).
         if librenms_id is not None:
-            model_id_match = find_by_librenms_id(Model, librenms_id, server_key)
-            cross_id_match = find_by_librenms_id(CrossModel, librenms_id, server_key)
+            model_id_match = find_mapping(
+                Model.objects.all(), server=server_key, identity=librenms_id, roles=(MappingRole.OWN, MappingRole.OOB)
+            )
+            cross_id_match = find_mapping(
+                CrossModel.objects.all(),
+                server=server_key,
+                identity=librenms_id,
+                roles=(MappingRole.OWN, MappingRole.OOB),
+            )
             if model_id_match and cross_id_match:
                 raise AmbiguousLibreNMSIdError(
                     f"LibreNMS ID {librenms_id} matches both {Model.__name__} and {CrossModel.__name__}"

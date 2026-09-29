@@ -22,18 +22,15 @@ from netbox_librenms_plugin.interface_relationships import (
     relationship_diagnostics_report,
     resolve_relationship_row,
 )
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.librenms_ids import (
-    coerce_librenms_id,
-    normalize_librenms_port_id,
-)
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
     cache_remaining_ttl,
     get_interface_name_field,
     get_interface_port_identity_sets,
-    get_librenms_oob,
     get_librenms_sync_device,
     is_list_of_dicts,
     is_valid_ports_payload,
@@ -158,9 +155,11 @@ class BaseInterfaceTableView(
         """
         raise NotImplementedError("Subclasses must implement get_table()")
 
-    def _get_object_librenms_id(self, obj):
-        """Resolve a cached/stored LibreNMS ID for any NetBox object without dynamic fallback noise."""
-        librenms_id = self.librenms_api.get_stored_librenms_id(obj)
+    def _get_object_librenms_id(self, obj, mapping):
+        """Resolve the stored or cached LibreNMS ID of an interface from its mapping snapshot."""
+        librenms_id = mapping.own_id(self.librenms_api.server_key)
+        if librenms_id is None:
+            librenms_id = self.librenms_api.get_cached_librenms_id(obj)
         if not isinstance(librenms_id, (int, str)) or isinstance(librenms_id, bool):
             return None
         return normalize_librenms_port_id(librenms_id)
@@ -193,18 +192,21 @@ class BaseInterfaceTableView(
         related_field = self.get_select_related_field(obj)
         queryset = self.get_interfaces(obj)
         if metadata_only:
+            records = read_mappings(queryset, fields=("pk", "name", f"{related_field}_id"))
             interfaces = (
-                SimpleNamespace(_meta=queryset.model._meta, **row)
-                for row in queryset.values("pk", "name", f"{related_field}_id", "custom_field_data")
+                (SimpleNamespace(_meta=queryset.model._meta, **record.values), record.mapping) for record in records
             )
         else:
             extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
-            interfaces = queryset.select_related(related_field, "untagged_vlan", *extra_related).prefetch_related(
-                "tagged_vlans", "tagged_vlans__group", "mac_addresses"
+            interfaces = (
+                (interface, read_mapping(interface))
+                for interface in queryset.select_related(
+                    related_field, "untagged_vlan", *extra_related
+                ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
             )
-        for interface in interfaces:
+        for interface, mapping in interfaces:
             by_name[interface.name] = interface
-            librenms_id = self._get_object_librenms_id(interface)
+            librenms_id = self._get_object_librenms_id(interface, mapping)
             if librenms_id is None:
                 continue
             librenms_id_counts[librenms_id] = librenms_id_counts.get(librenms_id, 0) + 1
@@ -315,24 +317,20 @@ class BaseInterfaceTableView(
         # migrated context all stay on one server — no mismatch between cached data and
         # migrated mode. Resolving OOB from the sync device (not the viewed member) matters
         # for a VC member: the OOB relationship lives on the sync device, so
-        # get_librenms_oob(obj) would miss it and drop OOB rows / shared-LOM flagging.
-        oob = get_librenms_oob(lookup_device, server_key=_server_key)
-        # Coerce the OOB controller id the same way the host id is coerced above: a non-numeric /
-        # bool / zero / negative stored id must fail closed (oob_id=None → skip the OOB fetch),
-        # never build a GET /devices/<garbage>/ports that 404s and silently drops OOB ports.
-        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
+        # reading the viewed member would miss it and drop OOB rows / shared-LOM flagging.
+        lookup_mapping = read_mapping(lookup_device)
+        oob_linked = lookup_mapping.has_oob(_server_key)
+        # A non-numeric / bool / zero / negative stored id must fail closed (oob_id=None → skip the
+        # OOB fetch), never build a GET /devices/<garbage>/ports that 404s and silently drops OOB ports.
+        oob_id = lookup_mapping.oob_id(_server_key)
         oob_ports_failed = False
-        if oob and oob_id is None:
+        if oob_linked and oob_id is None:
             # An OOB controller IS linked, but its stored id is corrupt (non-numeric / bool / zero /
             # negative). Silently skipping here would cache a host-only snapshot that looks COMPLETE,
             # so the OOB rows / shared-LOM markers would vanish with no banner. Fail closed onto the
             # same partial-outcome path as a fetch failure: log the corrupt custom-field state, warn
             # the user, and tag the snapshot oob_incomplete below.
-            logger.warning(
-                "Invalid OOB controller id for device %s: %r",
-                self.librenms_id,
-                oob.get("id"),
-            )
+            logger.warning("Invalid OOB controller id for device %s", self.librenms_id)
             messages.warning(
                 request,
                 "Interfaces refreshed, but OOB controller ports fetch failed; "

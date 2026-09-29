@@ -37,7 +37,7 @@ rules:
       # helpers that resolve a NetBox object with no permission scope applied
       - pattern: resolve_device_by_host_ip(...)
       - pattern: find_devices_by_serial(...)
-      - pattern: find_by_librenms_id(...)
+      - pattern: find_mapping(...)
       - pattern: get_librenms_sync_device(...)
       # a match an unrestricted search already bound into the validation dict
       - pattern: $V["existing_device"]

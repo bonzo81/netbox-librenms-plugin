@@ -839,7 +839,7 @@ class DeviceImportTable(tables.Table):
             def _coerce_pair_id(value):
                 # Strict coercion (rejects booleans and floats, unlike int()) so malformed
                 # custom-field data can't make the host/OOB pair comparison hide or mislabel a
-                # pair. Matches the coercion used by the refresh path / find_by_librenms_id.
+                # pair. Matches the coercion used by the refresh path / find_mapping.
                 return coerce_librenms_id(value)
 
             # Coerce both pair ids once. A malformed id becomes None, so the host/OOB pair branches

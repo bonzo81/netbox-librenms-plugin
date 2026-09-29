@@ -14,15 +14,14 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_module_model_placeholder,
 )
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
 )
+from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
-    get_librenms_device_id,
-    get_librenms_oob,
     get_librenms_sync_device,
     get_module_template_interface_names,
     get_module_template_interface_specs,
@@ -636,14 +635,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # is not safe for high-density chassis. Instead we compute an offset
         # that is always above the main device's highest observed index,
         # including any synthetic transceiver rows added above.
-        oob = get_librenms_oob(sync_device, server_key=server_key)
-        # Coerce to a positive int (or None) like interfaces_view.py:212 / cables_view.py — a
-        # bool/negative/non-numeric stored OOB id must not be treated as valid and fired at
-        # get_device_inventory(). It also normalizes the value cached as the OOB fingerprint
-        # below so get_context_data()'s comparison is int-vs-int (see the read side).
-        oob_id = coerce_librenms_id(oob.get("id")) if isinstance(oob, dict) else None
+        sync_mapping = read_mapping(sync_device)
+        # A bool/negative/non-numeric stored OOB id reads as None, so it is never fired at
+        # get_device_inventory(). The int is also the OOB fingerprint cached below.
+        oob_id = sync_mapping.oob_id(server_key)
         oob_failed = False
-        if oob and oob_id is None:
+        if sync_mapping.has_oob(server_key) and oob_id is None:
             # An OOB controller IS linked but its stored id is corrupt (non-numeric / bool /
             # zero / negative — e.g. after a manual custom-field edit). A bare falsy check
             # would conflate this with "no OOB linked": the controller's inventory rows would
@@ -652,11 +649,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Cables tabs fail closed with an explicit warning for the very same state. Take
             # the same partial-outcome path as a fetch failure.
             oob_failed = True
-            logger.warning(
-                "Invalid OOB controller id for device %s: %r",
-                self.librenms_id,
-                oob.get("id"),
-            )
+            logger.warning("Invalid OOB controller id for device %s", self.librenms_id)
         elif oob_id:
             oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
             # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
@@ -815,16 +808,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Same for the linked OOB controller: a re-link (or unlink) to a different
         # controller must drop merged inventory built for the old one. Symmetric on
         # None so had-OOB→none and none→has-OOB both invalidate.
-        current_oob = get_librenms_oob(sync_device, server_key=scoped_server)
-        # Coerce both sides of the fingerprint so a stored string id ("5") and an int id (5) of
-        # the same value compare equal — otherwise the merged inventory is wrongly treated as
-        # stale on every GET and the module table renders empty until a manual refresh. The write
-        # side (post()) now caches the coerced value, so this matches it.
-        current_oob_id = coerce_librenms_id(current_oob.get("id")) if isinstance(current_oob, dict) else None
+        sync_mapping = read_mapping(sync_device)
+        # The snapshot reads a stored "5" and 5 as the same int, which post() also caches.
+        current_oob_id = sync_mapping.oob_id(scoped_server)
         # A linked-but-corrupt OOB id must not collapse to the no-OOB fingerprint: post()
         # takes the partial-outcome path (never caches) for this state, so the GET compare
         # can't quietly serve a prior no-OOB snapshot while an OOB controller is linked.
-        if current_oob and current_oob_id is None:
+        if sync_mapping.has_oob(scoped_server) and current_oob_id is None:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         if cached_payload.get("oob_librenms_id") != current_oob_id:
@@ -1481,7 +1471,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         current_port_id = None
         if server_key:
             try:
-                current_port_id = int(get_librenms_device_id(interface, server_key, auto_save=False) or 0) or None
+                current_port_id = int(read_mapping(interface).own_id(server_key) or 0) or None
             except (TypeError, ValueError):
                 current_port_id = None
 

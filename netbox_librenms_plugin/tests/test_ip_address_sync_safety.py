@@ -21,6 +21,7 @@ from django.urls import reverse
 from ipam.models import IPAddress, VRF
 
 from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
@@ -1032,8 +1033,6 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
     """Bulk IP sync must create one shared termination for rows on the same missing port."""
     from dcim.models import Interface
 
-    from netbox_librenms_plugin.utils import get_librenms_device_id
-
     _configure_test_server(settings)
     device = make_device("ip-create-missing-interface", librenms_cf={"default": {"id": 42}})
     blue = VRF.objects.create(name="Create Missing Blue")
@@ -1088,7 +1087,7 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
     assert response.status_code == 302
     interface = Interface.objects.get(device=device, name="Ethernet1")
     assert Interface.objects.filter(device=device, name="Ethernet1").count() == 1
-    assert get_librenms_device_id(interface, "default", auto_save=False) == 7001
+    assert read_mapping(interface).own_id("default") == 7001
     assert interface.description == "Server uplink"
     assert interface.mtu == 1500
     assert interface.enabled is True
