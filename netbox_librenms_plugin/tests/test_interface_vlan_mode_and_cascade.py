@@ -362,3 +362,30 @@ def test_lag_vlan_rollup_agrees_with_the_database_writer(modes, tagged, expected
     else:
         assert {member.mode for member in members} == {"access", "tagged"}
         assert "vlan_inherited_from" not in rows[0]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("requested_vid, expected_vid", [(999, 100), (200, 200), (None, None)])
+def test_vlan_sync_preserves_an_existing_assignment_when_the_requested_vid_is_missing(
+    client, settings, requested_vid, expected_vid
+):
+    from ipam.models import VLAN
+
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_superuser
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
+
+    _mixin, interface, _maps, vlans = _fixture("unresolved-untagged", [100, 200])
+    interface.mode = "access"
+    interface.untagged_vlan = vlans[0]
+    interface.save()
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser("unresolved-untagged-user"))
+    seed_ports(
+        interface.device, [sync_port(10, interface.name, mode="access", untagged_vlan=requested_vid, tagged_vlans=[])]
+    )
+
+    post_interface_sync(client, interface.device, [10], htmx=False, exclude_columns=("mac_address",))
+
+    interface.refresh_from_db()
+    expected = VLAN.objects.get(vid=expected_vid) if expected_vid is not None else None
+    assert interface.untagged_vlan == expected
