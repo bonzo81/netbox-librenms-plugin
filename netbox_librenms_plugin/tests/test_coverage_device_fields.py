@@ -1210,6 +1210,61 @@ class TestCommonFieldUpdateFailures:
 
         assert any("Failed to retrieve device info" in text for text in _messages(response, "error"))
 
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize(
+        "view_name",
+        [
+            "update_device_name",
+            "update_device_serial",
+            "update_device_type",
+            "update_device_platform",
+        ],
+    )
+    def test_a_device_deleted_during_the_live_lookup_is_reported_as_gone(
+        self,
+        logged_in_client,
+        librenms_server,
+        view_name,
+    ):
+        """The mock server's thread deletes the device in its own session, so the view's locked write finds no row."""
+        from core.models import ObjectChange
+        from dcim.models import Device, DeviceType, Platform
+        from django.contrib.contenttypes.models import ContentType
+        from django.db import connections
+
+        device = _linked_device(f"deleted-{view_name}".replace("_", "-"), 6573)
+        new_type = DeviceType.objects.create(
+            manufacturer=device.device_type.manufacturer, model="Deleted Lookup Router", slug="deleted-lookup-router"
+        )
+        new_platform = Platform.objects.create(name="deleted-lookup-os", slug="deleted-lookup-os")
+        live = {
+            "device_id": 6573,
+            "hostname": "renamed-during-lookup",
+            "sysName": "renamed-during-lookup",
+            "serial": "LOOKUP-SERIAL",
+            "hardware": new_type.model,
+            "os": new_platform.name,
+        }
+
+        def delete_then_answer(**_request):
+            try:
+                Device.objects.filter(pk=device.pk).delete()
+            finally:
+                connections.close_all()
+            return 200, {"status": "ok", "devices": [live]}
+
+        librenms_server.register("/api/v0/devices/6573", delete_then_answer)
+
+        response = _post(logged_in_client, view_name, device)
+
+        assert _messages(response) == ["Device no longer exists."]
+        assert _messages(response, "error") == ["Device no longer exists."]
+        assert response.status_code == 302
+        assert response.url == f"{_url('device_librenms_sync', device.pk)}?server_key={SERVER_KEY}"
+        assert not Device.objects.filter(pk=device.pk).exists()
+        device_type = ContentType.objects.get_for_model(Device)
+        assert not ObjectChange.objects.filter(changed_object_type=device_type, changed_object_id=device.pk).exists()
+
 
 class TestDeviceFieldHelpers:
     @pytest.mark.parametrize(
