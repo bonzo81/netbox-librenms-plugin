@@ -3319,9 +3319,28 @@ class MoveModuleView(
 
         self.restrict_object_or_404(ModuleBay, pk=target_bay_id, device=target_device)
 
+        occupant_removed_msg = from_device = from_bay = None
+
+        def move(module):
+            nonlocal occupant_removed_msg, from_device, from_bay
+            # Remove whatever is currently in the target bay (if provided and different).
+            # Scoped by "delete": the device and bay filters prove where the row sits, not that
+            # the grant covers it, and the gate asked has_perm without an instance.
+            if module_id and module_id != module.pk:
+                occupant = (
+                    self.restricted_queryset(Module, "delete")
+                    .select_for_update(of=("self",))
+                    .filter(pk=module_id, device=target_device, module_bay=target_bay)
+                    .first()
+                )
+                if occupant:
+                    occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
+                    occupant.delete()
+            from_device, from_bay = module.device.name, module.module_bay.name
+            module.module_bay = target_bay
+            module.device = target_device
+
         try:
-            occupant_removed_msg = None
-            source_device = None
             with transaction.atomic():
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
@@ -3334,47 +3353,19 @@ class MoveModuleView(
                     messages.error(request, "Module bay no longer exists.")
                     return _modules_action_response(request, page_device, server_key)
 
-                # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
-                # primary lookup: this module's device and bay are reassigned below, and its pk
-                # comes straight from the POST, so an unscoped read would move a module the
-                # user's grant does not cover.
-                conflict_module = (
-                    self.restricted_queryset(Module, "change")
-                    .select_for_update(of=("self",))
-                    .filter(pk=conflict_module_id)
-                    .select_related("module_type", "module_bay", "device")
-                    .first()
-                )
-                if not conflict_module:
+                # Scoped like the primary lookup: this module's device and bay are reassigned, and
+                # its pk comes straight from the POST, so an unscoped read would move a module the
+                # user's grant does not cover. The module is locked before the occupant.
+                try:
+                    conflict_module = update_existing_row(
+                        self.restricted_queryset(Module, "change")
+                        .filter(pk=conflict_module_id)
+                        .select_related("module_type", "module_bay", "device"),
+                        move,
+                    )
+                except Module.DoesNotExist:
                     messages.error(request, "Module no longer exists.")
                     return _modules_action_response(request, page_device, server_key)
-
-                # Remove whatever is currently in the target bay (if provided and different).
-                # Scoped by "delete": the device and bay filters prove where the row sits, not that
-                # the grant covers it, and the gate asked has_perm without an instance.
-                if module_id:
-                    occupant = (
-                        self.restricted_queryset(Module, "delete")
-                        .select_for_update(of=("self",))
-                        .filter(pk=module_id, device=target_device, module_bay=target_bay)
-                        .first()
-                    )
-                    if occupant and occupant.pk != conflict_module.pk:
-                        occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
-                        occupant.delete()
-
-                # Move the conflict module to the target bay
-                from_bay = conflict_module.module_bay.name
-                source_device = conflict_module.device
-                from_device = source_device.name
-
-                def move(row):
-                    row.module_bay = target_bay
-                    row.device = target_device
-
-                conflict_module = update_existing_row(
-                    self.restricted_queryset(Module, "change").filter(pk=conflict_module.pk), move
-                )
 
             if occupant_removed_msg:
                 messages.info(request, occupant_removed_msg)
