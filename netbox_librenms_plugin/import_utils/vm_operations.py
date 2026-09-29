@@ -163,9 +163,9 @@ def create_vm_from_librenms(
             platform=platform,
             comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
         )
-        vm.full_clean()
-        vm.save()
+        # Set before the one save: a second save would log an update without a before-state.
         set_librenms_device_id(vm, librenms_device_id, server_key)
+        vm.full_clean()
         vm.save()
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")

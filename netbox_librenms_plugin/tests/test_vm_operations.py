@@ -104,6 +104,24 @@ class TestCreateVmFromLibrenms:
         assert "device_id=6101" in vm.comments
         assert "netbox-librenms-plugin" in vm.comments
 
+    def test_creation_is_one_change_record_that_holds_the_librenms_id(self):
+        """The VM is written once, so the change log has no update without a before-state."""
+        from core.models import ObjectChange
+        from django.contrib.contenttypes.models import ContentType
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+        from netbox_librenms_plugin.tests.view_test_helpers import change_logging, make_request
+
+        with change_logging(make_request()):
+            vm = create_vm_from_librenms(_payload(6102, _computed_name="vm-change-log"), _validation("change-log"))
+
+        changes = ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(VirtualMachine), changed_object_id=vm.pk
+        )
+        assert [change.action for change in changes] == ["create"]
+        assert changes.get().postchange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6102}
+
     def test_validated_name_precedes_raw_name_recomputation(self):
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
