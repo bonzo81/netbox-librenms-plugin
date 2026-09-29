@@ -408,6 +408,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Raises:
             LibreNMSIDConflictError: If discovery finds an ID owned by another object.
+            TransactionConflict: If another operation holds the claim that discovery needs.
 
         """
         try:
