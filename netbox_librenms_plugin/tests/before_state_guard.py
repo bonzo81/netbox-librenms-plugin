@@ -19,6 +19,7 @@ import django
 import taggit
 from django.db.models import signals
 from django.db.models.query import QuerySet
+from extras.models import Tag
 from netbox.context import current_request
 from netbox.models.features import ChangeLoggingMixin
 
@@ -133,21 +134,34 @@ def _on_pre_save(sender, instance, raw=False, **kwargs):
         _check_instance(instance, "save stale" if "_prechange_snapshot" in instance.__dict__ else "save missing")
 
 
+def _consume(instance, caller):
+    """Mark the snapshot of *instance* as used by a change log record that *caller* asked for."""
+    instance.__dict__[_CONSUMED] = instance.__dict__.get("_prechange_snapshot")
+    # NetBox merges a later m2m change into the change log record of this change only in the same request.
+    plugin_change = caller is not None and _file(caller)[0] != _TESTS
+    instance.__dict__[_MERGES] = current_request.get() if plugin_change else None
+
+
 def _on_post_save(sender, instance, raw=False, **kwargs):
     if raw or not isinstance(instance, ChangeLoggingMixin):
         return
-    instance.__dict__[_CONSUMED] = instance.__dict__.get("_prechange_snapshot")
     caller, outer_save = _caller(instance)
     _last_saves[id(instance)] = (instance, outer_save)
-    # NetBox merges a later m2m change into the change log record of this save only in the same request.
-    plugin_save = caller is not None and _file(caller)[0] != _TESTS
-    instance.__dict__[_MERGES] = current_request.get() if plugin_save else None
+    _consume(instance, caller)
 
 
-def _on_m2m_changed(sender, instance, action, pk_set, **kwargs):
-    if action not in ("pre_add", "pre_remove", "pre_clear") or (action != "pre_clear" and not pk_set):
-        return
+def _on_m2m_changed(sender, instance, action, pk_set, model=None, **kwargs):
     if instance._state.adding or not isinstance(instance, ChangeLoggingMixin):
+        return
+    if action in ("post_add", "post_remove") and pk_set:
+        _consume(instance, _caller(instance, manager=True)[0])
+        return
+    if action == "post_clear":
+        # NetBox logs a clear only for tags that the snapshot holds (core/signals.py handle_changed_object).
+        if model is Tag and getattr(instance, "_prechange_snapshot", {}).get("tags"):
+            _consume(instance, _caller(instance, manager=True)[0])
+        return
+    if action not in ("pre_add", "pre_remove", "pre_clear") or (action != "pre_clear" and not pk_set):
         return
     request = current_request.get()
     merges = request is not None and instance.__dict__.get(_MERGES) is request

@@ -304,6 +304,57 @@ class TestManyToMany:
 
         assert found_by(snapshot_and_add, stored(make_device("bsg-tag-fresh")), make_tag()) == []
 
+    def test_a_save_after_a_tag_change_without_a_new_snapshot_is_a_violation(self):
+        """NetBox writes the change log record of the tag change from the snapshot, so the save needs a new one."""
+        add_then_save = plugin_function(
+            """
+            def add_then_save(obj, tag):
+                obj.snapshot()
+                obj.tags.add(tag)
+                obj.description = "changed"
+                obj.save()
+            """
+        )
+        device = stored(make_device("bsg-add-then-save"))
+
+        with change_logging(make_request()):
+            found = found_by(add_then_save, device, make_tag())
+
+        assert found == [(PROBE, "add_then_save", "dcim.Device", "save stale", device.pk)]
+
+    def test_a_save_after_a_tag_change_with_a_new_snapshot_is_not_a_violation(self):
+        add_then_snapshot_and_save = plugin_function(
+            """
+            def add_then_snapshot_and_save(obj, tag):
+                obj.snapshot()
+                obj.tags.add(tag)
+                obj.snapshot()
+                obj.description = "changed"
+                obj.save()
+            """
+        )
+
+        with change_logging(make_request()):
+            found = found_by(add_then_snapshot_and_save, stored(make_device("bsg-add-snapshot-save")), make_tag())
+
+        assert found == []
+
+    def test_two_tag_changes_in_one_request_after_one_snapshot_are_not_a_violation(self):
+        """NetBox merges the second change into the change log record of the first change in the same request."""
+        add_twice = plugin_function(
+            """
+            def add_twice(obj, first, second):
+                obj.snapshot()
+                obj.tags.add(first)
+                obj.tags.add(second)
+            """
+        )
+
+        with change_logging(make_request()):
+            found = found_by(add_twice, stored(make_device("bsg-add-twice")), make_tag(), make_tag("bsg-tag-2"))
+
+        assert found == []
+
     def test_a_tag_change_after_a_plugin_save_in_the_same_request_is_not_a_violation(self):
         """NetBox merges the change into the change log record of the save in the same request."""
         create_then_add = plugin_function(
