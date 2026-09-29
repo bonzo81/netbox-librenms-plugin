@@ -796,6 +796,14 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             "reason": f"no matching interface found for port_id {port_id}",
         }
 
+    # The checks and the change below read the locked row: a concurrent bind may have written it since the read above.
+    candidate = interfaces.select_for_update(of=("self",)).filter(pk=candidate.pk, device=device).first()
+    if candidate is None:
+        return {
+            "status": "skipped",
+            "reason": f"matching interface is not available for port_id {port_id}",
+        }
+
     set_module = False
     if module_pk:
         candidate_module_id = getattr(candidate, "module_id", None)
