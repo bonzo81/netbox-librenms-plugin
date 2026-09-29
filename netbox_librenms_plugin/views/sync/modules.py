@@ -40,6 +40,7 @@ from netbox_librenms_plugin.utils import (
     normalize_serial,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
+    validation_error_detail,
 )
 from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _PLACEHOLDER_VALUES, _inventory_item_key
 from netbox_librenms_plugin.views.mixins import (
@@ -67,7 +68,7 @@ OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
 def _module_error_detail(error):
     """Render validation messages as text and preserve database conflict details."""
-    return "; ".join(error.messages) if isinstance(error, ValidationError) else str(error)
+    return validation_error_detail(error) if isinstance(error, ValidationError) else str(error)
 
 
 def _modules_redirect_response(request, sync_url, server_key=None):

@@ -9504,7 +9504,7 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
     [
         ("Invalid module.", "Invalid module."),
         (["Invalid module.", "Choose a bay."], "Invalid module.; Choose a bay."),
-        ({"serial": ["Invalid serial."]}, "Invalid serial."),
+        ({"serial": ["Invalid serial."]}, "serial: Invalid serial."),
     ],
 )
 def test_module_validation_details_are_plain_text(details, expected):
