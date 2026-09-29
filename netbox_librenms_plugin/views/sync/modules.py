@@ -65,6 +65,11 @@ NO_LIBRENMS_SERVER_MESSAGE = (
 OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
 
+def _module_error_detail(error):
+    """Render validation messages as text and preserve database conflict details."""
+    return "; ".join(error.messages) if isinstance(error, ValidationError) else str(error)
+
+
 def _modules_redirect_response(request, sync_url, server_key=None):
     """
     Return a Django redirect back to the modules tab for a classic (non-HTMX) form post.
@@ -1052,7 +1057,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to install module: {e}")
+            messages.error(request, f"Failed to install module: {_module_error_detail(e)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -1251,7 +1256,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Branch install failed: {e}")
+            messages.error(request, f"Branch install failed: {_module_error_detail(e)}")
             return
 
         _report_install_results(request, installed, skipped, failed)
@@ -1562,7 +1567,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 "reason": f"a matching {exc.component_label} is not available for module adoption",
             }
         except (ValidationError, IntegrityError) as e:
-            error_msg = str(e)
+            error_msg = _module_error_detail(e)
             if "dcim_interface_unique_device_name" in error_msg:
                 error_msg = (
                     "duplicate interface name — this module type's interface template "
@@ -2003,7 +2008,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Install failed: {e}")
+            messages.error(request, f"Install failed: {_module_error_detail(e)}")
             return _modules_action_response(request, page_device, server_key)
 
         if invalid_selection_seen:
@@ -2097,7 +2102,7 @@ class UpdateModuleSerialView(
             else:
                 messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to update serial: {e}")
+            messages.error(request, f"Failed to update serial: {_module_error_detail(e)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -2677,7 +2682,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 "Ask an administrator to resolve the conflict.",
             )
         except (ValidationError, IntegrityError) as e:
-            error_msg = str(e)
+            error_msg = _module_error_detail(e)
             if "dcim_interface_unique_device_name" in error_msg:
                 error_msg = (
                     "duplicate interface name — this module type's interface template "
@@ -2816,7 +2821,7 @@ class MoveModuleView(
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Move failed: {e}")
+            messages.error(request, f"Move failed: {_module_error_detail(e)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -3104,7 +3109,7 @@ class AddBayTemplateView(
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
-                messages.error(request, f"Failed to add bay mapping: {exc}")
+                messages.error(request, f"Failed to add bay mapping: {_module_error_detail(exc)}")
             else:
                 messages.success(request, f"Added bay mapping for '{librenms_name}' to '{name}'.")
                 if server_key:
@@ -3353,6 +3358,6 @@ class AddBayTemplateView(
             if server_key:
                 _schedule_module_cache_mutation(request, device, server_key)
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to add bay template: {e}")
+            messages.error(request, f"Failed to add bay template: {_module_error_detail(e)}")
 
         return _modules_action_response(request, device, server_key)

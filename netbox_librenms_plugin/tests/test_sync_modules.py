@@ -9492,6 +9492,30 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
     assert response.status_code == 302
     assert not Module.objects.filter(device__in=[page, target]).exists()
     if deleted:
-        assert any("no longer available" in str(message) for message in response.wsgi_request._messages)
+        assert [str(message) for message in response.wsgi_request._messages] == [
+            "Install failed: A selected device is no longer available. Refresh Modules and try again."
+        ]
     else:
         assert any("matched ignore rule" in str(message) for message in response.wsgi_request._messages)
+
+
+@pytest.mark.parametrize(
+    "details, expected",
+    [
+        ("Invalid module.", "Invalid module."),
+        (["Invalid module.", "Choose a bay."], "Invalid module.; Choose a bay."),
+        ({"serial": ["Invalid serial."]}, "Invalid serial."),
+    ],
+)
+def test_module_validation_details_are_plain_text(details, expected):
+    from django.core.exceptions import ValidationError
+    from netbox_librenms_plugin.views.sync.modules import _module_error_detail
+
+    assert _module_error_detail(ValidationError(details)) == expected
+
+
+def test_module_database_conflict_details_are_preserved():
+    from django.db import IntegrityError
+    from netbox_librenms_plugin.views.sync.modules import _module_error_detail
+
+    assert _module_error_detail(IntegrityError("Duplicate module.")) == "Duplicate module."
