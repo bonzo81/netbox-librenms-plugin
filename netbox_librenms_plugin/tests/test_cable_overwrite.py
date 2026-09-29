@@ -644,17 +644,21 @@ class TestSerialCableOverwriteBehaviour:
         assert target_port.cable_id is None
 
     def test_same_connection_untagged_gets_tagged_not_recreated(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, change_logging
+
         acs, csp, cp_a, _cp_b = self._setup("tag")
         cable = cable_together(csp, cp_a)  # untagged, already the desired connection
 
         sync = _sync_view()
-        result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
+        with change_logging(sync.request):
+            result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
 
         assert result["status"] == "tagged"
         cable.refresh_from_db()
         assert "librenms" in set(cable.tags.values_list("slug", flat=True))
         csp.refresh_from_db()
         assert csp.cable_id == cable.pk  # same cable, not recreated
+        assert_update_logged(cable, "tags", [], [cable.tags.get().name])
 
 
 # ---------------------------------------------------------------------------
