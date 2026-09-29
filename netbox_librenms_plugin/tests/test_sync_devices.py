@@ -59,6 +59,23 @@ def _add_url(obj):
     return reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[obj.pk])
 
 
+def _configure_only_other_server(settings):
+    """Configure one server that is not ``default``, so a legacy ``default`` mapping is unprotected."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "primary": {"librenms_url": "https://primary.example.test", "api_token": "remove-test-token"}
+    }
+    plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
+    settings.PLUGINS_CONFIG = plugin_config
+
+
+def _post_remove(client, obj, server_key):
+    return client.post(
+        reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[obj.pk]),
+        {"object_type": obj._meta.model_name, "server_key": server_key},
+    )
+
+
 def _v2_payload(obj, **overrides):
     data = {
         "object_type": obj._meta.model_name,
@@ -317,6 +334,95 @@ class TestRemoveServerMappingView:
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         vm.refresh_from_db()
         assert vm.custom_field_data["librenms_id"] is None
+
+    @pytest.mark.parametrize("stored", ["²", 0, -1, True])
+    def test_a_legacy_value_the_reader_cannot_resolve_has_no_mapping_to_remove(self, client, settings, stored):
+        _configure_only_other_server(settings)
+        device = make_device(f"remove-unreadable-legacy-{stored}", librenms_cf=stored)
+        client.force_login(make_superuser(f"remove-unreadable-legacy-{stored}-writer"))
+
+        response = _post_remove(client, device, "default")
+
+        assert response.status_code == 302
+        assert _messages(response, "warning") == ["No mapping found for server 'default'."]
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == stored
+
+    @pytest.mark.parametrize("stored", ["42", "+42", "4_2", " 42 ", 42])
+    def test_a_legacy_value_the_reader_resolves_is_removable_under_default(self, client, settings, stored):
+        _configure_only_other_server(settings)
+        device = make_device(f"remove-readable-legacy-{stored}", librenms_cf=stored)
+        client.force_login(make_superuser(f"remove-readable-legacy-{stored}-writer"))
+
+        response = _post_remove(client, device, "default")
+
+        assert response.status_code == 302
+        assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'default'."]
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] is None
+
+    def test_a_legacy_value_is_removable_only_under_default(self, client, settings):
+        _configure_only_other_server(settings)
+        device = make_device("remove-legacy-other-server", librenms_cf="+42")
+        client.force_login(make_superuser("remove-legacy-other-server-writer"))
+
+        response = _post_remove(client, device, "retired")
+
+        assert _messages(response, "warning") == ["No mapping found for server 'retired'."]
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == "+42"
+
+    def test_a_readable_legacy_value_stays_when_default_is_configured(self, client):
+        device = make_device("remove-legacy-protected-default", librenms_cf="+42")
+        client.force_login(make_superuser("remove-legacy-protected-default-writer"))
+
+        response = _post_remove(client, device, "default")
+
+        assert _messages(response, "error") == [
+            "Cannot remove mapping for configured server 'default'. "
+            "Remove the server from plugin configuration first, then retry."
+        ]
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == "+42"
+
+    def test_a_legacy_value_is_rechecked_on_the_locked_row(self, client, settings):
+        from django.db import connection
+
+        _configure_only_other_server(settings)
+        device = make_device("remove-legacy-locked-recheck", librenms_cf="+42")
+        client.force_login(make_superuser("remove-legacy-locked-recheck-writer"))
+
+        class CorruptBeforeLock:
+            fired = False
+
+            def __call__(self, execute, sql, params, many, context):
+                if not self.fired and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql.upper():
+                    self.fired = True
+                    type(device).objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": "²"})
+                return execute(sql, params, many, context)
+
+        lock_hook = CorruptBeforeLock()
+        with connection.execute_wrapper(lock_hook):
+            response = _post_remove(client, device, "default")
+
+        assert lock_hook.fired
+        assert _messages(response) == ["Mapping for server 'default' was already removed."]
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == "²"
+
+    def test_a_readable_legacy_value_needs_change_permission_to_remove(self, client, settings):
+        from dcim.models import Device
+
+        _configure_only_other_server(settings)
+        device = make_device("remove-legacy-view-only", librenms_cf="+42")
+        client.force_login(make_user_with_perms("remove-legacy-view-only-user", [("view", Device)]))
+
+        response = _post_remove(client, device, "default")
+
+        assert response.status_code == 302
+        assert _messages(response, "error") == ["Missing permissions: dcim.change_device"]
+        device.refresh_from_db()
+        assert device.custom_field_data["librenms_id"] == "+42"
 
     def test_mapping_removal_preserves_unrelated_legacy_device_state(self, client):
         from dcim.models import Device

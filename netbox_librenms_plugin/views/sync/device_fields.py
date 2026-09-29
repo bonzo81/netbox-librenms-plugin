@@ -902,6 +902,13 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         return None
 
 
+def _has_removable_mapping(stored, server_key):
+    """Return whether *server_key* has an entry, or a readable legacy value that ``default`` serves."""
+    if isinstance(stored, dict):
+        return server_key in stored
+    return server_key == "default" and is_legacy_librenms_id(stored)
+
+
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
 
@@ -913,15 +920,6 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         """Return the Device or VirtualMachine for the given pk."""
         model = _sync_model(object_type)
         return self.restrict_object_or_404(model, "change", pk=pk), model
-
-    def _normalize_librenms_mapping(self, value):
-        if isinstance(value, bool):
-            return {}
-        if isinstance(value, int):
-            return {"default": value}
-        if isinstance(value, str) and value.isdigit():
-            return {"default": int(value)}
-        return value if isinstance(value, dict) else {}
 
     def post(self, request, pk):
         # Scope required permissions to the specific model being modified before checking.
@@ -949,8 +947,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             messages.error(request, str(exc))
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
-        cf_value = self._normalize_librenms_mapping(obj.custom_field_data.get("librenms_id"))
-        if not isinstance(cf_value, dict) or server_key not in cf_value:
+        if not _has_removable_mapping(obj.custom_field_data.get("librenms_id"), server_key):
             messages.warning(request, f"No mapping found for server '{server_key}'.")
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
@@ -982,15 +979,17 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-            cf = self._normalize_librenms_mapping(obj_locked.custom_field_data.get("librenms_id"))
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"
             )
-            if isinstance(cf, dict) and server_key in cf and not _is_protected:
+            stored = obj_locked.custom_field_data.get("librenms_id")
+            if _has_removable_mapping(stored, server_key) and not _is_protected:
                 obj_locked.snapshot()
-                cf = without_server_mapping(cf, server_key)
+                # A legacy value has no server entry, so removing it leaves an empty mapping.
+                cf = without_server_mapping(stored, server_key)
                 obj_locked.custom_field_data["librenms_id"] = cf
+                # The count reads the edited object, so a preference for the removed server goes.
                 usable_count = sum(mapping.is_selectable for mapping in build_server_mappings(obj_locked))
                 if usable_count <= 1:
                     cf.pop(PREFERRED_SERVER_FIELD, None)
