@@ -284,6 +284,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     tenant=getattr(getattr(remote_interface, "device", None), "tenant", None),
                 )
                 cable.save()
+                # The tag add merges into the create's change record only inside a NetBox request.
+                cable.snapshot()
                 cable.tags.add(self._get_provenance_tag(create=True, sync_settings=sync_settings))
                 if not self.restricted_queryset(Cable, "add").filter(pk=cable.pk).exists():
                     raise PermissionDenied("You may not add this cable.")

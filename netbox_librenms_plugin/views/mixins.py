@@ -1764,9 +1764,8 @@ class VlanAssignmentMixin:
         else:
             tagged_vlan_ids = set()
         if tagged_vlan_ids != prior_tagged_vlan_ids:
-            # An unsaved row has no change-log before-state yet, and its tagged VLANs are about to change.
-            if not fields_changed:
-                interface.snapshot()
+            # The change merges into the record of the row's save only inside a NetBox request.
+            interface.snapshot()
             if tagged_vids:
                 interface.tagged_vlans.set(tagged_set)
             else:

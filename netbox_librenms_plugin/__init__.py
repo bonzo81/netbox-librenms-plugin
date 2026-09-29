@@ -162,13 +162,10 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
             },
         )
 
-        if not created:
-            # The type update and the object-type add below record this before-state.
-            cf.snapshot()
-
         # Migrate legacy integer-typed field to JSON so the multi-server
         # dict format {"server_key": device_id} is accepted by the UI/API.
         if not created and cf.type == "integer":
+            cf.snapshot()
             cf.type = "json"
             cf.save(using=db_alias, update_fields=["type", "last_updated"])
             logger.info("Migrated 'librenms_id' custom field type from integer to json")
@@ -184,10 +181,15 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         ContentType.objects.clear_cache()
         current_types = set(cf.object_types.values_list("pk", flat=True))
 
-        for model in required_models:
-            ct = ContentType.objects.db_manager(db_alias).get_for_model(model)
-            if ct.pk not in current_types:
-                cf.object_types.add(ct)
+        missing_types = [
+            ct
+            for ct in (ContentType.objects.db_manager(db_alias).get_for_model(model) for model in required_models)
+            if ct.pk not in current_types
+        ]
+        if missing_types:
+            # post_migrate has no request, so NetBox cannot merge the add into the record of an earlier save.
+            cf.snapshot()
+            cf.object_types.add(*missing_types)
 
         if created:
             logger.info("Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface")
