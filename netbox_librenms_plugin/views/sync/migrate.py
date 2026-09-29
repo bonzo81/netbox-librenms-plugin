@@ -493,6 +493,7 @@ def _refresh_cable_termination_caches(interface):
     """
     ct_type = ContentType.objects.get_for_model(Interface)
     for termination in CableTermination.objects.filter(termination_type=ct_type, termination_id=interface.pk):
+        termination.snapshot()
         termination.save()
 
 
@@ -661,6 +662,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 # uniqueness, …) still runs, and save() still refreshes the denormalized
                 # _site/_location/_rack columns. A bare .update(device=...) would skip all of
                 # that (stale denormalized location + no relationship validation).
+                interface.snapshot()
                 interface.device = winner
                 # Coupling to a private NetBox internal: ComponentModel seeds
                 # _original_device from device_id in __init__ and clean() raises
@@ -710,6 +712,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 # guarantees each dependent's lag/parent/bridge target has already moved,
                 # so full_clean()'s cross-device checks pass for real.
                 for dep in dependents:
+                    dep.snapshot()
                     dep.device = winner
                     dep._original_device = winner.pk  # same ComponentModel re-seed as above
                     try:
