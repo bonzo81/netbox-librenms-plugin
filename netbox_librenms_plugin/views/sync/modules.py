@@ -23,7 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict
+from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     AmbiguousLibreNMSIdError,
@@ -3367,10 +3367,14 @@ class MoveModuleView(
                 from_bay = conflict_module.module_bay.name
                 source_device = conflict_module.device
                 from_device = source_device.name
-                conflict_module.module_bay = target_bay
-                conflict_module.device = target_device
-                conflict_module.full_clean()
-                conflict_module.save()
+
+                def move(row):
+                    row.module_bay = target_bay
+                    row.device = target_device
+
+                conflict_module = update_existing_row(
+                    self.restricted_queryset(Module, "change").filter(pk=conflict_module.pk), move
+                )
 
             if occupant_removed_msg:
                 messages.info(request, occupant_removed_msg)
