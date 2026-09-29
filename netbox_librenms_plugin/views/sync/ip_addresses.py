@@ -79,6 +79,32 @@ def vrf_create_lock_identity(name):
     return f"netbox-librenms-plugin:vrf-create:{name}"
 
 
+class _PrimaryIPNotEligible(Exception):
+    """NetBox would refuse the matched interface as the owner's primary IP interface."""
+
+
+def _primary_ip_interface_is_eligible(owner, interface):
+    """
+    Return whether NetBox accepts an address on *interface* as the primary IP of *owner*.
+
+    ``_build_interface_maps`` indexes ALL VC member interfaces, so *interface* can belong to a
+    sibling member. NetBox's ``Device.clean()`` accepts a primary IP on any same-VC member's
+    non-mgmt-only interface (``vc_interfaces(if_master=False)``), so only an interface outside the
+    owner's VC, or a sibling's mgmt-only interface, is refused.
+    """
+    return not (
+        isinstance(owner, Device)
+        and isinstance(interface, Interface)
+        and interface.device_id != owner.pk
+        and not (
+            owner.virtual_chassis_id is not None
+            and interface.device is not None
+            and interface.device.virtual_chassis_id == owner.virtual_chassis_id
+            and not interface.mgmt_only
+        )
+    )
+
+
 class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Synchronize IP addresses from LibreNMS cache into NetBox."""
 
@@ -651,33 +677,45 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return None, None
         return locked_interface, locked_obj
 
-    def _set_primary_ip(self, obj, ip_obj):
+    def _set_primary_ip(self, obj, ip_obj, interface):
         """
-        Point ``obj.primary_ip4``/``primary_ip6`` (by family) at *ip_obj*.
+        Point ``obj.primary_ip4``/``primary_ip6`` (by family) at *ip_obj*, on *interface*.
 
-        The caller guarantees ``ip_obj`` is assigned to one of the object's interfaces, so this
-        satisfies NetBox's ``primary_ip`` constraint. The row is written under its lock, from the
-        caller's change scope.
+        The owner row is read, checked and written under its lock, from the caller's change scope.
+        NetBox validates the whole owner, so an owner that NetBox refuses fails the write.
 
         Args:
             obj (Device | VirtualMachine): The object whose primary IP to set.
-            ip_obj (IPAddress): The address to set as primary (already interface-assigned).
+            ip_obj (IPAddress): The address to set as primary, assigned to *interface*.
+            interface (Interface | VMInterface): The interface that holds *ip_obj*.
 
         Returns:
             bool: True if the primary IP changed, False if it was already set.
+
+        Raises:
+            _PrimaryIPNotEligible: NetBox would refuse *interface* for the owner's primary IP.
+            ValueError: NetBox refuses the owner; the text is safe for the user.
 
         """
         # ip_family(), not ip_obj.family: NetBox 4.4's property raises AttributeError on the
         # in-memory str address of a freshly created IPAddress, failing the whole IP sync row.
         field = "primary_ip6" if ip_family(ip_obj) == 6 else "primary_ip4"
-        if getattr(obj, f"{field}_id") == ip_obj.pk:
-            return False
-        update_existing_row(
-            self.restricted_queryset(type(obj), "change").filter(pk=obj.pk),
-            lambda row: setattr(row, field, ip_obj),
-        )
-        setattr(obj, field, ip_obj)
-        return True
+        changed = False
+
+        def point_at_ip(owner):
+            nonlocal changed
+            if not _primary_ip_interface_is_eligible(owner, interface):
+                raise _PrimaryIPNotEligible
+            if getattr(owner, f"{field}_id") == ip_obj.pk:
+                return False
+            setattr(owner, field, ip_obj)
+            changed = True
+
+        try:
+            update_existing_row(self.restricted_queryset(type(obj), "change").filter(pk=obj.pk), point_at_ip)
+        except ValidationError as exc:
+            raise ValueError(f"Primary IP not set: {exception_text_for(exc, type(obj), self.request.user)}") from None
+        return changed
 
     @staticmethod
     def _cached_ip_index(cached_ips):
@@ -1227,9 +1265,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # order closes a deadlock cycle with a concurrent donor move.
                         if self.relock_scoped_row(type(obj), pk=obj.pk) is None:
                             raise type(obj).DoesNotExist(f"{type(obj).__name__} {obj.pk} no longer exists")
-                        # Re-read the primary_ip ids from the locked row. A stale in-memory value
-                        # would make _set_primary_ip skip a set it must perform.
-                        obj.refresh_from_db()
 
                     if force_payload is not None:
                         ip_obj = self._apply_confirmed_ip_change(
@@ -1269,28 +1304,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     # handled above (the row was skipped before any write), so here the IP is
                     # guaranteed interface-assigned and can satisfy NetBox's primary constraint.
                     if is_primary_candidate:
-                        # _build_interface_maps indexes ALL VC member interfaces, so `interface`
-                        # can belong to a sibling member. NetBox's Device.clean() accepts a
-                        # primary IP on any same-VC member's non-mgmt-only interface
-                        # (vc_interfaces(if_master=False)) — mirror that exactly: refuse only an
-                        # interface NetBox itself would reject (outside obj's VC, or a sibling's
-                        # mgmt-only interface), instead of refusing every sibling match on the
-                        # very VC case _build_interface_maps exists to support.
-                        if (
-                            isinstance(obj, Device)
-                            and isinstance(interface, Interface)
-                            and interface.device_id != obj.pk
-                            and not (
-                                obj.virtual_chassis_id is not None
-                                and interface.device is not None
-                                and interface.device.virtual_chassis_id == obj.virtual_chassis_id
-                                and not interface.mgmt_only
-                            )
-                        ):
+                        try:
+                            if self._set_primary_ip(obj, ip_obj, interface):
+                                results["primary_set"].append(display_address)
+                                row_mutations.add(row_id)
+                        except _PrimaryIPNotEligible:
                             results["primary_interface_not_eligible"].append(display_address)
-                        elif self._set_primary_ip(obj, ip_obj):
-                            results["primary_set"].append(display_address)
-                            row_mutations.add(row_id)
 
             except Exception as exc:
                 if classify_conflict(exc):
