@@ -28,6 +28,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     persist_test_server_mapping,
 )
+from netbox_librenms_plugin.utils import set_librenms_device_id
 
 SERVER_KEY = configured_server_key()
 
@@ -829,7 +830,7 @@ class TestCableOverwriteHtmxModal:
         )
         old = Cable(a_terminations=csps, b_terminations=old_ports, status="connected")
         old.save()
-        acs.custom_field_data["librenms_id"] = {SERVER_KEY: 13}
+        set_librenms_device_id(acs, 13, SERVER_KEY)
         acs.save(update_fields=["custom_field_data"])
         row = make_serial_row(csps[0], target_device.name, acs)
         snapshot = {"links": [row], "snapshot_token": "multi-termination"}
