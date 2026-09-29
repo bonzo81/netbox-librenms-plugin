@@ -11,6 +11,7 @@ from netbox.views import generic
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
     build_server_mappings,
@@ -21,16 +22,13 @@ from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
     SyncTabState,
-    mapped_server_keys,
     sync_cache_browser_contract,
 )
 from netbox_librenms_plugin.utils import (
     find_matching_platform,
     get_interface_name_field,
-    get_librenms_device_id,
     get_librenms_sync_device,
     get_user_pref,
-    is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     normalize_inventory_serial,
     resolve_naming_preferences,
@@ -282,8 +280,7 @@ class BaseLibreNMSSyncView(
 
             if librenms_sync_device:
                 sync_device_has_librenms_id = (
-                    get_librenms_device_id(librenms_sync_device, self.librenms_api.server_key, auto_save=False)
-                    is not None
+                    read_mapping(librenms_sync_device).own_id(self.librenms_api.server_key) is not None
                 )
                 sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
 
@@ -298,7 +295,7 @@ class BaseLibreNMSSyncView(
 
         render_server_key = self._scoped_render_server_key or self.active_server_key
         sync_cache_status = None
-        if render_server_key and render_server_key in mapped_server_keys(obj, render_server_key):
+        if render_server_key and render_server_key in mapped_device_servers(obj, active_server=render_server_key):
             sync_cache_status = coordinator.status_for_request(
                 request,
                 render_server_key,
@@ -334,8 +331,7 @@ class BaseLibreNMSSyncView(
 
         # Detect legacy bare-int librenms_id format for conversion badge
         _lookup_device = getattr(self, "_librenms_lookup_device", obj)
-        _raw_cf = _lookup_device.cf.get("librenms_id") if _lookup_device else None
-        librenms_id_is_legacy = is_legacy_librenms_id(_raw_cf)
+        librenms_id_is_legacy = bool(_lookup_device) and read_mapping(_lookup_device).legacy.is_legacy
 
         # Determine if serial match allows legacy ID conversion.
         # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.

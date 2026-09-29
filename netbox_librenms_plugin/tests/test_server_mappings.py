@@ -1,32 +1,44 @@
-"""Tests for multi-server librenms_id helpers.
+"""Tests for the object server mapping module and the writers that still edit stored mappings.
 
-Covers get_librenms_device_id, set_librenms_device_id, find_by_librenms_id,
-and migrate_legacy_librenms_id.
-
-These run against real NetBox Device rows (``@pytest.mark.django_db``): the
-helpers read/write the real ``librenms_id`` JSON custom field via ``device.cf`` /
-``device.custom_field_data``, and ``find_by_librenms_id`` issues real ORM queries
-against the JSON field. A dynamically fabricated object would let ``.cf`` (a computed property
-distinct from ``custom_field_data``) or the JSON-path query silently diverge from
-production; real rows + DB reloads catch that. The few genuinely query-free guards
-(rejecting a float/dict before touching the ORM) use a model whose manager access
-raises, so the "no DB hit on bad input" contract stays assertable.
+The readers run against real NetBox rows (``@pytest.mark.django_db``): a snapshot decodes the
+stored ``librenms_id`` custom field, and the lookups issue real JSON-field queries. A fabricated
+object would let the stored shape or the JSON-path query drift from production. The writer
+classes below cover ``set_librenms_device_id``, ``migrate_legacy_librenms_id``, the OOB setters,
+merge and the migration marker, and read their results back through the snapshot.
 """
 
 import itertools
+from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 
 import pytest
+from django.db import connection, transaction
+from django.test.utils import CaptureQueriesContext
 
-from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    ContainerStatus,
+    MappingRole,
+    PreferenceStatus,
+    decode_stored_mapping,
+    find_mapping,
+    find_port_owner,
+    identity_q,
+    mapped_device_servers,
+    read_mapping,
+    read_mappings,
+    resolve_device_port,
+)
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_interface,
+    make_virtual_chassis_members,
+    make_vm,
+)
 
 _UNSET = object()
 _counter = itertools.count(1)
-
-
-class _QueryForbiddenModel:
-    @property
-    def objects(self):
-        raise AssertionError("invalid IDs must be rejected before ORM manager access")
+BOTH_ROLES = (MappingRole.OWN, MappingRole.OOB)
 
 
 def _dev(librenms_value=_UNSET, *, name=None):
@@ -38,107 +50,299 @@ def _dev(librenms_value=_UNSET, *, name=None):
     return dev
 
 
+def _find(identity, server="default", *, roles=BOTH_ROLES, queryset=None):
+    from dcim.models import Device
+
+    return find_mapping(
+        Device.objects.all() if queryset is None else queryset, server=server, identity=identity, roles=roles
+    )
+
+
+def _bind(interface, value):
+    interface.custom_field_data["librenms_id"] = value
+    interface.save()
+    return interface
+
+
 @pytest.mark.django_db
-class TestGetLibreNMSDeviceId:
-    """Tests for get_librenms_device_id() against the real ``device.cf`` accessor."""
+class TestOwnIdentityRead:
+    """The own identity a snapshot resolves per server, on real Device rows."""
 
     def test_returns_none_when_cf_missing(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        assert get_librenms_device_id(_dev(), "default") is None
+        assert read_mapping(_dev()).own_id("default") is None
 
     def test_returns_int_for_legacy_bare_integer(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        assert get_librenms_device_id(_dev(42), "default") == 42
+        assert read_mapping(_dev(42)).own_id("default") == 42
 
     def test_legacy_bare_int_returned_for_any_server_key(self):
-        """Legacy bare integers are returned as a universal fallback for any server_key."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        dev = _dev(99)
-        assert get_librenms_device_id(dev, "default") == 99
-        assert get_librenms_device_id(dev, "production") == 99
-        assert get_librenms_device_id(dev, "secondary") == 99
+        """Legacy bare integers are returned as a universal fallback for any server key."""
+        mapping = read_mapping(_dev(99))
+        assert mapping.own_id("default") == 99
+        assert mapping.own_id("production") == 99
+        assert mapping.own_id("secondary") == 99
 
     def test_returns_value_for_matching_server_key(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        assert get_librenms_device_id(_dev({"production": 7, "secondary": 12}), "production") == 7
+        assert read_mapping(_dev({"production": 7, "secondary": 12})).own_id("production") == 7
 
     def test_returns_none_for_missing_server_key_in_dict(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        assert get_librenms_device_id(_dev({"production": 7}), "secondary") is None
+        assert read_mapping(_dev({"production": 7})).own_id("secondary") is None
 
     def test_returns_none_for_unexpected_type(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
+        assert read_mapping(_dev("not-an-int-or-dict")).own_id("default") is None
 
-        assert get_librenms_device_id(_dev("not-an-int-or-dict"), "default") is None
-
-    def test_legacy_string_int_returned_for_any_server_key_and_persists(self):
-        """A bare string integer ('42') is coerced, returned for any server_key, and the auto-save path normalises it back to an int in the DB (real save, verified by reload)."""
+    def test_legacy_string_int_resolves_for_any_server_key_without_persisting(self):
+        """A bare string integer is coerced for every server, and the read leaves the stored string alone."""
         from dcim.models import Device
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
         dev = _dev("42")
-        assert get_librenms_device_id(dev, "default") == 42
-        assert get_librenms_device_id(dev, "production") == 42
-        # auto_save=True normalised the bare string to an int and persisted it.
-        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == 42
+        assert read_mapping(dev).own_id("default") == 42
+        assert read_mapping(dev).own_id("production") == 42
+        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == "42"
 
     def test_returns_none_for_bare_boolean(self):
-        """bool is a subclass of int; bare True/False must not be treated as a valid ID."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        assert get_librenms_device_id(_dev(True), "default") is None
-        assert get_librenms_device_id(_dev(False), "default") is None
+        """A bool is an int subclass, so bare True/False must not count as a valid ID."""
+        assert read_mapping(_dev(True)).own_id("default") is None
+        assert read_mapping(_dev(False)).own_id("default") is None
 
     def test_returns_none_for_boolean_inside_dict(self):
         """Boolean values inside the JSON dict must be rejected."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
+        assert read_mapping(_dev({"default": True})).own_id("default") is None
 
-        assert get_librenms_device_id(_dev({"default": True}), "default") is None
-
-    def test_default_server_key_is_default(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        assert get_librenms_device_id(_dev({"default": 5})) == 5
+    def test_an_invalid_server_key_is_refused(self):
+        with pytest.raises(ValueError, match="'__'"):
+            read_mapping(_dev({"default": 5})).own_id("a__b")
 
 
 @pytest.mark.django_db
-class TestFindByLibreNMSId:
-    """Tests for find_by_librenms_id() against real Device rows and JSON-field queries."""
+class TestReadPurity:
+    """A read is a snapshot: no SQL on a loaded object, no write, no lock, no cache."""
 
-    def test_finds_each_storage_shape(self):
-        """Every supported storage shape (namespaced scalar, string scalar, dict-with-id, oob sub-id, legacy bare int/string) is actually resolvable by a real query."""
+    def test_a_read_of_a_loaded_object_runs_no_sql_and_changes_nothing(self, django_assert_num_queries):
+        from core.models import ObjectChange
         from dcim.models import Device
 
-        from netbox_librenms_plugin.utils import find_by_librenms_id
+        stored = {
+            "default": {"id": "42", "oob": {"id": "7", "type": "idrac"}},
+            "retired": {"_migrated_to": {"device_id": 3, "server_key": "retired", "at": "2026-01-01T00:00:00Z"}},
+            "_preferred_server": "default",
+        }
+        loaded = Device.objects.get(pk=_dev(stored).pk)
+        last_updated = loaded.last_updated
+        change_count = ObjectChange.objects.count()
 
-        scalar = _dev({"default": 42})
-        assert find_by_librenms_id(Device, 42, "default") == scalar
-        scalar.delete()
+        with django_assert_num_queries(0):
+            mapping = read_mapping(loaded)
+            assert mapping.own_id("default") == 42
+            assert mapping.oob_id("default") == 7
+            assert mapping.migrated_to("retired").device_id == 3
+            assert mapping.allows_name_fallback("default", 42)
 
-        string_scalar = _dev({"default": "42"})
-        assert find_by_librenms_id(Device, 42, "default") == string_scalar
-        string_scalar.delete()
+        reloaded = Device.objects.get(pk=loaded.pk)
+        assert reloaded.custom_field_data["librenms_id"] == stored
+        assert reloaded.last_updated == last_updated
+        assert ObjectChange.objects.count() == change_count
 
-        dict_id = _dev({"default": {"id": 42}})
-        assert find_by_librenms_id(Device, 42, "default") == dict_id
-        dict_id.delete()
+    def test_a_new_snapshot_sees_an_unsaved_change_and_an_earlier_one_does_not(self):
+        dev = _dev({"default": {"id": 42, "oob": {"id": 7, "type": "idrac"}}})
+        earlier = read_mapping(dev)
 
-        oob_id = _dev({"default": {"id": 1, "oob": {"id": 42}}})
-        assert find_by_librenms_id(Device, 42, "default") == oob_id
-        oob_id.delete()
+        dev.custom_field_data["librenms_id"]["default"]["oob"]["type"] = "ilo"
+        dev.custom_field_data["librenms_id"]["default"]["id"] = 43
+        later = read_mapping(dev)
 
-        legacy_int = _dev(42)
-        assert find_by_librenms_id(Device, 42, "anyserver") == legacy_int
-        legacy_int.delete()
+        assert (earlier.own_id("default"), earlier.server("default").oob_type) == (42, "idrac")
+        assert (later.own_id("default"), later.server("default").oob_type) == (43, "ilo")
 
-        legacy_str = _dev("42")
-        assert find_by_librenms_id(Device, 42, "anyserver") == legacy_str
+    def test_a_snapshot_is_immutable(self):
+        mapping = read_mapping(_dev({"default": 42}))
+
+        with pytest.raises(FrozenInstanceError):
+            mapping.container = ContainerStatus.ABSENT
+        with pytest.raises(FrozenInstanceError):
+            mapping.server("default").own_id = 43
+
+    def test_only_mapped_models_can_be_read(self):
+        from dcim.models import Site
+
+        with pytest.raises(TypeError):
+            read_mapping(SimpleNamespace(custom_field_data={"librenms_id": 42}))
+        with pytest.raises(TypeError):
+            identity_q(Site, server="default", identities=(42,), roles=BOTH_ROLES)
+
+
+@pytest.mark.django_db
+class TestMappingDecoding:
+    """Decoding of every stored form, on real rows."""
+
+    @pytest.mark.parametrize(
+        ("stored", "container", "readable_id", "queryable_id", "recorded"),
+        [
+            (None, ContainerStatus.ABSENT, None, None, False),
+            ({}, ContainerStatus.SCOPED, None, None, False),
+            ({"_preferred_server": "a"}, ContainerStatus.SCOPED, None, None, True),
+            (42, ContainerStatus.LEGACY, 42, 42, True),
+            ("42", ContainerStatus.LEGACY, 42, 42, True),
+            (" +42 ", ContainerStatus.LEGACY, 42, 42, True),
+            ("4_2", ContainerStatus.LEGACY, 42, None, True),
+            ("١٢", ContainerStatus.LEGACY, 12, None, True),
+            (0, ContainerStatus.INVALID, None, None, False),
+            (-1, ContainerStatus.INVALID, None, None, True),
+            ("²", ContainerStatus.INVALID, None, None, True),
+            (True, ContainerStatus.INVALID, None, None, True),
+            ("", ContainerStatus.INVALID, None, None, False),
+            ("abc", ContainerStatus.INVALID, None, None, True),
+            ([], ContainerStatus.INVALID, None, None, False),
+        ],
+        ids=repr,
+    )
+    def test_container_and_both_legacy_meanings(self, stored, container, readable_id, queryable_id, recorded):
+        mapping = read_mapping(_dev(stored))
+
+        assert mapping.container is container
+        assert mapping.legacy.readable_id == readable_id
+        assert mapping.legacy.queryable_id == queryable_id
+        assert mapping.legacy.is_legacy is (readable_id is not None)
+        assert mapping.has_recorded_state is recorded
+        assert mapping.own_id("any-server") == (readable_id if container is ContainerStatus.LEGACY else None)
+
+    def test_servers_keep_stored_order_and_skip_invalid_keys_and_metadata(self):
+        mapping = read_mapping(_dev({"b": 1, "a__x": 2, "a": {"id": "3"}, "_preferred_server": "b"}))
+
+        assert [(entry.server, entry.own_id) for entry in mapping.servers] == [("b", 1), ("a", 3)]
+        assert mapping.server("a__x") is None
+
+    def test_own_and_oob_identities_stay_separate(self):
+        mapping = read_mapping(
+            _dev({"host": {"id": 42, "oob": {"id": 7, "type": "idrac"}}, "oob-only": {"oob": {"id": "8"}}})
+        )
+
+        host, oob_only = mapping.server("host"), mapping.server("oob-only")
+        assert (host.own_id, host.oob_id, host.oob_type, host.display_id, host.is_oob_only) == (
+            42,
+            7,
+            "idrac",
+            42,
+            False,
+        )
+        assert (oob_only.own_id, oob_only.oob_id, oob_only.display_id, oob_only.is_oob_only) == (None, 8, 8, True)
+        assert mapping.own_id("oob-only") is None
+
+    @pytest.mark.parametrize(
+        ("entry", "has_oob", "oob_id"),
+        [
+            ({"id": 42, "oob": {"id": 7, "type": "idrac"}}, True, 7),
+            ({"id": 42, "oob": {"type": "idrac"}}, True, None),
+            ({"id": 42, "oob": {"id": "abc"}}, True, None),
+            ({"id": 42, "oob": {}}, False, None),
+            ({"id": 42, "oob": "idrac"}, False, None),
+            ({"id": 42}, False, None),
+            (42, False, None),
+        ],
+        ids=repr,
+    )
+    def test_oob_occupancy_counts_a_metadata_only_entry(self, entry, has_oob, oob_id):
+        mapping = read_mapping(_dev({"default": entry}))
+
+        assert mapping.has_oob("default") is has_oob
+        assert mapping.oob_id("default") == oob_id
+
+    @pytest.mark.parametrize(
+        ("stored", "status", "server"),
+        [
+            ({"a": 1}, PreferenceStatus.ABSENT, None),
+            ({"a": 1, "_preferred_server": "a"}, PreferenceStatus.NAMED, "a"),
+            ({"a": 1, "_preferred_server": "gone"}, PreferenceStatus.NAMED, "gone"),
+            ({"a": 1, "_preferred_server": "   "}, PreferenceStatus.MALFORMED, None),
+            ({"a": 1, "_preferred_server": 123}, PreferenceStatus.MALFORMED, None),
+            (42, PreferenceStatus.ABSENT, None),
+        ],
+        ids=repr,
+    )
+    def test_preference_states(self, stored, status, server):
+        preference = read_mapping(_dev(stored)).preference
+
+        assert (preference.status, preference.server) == (status, server)
+
+    @pytest.mark.parametrize(
+        ("entry", "recorded", "effective_pk"),
+        [
+            ({"_migrated_to": {"device_id": 5, "server_key": "default", "at": "t"}}, True, 5),
+            ({"id": 9, "_migrated_to": {"device_id": 5, "server_key": "default"}}, True, None),
+            ({"oob": {"id": 9}, "_migrated_to": {"device_id": 5, "server_key": "default"}}, True, None),
+            ({"oob": {"type": "idrac"}, "_migrated_to": {"device_id": 5, "server_key": "default"}}, True, 5),
+            ({"_migrated_to": {"device_id": 5, "server_key": "other"}}, True, None),
+            ({"_migrated_to": {"device_id": "5", "server_key": "default"}}, True, None),
+            ({"_migrated_to": {"device_id": True, "server_key": "default"}}, True, None),
+            ({"_migrated_to": {"device_id": 0, "server_key": "default"}}, True, None),
+            ({"_migrated_to": "garbage"}, False, None),
+            ({"id": 9}, False, None),
+        ],
+        ids=repr,
+    )
+    def test_recorded_and_effective_migration_markers(self, entry, recorded, effective_pk):
+        mapping = read_mapping(_dev({"default": entry}))
+        migration = mapping.server("default").migration
+        target = mapping.migrated_to("default")
+
+        assert migration.recorded is recorded
+        assert (target.device_id if target else None) == effective_pk
+        assert migration.effective == target
+
+    def test_an_effective_marker_carries_its_timestamp(self):
+        target = read_mapping(
+            _dev({"default": {"_migrated_to": {"device_id": 5, "server_key": "default", "at": "2026-09-29T10:00:00Z"}}})
+        ).migrated_to("default")
+
+        assert (target.device_id, target.server_key, target.at) == (5, "default", "2026-09-29T10:00:00Z")
+
+    @pytest.mark.parametrize(
+        ("stored", "port_id", "expected"),
+        [
+            (None, 42, True),
+            ({"other": 7}, 42, True),
+            ({"default": 42}, 42, True),
+            ({"default": {"id": "42"}}, 42, True),
+            ({"default": 7}, 42, False),
+            ({"default": "abc"}, 42, False),
+            ({"default": {"oob": {"id": 42}}}, 42, False),
+            (42, 42, True),
+            (42, 7, False),
+            ("abc", 42, False),
+            (None, "abc", False),
+        ],
+        ids=repr,
+    )
+    def test_name_fallback_needs_an_absent_or_matching_binding(self, stored, port_id, expected):
+        interface = _bind(make_interface(_dev(), "eth0"), stored)
+
+        assert read_mapping(interface).allows_name_fallback("default", port_id) is expected
+
+    def test_the_raw_decoder_agrees_with_the_object_reader(self):
+        stored = {"default": {"id": "42", "oob": {"type": "idrac"}}, "_preferred_server": 1}
+
+        assert decode_stored_mapping(stored) == read_mapping(_dev(stored))
+
+
+@pytest.mark.django_db
+class TestFindMapping:
+    """find_mapping against real Device rows and JSON-field queries."""
+
+    @pytest.mark.parametrize(
+        ("shape", "server_key"),
+        [
+            ({"default": 42}, "default"),
+            ({"default": "42"}, "default"),
+            ({"default": {"id": 42}}, "default"),
+            ({"default": {"id": 1, "oob": {"id": 42}}}, "default"),
+            (42, "anyserver"),
+            ("42", "anyserver"),
+        ],
+        ids=repr,
+    )
+    def test_finds_each_storage_shape(self, shape, server_key):
+        """Every supported storage shape is resolvable by a real query."""
+        device = _dev(shape)
+        assert _find(42, server_key) == device
 
     @pytest.mark.parametrize(
         ("shape", "server_key"),
@@ -150,167 +354,274 @@ class TestFindByLibreNMSId:
         ],
     )
     def test_integer_lookup_finds_every_accepted_numeric_string(self, shape, server_key):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
         device = _dev(shape)
-
-        assert find_by_librenms_id(Device, 42, server_key) == device
-
-    def test_librenms_id_q_resolves_each_storage_shape(self):
-        """cables_view._librenms_id_q (sharing build_librenms_id_qs with find_by_librenms_id) must resolve the same storage shapes — including the OOB sub-id — so the two can't drift apart."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
-
-        for shape in (
-            {"default": 42},
-            {"default": "42"},
-            {"default": {"id": 42}},
-            {"default": {"id": 1, "oob": {"id": 42}}},
-        ):
-            dev = _dev(shape)
-            assert Device.objects.filter(_librenms_id_q("default", 42)).first() == dev, shape
-            dev.delete()
-
-        # Legacy bare int/str resolve under any server key.
-        for legacy in (42, "42"):
-            dev = _dev(legacy)
-            assert Device.objects.filter(_librenms_id_q("anyserver", 42)).first() == dev, legacy
-            dev.delete()
-
-        # include_oob=False (resolving a device by its OWN identity) must NOT match an OOB sub-id.
-        oob_only = _dev({"default": {"id": 1, "oob": {"id": 42}}})
-        assert Device.objects.filter(_librenms_id_q("default", 42, include_oob=False)).first() is None
-        oob_only.delete()
-
-    def test_build_librenms_id_qs_fails_closed_on_invalid_value(self):
-        """A malformed value must build match-nothing predicates so it can't resolve a corrupt legacy row."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import build_librenms_id_qs
-
-        # A device carrying a corrupt legacy bare-string id. Unfixed, build_librenms_id_qs("abc")
-        # emits Q(custom_field_data__librenms_id="abc") and this row is matched; the central
-        # coerce_librenms_id() guard now returns match-nothing predicates instead.
-        corrupt = _dev("abc")
-        host_q, oob_q = build_librenms_id_qs("prod", "abc")
-        assert Device.objects.filter(host_q).first() is None
-        assert Device.objects.filter(oob_q).first() is None
-        corrupt.delete()
-
-        # bool / zero / negative also fail closed (return match-nothing) rather than building a lookup.
-        for bad in (True, 0, -5, None):
-            hq, oq = build_librenms_id_qs("prod", bad)
-            assert Device.objects.filter(hq).first() is None
-            assert Device.objects.filter(oq).first() is None
-
-    def test_build_librenms_id_qs_fails_closed_on_invalid_server_key(self):
-        """A malformed server key must not raise or resolve corrupt custom-field data."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import build_librenms_id_qs
-
-        corrupt = _dev({"invalid__server": 42})
-        nested = _dev({"invalid": {"server": 42}})
-        host_q, oob_q = build_librenms_id_qs("invalid__server", 42)
-
-        assert Device.objects.filter(host_q).first() is None
-        assert Device.objects.filter(oob_q).first() is None
-        nested.delete()
-        corrupt.delete()
-
-    def test_returns_matching_object(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
-        dev = _dev({"default": 42})
-        assert find_by_librenms_id(Device, 42, "default") == dev
+        assert _find(42, server_key) == device
 
     def test_returns_none_when_not_found(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
         _dev({"production": 7})  # a row exists, but not for id 999
-        assert find_by_librenms_id(Device, 999, "production") is None
+        assert _find(999, "production") is None
 
     def test_single_match_uses_one_query(self, django_assert_num_queries):
-        """The common case (0 or 1 match) must use a single combined query, not separate host + OOB queries — find_by_librenms_id runs per-port during sync."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
+        """The common case (0 or 1 match) uses one combined query, because it runs per port during sync."""
         dev = _dev({"default": {"id": 42}})
         with django_assert_num_queries(1):
-            result = find_by_librenms_id(Device, 42, "default")
+            result = _find(42)
         assert result == dev
 
     def test_fail_closed_when_host_and_oob_match_different_rows(self):
-        """Host query matches one row, OOB query a *different* one → ambiguous → raise."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
-
-        _dev({"default": 42})  # host id 42
-        _dev({"default": {"id": 99, "oob": {"id": 42}}})  # OOB id 42 on a different device
-        with pytest.raises(AmbiguousLibreNMSIdError):
-            find_by_librenms_id(Device, 42, "default")
+        _dev({"default": 42})
+        _dev({"default": {"id": 99, "oob": {"id": 42}}})
+        with pytest.raises(AmbiguousLibreNMSIdError, match="host pk=.* but a different OOB pk="):
+            _find(42)
 
     def test_same_row_for_host_and_oob_is_returned(self):
-        """When both queries resolve to the same row, it is returned (not ambiguous)."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
         dev = _dev({"default": {"id": 42, "oob": {"id": 42}}})
-        assert find_by_librenms_id(Device, 42, "default") == dev
-
-    def test_host_match_wins_when_no_oob_match(self):
-        """Host identity is returned when only the host query matches."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
-        dev = _dev({"default": 42})
-        assert find_by_librenms_id(Device, 42, "default") == dev
+        assert _find(42) == dev
 
     def test_fail_closed_on_duplicate_host_matches(self):
-        """Two distinct rows sharing the same host librenms_id → raise."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
-
         _dev({"default": 42})
         _dev({"default": 42})
-        with pytest.raises(AmbiguousLibreNMSIdError):
-            find_by_librenms_id(Device, 42, "default")
+        with pytest.raises(AmbiguousLibreNMSIdError, match="multiple Device host records"):
+            _find(42)
 
     def test_fail_closed_on_duplicate_oob_matches(self):
-        """Two distinct rows sharing the same OOB librenms_id → raise."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
-
-        # Host ids differ (1 and 2) so only the OOB query is ambiguous.
         _dev({"default": {"id": 1, "oob": {"id": 42}}})
         _dev({"default": {"id": 2, "oob": {"id": 42}}})
+        with pytest.raises(AmbiguousLibreNMSIdError, match="multiple Device OOB records"):
+            _find(42)
+
+    def test_the_own_role_ignores_an_oob_reference(self):
+        owner = _dev({"default": {"id": 42}})
+        referrer = _dev({"default": {"id": 1, "oob": {"id": 42}}})
+
+        assert _find(42, roles=(MappingRole.OWN,)) == owner
+        assert _find(42, roles=(MappingRole.OOB,)) == referrer
         with pytest.raises(AmbiguousLibreNMSIdError):
-            find_by_librenms_id(Device, 42, "default")
+            _find(42)
 
-    def test_float_input_rejected_without_querying(self):
-        """A positive float bypasses the int-only coerce contract → reject before the ORM."""
-        from netbox_librenms_plugin.utils import find_by_librenms_id
+    def test_the_callers_queryset_scopes_the_lookup(self):
+        from dcim.models import Device
 
-        assert find_by_librenms_id(_QueryForbiddenModel(), 42.0, "default") is None
+        owner = _dev({"default": 42})
+        other = _dev({"default": 43})
 
-    def test_non_scalar_input_rejected_without_querying(self):
-        """Arbitrary non-int/str objects (e.g. a dict) must fail closed before the lookup."""
-        from netbox_librenms_plugin.utils import find_by_librenms_id
+        assert _find(42, queryset=Device.objects.filter(pk=other.pk)) is None
+        assert _find(42, queryset=Device.objects.filter(pk=owner.pk)) == owner
 
-        assert find_by_librenms_id(_QueryForbiddenModel(), {"id": 42}, "default") is None
+    def test_a_locking_queryset_locks_the_matched_row(self):
+        from dcim.models import Device
+
+        owner = _dev({"default": 42})
+        with transaction.atomic(), CaptureQueriesContext(connection) as queries:
+            assert _find(42, queryset=Device.objects.select_for_update()) == owner
+
+        assert all("FOR UPDATE" in query["sql"] for query in queries.captured_queries)
+
+    @pytest.mark.parametrize("invalid", [None, True, 0, -1, "", "  ", "abc", 42.0, {"id": 42}, [42]], ids=repr)
+    def test_an_invalid_identity_is_refused_without_a_query(self, invalid, django_assert_num_queries):
+        with django_assert_num_queries(0):
+            assert _find(invalid) is None
+
+    def test_a_lookup_names_at_least_one_role(self):
+        with pytest.raises(ValueError, match="role"):
+            _find(42, roles=())
+
+
+@pytest.mark.django_db
+class TestIdentityPredicate:
+    """identity_q builds the one set of JSON predicates every lookup uses."""
+
+    def test_an_invalid_identity_matches_nothing(self):
+        from dcim.models import Device
+
+        _dev("abc")  # a corrupt legacy row that a literal predicate would match
+        for bad in ("abc", True, 0, -5, None):
+            assert not Device.objects.filter(
+                identity_q(Device, server="prod", identities=(bad,), roles=BOTH_ROLES)
+            ).exists()
+
+    def test_an_invalid_server_key_matches_nothing(self):
+        from dcim.models import Device
+
+        _dev({"invalid__server": 42})
+        _dev({"invalid": {"server": 42}})
+
+        assert not Device.objects.filter(
+            identity_q(Device, server="invalid__server", identities=(42,), roles=BOTH_ROLES)
+        ).exists()
+
+    def test_several_identities_and_the_roles_compose(self):
+        from dcim.models import Device
+
+        first = _dev({"default": 41})
+        second = _dev({"default": {"id": 1, "oob": {"id": 42}}})
+        _dev({"default": 43})
+
+        own = Device.objects.filter(identity_q(Device, server="default", identities=(41, 42), roles=(MappingRole.OWN,)))
+        both = Device.objects.filter(identity_q(Device, server="default", identities=(41, 42), roles=BOTH_ROLES))
+
+        assert list(own) == [first]
+        assert set(both) == {first, second}
+        assert not Device.objects.filter(identity_q(Device, server="default", identities=(), roles=BOTH_ROLES)).exists()
+
+
+@pytest.mark.django_db
+class TestPortLookups:
+    """Port-space lookups across Interface and VMInterface."""
+
+    def test_a_port_owner_is_found_on_either_interface_model(self):
+        from virtualization.models import VMInterface
+
+        vm_interface = _bind(
+            VMInterface.objects.create(virtual_machine=make_vm("port-owner-vm"), name="eth0"), {"p": 5}
+        )
+
+        assert find_port_owner(5, server="p") == vm_interface
+        assert find_port_owner(6, server="p") is None
+
+    def test_a_port_held_on_both_models_is_ambiguous(self):
+        from virtualization.models import VMInterface
+
+        _bind(make_interface(_dev(), "eth0"), {"p": 5})
+        _bind(VMInterface.objects.create(virtual_machine=make_vm("port-both-vm"), name="eth0"), {"p": 5})
+
+        with pytest.raises(AmbiguousLibreNMSIdError, match="both an Interface and a VMInterface"):
+            find_port_owner(5, server="p")
+
+    def test_a_device_port_resolves_by_id_first_then_by_name(self):
+        device = _dev()
+        bound = _bind(make_interface(device, "xe-0/0/1"), {"p": 5})
+        named = make_interface(device, "eth0")
+        _bind(make_interface(_dev(), "eth0"), {"p": 6})  # another device's binding stays out of scope
+
+        assert resolve_device_port(device, server="p", port_id=5, name_candidates=["eth0"]) == bound
+        assert resolve_device_port(device, server="p", port_id=6, name_candidates=["eth0"]) == named
+        assert resolve_device_port(device, server="p", port_id=None, name_candidates=["missing"]) is None
+
+    def test_an_ambiguous_port_id_does_not_fall_through_to_a_name(self):
+        device = _dev()
+        _bind(make_interface(device, "a"), {"p": 5})
+        _bind(make_interface(device, "b"), {"p": 5})
+        make_interface(device, "eth0")
+
+        assert resolve_device_port(device, server="p", port_id=5, name_candidates=["eth0"]) is None
+
+    def test_an_oob_reference_is_not_a_device_port_binding(self):
+        device = _dev()
+        _bind(make_interface(device, "a"), {"p": {"oob": {"id": 5}}})
+        named = make_interface(device, "eth0")
+
+        assert resolve_device_port(device, server="p", port_id=5, name_candidates=["eth0"]) == named
+
+
+@pytest.mark.django_db
+class TestMappedDeviceServers:
+    """Server enumeration across a subject and its virtual chassis."""
+
+    def test_counts_own_oob_and_marker_entries_but_not_metadata(self):
+        device = _dev(
+            {
+                "own": 1,
+                "oob": {"oob": {"id": 2}},
+                "moved": {"_migrated_to": {"device_id": 9, "server_key": "moved"}},
+                "broken": "abc",
+                "_preferred_server": "own",
+            }
+        )
+
+        assert mapped_device_servers(device) == ("moved", "oob", "own")
+
+    def test_a_legacy_value_counts_only_for_the_active_server(self):
+        device = _dev("42")
+
+        assert mapped_device_servers(device) == ()
+        assert mapped_device_servers(device, active_server="primary") == ("primary",)
+        assert mapped_device_servers(device, active_server="a__b") == ()
+
+    def test_every_chassis_member_contributes(self):
+        _chassis, (first, second) = make_virtual_chassis_members("mapped-servers", count=2)
+        first.custom_field_data["librenms_id"] = {"a": 1}
+        first.save()
+        second.custom_field_data["librenms_id"] = "7"
+        second.save()
+
+        assert mapped_device_servers(first) == ("a",)
+        assert mapped_device_servers(first, active_server="b") == ("a", "b")
+
+
+@pytest.mark.django_db
+class TestBulkRead:
+    """read_mappings keeps the caller's queryset and reads every mapping in one query."""
+
+    def test_scope_order_and_one_query(self, django_assert_num_queries):
+        from dcim.models import Interface
+        from django.db.models.signals import post_init
+
+        device = _dev()
+        for index, name in enumerate(("c", "a", "b"), start=1):
+            _bind(make_interface(device, name), {"p": index})
+        make_interface(_dev(), "z")  # outside the caller's scope
+        built = []
+
+        def count_instance(**_kwargs):
+            built.append(1)
+
+        queryset = Interface.objects.filter(device=device).order_by("-name")
+        post_init.connect(count_instance, sender=Interface, weak=False)
+        try:
+            with django_assert_num_queries(1):
+                records = read_mappings(queryset, fields=("name", "device_id"))
+                rows = [(record.values, record.mapping.own_id("p")) for record in records]
+        finally:
+            post_init.disconnect(count_instance, sender=Interface)
+
+        assert rows == [
+            ({"name": "c", "device_id": device.pk}, 1),
+            ({"name": "b", "device_id": device.pk}, 3),
+            ({"name": "a", "device_id": device.pk}, 2),
+        ]
+        assert built == []
+
+    def test_the_caller_names_no_storage_field(self):
+        from dcim.models import Interface
+
+        with pytest.raises(ValueError, match="mapping storage"):
+            read_mappings(Interface.objects.all(), fields=("name", "custom_field_data"))
+
+
+MOVED_OUT_OF_UTILS = frozenset(
+    {
+        "AmbiguousLibreNMSIdError",
+        "coerce_librenms_id",
+        "normalize_librenms_port_id",
+        "read_mapping",
+        "find_mapping",
+        "identity_q",
+        "decode_stored_mapping",
+        "readable_legacy_id",
+    }
+)
+
+
+def test_no_module_imports_a_mapping_or_id_name_from_utils():
+    """Utils only uses these names, so an import of one from utils would make utils a re-export."""
+    import ast
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in sorted(package.rglob("*.py")):
+        if "migrations" in path.parts:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] == "utils":
+                offenders += [
+                    f"{path.name}:{node.lineno} {alias.name}"
+                    for alias in node.names
+                    if alias.name in MOVED_OUT_OF_UTILS
+                ]
+
+    assert offenders == []
 
 
 @pytest.mark.django_db
@@ -340,7 +651,7 @@ class TestMigrateLegacyLibreNMSId:
         assert migrate_legacy_librenms_id(_dev(None), "default") is False
 
     def test_returns_false_for_boolean_value(self):
-        """bool is a subclass of int; True/False must not be migrated."""
+        """A bool is an int subclass, so True/False must not be migrated."""
         from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         dev = _dev(True)
@@ -370,31 +681,31 @@ class TestLibreNMSIdRoundtrip:
     """get_librenms_device_id should see the value set by set_librenms_device_id."""
 
     def test_set_then_get_returns_same_value(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         dev = _dev()
         set_librenms_device_id(dev, 42, "production")
-        assert get_librenms_device_id(dev, "production") == 42
+        assert read_mapping(dev).own_id("production") == 42
 
     def test_set_multiple_servers_get_correct_each(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         dev = _dev()
         set_librenms_device_id(dev, 10, "primary")
         set_librenms_device_id(dev, 20, "secondary")
-        assert get_librenms_device_id(dev, "primary") == 10
-        assert get_librenms_device_id(dev, "secondary") == 20
+        assert read_mapping(dev).own_id("primary") == 10
+        assert read_mapping(dev).own_id("secondary") == 20
 
     def test_migrate_then_get_returns_value(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id, migrate_legacy_librenms_id
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         dev = _dev(55)
         migrate_legacy_librenms_id(dev, "default")
-        assert get_librenms_device_id(dev, "default") == 55
+        assert read_mapping(dev).own_id("default") == 55
 
 
-class TestIsLegacyLibreNMSId:
-    """Unit coverage for the shared is_legacy_librenms_id predicate (no DB)."""
+class TestLegacyClassification:
+    """Unit coverage for the wide legacy rule that readers and writers share (no DB)."""
 
     @pytest.mark.parametrize(
         "value,expected",
@@ -421,23 +732,21 @@ class TestIsLegacyLibreNMSId:
         ],
     )
     def test_classifies_legacy_values(self, value, expected):
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+        assert decode_stored_mapping(value).legacy.is_legacy is expected
 
-        assert is_legacy_librenms_id(value) is expected
-
-    def test_defined_exactly_once_in_utils(self):
-        """Guard is_legacy_librenms_id has exactly one module-level def (a duplicate silently shadows the other)."""
+    def test_defined_exactly_once(self):
+        """Guard the wide rule has exactly one module-level def (a duplicate silently shadows the other)."""
         import ast
         import inspect
 
-        from netbox_librenms_plugin import utils
+        from netbox_librenms_plugin import server_mappings
 
         defs = [
             node
-            for node in ast.parse(inspect.getsource(utils)).body
-            if isinstance(node, ast.FunctionDef) and node.name == "is_legacy_librenms_id"
+            for node in ast.parse(inspect.getsource(server_mappings)).body
+            if isinstance(node, ast.FunctionDef) and node.name == "readable_legacy_id"
         ]
-        assert len(defs) == 1, f"is_legacy_librenms_id defined {len(defs)}x — a duplicate shadows the other"
+        assert len(defs) == 1, f"readable_legacy_id defined {len(defs)}x — a duplicate shadows the other"
 
 
 @pytest.mark.django_db
@@ -511,30 +820,22 @@ class TestSetLibreNMSDeviceId:
         assert dev.custom_field_data["librenms_id"] == {"primary": 5}
 
 
-class TestIsLegacyLibreNMSIdPositivity:
-    """is_legacy_librenms_id must treat only a *positive* bare int / int-string as a legacy link."""
+class TestLegacyClassificationPositivity:
+    """The wide rule treats only a *positive* bare int / int-string as a legacy link."""
 
     def test_positive_int_and_string_are_legacy(self):
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id
-
-        assert is_legacy_librenms_id(42) is True
-        assert is_legacy_librenms_id("42") is True
         # int() coercion accepts surrounding whitespace / a leading +, so these stay legacy.
-        assert is_legacy_librenms_id(" 42 ") is True
-        assert is_legacy_librenms_id("+42") is True
+        for value in (42, "42", " 42 ", "+42"):
+            assert decode_stored_mapping(value).legacy.is_legacy is True, value
 
     def test_zero_and_negative_are_not_legacy(self):
         """A LibreNMS device id is a positive PK; 0 / negative is not a real link and must not migrate."""
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id
-
         for value in (0, -1, "0", " 0 ", "-1", "-42", "+0"):
-            assert is_legacy_librenms_id(value) is False, value
+            assert decode_stored_mapping(value).legacy.is_legacy is False, value
 
     def test_non_numeric_and_dict_and_bool_are_not_legacy(self):
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id
-
         for value in (None, True, False, "abc", "", {"default": 42}):
-            assert is_legacy_librenms_id(value) is False, value
+            assert decode_stored_mapping(value).legacy.is_legacy is False, value
 
 
 @pytest.mark.django_db
@@ -543,15 +844,15 @@ class TestLibreNMSIdAcceptedFormsContract:
 
     Two different definitions of "a numeric id" are in use, and they are not the same:
 
-    * the reader ``get_librenms_device_id`` and the classifier ``is_legacy_librenms_id``
-      parse a top-level string with a bare ``int()``;
-    * ``coerce_librenms_id`` and the ``build_librenms_id_qs`` predicates behind
-      ``find_by_librenms_id`` require ASCII digits.
+    * the snapshot's ``legacy.readable_id`` (the wide rule) parses a top-level string with a
+      bare ``int()``;
+    * ``legacy.queryable_id``, ``coerce_librenms_id`` and the ``identity_q`` predicates behind
+      ``find_mapping`` require ASCII digits.
 
     Their overlap is the deliberate legacy tolerance: surrounding ASCII whitespace, a
     leading ``+``, leading zeros. Anything the reader accepts BEYOND that overlap resolves
     for the reader while no query can find the row, so a guard built on
-    ``find_by_librenms_id`` cannot see it.
+    ``find_mapping`` cannot see it.
 
     These tests CHARACTERISE that split rather than endorse it. Narrowing the reader was
     tried and reverted: it only makes sense together with narrowing the classifier, and
@@ -568,66 +869,47 @@ class TestLibreNMSIdAcceptedFormsContract:
     @pytest.mark.parametrize("stored,resolved", TOLERATED, ids=lambda v: repr(v))
     def test_tolerated_forms_resolve_and_are_findable(self, stored, resolved):
         """The legacy tolerance set: the reader resolves it and a real query finds the row."""
-        from dcim.models import Device
-
         from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-        from netbox_librenms_plugin.utils import find_by_librenms_id, get_librenms_device_id
 
         device = _dev(stored)
 
-        assert get_librenms_device_id(device, "default", auto_save=False) == resolved
+        assert read_mapping(device).own_id("default") == resolved
         assert coerce_librenms_id(stored) == resolved
-        assert find_by_librenms_id(Device, resolved, "default") == device
+        assert _find(resolved) == device
 
     @pytest.mark.parametrize("stored,resolved", READER_ONLY, ids=lambda v: repr(v))
     def test_reader_only_forms_resolve_but_no_query_finds_them(self, stored, resolved):
         """Forms only a bare int() accepts: the reader resolves them, the lookup is blind to them."""
-        from dcim.models import Device
-
         from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-        from netbox_librenms_plugin.utils import find_by_librenms_id, get_librenms_device_id
 
         device = _dev(stored)
 
         # The reader binds the row to an id ...
-        assert get_librenms_device_id(device, "default", auto_save=False) == resolved
+        assert read_mapping(device).own_id("default") == resolved
         # ... that no predicate can match, so every lookup-based guard is blind to it.
         assert coerce_librenms_id(stored) is None
-        assert find_by_librenms_id(Device, resolved, "default") is None
+        assert _find(resolved) is None
 
     @pytest.mark.parametrize("stored,resolved", READER_ONLY, ids=lambda v: repr(v))
-    def test_a_reader_pass_with_auto_save_heals_the_row(self, stored, resolved):
-        """The split closes itself: one read with auto_save rewrites the value as a plain int.
-
-        This is why the split is tolerable in practice. A row only stays invisible to the
-        lookup while nothing has read it through the normalising path.
-        """
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id, get_librenms_device_id
-
+    def test_a_read_leaves_a_reader_only_form_invisible_to_the_lookup(self, stored, resolved):
+        """A read never rewrites the stored value, so only an explicit conversion makes the row findable."""
         device = _dev(stored)
-        assert find_by_librenms_id(Device, resolved, "default") is None
 
-        assert get_librenms_device_id(device, "default") == resolved
-
+        assert read_mapping(device).legacy.readable_id == resolved
+        assert read_mapping(device).legacy.queryable_id is None
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == resolved
-        assert find_by_librenms_id(Device, resolved, "default") == device
+        assert device.custom_field_data["librenms_id"] == stored
+        assert _find(resolved) is None
 
     @pytest.mark.parametrize("stored,_resolved", TOLERATED + READER_ONLY, ids=lambda v: repr(v))
-    def test_the_classifier_tracks_the_reader_not_the_lookup(self, stored, _resolved):
-        """is_legacy_librenms_id must agree with the reader, because set_librenms_device_id gates on it.
+    def test_the_setter_keeps_every_value_the_reader_resolves(self, stored, _resolved):
+        """set_librenms_device_id refuses a legacy value, so it never resets a mapping the reader still resolves."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
-        Whenever the reader resolves a bare value, the classifier has to call it legacy, or
-        set_librenms_device_id falls through to its corrupt-string branch and resets the
-        custom field to an empty dict.
-        """
-        from netbox_librenms_plugin.utils import get_librenms_device_id, is_legacy_librenms_id
+        device = _dev(stored)
+        set_librenms_device_id(device, 99, "primary")
 
-        reader_resolves = get_librenms_device_id(_dev(stored), "default", auto_save=False) is not None
-
-        assert is_legacy_librenms_id(stored) is reader_resolves
+        assert device.custom_field_data["librenms_id"] == stored
 
 
 @pytest.mark.django_db
@@ -651,31 +933,23 @@ class TestMigrateLegacyRejectsNonPositive:
 
 @pytest.mark.django_db
 class TestOOBHelpers:
-    """Tests for get_librenms_oob, set_librenms_oob, clear_librenms_oob, and the dict-with-id behaviour of get/set_librenms_device_id and find_by_librenms_id."""
+    """Tests for the OOB snapshot facts, set_librenms_oob, clear_librenms_oob, and the dict-with-id form in the reader, the setter and find_mapping."""
 
     # ── get_librenms_device_id: dict-with-id form ─────────────────────────────
 
     def test_get_id_from_dict_with_id_form(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        assert get_librenms_device_id(_dev({"primary": {"id": 42}}), "primary") == 42
+        assert read_mapping(_dev({"primary": {"id": 42}})).own_id("primary") == 42
 
     def test_get_id_when_oob_also_present(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "drac"}}})
-        assert get_librenms_device_id(dev, "primary") == 42
+        assert read_mapping(dev).own_id("primary") == 42
 
     def test_get_returns_none_for_dict_without_id_key(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        assert get_librenms_device_id(_dev({"primary": {"oob": {"id": 17}}}), "primary") is None
+        assert read_mapping(_dev({"primary": {"oob": {"id": 17}}})).own_id("primary") is None
 
     def test_get_normalises_string_id_inside_dict_with_id_form(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
         dev = _dev({"primary": {"id": "42"}})
-        assert get_librenms_device_id(dev, "primary", auto_save=False) == 42
+        assert read_mapping(dev).own_id("primary") == 42
 
     # ── set_librenms_device_id: oob preservation ─────────────────────────────
 
@@ -698,65 +972,53 @@ class TestOOBHelpers:
     # ── find_by_librenms_id: dict-with-id and oob id lookups ─────────────────
 
     def test_find_by_matches_main_id_in_dict_with_id_form(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
 
         dev = _dev({"primary": {"id": 42}})
-        assert find_by_librenms_id(Device, 42, "primary") == dev
+        assert _find(42, "primary") == dev
 
     def test_find_by_matches_oob_id(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
 
         dev = _dev({"primary": {"id": 1, "oob": {"id": 17}}})
-        assert find_by_librenms_id(Device, 17, "primary") == dev
+        assert _find(17, "primary") == dev
 
     def test_find_by_does_not_return_unrelated_id(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id
 
         _dev({"primary": {"id": 1}})
-        assert find_by_librenms_id(Device, 999, "primary") is None
+        assert _find(999, "primary") is None
 
-    # ── get_librenms_oob ──────────────────────────────────────────────────────
+    # ── OOB snapshot facts ────────────────────────────────────────────────────
 
-    def test_get_oob_returns_none_for_legacy_bare_int(self):
-        from netbox_librenms_plugin.utils import get_librenms_oob
+    def test_a_legacy_bare_int_has_no_oob(self):
+        assert not read_mapping(_dev(42)).has_oob("primary")
 
-        assert get_librenms_oob(_dev(42), "primary") is None
+    def test_a_bare_int_entry_has_no_oob(self):
+        assert not read_mapping(_dev({"primary": 42})).has_oob("primary")
 
-    def test_get_oob_returns_none_for_bare_int_entry(self):
-        from netbox_librenms_plugin.utils import get_librenms_oob
-
-        assert get_librenms_oob(_dev({"primary": 42}), "primary") is None
-
-    def test_get_oob_returns_oob_dict_when_present(self):
-        from netbox_librenms_plugin.utils import get_librenms_oob
-
+    def test_an_oob_entry_reads_its_id_and_type(self):
         oob_data = {"id": 17, "type": "drac", "version": "5.10", "ip": "10.0.0.5"}
         dev = _dev({"primary": {"id": 42, "oob": oob_data}})
-        assert get_librenms_oob(dev, "primary") == oob_data
+        entry = read_mapping(dev).server("primary")
+        assert (entry.oob_recorded, entry.oob_id, entry.oob_type) == (True, 17, "drac")
+        assert dev.custom_field_data["librenms_id"]["primary"]["oob"] == oob_data
 
     # ── set_librenms_oob ──────────────────────────────────────────────────────
 
     def test_set_oob_round_trip(self):
         """set_librenms_oob stores only id + type; ip/version are not persisted."""
-        from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
+        from netbox_librenms_plugin.utils import set_librenms_oob
 
         dev = _dev({"primary": 42})
         set_librenms_oob(dev, 17, "primary", oob_type="drac")
-        assert get_librenms_oob(dev, "primary") == {"id": 17, "type": "drac"}
+        assert dev.custom_field_data["librenms_id"]["primary"]["oob"] == {"id": 17, "type": "drac"}
+        assert read_mapping(dev).oob_id("primary") == 17
 
     def test_set_oob_promotes_bare_int_entry(self):
         """set_librenms_oob promotes a bare-int entry to dict form, preserving the main id."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_oob
+        from netbox_librenms_plugin.utils import set_librenms_oob
 
         dev = _dev({"primary": 42})
         set_librenms_oob(dev, 17, "primary", oob_type="idrac")
-        assert get_librenms_device_id(dev, "primary") == 42
+        assert read_mapping(dev).own_id("primary") == 42
 
     def test_set_oob_fails_closed_on_non_positive_int_host_id(self):
         """A stored bare-int host id of 0 or negative is corrupt → raise."""
@@ -808,14 +1070,14 @@ class TestOOBHelpers:
 
     def test_set_oob_accepts_generic_oob_sentinel(self):
         """set_librenms_oob must accept "oob" as a generic fallback type."""
-        from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
+        from netbox_librenms_plugin.utils import set_librenms_oob
 
         dev = _dev({"default": 99})
         set_librenms_oob(dev, 55, "default", oob_type="oob")
-        result = get_librenms_oob(dev, "default")
-        assert result is not None
-        assert result["id"] == 55
-        assert result["type"] == "oob"
+        entry = read_mapping(dev).server("default")
+        assert entry.oob_recorded
+        assert entry.oob_id == 55
+        assert entry.oob_type == "oob"
 
     def test_set_oob_generic_sentinel_case_insensitive(self):
         """The "oob" sentinel is accepted case-insensitively (OOB, Oob, etc.)."""
@@ -839,11 +1101,11 @@ class TestOOBHelpers:
     # ── clear_librenms_oob ────────────────────────────────────────────────────
 
     def test_clear_oob_removes_oob_sub_key(self):
-        from netbox_librenms_plugin.utils import clear_librenms_oob, get_librenms_oob
+        from netbox_librenms_plugin.utils import clear_librenms_oob
 
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "drac"}}})
         clear_librenms_oob(dev, "primary")
-        assert get_librenms_oob(dev, "primary") is None
+        assert not read_mapping(dev).has_oob("primary")
         assert dev.custom_field_data["librenms_id"]["primary"] == {"id": 42}
 
     def test_clear_oob_is_noop_when_no_oob(self):
@@ -1404,9 +1666,7 @@ class TestMarkLibreNMSMigrated:
     @pytest.mark.django_db
     def test_after_marker_find_by_librenms_id_no_longer_matches(self):
         """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned by find_by_librenms_id, queried against the REAL Device model."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import find_by_librenms_id, mark_librenms_migrated
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         donor = _dev({"default": {"id": 99}})
         mark_librenms_migrated(donor, winner_pk=99, server_key="default")
@@ -1419,7 +1679,7 @@ class TestMarkLibreNMSMigrated:
         assert entry.get("oob") is None
 
         # The real model query must not return the migrated-only donor for id 99.
-        assert find_by_librenms_id(Device, 99, "default") is None
+        assert _find(99) is None
 
 
 class TestNormalizeMergeEntry:

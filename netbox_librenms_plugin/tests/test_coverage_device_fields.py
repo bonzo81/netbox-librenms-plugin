@@ -1144,7 +1144,7 @@ class TestConvertLegacyLibreNMSIdView:
         ("value", "fragment"),
         [
             ({SERVER_KEY: 6564}, "already in the server-scoped"),
-            (True, "invalid boolean"),
+            (True, "not a valid integer"),
             ("not-an-id", "not a valid integer"),
         ],
     )

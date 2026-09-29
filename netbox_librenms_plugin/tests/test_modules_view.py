@@ -1271,8 +1271,8 @@ class TestPostInventoryRefresh:
         assert view.active_server_key == active_key
         assert message_texts(request, "error") == ["Selected LibreNMS server is no longer configured."]
         assert len(rendered_contexts) == 1
-        assert rendered_contexts[0]["migrated_to_marker"]["server_key"] == active_key
-        assert rendered_contexts[0]["migrated_to_marker"]["device_id"] == winner.pk
+        assert rendered_contexts[0]["migrated_to_marker"].server_key == active_key
+        assert rendered_contexts[0]["migrated_to_marker"].device_id == winner.pk
         assert rendered_contexts[0]["migrated_to_winner"] == winner
 
     def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self, librenms_server, server_keys):

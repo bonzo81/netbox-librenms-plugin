@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_superuser
 
 
@@ -203,7 +204,7 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
     from django.db.models import Model
 
-    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+    from netbox_librenms_plugin.utils import set_librenms_device_id
 
     if not isinstance(device.custom_field_data, dict):
         device.custom_field_data = {}
@@ -220,7 +221,7 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
     # set_librenms_device_id() only logs and returns when it refuses a write (legacy bare
     # integer, non-positive id), which would leave the payload claiming a mapping the device
     # does not have; every caller would then fail on the production staleness guard instead.
-    stored = get_librenms_device_id(device, server_key, auto_save=False)
+    stored = read_mapping(device).own_id(server_key)
     assert stored == librenms_id, (
         f"set_librenms_device_id declined the write (stored {stored!r}, wanted {librenms_id!r}); "
         "the payload fingerprint would not match the device mapping"

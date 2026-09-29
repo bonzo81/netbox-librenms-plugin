@@ -45,6 +45,13 @@ from netbox_librenms_plugin.interface_sync import (
     keep_change_log_before_state,
     update_interface_from_port,
 )
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    find_port_owner,
+    read_mapping,
+    read_mappings,
+)
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -52,21 +59,15 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
-from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
-    AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
     build_migrated_context,
     coerce_model_pk,
     convert_speed_to_kbps,
-    find_interface_by_librenms_port_id,
     get_interface_name_field,
     get_interface_port_identity_sets,
-    get_librenms_device_id,
     get_librenms_sync_device,
-    get_migrated_to_marker,
-    interface_name_fallback_matches_port,
     is_list_of_dicts,
     netbox_interface_clean,
     normalize_relationship_maps,
@@ -1518,25 +1519,20 @@ class SyncInterfacesView(
         """Return active-server port IDs bound to each target interface name."""
         if isinstance(obj, Device):
             target_ids = getattr(self, "_locked_target_devices", {obj.pk: obj})
-            interfaces = Interface.objects.filter(device_id__in=target_ids).only(
-                "device_id",
-                "name",
-                "custom_field_data",
-            )
+            records = read_mappings(Interface.objects.filter(device_id__in=target_ids), fields=("device_id", "name"))
             owner_field = "device_id"
         else:
-            interfaces = VMInterface.objects.filter(virtual_machine=obj).only(
-                "virtual_machine_id",
-                "name",
-                "custom_field_data",
+            records = read_mappings(
+                VMInterface.objects.filter(virtual_machine=obj), fields=("virtual_machine_id", "name")
             )
             owner_field = "virtual_machine_id"
 
         reserved = {}
-        for interface in interfaces:
-            port_id = normalize_librenms_port_id(get_librenms_device_id(interface, server_key, auto_save=False))
+        for record in records:
+            port_id = normalize_librenms_port_id(record.mapping.own_id(server_key))
             if port_id is not None:
-                reserved.setdefault(getattr(interface, owner_field), {}).setdefault(interface.name, set()).add(port_id)
+                owner_id = record.values[owner_field]
+                reserved.setdefault(owner_id, {}).setdefault(record.values["name"], set()).add(port_id)
         return reserved
 
     def _selected_vlan_scope_devices(self, obj, ports_data, interface_name_field):
@@ -1768,7 +1764,7 @@ class SyncInterfacesView(
             claim_librenms_port_binding(port_id, server_key)
         # Resolve the owner only after claiming the cross-model identity.
         try:
-            port_owner = find_interface_by_librenms_port_id(port_id, server_key) if port_id is not None else None
+            port_owner = find_port_owner(port_id, server=server_key) if port_id is not None else None
             port_owner_is_ambiguous = False
         except AmbiguousLibreNMSIdError:
             # port_id matches multiple interfaces — skip this row rather than bind
@@ -1915,7 +1911,7 @@ class SyncInterfacesView(
             if not self.restricted_queryset(Interface).filter(pk=interface.pk).exists():
                 return None
             raise _HostInterfaceNameConflict
-        if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
+        if not created and port_id and not read_mapping(interface).allows_name_fallback(server_key, port_id):
             return None
         if created:
             interface._librenms_sync_created = True
@@ -1934,7 +1930,7 @@ class SyncInterfacesView(
         if interface_name is None:
             return None
         interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
-        if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
+        if not created and port_id and not read_mapping(interface).allows_name_fallback(server_key, port_id):
             return None
         if created:
             interface._librenms_sync_created = True
@@ -2151,7 +2147,7 @@ class RebindInterfacePortView(SyncInterfacesView):
         target = self._locked_target_devices.get(target_id) if isinstance(locked_obj, Device) else locked_obj
         if target is None:
             raise _RebindRefusedError(f"LibreNMS port {port_id} has no interface owner. Select one and try again.")
-        if isinstance(locked_obj, Device) and get_migrated_to_marker(target, server_key):
+        if isinstance(locked_obj, Device) and read_mapping(target).migrated_to(server_key):
             raise _RebindRefusedError("The row's device has been migrated and is read-only.")
         # A rebind writes the interface's binding, so the rules decide the port first.
         rule_refusal = decision_reason(
@@ -2174,7 +2170,7 @@ class RebindInterfacePortView(SyncInterfacesView):
         # Only a holder the caller may both view and change can name its port in a message.
         if interface is None or not self.restricted_queryset(writer_model, "view").filter(pk=interface.pk).exists():
             raise _RebindRefusedError(f"You cannot change NetBox interface '{owner.name}'.")
-        current_port_id = normalize_librenms_port_id(get_librenms_device_id(interface, server_key, auto_save=False))
+        current_port_id = normalize_librenms_port_id(read_mapping(interface).own_id(server_key))
         if current_port_id != expected_port_id or owner.port_id != expected_port_id:
             raise _RebindRefusedError(
                 f"NetBox interface '{owner.name}' changed after the page was loaded. Refresh the data and try again."
@@ -2183,14 +2179,14 @@ class RebindInterfacePortView(SyncInterfacesView):
             raise _RebindRefusedError(f"Rebind is refused. {owner.explanation()}")
         claim_librenms_port_binding(port_id, server_key)
         try:
-            port_is_bound = find_interface_by_librenms_port_id(port_id, server_key) is not None
+            port_is_bound = find_port_owner(port_id, server=server_key) is not None
         except AmbiguousLibreNMSIdError:
             port_is_bound = True
         if port_is_bound:
             raise _RebindRefusedError(f"LibreNMS port {port_id} is already bound to a NetBox interface.")
         interface.snapshot()
         set_librenms_device_id(interface, port_id, server_key)
-        if get_librenms_device_id(interface, server_key, auto_save=False) != port_id:
+        if read_mapping(interface).own_id(server_key) != port_id:
             raise _RebindRefusedError(
                 f"NetBox interface '{owner.name}' stores its LibreNMS ID in the legacy format. Convert it first."
             )
@@ -2912,6 +2908,7 @@ class _BaseRelationshipSyncView(
             return error
 
         candidate_q = relationship_candidate_q(
+            VMInterface if isinstance(obj, VirtualMachine) else Interface,
             server_key,
             (source_port.get("port_id"), related_port.get("port_id")),
             (source_name, related_name),

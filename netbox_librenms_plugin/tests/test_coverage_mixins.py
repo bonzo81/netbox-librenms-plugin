@@ -163,7 +163,7 @@ class TestBuildMigratedContextLazyWinner:
         # Building the context must NOT fetch the winner row (the boolean-only partials never read it).
         with CaptureQueriesContext(connection) as cap_build:
             ctx = build_migrated_context(donor, "default")
-        assert ctx["migrated_to_marker"]["device_id"] == winner.pk  # banner boolean present
+        assert ctx["migrated_to_marker"].device_id == winner.pk  # banner boolean present
         assert self._winner_lookups(cap_build, winner.pk) == []  # winner Device not fetched yet
 
         # Reading the proxy (the interface/IP partials do) resolves the real Device — one query.

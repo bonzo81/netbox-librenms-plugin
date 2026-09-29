@@ -18,6 +18,11 @@ from utilities.exceptions import AbortRequest
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    find_port_owner,
+    read_mapping,
+)
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -26,11 +31,8 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
-    AmbiguousLibreNMSIdError,
     claim_librenms_port_binding,
     acquire_advisory_transaction_lock,
-    find_interface_by_librenms_port_id,
-    get_librenms_device_id,
     get_librenms_sync_device,
     get_module_template_interface_names,
     get_module_template_interface_specs,
@@ -50,9 +52,7 @@ from netbox_librenms_plugin.utils import (
     set_librenms_device_id,
     exception_text_for,
 )
-from netbox_librenms_plugin.utils import (
-    coerce_positive_int as _coerce_positive_int,
-)
+from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
     NO_DEVICE_IDENTITY,
     BaseModuleTableView,
@@ -263,7 +263,7 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
     if inventory is None:
         return None
 
-    current_librenms_id = _coerce_positive_int(get_librenms_device_id(sync_device, server_key, auto_save=False))
+    current_librenms_id = _coerce_positive_int(read_mapping(sync_device).own_id(server_key))
     cached_librenms_id = _coerce_positive_int(cached_payload.get("librenms_id"))
     if current_librenms_id is None or cached_librenms_id is None or current_librenms_id != cached_librenms_id:
         return None
@@ -812,7 +812,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
 
     claim_librenms_port_binding(port_id, server_key)
     try:
-        existing_owner = find_interface_by_librenms_port_id(port_id, server_key)
+        existing_owner = find_port_owner(port_id, server=server_key)
     except AmbiguousLibreNMSIdError:
         return {
             "status": "conflict",
@@ -878,7 +878,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             }
         set_module = not candidate_module_id
 
-    current_port_id = _coerce_positive_int(get_librenms_device_id(candidate, server_key, auto_save=False))
+    current_port_id = _coerce_positive_int(read_mapping(candidate).own_id(server_key))
     if current_port_id and current_port_id != port_id:
         return {
             "status": "conflict",

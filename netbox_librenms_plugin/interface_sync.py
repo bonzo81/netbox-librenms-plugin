@@ -19,15 +19,16 @@ from netbox_librenms_plugin.interface_diff import (
     synced_description,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.utils import (
+from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    find_port_owner,
+    read_mapping,
+)
+from netbox_librenms_plugin.utils import (
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
     coerce_interface_mtu,
     convert_speed_to_kbps,
-    find_interface_by_librenms_port_id,
-    get_librenms_device_id,
-    interface_name_fallback_matches_port,
     interface_name_rejection_reason,
     set_librenms_device_id,
 )
@@ -298,7 +299,7 @@ def _bound_interface_name_is_occupied(interface, synced_name, port_id, server_ke
     """Return whether a bound interface must keep its current name."""
     if synced_name == interface.name:
         return False
-    stored_port_id = normalize_librenms_port_id(get_librenms_device_id(interface, server_key, auto_save=False))
+    stored_port_id = normalize_librenms_port_id(read_mapping(interface).own_id(server_key))
     if port_id is None or stored_port_id != port_id:
         return False
     return (
@@ -381,7 +382,7 @@ def update_interface_from_port(  # noqa: C901
     if port_id is not None:
         claim_librenms_port_binding(port_id, server_key)
         try:
-            existing_owner = find_interface_by_librenms_port_id(port_id, server_key)
+            existing_owner = find_port_owner(port_id, server=server_key)
         except AmbiguousLibreNMSIdError:
             raise LibreNMSPortBindingConflict("The LibreNMS port ID matches multiple NetBox interfaces.") from None
         if existing_owner is not None and existing_owner != interface:
@@ -486,7 +487,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
 
     claim_librenms_port_binding(port_id, server_key)
     try:
-        by_id = find_interface_by_librenms_port_id(port_id, server_key)
+        by_id = find_port_owner(port_id, server=server_key)
     except AmbiguousLibreNMSIdError:
         raise ValueError("The LibreNMS port ID matches multiple NetBox interfaces.") from None
 
@@ -503,10 +504,10 @@ def resolve_or_create_interface_from_port(  # noqa: C901
     else:
         existing_by_name = model.objects.filter(**owner_filter, name=interface_name).first()
         if existing_by_name is not None:
-            if not interface_name_fallback_matches_port(existing_by_name, port_id, server_key):
+            if not read_mapping(existing_by_name).allows_name_fallback(server_key, port_id):
                 # Name the holding port only to a caller who may view the interface.
                 holder = (
-                    normalize_librenms_port_id(get_librenms_device_id(existing_by_name, server_key, auto_save=False))
+                    normalize_librenms_port_id(read_mapping(existing_by_name).own_id(server_key))
                     if viewable_queryset.filter(pk=existing_by_name.pk).exists()
                     else None
                 )
@@ -521,7 +522,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         else:
             interface, created = model.objects.get_or_create(**owner_filter, name=interface_name)
             if not created:
-                if not interface_name_fallback_matches_port(interface, port_id, server_key):
+                if not read_mapping(interface).allows_name_fallback(server_key, port_id):
                     raise ValueError("The interface name became bound to another LibreNMS port.")
                 if not viewable_queryset.filter(pk=interface.pk).exists():
                     raise ValueError("The matching NetBox interface is outside your view scope.")

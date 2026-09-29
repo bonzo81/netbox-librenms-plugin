@@ -20,13 +20,13 @@ from django.core.exceptions import ValidationError
 from netbox_librenms_plugin.constants import INTERFACE_SYNC_EXTRA_FIELDS, INTERFACE_SYNC_FIELD_PAIRS
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, rule_names
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.utils import (
     bounded_interface_text,
     check_vlan_group_matches,
     coerce_interface_mtu,
     convert_speed_to_kbps,
     effective_vlan_mode,
-    get_librenms_device_id,
     hidden_refusal_text,
     is_active_superuser,
     netbox_interface_clean,
@@ -60,7 +60,8 @@ _BLOCKED_ROW_STATE_BY_KIND = {
 SYNC_FIELDS = tuple(netbox_field for _, netbox_field in INTERFACE_SYNC_FIELD_PAIRS) + INTERFACE_SYNC_EXTRA_FIELDS
 
 # The model attribute each field needs. A model without it (VMInterface has no type or speed)
-# cannot be changed by that part of the sync, so the field is reported as matching.
+# cannot be changed by that part of the sync, so the field is reported as matching. Every
+# interface model holds a mapping, so librenms_id needs no attribute.
 _REQUIRED_ATTRIBUTE = {
     "name": "name",
     "type": "type",
@@ -69,7 +70,6 @@ _REQUIRED_ATTRIBUTE = {
     "mtu": "mtu",
     "enabled": "enabled",
     "mac_address": "mac_addresses",
-    "librenms_id": "custom_field_data",
     "vlans": "mode",
 }
 
@@ -340,7 +340,7 @@ def _librenms_id_differs(port, interface, context):
     port_id = normalize_librenms_port_id(port.get("port_id"))
     if port_id is None:
         return False
-    stored = get_librenms_device_id(interface, context.server_key, auto_save=False)
+    stored = read_mapping(interface).own_id(context.server_key)
     return stored is None or str(stored) != str(port_id)
 
 
@@ -433,7 +433,7 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, decision, 
     )
     fields = {}
     for field in SYNC_FIELDS:
-        if not hasattr(interface, _REQUIRED_ATTRIBUTE[field]):
+        if field in _REQUIRED_ATTRIBUTE and not hasattr(interface, _REQUIRED_ATTRIBUTE[field]):
             fields[field] = MATCHES
             continue
         fields[field] = DIFFERS if _RULES[field](port, interface, context) else MATCHES

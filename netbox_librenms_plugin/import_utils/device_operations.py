@@ -21,17 +21,12 @@ from ..ip_addressing import parse_host_address
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..librenms_ids import coerce_librenms_id
 from ..utils import (
-    AmbiguousLibreNMSIdError,
     cached_row_matches,
     exception_text_for,
-    find_by_librenms_id,
     find_devices_by_serial,
     find_matching_location,
     find_matching_platform,
     find_matching_site,
-    get_librenms_device_id,
-    get_librenms_oob,
-    is_legacy_librenms_id,
     lock_librenms_id_assignment,
     match_librenms_hardware_to_device_type,
     normalize_serial,
@@ -46,6 +41,12 @@ from .virtual_chassis import (
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
+)
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    MappingRole,
+    find_mapping,
+    read_mapping,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,25 +131,13 @@ def _describe_existing_librenms_link(obj, server_key):
             summarising the ``librenms_id`` custom field for *server_key*.
 
     """
-    info = {"host_id": None, "oob_id": None, "oob_type": None}
-    # Host ID via the single canonical accessor (per coding guidelines) rather than touching the
-    # custom field directly. auto_save=False: this is a read-only describe/badge path and must not
-    # mutate custom_field_data. get_librenms_device_id handles legacy bare-int / string-digit and
-    # the per-server dict's "id" key, mirroring find_by_librenms_id's coercion.
-    host_id = get_librenms_device_id(obj, server_key, auto_save=False)
-    if host_id is not None and host_id > 0:
-        info["host_id"] = host_id
-    # The OOB sub-object via the canonical accessor (mirrors the host-id read above): it returns
-    # the raw oob dict ({"id": <int|str>, "type": <str>, ...}) or None, encapsulating the
-    # dict-form navigation {"<server_key>": {"id": ..., "oob": {...}}}.
-    oob = get_librenms_oob(obj, server_key)
-    if oob is not None:
-        oob_id = coerce_librenms_id(oob.get("id"))
-        if oob_id is not None and oob_id > 0:
-            info["oob_id"] = oob_id
-        oob_type = oob.get("type")
-        if isinstance(oob_type, str) and oob_type:
-            info["oob_type"] = oob_type
+    mapping = read_mapping(obj)
+    info = {"host_id": mapping.own_id(server_key), "oob_id": None, "oob_type": None}
+    entry = mapping.server(server_key)
+    if entry is not None:
+        info["oob_id"] = entry.oob_id
+        if isinstance(entry.oob_type, str) and entry.oob_type:
+            info["oob_type"] = entry.oob_type
     return info
 
 
@@ -386,7 +375,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         libre_device.get("os", ""),
         libre_device.get("hardware", ""),
     )
-    existing_oob = get_librenms_oob(existing_by_serial, server_key=server_key)
+    existing_oob_recorded = read_mapping(existing_by_serial).has_oob(server_key)
 
     # Only treat this as a possible host/OOB chassis-pair situation when
     # there is a real ambiguity: either the existing NetBox device's name
@@ -433,7 +422,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         already_linked_elsewhere or bool(oob_type_from_libre) or ((not names_match) and has_oob_signal)
     )
 
-    oob_possible = chassis_pair_likely and existing_oob is None
+    oob_possible = chassis_pair_likely and not existing_oob_recorded
     host_possible = chassis_pair_likely and bool(linked_to_other_id and not existing_link.get("oob_id"))
 
     # --- Compute all values before mutating result ---
@@ -481,7 +470,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         serial_action_value = None
 
     block_warnings: list = []
-    if oob_type_from_libre and existing_oob is not None:
+    if oob_type_from_libre and existing_oob_recorded:
         # OOB-typed incoming but existing already has an OOB linked -- inform without blocking.
         # Use a dedicated non-actionable value: "link" would render the generic host-link form
         # ("Link to LibreNMS" button) in device_validation_details.html, posting an
@@ -756,11 +745,16 @@ def validate_device_for_import(  # noqa: C901
         server_key = api.server_key if api is not None else server_key
 
         # Check for existing VM first (by librenms_id custom field).
-        # find_by_librenms_id() covers both the new per-server JSON format
+        # find_mapping() covers both the new per-server JSON format
         # and legacy bare-integer values so neither is missed. An ambiguous id
         # (matching multiple records) blocks the import — see _flag_ambiguous_librenms_id.
         try:
-            existing_vm = find_by_librenms_id(VirtualMachine, librenms_id, server_key)
+            existing_vm = find_mapping(
+                VirtualMachine.objects.all(),
+                server=server_key,
+                identity=librenms_id,
+                roles=(MappingRole.OWN, MappingRole.OOB),
+            )
         except AmbiguousLibreNMSIdError as exc:
             existing_vm = None
             _flag_ambiguous_librenms_id(result, librenms_id, exc)
@@ -770,7 +764,12 @@ def validate_device_for_import(  # noqa: C901
         # binding to the VM. Detect it and fail closed (the device block is gated on the flag).
         if existing_vm is not None:
             try:
-                _device_collision = find_by_librenms_id(Device, librenms_id, server_key)
+                _device_collision = find_mapping(
+                    Device.objects.all(),
+                    server=server_key,
+                    identity=librenms_id,
+                    roles=(MappingRole.OWN, MappingRole.OOB),
+                )
             except AmbiguousLibreNMSIdError as exc:
                 # An ambiguous device lookup is itself a fail-closed condition: drop the
                 # VM binding too so the block below cannot rebind it as a definitive
@@ -792,12 +791,8 @@ def validate_device_for_import(  # noqa: C901
             # (mirrors the device path); otherwise the UI shows the VM as unlinked.
             result["existing_librenms_link"] = _describe_existing_librenms_link(existing_vm, server_key)
 
-            # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
-            # Direct access needed to detect legacy format for migration prompt:
-            # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
-            # raw type check on custom_field_data reveals whether migration is needed.
-            _vm_cf_id = existing_vm.custom_field_data.get("librenms_id")
-            if is_legacy_librenms_id(_vm_cf_id):
+            # A legacy bare value resolves like a scoped one, so only the snapshot shows it needs migration.
+            if read_mapping(existing_vm).legacy.is_legacy:
                 result["librenms_id_needs_migration"] = True
 
             # Check if name matches resolved name (accounts for use_sysname/strip_domain)
@@ -808,12 +803,17 @@ def validate_device_for_import(  # noqa: C901
                 result["suggested_name"] = hostname
 
         # Check for existing Device (by librenms_id custom field).
-        # find_by_librenms_id() covers both the new per-server JSON format
+        # find_mapping() covers both the new per-server JSON format
         # and legacy bare-integer values so neither is missed. Skip when an ambiguity
         # (intra-model or cross-model) was already flagged — binding must fail closed.
         if not result["existing_device"] and not result["ambiguous_librenms_id"]:
             try:
-                existing_device = find_by_librenms_id(Device, librenms_id, server_key)
+                existing_device = find_mapping(
+                    Device.objects.all(),
+                    server=server_key,
+                    identity=librenms_id,
+                    roles=(MappingRole.OWN, MappingRole.OOB),
+                )
             except AmbiguousLibreNMSIdError as exc:
                 existing_device = None
                 _flag_ambiguous_librenms_id(result, librenms_id, exc)
@@ -829,20 +829,16 @@ def validate_device_for_import(  # noqa: C901
                 result["can_import"] = False
 
                 # If the match was via the OOB sub-key, mark it so the UI shows no duplicate warning.
-                _existing_oob = get_librenms_oob(existing_device, server_key=server_key)
-                if _existing_oob and coerce_librenms_id(_existing_oob.get("id")) == coerce_librenms_id(librenms_id):
+                existing_oob_id = read_mapping(existing_device).oob_id(server_key)
+                if existing_oob_id is not None and existing_oob_id == coerce_librenms_id(librenms_id):
                     result["existing_match_type"] = "librenms_oob"
 
                 # Surface the full host/OOB linkage so the import table can render
                 # both halves of an existing pair with consistent paired styling.
                 result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
 
-                # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
-                # Direct access needed to detect legacy format for migration prompt:
-                # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
-                # raw type check on custom_field_data reveals whether migration is needed.
-                _dev_cf_id = existing_device.custom_field_data.get("librenms_id")
-                if is_legacy_librenms_id(_dev_cf_id):
+                # A legacy bare value resolves like a scoped one, so only the snapshot shows it needs migration.
+                if read_mapping(existing_device).legacy.is_legacy:
                     result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
@@ -1297,8 +1293,7 @@ def validate_device_for_import(  # noqa: C901
                             or "oob"
                         )
                         if is_oob_ip or (oob_type and not has_primary_ip):
-                            existing_oob = get_librenms_oob(device, server_key=server_key)
-                            if existing_oob is None:
+                            if not read_mapping(device).has_oob(server_key):
                                 result["existing_device"] = device
                                 result["existing_match_type"] = "primary_ip"
                                 result["serial_action"] = "oob_candidate"

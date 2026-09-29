@@ -22,6 +22,8 @@ from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_ru
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -29,12 +31,9 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
-from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
-    get_librenms_device_id,
-    get_migrated_to_marker,
     index_ip_source_interfaces,
     index_ip_sync_rows,
     index_ip_port_records,
@@ -555,7 +554,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 Interface.objects.filter(device_id__in=state["members_by_id"]).select_related("device")
             )
             for interface in current_interfaces:
-                bound_id = get_librenms_device_id(interface, server_key, auto_save=False)
+                bound_id = read_mapping(interface).own_id(server_key)
                 if bound_id is not None:
                     state["interfaces_by_port_id"].setdefault(bound_id, []).append(interface)
         return state
@@ -606,7 +605,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             )
             if owner is None or owner.pk not in interface_creation_state["members_by_id"]:
                 raise ValueError("The LibreNMS port does not identify one viewable chassis member.")
-            if get_migrated_to_marker(locked_obj, server_key) or get_migrated_to_marker(owner, server_key):
+            if read_mapping(locked_obj).migrated_to(server_key) or read_mapping(owner).migrated_to(server_key):
                 raise ValueError("The interface owner is read-only because it was migrated.")
             interface_model = Interface
         else:
@@ -661,7 +660,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 return None, None
             owner = {owner.pk: owner for owner in locked_owners}[locked_interface.device_id]
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            if get_migrated_to_marker(locked_obj, server_key) or get_migrated_to_marker(owner, server_key):
+            if read_mapping(locked_obj).migrated_to(server_key) or read_mapping(owner).migrated_to(server_key):
                 raise ValueError("The interface owner is read-only because it was migrated.")
             return locked_interface, owner
         if not isinstance(interface, VMInterface):

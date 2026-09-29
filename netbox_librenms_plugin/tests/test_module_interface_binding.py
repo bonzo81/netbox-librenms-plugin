@@ -2,6 +2,7 @@
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
     install_module,
@@ -58,8 +59,6 @@ class TestInterfacePortBinding:
         return _bind_interface_librenms_id(device, item, module_pk, "default", Interface.objects.all())
 
     def test_coordinates_pick_the_module_interface_when_no_name_matches(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
         device = make_device_with_module_bays("bind-coordinates", ["Slot 1"])
         module = _module_with_interfaces(device, "Slot 1", "BIND-COORD-CARD", ["Ethernet1/17", "Ethernet1/18"])
         item = {"_librenms_port_id": 8801, "_librenms_ifname": "port 1/17"}
@@ -69,11 +68,9 @@ class TestInterfacePortBinding:
         assert result["status"] == "bound"
         assert result["interface"] == "Ethernet1/17"
         bound = module.interfaces.get(name="Ethernet1/17")
-        assert get_librenms_device_id(bound, "default", auto_save=False) == 8801
+        assert read_mapping(bound).own_id("default") == 8801
 
     def test_a_lone_module_interface_is_used_when_nothing_else_narrows_it(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
         device = make_device_with_module_bays("bind-lone", ["Slot 1"])
         module = _module_with_interfaces(device, "Slot 1", "BIND-LONE-CARD", ["Uplink"])
         item = {"_librenms_port_id": 8802, "_librenms_ifdescr": "Unmatched Label"}
@@ -83,7 +80,7 @@ class TestInterfacePortBinding:
         assert result["status"] == "bound"
         assert result["interface"] == "Uplink"
         # The identity has to reach the database, not just the returned dict.
-        assert get_librenms_device_id(module.interfaces.get(name="Uplink"), "default", auto_save=False) == 8802
+        assert read_mapping(module.interfaces.get(name="Uplink")).own_id("default") == 8802
 
     def test_no_module_context_and_no_name_match_reports_a_skip(self):
         device = make_device("bind-nothing")

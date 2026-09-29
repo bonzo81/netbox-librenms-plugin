@@ -8,6 +8,11 @@ from django.urls import reverse
 from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    find_port_owner,
+    read_mapping,
+)
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configure_default_librenms_server,
@@ -17,12 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.utils import (
-    AmbiguousLibreNMSIdError,
-    find_interface_by_librenms_port_id,
-    get_librenms_device_id,
-    set_librenms_device_id,
-)
+from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 
@@ -54,7 +54,7 @@ def _bind(interface, port_id):
 
 def _binding(interface):
     interface.refresh_from_db()
-    return get_librenms_device_id(interface, SERVER_KEY, auto_save=False)
+    return read_mapping(interface).own_id(SERVER_KEY)
 
 
 def _vm_interface(name, port_id):
@@ -92,14 +92,14 @@ class TestTheSharedLookup:
     def test_a_vm_interface_is_found_for_a_port_no_device_interface_holds(self):
         vm_interface = _vm_interface("lookup-vm", PORT)
 
-        assert find_interface_by_librenms_port_id(PORT, SERVER_KEY) == vm_interface
+        assert find_port_owner(PORT, server=SERVER_KEY) == vm_interface
 
     def test_a_holder_on_each_model_is_ambiguous(self):
         _vm_interface("lookup-both", PORT)
         _bind(make_interface(make_device("lookup-both-device"), "eth0"), PORT)
 
         with pytest.raises(AmbiguousLibreNMSIdError):
-            find_interface_by_librenms_port_id(PORT, SERVER_KEY)
+            find_port_owner(PORT, server=SERVER_KEY)
 
 
 class TestTheSyncWriter:

@@ -27,6 +27,7 @@ from django.urls import get_script_prefix, reverse
 from django.views import View
 from ipam.models import IPAddress
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -34,11 +35,9 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
     sync_subject_key,
 )
-from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
     DEVICE_IP_FK_LABELS,
-    get_migrated_to_marker,
     set_device_ip_fk,
     validation_error_detail,
     exception_text_for,
@@ -57,35 +56,12 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
-def _parse_marker_winner_pk(device_id):
-    """
-    Parse a ``_migrated_to`` marker's ``device_id`` to a positive int pk, or None if invalid.
-
-    A marker id from a tampered/legacy source may arrive as a string: accept ONLY a plain digit
-    string (``str.isdecimal()``) so whitespace/sign/decimal forms (``" 5 "``, ``"+5"``, ``"1.9"``)
-    fail closed. This is deliberately stricter than the raw ``int()``
-    :func:`~netbox_librenms_plugin.librenms_ids.coerce_librenms_id` applies to LibreNMS ids. The
-    int/positive-value coercion itself is delegated to ``coerce_librenms_id`` (bool rejected,
-    positive int only) so that rule lives in one place and can't drift from the rest of the plugin's
-    id handling. This function is shared by :func:`_resolve_winner_for_donor` and
-    :func:`_winner_unavailable_reason` so the two can't disagree on a parseable winner id.
-
-    Args:
-        device_id (object): The marker's candidate winner device id.
-
-    Returns:
-        int | None: The positive winner device pk, or None if the marker value is invalid.
-    """
-    if isinstance(device_id, str) and not device_id.isdecimal():
-        return None
-    return coerce_librenms_id(device_id)
-
-
 def _resolve_winner_for_donor(donor, server_key="default"):
     """
     Resolve the migration winner device recorded on a donor.
 
-    ``marker`` is the dict written by :func:`mark_librenms_migrated`.
+    ``marker`` is the effective marker that :func:`mark_librenms_migrated` wrote. The reader
+    accepts only a positive integer winner pk.
 
     Args:
         donor: The donor device whose ``_migrated_to`` marker is read.
@@ -94,18 +70,14 @@ def _resolve_winner_for_donor(donor, server_key="default"):
     Returns:
         tuple: ``(winner, marker)`` when the marker is valid and the winner exists;
             ``(None, None)`` when no marker is present; ``(None, marker)`` when the
-            marker is stale (winner deleted, unparseable ``device_id``, or
-            self-pointing) so callers can distinguish "no marker" from "stale marker".
+            marker is stale (winner deleted, or self-pointing) so callers can distinguish "no marker" from "stale marker".
             Use :func:`_winner_unavailable_reason` to tell a deleted winner from a
             corrupt marker.
     """
-    marker = get_migrated_to_marker(donor, server_key)
-    if not marker:
+    marker = read_mapping(donor).migrated_to(server_key)
+    if marker is None:
         return None, None
-    winner_pk = _parse_marker_winner_pk(marker.get("device_id"))
-    if winner_pk is None:
-        return None, marker
-    winner = Device.objects.filter(pk=winner_pk).first()
+    winner = Device.objects.filter(pk=marker.device_id).first()
     if winner is None:
         return None, marker
     # A self-pointing marker (winner == donor) is corrupt: it would make the move
@@ -121,19 +93,13 @@ def _winner_unavailable_reason(donor, marker):
     Classify a present ``_migrated_to`` marker that resolved to no winner.
 
     Called only on the ``(None, marker)`` path of :func:`_resolve_winner_for_donor`, so a
-    well-formed, non-self ``device_id`` here means the winner row was deleted; anything else
-    is a corrupt marker. Mirrors the staleness checks in :func:`_resolve_winner_for_donor`.
+    ``device_id`` other than the donor's here means the winner row was deleted; a
+    self-pointing marker is corrupt. Mirrors the staleness checks in :func:`_resolve_winner_for_donor`.
 
     Returns:
-        str: ``"deleted"`` (well-formed positive id, winner row gone) or ``"corrupt"``
-            (bool/unparseable/non-positive ``device_id``, or self-pointing).
+        str: ``"deleted"`` (winner row gone) or ``"corrupt"`` (self-pointing).
     """
-    # A parseable positive pk (shared parser rejects bool/numeric-like/non-positive) that isn't
-    # the donor itself means the winner row was deleted; anything else is a corrupt marker.
-    winner_pk = _parse_marker_winner_pk(marker.get("device_id"))
-    if winner_pk is None or winner_pk == donor.pk:
-        return "corrupt"
-    return "deleted"
+    return "corrupt" if marker.device_id == donor.pk else "deleted"
 
 
 def _fail_winner_unavailable(view, request, donor, marker):

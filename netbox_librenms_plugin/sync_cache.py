@@ -17,15 +17,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
-from netbox_librenms_plugin.server_mappings import is_server_key, iter_server_mapping_entries
-from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.utils import (
-    cache_remaining_ttl,
-    get_librenms_device_id,
-    get_librenms_sync_device,
-    get_migrated_to_marker,
-    resolve_server_mapping_display_id,
-)
+from netbox_librenms_plugin.server_mappings import mapped_device_servers
+from netbox_librenms_plugin.utils import cache_remaining_ttl, get_librenms_sync_device
 
 logger = logging.getLogger(__name__)
 
@@ -305,46 +298,6 @@ def _state_key(subject, server_key, tab):
     return f"librenms_sync_tab_state_{subject._meta.model_name}_{subject.pk}_{server_key}_{tab.value}"
 
 
-def _explicit_server_keys(obj):
-    raw_mapping = getattr(obj, "custom_field_data", {}).get("librenms_id")
-    if not isinstance(raw_mapping, dict):
-        return set()
-    return {
-        str(server_key)
-        for server_key, entry in iter_server_mapping_entries(raw_mapping)
-        if isinstance(server_key, str)
-        and server_key
-        and (
-            resolve_server_mapping_display_id(entry)[0] is not None
-            or get_migrated_to_marker(obj, server_key) is not None
-        )
-    }
-
-
-def mapped_server_keys(subject, active_server_key=None):
-    """Return only server namespaces linked to the synchronization subject or its VC."""
-    objects = [subject]
-    virtual_chassis = getattr(subject, "virtual_chassis", None)
-    if virtual_chassis is not None:
-        objects = list(virtual_chassis.members.all())
-
-    server_keys = set()
-    for obj in objects:
-        server_keys.update(_explicit_server_keys(obj))
-
-    # Two cache-only endpoints pass a raw ``?server_key`` here, and get_librenms_sync_device()
-    # below raises on a key the validator rejects instead of leaving it out of the mapped set.
-    if active_server_key and is_server_key(active_server_key) and active_server_key not in server_keys:
-        sync_owner = get_librenms_sync_device(subject, server_key=active_server_key) or subject
-        raw_mapping = getattr(sync_owner, "custom_field_data", {}).get("librenms_id")
-        if not isinstance(raw_mapping, dict) and coerce_librenms_id(raw_mapping) is not None:
-            server_keys.add(active_server_key)
-        elif get_librenms_device_id(sync_owner, active_server_key, auto_save=False) is not None:
-            server_keys.add(active_server_key)
-
-    return tuple(sorted(server_keys))
-
-
 class SyncCacheConsistency:
     """Own sync-tab cache keys, transitions, and status serialization."""
 
@@ -478,7 +431,7 @@ class SyncCacheConsistency:
     ):
         """Invalidate dependent snapshots only after the current transaction commits."""
         cleanup_tabs = set(self.applicable_tabs())
-        if active_server_key in mapped_server_keys(self.subject, active_server_key):
+        if active_server_key in mapped_device_servers(self.subject, active_server=active_server_key):
             cleanup_tabs.discard(source_tab)
         transition = CacheMutationTransition(
             cleanup_tabs=cleanup_tabs,
@@ -546,7 +499,7 @@ class SyncCacheConsistency:
         claimed = active_sync_subject_keys()
         # Every server this object is mapped to, not one acting server: the NetBox change is
         # server-independent, so a snapshot under any of its namespaces is equally stale.
-        for server_key in mapped_server_keys(self.subject):
+        for server_key in mapped_device_servers(self.subject):
             for tab in self.applicable_tabs():
                 # A VC-shared tab resolves to one snapshot for the whole chassis, and the page
                 # holding the claim need not be the member that snapshot is keyed on. Compare
@@ -633,7 +586,7 @@ class SyncCacheConsistency:
 
     def _apply_mutation(self, source_tab, active_server_key, actor_id, transition):
         # An unmapped active server owns no source snapshot to preserve.
-        mapped_keys = mapped_server_keys(self.subject, active_server_key)
+        mapped_keys = mapped_device_servers(self.subject, active_server=active_server_key)
 
         transition.affected_tabs = {
             (server_key, tab)
@@ -678,7 +631,7 @@ class SyncCacheConsistency:
 
     def _mark_cleanup_failure_states(self, source_tab, active_server_key, actor_id, transition):
         """Publish one fail-closed revision after incomplete cache cleanup."""
-        mapped_keys = mapped_server_keys(self.subject, active_server_key)
+        mapped_keys = mapped_device_servers(self.subject, active_server=active_server_key)
         mutation_revision = transition.transition_id
         for server_key in mapped_keys:
             for tab in self.applicable_tabs():

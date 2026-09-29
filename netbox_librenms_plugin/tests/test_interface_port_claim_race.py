@@ -7,6 +7,7 @@ from threading import Event
 import pytest
 from django.apps import apps
 
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
     configure_default_librenms_server,
@@ -86,10 +87,13 @@ def _port_holders():
     from dcim.models import Interface
     from virtualization.models import VMInterface
 
-    from netbox_librenms_plugin.utils import build_librenms_id_qs
-
-    host_q, oob_q = build_librenms_id_qs(SERVER_KEY, PORT)
-    holders = (model.objects.filter(host_q | oob_q).values_list("pk", flat=True) for model in (Interface, VMInterface))
+    roles = (MappingRole.OWN, MappingRole.OOB)
+    holders = (
+        model.objects.filter(identity_q(model, server=SERVER_KEY, identities=(PORT,), roles=roles)).values_list(
+            "pk", flat=True
+        )
+        for model in (Interface, VMInterface)
+    )
     return sorted(pk for pks in holders for pk in pks)
 
 

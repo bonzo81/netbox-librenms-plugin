@@ -18,16 +18,16 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
 )
+from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     get_interface_name_field,
-    get_librenms_device_id,
     get_virtual_chassis_members,
     identify_ip_sync_rows,
     index_ip_source_interfaces,
@@ -101,7 +101,7 @@ def ip_assignment_ports(ports_by_id, bound_ports_by_id, source_port_id, interfac
     """
     port_ids = {
         normalize_librenms_port_id(source_port_id),
-        get_librenms_device_id(interface, server_key, auto_save=False),
+        read_mapping(interface).own_id(server_key),
     } - {None}
     return [
         (
@@ -961,9 +961,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         from dcim.models import Device, Interface
         from django.contrib.contenttypes.models import ContentType
 
-        from netbox_librenms_plugin.utils import get_migrated_to_marker
-
-        if not isinstance(obj, Device) or not get_migrated_to_marker(obj, server_key or "default"):
+        if not isinstance(obj, Device) or not read_mapping(obj).migrated_to(server_key or "default"):
             return []
         name_by_id = {iface.pk: iface.name for iface in obj.interfaces.all()}
         if not name_by_id:
