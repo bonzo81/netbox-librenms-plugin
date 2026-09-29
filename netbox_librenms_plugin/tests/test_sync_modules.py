@@ -631,6 +631,59 @@ class TestInterfaceBinding:
         assert "multiple module interfaces" in result["reason"]
 
 
+def _bind_paused_after(read, bind, concurrent):
+    """
+    Run *bind* on its own connection, pause it after its first query that *read* matches, and run *concurrent*.
+
+    *concurrent* runs and commits on the test's connection while the paused bind holds no row lock.
+    Return what *bind* returned.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from django.db import close_old_connections, connection
+
+    paused = Event()
+    resume = Event()
+
+    def pause_after_the_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not paused.is_set() and read(sql):
+            paused.set()
+            assert resume.wait(timeout=10)
+        return result
+
+    def run():
+        close_old_connections()
+        try:
+            with connection.execute_wrapper(pause_after_the_read):
+                return bind()
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(run)
+        assert paused.wait(timeout=10)
+        try:
+            concurrent()
+        finally:
+            resume.set()
+        return future.result(timeout=30)
+
+
+def _candidate_read_by_name(sql):
+    return 'FROM "dcim_interface"' in sql and '"name" IN' in sql
+
+
+def _bind(device, port_id, name, server_key="default", module_pk=None):
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
+
+    item = {"_librenms_port_id": port_id, "_librenms_ifname": name}
+    return _bind_interface_librenms_id(device, item, module_pk, server_key, Interface.objects.all())
+
+
 @transactional_db_with_all_apps()
 @pytest.mark.parametrize(
     ("loser_server", "loser_port", "expected_status", "expected_mapping"),
@@ -644,51 +697,83 @@ def test_a_bind_that_read_its_interface_before_a_concurrent_bind_keeps_the_winne
     loser_server, loser_port, expected_status, expected_mapping
 ):
     """Two module binds pick one unbound interface; the one that read it first must decide on the locked row."""
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
-
-    from dcim.models import Interface
-    from django.db import close_old_connections, connection
-
-    from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
-
     device = make_device(f"bind-race-{loser_server}")
     interface = make_interface(device, "Ethernet30")
-    loser_read = Event()
-    winner_done = Event()
+    winner = {}
 
-    def pause_after_the_candidate_read(execute, sql, params, many, context):
-        result = execute(sql, params, many, context)
-        if not loser_read.is_set() and 'FROM "dcim_interface"' in sql and '"name" IN' in sql:
-            loser_read.set()
-            assert winner_done.wait(timeout=10)
-        return result
-
-    def bind(server_key, port_id):
-        item = {"_librenms_port_id": port_id, "_librenms_ifname": interface.name}
-        return _bind_interface_librenms_id(device, item, None, server_key, Interface.objects.all())
-
-    def loser():
-        close_old_connections()
-        try:
-            with connection.execute_wrapper(pause_after_the_candidate_read):
-                return bind(loser_server, loser_port)
-        finally:
-            connection.close()
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        loser_future = executor.submit(loser)
-        assert loser_read.wait(timeout=10)
-        winner = bind("default", 301)
-        winner_done.set()
-        loser_result = loser_future.result(timeout=30)
+    loser_result = _bind_paused_after(
+        _candidate_read_by_name,
+        lambda: _bind(device, loser_port, interface.name, loser_server),
+        lambda: winner.update(_bind(device, 301, interface.name)),
+    )
 
     assert winner["status"] == "bound"
     assert loser_result["status"] == expected_status
     if expected_status == "conflict":
-        assert "already mapped to port_id 301; not overwriting" in loser_result["reason"]
+        # The name chooses again under the lock, and the name now belongs to the winner's port.
+        assert loser_result["reason"] == "Ethernet30 is already bound to a different LibreNMS port; not overwriting"
     interface.refresh_from_db()
     assert interface.custom_field_data["librenms_id"] == expected_mapping
+
+
+@transactional_db_with_all_apps()
+def test_a_bind_whose_interface_was_renamed_and_its_name_reused_binds_nothing():
+    """The name chose the interface, so the name must still choose it once the row is locked."""
+    from dcim.models import Interface
+
+    device = make_device("bind-renamed-by-name")
+    original = make_interface(device, "Ethernet30")
+    replacement = {}
+
+    def rename_and_reuse_the_name():
+        renamed = Interface.objects.get(pk=original.pk)
+        renamed.name = "Ethernet31"
+        renamed.save()
+        replacement["interface"] = make_interface(device, "Ethernet30")
+
+    result = _bind_paused_after(
+        _candidate_read_by_name, lambda: _bind(device, 304, "Ethernet30"), rename_and_reuse_the_name
+    )
+
+    assert result["status"] == "skipped"
+    assert "changed" in result["reason"]
+    for interface in (Interface.objects.get(pk=original.pk), replacement["interface"]):
+        interface.refresh_from_db()
+        assert read_mapping(interface).own_id("default") is None
+
+
+@transactional_db_with_all_apps()
+def test_a_bind_whose_bound_interface_was_renamed_still_binds_it():
+    """The port mapping chose the interface, so a rename after the choice does not matter."""
+    from dcim.models import Interface, Module
+
+    device = make_device("bind-renamed-by-mapping")
+    module = Module.objects.create(
+        device=device,
+        module_bay=make_module_bay(device, "Renamed Bay"),
+        module_type=make_module_type("RENAMED-CARD"),
+        status="active",
+    )
+    interface = make_interface(device, "Ethernet30")
+    interface.custom_field_data["librenms_id"] = {"default": 305}
+    interface.save()
+
+    def rename():
+        renamed = Interface.objects.get(pk=interface.pk)
+        renamed.name = "Ethernet31"
+        renamed.save()
+
+    # The port owner search reads the VM interfaces last, so the owner is chosen when that read returns.
+    result = _bind_paused_after(
+        lambda sql: 'FROM "virtualization_vminterface"' in sql,
+        lambda: _bind(device, 305, "Ethernet30", module_pk=module.pk),
+        rename,
+    )
+
+    assert result == {"status": "bound", "interface": "Ethernet31", "port_id": 305, "changed": True}
+    interface.refresh_from_db()
+    assert (interface.name, interface.module_id) == ("Ethernet31", module.pk)
+    assert interface.custom_field_data["librenms_id"] == {"default": 305}
 
 
 class TestBranchCollection:
