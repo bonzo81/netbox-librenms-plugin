@@ -362,36 +362,72 @@ def _mapping_change_is_allowed(view, model, pk) -> bool:
     return view.restricted_queryset(model, "change").filter(pk=pk).exists()
 
 
-def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
+class _MappingWriteRefused(Exception):
+    """The permission check of the locked mapping refused the write; ``response`` is the answer."""
+
+    def __init__(self, response):
+        super().__init__()
+        self.response = response
+
+
+def _write_mapping_in_scope(view, model, lookup, duplicate_message, *, field, target, existing_mapping, create):
     """
-    Read the candidate mapping pks unlocked, then lock the first one inside the change scope.
+    Point the one mapping of *lookup* at *target*, or create it with ``create()`` when it does not exist.
 
     Shared by the device-type and platform mapping views so the permission guarantee cannot drift
-    between two copies. Scope BEFORE locking: locking first lets a caller pin a row it cannot see
-    and stall concurrent work on it. The duplicate check still has to see every row, so it reads
-    unlocked and by pk only, materialised in one query (count() would drop the FOR UPDATE clause).
+    between two copies. The duplicate check has to see every row, so it reads unlocked and by pk
+    only. The row is then locked only inside the change scope (``update_existing_row``): locking
+    first would let a caller pin a row it cannot see and stall concurrent work on it.
 
     Args:
-        view: The calling view, used for ``restricted_queryset``.
-        model: The mapping model to lock.
+        view: The calling view, for ``restricted_queryset`` and the permission check.
+        model: The mapping model.
         lookup: Filter kwargs identifying the mapping's natural key.
         duplicate_message: Error text shown when more than one row matches.
+        field (str): The mapping's target field.
+        target (Model): The object that the mapping must point at.
+        existing_mapping (Model | None): The mapping that the upfront read found.
+        create (Callable[[], Model]): Creates the mapping.
 
     Returns:
-        tuple: ``(locked, None)`` on success, where *locked* is None when no row exists, or
-        ``(None, error_response)`` when the caller must stop.
+        HttpResponse | None: The error answer when the caller must stop, else None.
 
     """
+    view_permission = ("view", type(target))
     present_pks = list(model.objects.filter(**lookup).values_list("pk", flat=True)[:2])
     if len(present_pks) > 1:
-        return None, _htmx_error_response(duplicate_message)
+        return _htmx_error_response(duplicate_message)
     if not present_pks:
-        return None, None
-    locked = view.restricted_queryset(model, "change").select_for_update(of=("self",)).filter(pk=present_pks[0]).first()
-    # A row appeared (or left this caller's scope) after the upfront check.
-    if locked is None:
-        return None, _htmx_error_response("Existing mapping is no longer available.")
-    return locked, None
+        if existing_mapping:
+            # The mapping was deleted after the upfront read, so this is a create: it needs 'add'.
+            view.required_object_permissions = {"POST": [view_permission, ("add", model)]}
+            if error := view.require_object_permissions("POST"):
+                return error
+        try:
+            create()
+        except IntegrityError:
+            # A concurrent request created it: select_for_update() cannot lock an absent row.
+            return _htmx_error_response("Mapping was created concurrently. Please try again.")
+        return None
+
+    def point_at_target(row):
+        if getattr(row, f"{field}_id") == target.pk:
+            return False
+        if not existing_mapping:
+            # A concurrent request created the row after the upfront read, and this write changes it.
+            view.required_object_permissions = {"POST": [view_permission, ("change", model)]}
+            if error := view.require_object_permissions("POST"):
+                raise _MappingWriteRefused(error)
+        setattr(row, field, target)
+
+    try:
+        update_existing_row(view.restricted_queryset(model, "change").filter(pk=present_pks[0]), point_at_target)
+    except model.DoesNotExist:
+        # The row left this caller's change scope (or was deleted) after the unlocked read.
+        return _htmx_error_response("Existing mapping is no longer available.")
+    except _MappingWriteRefused as refused:
+        return refused.response
+    return None
 
 
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
@@ -2505,59 +2541,20 @@ class AddDeviceTypeMappingView(
 
         try:
             with transaction.atomic():
-                # Lock the row to close the window between the upfront permission
-                # check and the actual write (select_for_update prevents a concurrent
-                # INSERT from slipping through undetected). Materialise [:2] in one query
-                # (count() would drop the FOR UPDATE clause) and reject a concurrently-
-                # created duplicate rather than mutating an arbitrary row. Key on the
-                # NORMALISED hardware string (mapping_hardware) so the lock matches
-                # the existing_mapping lookup and create() below.
-                locked, lock_error = _lock_mapping_in_scope(
+                # Key on the NORMALISED hardware string (mapping_hardware), as the upfront read does.
+                if error := _write_mapping_in_scope(
                     self,
                     DeviceTypeMapping,
                     {"librenms_hardware__iexact": mapping_hardware},
                     "Multiple mappings exist for this hardware string. Remove duplicates before updating.",
-                )
-                if lock_error is not None:
-                    return lock_error
-                if locked and not existing_mapping:
-                    # A concurrent request created the mapping after our upfront read.
-                    # Only escalate to change permission if we would actually mutate the row;
-                    # if the locked row already maps to the same device type this is a no-op
-                    # and the caller needs only the add permission they already passed above.
-                    if locked.netbox_device_type_id != device_type_id:
-                        self.required_object_permissions = {
-                            "POST": [("view", DeviceType), ("change", DeviceTypeMapping)]
-                        }
-                        if error := self.require_object_permissions("POST"):
-                            return error
-                if existing_mapping and not locked:
-                    # The mapping was deleted between our upfront read and the lock.
-                    # We are about to CREATE a new row, so require add permission.
-                    self.required_object_permissions = {"POST": [("view", DeviceType), ("add", DeviceTypeMapping)]}
-                    if error := self.require_object_permissions("POST"):
-                        return error
-                if locked:
-                    if locked.netbox_device_type_id != device_type_id:
-                        try:
-                            update_existing_row(
-                                self.restricted_queryset(DeviceTypeMapping, "change").filter(pk=locked.pk),
-                                lambda row: setattr(row, "netbox_device_type", device_type),
-                            )
-                        except DeviceTypeMapping.DoesNotExist:
-                            return _htmx_error_response("Existing mapping is no longer available.")
-                else:
-                    try:
-                        DeviceTypeMapping.objects.create(
-                            librenms_hardware=mapping_hardware.lower(),
-                            netbox_device_type=device_type,
-                        )
-                    except IntegrityError:
-                        # Two concurrent requests both saw no existing mapping and
-                        # both attempted create(); select_for_update() cannot lock
-                        # absent rows. Surface a toast asking the user to retry
-                        # (the second attempt will find the row and take the update path).
-                        return _htmx_error_response("Mapping was created concurrently. Please try again.")
+                    field="netbox_device_type",
+                    target=device_type,
+                    existing_mapping=existing_mapping,
+                    create=lambda: DeviceTypeMapping.objects.create(
+                        librenms_hardware=mapping_hardware.lower(), netbox_device_type=device_type
+                    ),
+                ):
+                    return error
         except Exception as exc:
             logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
             return _htmx_error_response("Error saving mapping. Please try again.")
@@ -4179,7 +4176,7 @@ class AddPlatformMappingView(
 ):
     """HTMX view to create a PlatformMapping from the import validation modal."""
 
-    def post(self, request, device_id):  # noqa: C901
+    def post(self, request, device_id):
         """Create a PlatformMapping linking the LibreNMS OS string to a NetBox Platform."""
         if error := self.require_write_permission():
             return error
@@ -4239,49 +4236,19 @@ class AddPlatformMappingView(
 
         try:
             with transaction.atomic():
-                # Lock the row to close the TOCTOU window between the upfront
-                # permission check and the actual write. select_for_update cannot
-                # lock absent rows, so the create branch handles IntegrityError.
-                # Materialise the locked rows in one query — count() would drop
-                # the FOR UPDATE clause, leaving the rows unlocked.
-                locked, lock_error = _lock_mapping_in_scope(
+                if error := _write_mapping_in_scope(
                     self,
                     PlatformMapping,
                     {"librenms_os__iexact": librenms_os},
                     "Multiple mappings exist for this OS string. Remove duplicates before updating.",
-                )
-                if lock_error is not None:
-                    return lock_error
-                if locked and not existing_mapping:
-                    # Concurrent request created the mapping after our upfront read.
-                    # Only escalate to change permission if we would actually mutate.
-                    if locked.netbox_platform_id != platform_id:
-                        self.required_object_permissions = {"POST": [("view", Platform), ("change", PlatformMapping)]}
-                        if error := self.require_object_permissions("POST"):
-                            return error
-                if existing_mapping and not locked:
-                    # Mapping was deleted between our upfront read and the lock.
-                    # We are about to CREATE a new row, so require add permission.
-                    self.required_object_permissions = {"POST": [("view", Platform), ("add", PlatformMapping)]}
-                    if error := self.require_object_permissions("POST"):
-                        return error
-                if locked:
-                    if locked.netbox_platform_id != platform_id:
-                        try:
-                            update_existing_row(
-                                self.restricted_queryset(PlatformMapping, "change").filter(pk=locked.pk),
-                                lambda row: setattr(row, "netbox_platform", platform),
-                            )
-                        except PlatformMapping.DoesNotExist:
-                            return _htmx_error_response("Existing mapping is no longer available.")
-                else:
-                    try:
-                        PlatformMapping.objects.create(
-                            librenms_os=librenms_os.lower(),
-                            netbox_platform=platform,
-                        )
-                    except IntegrityError:
-                        return _htmx_error_response("Mapping was created concurrently. Please try again.")
+                    field="netbox_platform",
+                    target=platform,
+                    existing_mapping=existing_mapping,
+                    create=lambda: PlatformMapping.objects.create(
+                        librenms_os=librenms_os.lower(), netbox_platform=platform
+                    ),
+                ):
+                    return error
         except Exception as exc:
             logger.exception("AddPlatformMappingView: failed to save mapping: %s", exc)
             return _htmx_error_response("Error saving mapping. Please try again.")
