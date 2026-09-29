@@ -60,7 +60,7 @@ def _resolve_winner_for_donor(donor, server_key="default"):
     """
     Resolve the migration winner device recorded on a donor.
 
-    ``marker`` is the effective marker that :func:`mark_librenms_migrated` wrote. The reader
+    ``marker`` is the effective marker that ``server_mappings.mark_migrated`` built. The reader
     accepts only a positive integer winner pk.
 
     Args:
