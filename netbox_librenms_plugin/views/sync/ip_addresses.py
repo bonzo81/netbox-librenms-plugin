@@ -28,7 +28,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -651,13 +651,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return None, None
         return locked_interface, locked_obj
 
-    @staticmethod
-    def _set_primary_ip(obj, ip_obj):
+    def _set_primary_ip(self, obj, ip_obj):
         """
         Point ``obj.primary_ip4``/``primary_ip6`` (by family) at *ip_obj*.
 
         The caller guarantees ``ip_obj`` is assigned to one of the object's interfaces, so this
-        satisfies NetBox's ``primary_ip`` constraint.
+        satisfies NetBox's ``primary_ip`` constraint. The row is written under its lock, from the
+        caller's change scope.
 
         Args:
             obj (Device | VirtualMachine): The object whose primary IP to set.
@@ -672,8 +672,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         field = "primary_ip6" if ip_family(ip_obj) == 6 else "primary_ip4"
         if getattr(obj, f"{field}_id") == ip_obj.pk:
             return False
+        update_existing_row(
+            self.restricted_queryset(type(obj), "change").filter(pk=obj.pk),
+            lambda row: setattr(row, field, ip_obj),
+        )
         setattr(obj, field, ip_obj)
-        obj.save()
         return True
 
     @staticmethod
@@ -757,10 +760,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     def _host_rows(vrf, parsed):
         """Return current rows for one host inside one VRF."""
         return list(IPAddress.objects.filter(address__net_host=str(parsed.ip), vrf=vrf).order_by("pk"))
-
-    def _locked_changeable_ip(self, pk):
-        """Lock an IP row only when it remains in the caller's change scope."""
-        return self.restricted_queryset(IPAddress, "change").select_for_update(of=("self",)).filter(pk=pk).first()
 
     def _build_conflict(
         self,
@@ -964,44 +963,57 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if payload.get("target_vrf_id") != (vrf.pk if vrf is not None else None):
             raise ValueError("The target VRF changed. Refresh the IP data and try again.")
 
-        ip_obj = self._locked_changeable_ip(payload.get("ip_pk"))
-        if ip_obj is None:
-            raise ValueError("The existing IP address is no longer available in your change scope.")
-        if payload.get("ip_state") != self._ip_state(ip_obj):
-            raise ValueError("The existing IP address changed after confirmation. Refresh the IP data and try again.")
         kind = payload.get("kind")
-        if kind != "change_prefix" and parse_address_with_prefix(str(ip_obj.address)) != parsed:
-            raise ValueError("The existing IP address changed after confirmation. Refresh the IP data and try again.")
-
-        target_rows = self._host_rows(vrf, parsed)
-        exact_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) == parsed]
-        other_prefix_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) != parsed]
-        if other_prefix_rows and kind != "change_prefix":
-            raise ValueError("The destination VRF now contains this host with a different prefix length.")
-
         target_vrf_id = vrf.pk if vrf is not None else None
-        if kind == "reassign":
-            if len(exact_rows) != 1 or exact_rows[0].pk != ip_obj.pk or ip_obj.vrf_id != target_vrf_id:
-                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
-        elif kind == "move_vrf":
-            if exact_rows or ip_obj.vrf_id == target_vrf_id:
-                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
-            ip_obj.vrf = vrf
-        elif kind == "change_prefix":
-            if (
-                exact_rows
-                or len(other_prefix_rows) != 1
-                or other_prefix_rows[0].pk != ip_obj.pk
-                or ip_obj.vrf_id != target_vrf_id
-            ):
-                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
-            ip_obj.address = netaddr.IPNetwork(str(parsed))
-        else:
-            raise ValueError("IP address confirmation is invalid. Refresh the IP data and try again.")
 
-        ip_obj.assigned_object = interface
-        ip_obj.save()
-        return ip_obj
+        def apply(ip_obj):
+            if payload.get("ip_state") != self._ip_state(ip_obj):
+                raise ValueError(
+                    "The existing IP address changed after confirmation. Refresh the IP data and try again."
+                )
+            if kind != "change_prefix" and parse_address_with_prefix(str(ip_obj.address)) != parsed:
+                raise ValueError(
+                    "The existing IP address changed after confirmation. Refresh the IP data and try again."
+                )
+
+            target_rows = self._host_rows(vrf, parsed)
+            exact_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) == parsed]
+            other_prefix_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) != parsed]
+            if other_prefix_rows and kind != "change_prefix":
+                raise ValueError("The destination VRF now contains this host with a different prefix length.")
+
+            if kind == "reassign":
+                if len(exact_rows) != 1 or exact_rows[0].pk != ip_obj.pk or ip_obj.vrf_id != target_vrf_id:
+                    raise ValueError(
+                        "The destination VRF changed after confirmation. Refresh the IP data and try again."
+                    )
+            elif kind == "move_vrf":
+                if exact_rows or ip_obj.vrf_id == target_vrf_id:
+                    raise ValueError(
+                        "The destination VRF changed after confirmation. Refresh the IP data and try again."
+                    )
+                ip_obj.vrf = vrf
+            elif kind == "change_prefix":
+                if (
+                    exact_rows
+                    or len(other_prefix_rows) != 1
+                    or other_prefix_rows[0].pk != ip_obj.pk
+                    or ip_obj.vrf_id != target_vrf_id
+                ):
+                    raise ValueError(
+                        "The destination VRF changed after confirmation. Refresh the IP data and try again."
+                    )
+                ip_obj.address = netaddr.IPNetwork(str(parsed))
+            else:
+                raise ValueError("IP address confirmation is invalid. Refresh the IP data and try again.")
+            ip_obj.assigned_object = interface
+
+        try:
+            return update_existing_row(
+                self.restricted_queryset(IPAddress, "change").filter(pk=payload.get("ip_pk")), apply
+            )
+        except IPAddress.DoesNotExist:
+            raise ValueError("The existing IP address is no longer available in your change scope.") from None
 
     def process_ip_sync(
         self,

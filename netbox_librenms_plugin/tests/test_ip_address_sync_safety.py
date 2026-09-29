@@ -32,7 +32,13 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     run_in_threads,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_update_logged,
+    grant,
+    make_request,
+    make_user_with_perms,
+    make_view,
+)
 
 
 @pytest.mark.django_db
@@ -2087,6 +2093,7 @@ def test_force_reassigns_only_the_matching_vrf_row(client, settings, live_libren
     assert blue_ip.vrf == blue
     assert red_ip.assigned_object == red_current
     assert red_ip.vrf == red
+    assert_update_logged(blue_ip, "assigned_object_id", blue_current.pk, target.pk)
 
 
 @pytest.mark.django_db
@@ -2300,6 +2307,7 @@ def test_vrf_change_requires_confirmation_and_moves_the_identified_row(
     existing.refresh_from_db()
     assert existing.vrf == destination_vrf
     assert existing.assigned_object == target
+    assert_update_logged(existing, "vrf", source_vrf.pk, destination_vrf.pk)
 
 
 @pytest.mark.django_db
@@ -2429,6 +2437,7 @@ def test_same_host_with_a_different_prefix_requires_confirmation_before_update(
     assert str(other_vrf_ip.address) == existing_address
     assert other_vrf_ip.vrf == other_vrf
     assert other_vrf_ip.assigned_object is None
+    assert_update_logged(existing, "address", existing_address, row_id)
 
 
 @pytest.mark.django_db

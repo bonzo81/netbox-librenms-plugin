@@ -16,7 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_view, missing_pk
+from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, make_view, missing_pk
 from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -154,6 +154,7 @@ class TestPrimaryIPFromManagementAddress:
         device.refresh_from_db()
         assert device.primary_ip4_id == address.pk
         assert any(text.startswith("Set as Primary IP: 198.18.40.10/24") for text in _messages(response, "success"))
+        assert_update_logged(device, "primary_ip4", None, address.pk)
 
     def test_primary_ip_already_pointing_at_the_row_is_left_alone(self, client, live_librenms):
         """A row whose address is already the primary IP reports no primary change."""
