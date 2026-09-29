@@ -196,6 +196,8 @@ class TestPrimaryIPFromManagementAddress:
         assert device.primary_ip4_id is None
         [error] = _messages(response, "error")
         assert error.startswith("Failed to sync IP addresses: 198.18.41.30/24 (Primary IP not set: ")
+        # The savepoint rolled the create back, so no other message may name the address.
+        assert [message for message in _messages(response) if "198.18.41.30" in message] == [error]
         if superuser:
             assert "face: Cannot select a rack face without assigning a rack." in error
         else:

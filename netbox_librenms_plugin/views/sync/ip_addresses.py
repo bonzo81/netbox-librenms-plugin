@@ -1166,6 +1166,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             # Collect this row's mutations separately: two raw selections can canonicalize to the
             # same row_id, so a failing row must not discard a committed row's key.
             row_mutations = set()
+            # The row outcomes publish only when the savepoint commits.
+            row_results = []
             interface_creation_state_before_row = interface_creation_state
             interface_maps_before_row = (
                 (
@@ -1254,9 +1256,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # or create an unassigned/global address, both of which violate the
                         # interface-assigned model. Skip the row instead of corrupting state.
                         if is_primary_candidate:
-                            results["primary_no_interface"].append(display_address)
+                            row_results.append(("primary_no_interface", display_address))
                         else:
-                            results["skipped_no_interface"].append(display_address)
+                            row_results.append(("skipped_no_interface", display_address))
                         continue
 
                     if is_primary_candidate:
@@ -1274,7 +1276,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             interface=interface,
                             vrf=vrf,
                         )
-                        results["updated"].append(display_address)
+                        row_results.append(("updated", display_address))
                         row_mutations.add(row_id)
                     else:
                         ip_obj, outcome, conflict = self._classify_ip_change(
@@ -1294,9 +1296,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                                 conflict["target_vrf"],
                                 conflict["reason"],
                             )
-                            results["conflicts"].append(conflict)
+                            row_results.append(("conflicts", conflict))
                             continue
-                        results[outcome].append(display_address)
+                        row_results.append((outcome, display_address))
                         if outcome in {"created", "updated"}:
                             row_mutations.add(row_id)
 
@@ -1306,10 +1308,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     if is_primary_candidate:
                         try:
                             if self._set_primary_ip(obj, ip_obj, interface):
-                                results["primary_set"].append(display_address)
+                                row_results.append(("primary_set", display_address))
                                 row_mutations.add(row_id)
                         except _PrimaryIPNotEligible:
-                            results["primary_interface_not_eligible"].append(display_address)
+                            row_results.append(("primary_interface_not_eligible", display_address))
 
             except Exception as exc:
                 if classify_conflict(exc):
@@ -1335,6 +1337,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                 # The row's savepoint rolled back, so drop only this row's keys.
                 row_mutations.clear()
+                row_results.clear()
                 detail = exception_text_for(exc, IPAddress, request.user)
                 if isinstance(exc, PortSyncBlocked):
                     # The interface rules refused the create: an expected outcome, not an error.
@@ -1348,6 +1351,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 # `finally`, not `else`: the conflict and no-interface paths leave the row with
                 # `continue`, which skips an `else` clause but keeps their committed writes.
                 mutated_rows.update(row_mutations)
+                for key, value in row_results:
+                    results[key].append(value)
 
         results["mutated"] = bool(mutated_rows)
         return results
