@@ -20,6 +20,8 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_ti
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_update_logged,
+    change_logging,
     get as get_view,
     grant as grant_view_permission,
     make_request as make_view_request,
@@ -4430,7 +4432,8 @@ class TestCreatePlatformAssignmentIndependence:
             user=make_superuser(),
             HTTP_HX_REQUEST="true",
         )
-        return post_view(CreatePlatformFromImportView(), request, device_id=42)
+        with change_logging(request):
+            return post_view(CreatePlatformFromImportView(), request, device_id=42)
 
     def test_platform_persists_and_error_is_surfaced_when_legacy_target_is_invalid(self):
         """A failed optional assignment keeps the platform and returns an error instead of a success swap."""
@@ -4482,6 +4485,7 @@ class TestCreatePlatformAssignmentIndependence:
         platform = Platform.objects.get(name="Matching OS")
         target.refresh_from_db()
         assert target.platform_id == platform.pk
+        assert_update_logged(target, "platform", None, platform.pk)
         assert response.status_code == 200
         assert b' id="htmx-modal-content"' in response.content
         assert b"hx-swap-oob" in response.content
@@ -6543,11 +6547,13 @@ class TestAttachOOBIp:
         iface = make_interface(dev, "idrac0")
         existing = make_ip("10.0.0.9/24")  # unassigned host match
         user = make_user_with_perms("oob-ip-rehome", [("change", IPAddress)])
-        with transaction.atomic():
-            ip, reason = view._attach_oob_ip(make_request("post", user=user), "10.0.0.9", iface)
+        request = make_request("post", user=user)
+        with change_logging(request), transaction.atomic():
+            ip, reason = view._attach_oob_ip(request, "10.0.0.9", iface)
         assert ip.pk == existing.pk and reason is None
         existing.refresh_from_db()
         assert existing.assigned_object == iface
+        assert_update_logged(existing, "assigned_object_id", None, iface.pk)
 
     def test_vrf_scoped_ip_not_rehomed_creates_global_ip(self):
         """A same-host IP that lives in a VRF must NOT be re-homed: the create path makes a global (no-VRF) /32, so the lookup must be scoped to the global table — overlapping RFC1918 space in a tenant VRF is a different address."""
@@ -7131,7 +7137,8 @@ class TestMappingChangeScope:
             user=user,
             HTTP_HX_REQUEST="true",
         )
-        return post_view(view, request, device_id=device_id)
+        with change_logging(request):
+            return post_view(view, request, device_id=device_id)
 
     def test_device_type_mapping_outside_change_grant_is_not_updated(self):
         from dcim.models import DeviceType
@@ -7227,6 +7234,7 @@ class TestMappingChangeScope:
         assert b' id="htmx-modal-content"' in response.content
         allowed.refresh_from_db()
         assert allowed.netbox_device_type_id == new_type.pk
+        assert_update_logged(allowed, "netbox_device_type", old_type.pk, new_type.pk)
 
     def test_platform_mapping_inside_change_grant_is_updated(self):
         """Control for the platform refusal above (see the device-type control)."""
@@ -7254,6 +7262,7 @@ class TestMappingChangeScope:
         assert b' id="htmx-modal-content"' in response.content
         allowed.refresh_from_db()
         assert allowed.netbox_platform_id == new_platform.pk
+        assert_update_logged(allowed, "netbox_platform", old_platform.pk, new_platform.pk)
 
 
 # ---------------------------------------------------------------------------

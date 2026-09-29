@@ -13,6 +13,9 @@ query path is broken. Reserve mocks for the LibreNMS HTTP boundary and for error
 cannot produce (a lock ``DatabaseError``, a ``save()`` that raises).
 """
 
+from contextlib import contextmanager
+from uuid import uuid4
+
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.tests.conftest import make_superuser
 
@@ -156,6 +159,16 @@ def message_texts(request, level=None):
 
     wanted = None if level is None else _message_level(level)
     return [str(m.message) for m in get_messages(request) if wanted is None or m.level == wanted]
+
+
+@contextmanager
+def change_logging(request):
+    """Run the block as NetBox runs *request*: each save in it records a change record."""
+    from netbox.context_managers import event_tracking
+
+    request.id = uuid4()
+    with event_tracking(request):
+        yield
 
 
 def update_change(obj):

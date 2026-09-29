@@ -79,7 +79,7 @@ from netbox_librenms_plugin.server_mappings import (
 )
 from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
     IMPORT_CONTEXT_COLUMNS_PREFERENCE,
     acquire_advisory_transaction_lock,
@@ -2535,11 +2535,13 @@ class AddDeviceTypeMappingView(
                         return error
                 if locked:
                     if locked.netbox_device_type_id != device_type_id:
-                        if not _mapping_change_is_allowed(self, DeviceTypeMapping, locked.pk):
+                        try:
+                            update_existing_row(
+                                self.restricted_queryset(DeviceTypeMapping, "change").filter(pk=locked.pk),
+                                lambda row: setattr(row, "netbox_device_type", device_type),
+                            )
+                        except DeviceTypeMapping.DoesNotExist:
                             return _htmx_error_response("Existing mapping is no longer available.")
-                        locked.netbox_device_type = device_type
-                        locked.full_clean()
-                        locked.save()
                 else:
                     try:
                         DeviceTypeMapping.objects.create(
@@ -2950,14 +2952,10 @@ class CreatePlatformFromImportView(
             return platform, None
         # A refusal must not roll back the platform: the platform is the primary action.
         try:
-            with transaction.atomic():
-                target = (
-                    self.restricted_queryset(target_model, "change").select_for_update(of=("self",)).get(pk=target_pk)
-                )
-                target.snapshot()
-                target.platform = platform
-                target.full_clean()
-                target.save()
+            update_existing_row(
+                self.restricted_queryset(target_model, "change").filter(pk=target_pk),
+                lambda row: setattr(row, "platform", platform),
+            )
         except target_model.DoesNotExist:
             logger.warning(
                 "CreatePlatformFromImportView: %s pk=%s not found; platform "
@@ -3582,8 +3580,10 @@ class AddAsOOBView(
                 # caller's change scope, so reaching here means the grant covers this row: the
                 # unlocked pre-flight in _missing_oob_ip_permissions can race a concurrent create
                 # and wave through an 'add'-only user, and the scoped lock is what catches that.
-                existing.assigned_object = interface
-                existing.save()
+                existing = update_existing_row(
+                    IPAddress.objects.restrict(request.user, "change").filter(pk=existing.pk),
+                    lambda row: setattr(row, "assigned_object", interface),
+                )
             return existing, None
 
         # No row exists under the lock → this is a create, which needs 'add'. Re-verify
@@ -4257,11 +4257,13 @@ class AddPlatformMappingView(
                         return error
                 if locked:
                     if locked.netbox_platform_id != platform_id:
-                        if not _mapping_change_is_allowed(self, PlatformMapping, locked.pk):
+                        try:
+                            update_existing_row(
+                                self.restricted_queryset(PlatformMapping, "change").filter(pk=locked.pk),
+                                lambda row: setattr(row, "netbox_platform", platform),
+                            )
+                        except PlatformMapping.DoesNotExist:
                             return _htmx_error_response("Existing mapping is no longer available.")
-                        locked.netbox_platform = platform
-                        locked.full_clean()
-                        locked.save()
                 else:
                     try:
                         PlatformMapping.objects.create(
