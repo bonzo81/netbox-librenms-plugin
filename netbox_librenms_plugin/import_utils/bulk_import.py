@@ -18,11 +18,11 @@ from ..import_validation_helpers import (
     reset_device_role,
 )
 from ..librenms_api import LibreNMSAPI
+from ..librenms_ids import coerce_librenms_id
 from ..transactions import classify_conflict
 from ..utils import (
     AmbiguousLibreNMSIdError,
     cached_row_matches,
-    coerce_librenms_id,
     exception_text_for,
     find_by_librenms_id,
     find_devices_by_serial,

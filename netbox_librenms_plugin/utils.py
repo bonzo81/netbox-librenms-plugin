@@ -36,6 +36,11 @@ from netbox_librenms_plugin.constants import (
     is_module_model_placeholder,
     is_supported_interface_name_field,
 )
+from netbox_librenms_plugin.librenms_ids import (
+    coerce_librenms_id,
+    librenms_id_text_pattern,
+    normalize_librenms_port_id,
+)
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
 from netbox_librenms_plugin.server_mappings import (
     PREFERRED_SERVER_FIELD,
@@ -55,14 +60,6 @@ from netbox_librenms_plugin.transactions import (
 
 logger = logging.getLogger(__name__)
 
-# Bounded at 19 digits, the width of a PostgreSQL bigint. Without the bound an oversized string is
-# rejected only by CPython's int_max_str_digits limit, which a host may raise or disable.
-_ID_TEXT_SPACE = r"[ \t\r\n\f\v]*"
-_ID_TEXT_SIGN = r"\+?"
-_ID_TEXT_MAX_DIGITS = 19
-_ASCII_POSITIVE_INTEGER_RE = re.compile(
-    rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}[0-9]{{1,{_ID_TEXT_MAX_DIGITS}}}{_ID_TEXT_SPACE}$"
-)
 _MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_binding"
 
 
@@ -410,11 +407,6 @@ def format_mac_address(mac_address: object) -> str:
 
     formatted_mac = ":".join(mac_address[i : i + 2] for i in range(0, len(mac_address), 2))
     return formatted_mac.upper()
-
-
-def normalize_librenms_port_id(value) -> int | None:
-    """Normalize a LibreNMS port_id to a positive integer, or None."""
-    return coerce_librenms_id(value)
 
 
 def index_ip_port_records(ports_by_id):
@@ -2420,20 +2412,8 @@ def coerce_interface_mtu(value) -> int | None:
     """
     from dcim.constants import INTERFACE_MTU_MAX, INTERFACE_MTU_MIN
 
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        mtu = value
-    elif isinstance(value, str):
-        if not _ASCII_POSITIVE_INTEGER_RE.fullmatch(value):
-            return None
-        try:
-            mtu = int(value)
-        except ValueError:
-            return None
-    else:
-        return None
-    return mtu if INTERFACE_MTU_MIN <= mtu <= INTERFACE_MTU_MAX else None
+    mtu = coerce_positive_int(value)
+    return mtu if mtu is not None and INTERFACE_MTU_MIN <= mtu <= INTERFACE_MTU_MAX else None
 
 
 def coerce_model_pk(value) -> int | None:
@@ -3259,38 +3239,6 @@ def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -
     ).strip()
 
 
-def coerce_librenms_id(value) -> int | None:
-    """
-    Coerce a raw LibreNMS ID value (int or string-digit) to int, or None.
-
-    Accepts only ``int`` and ``str`` — other types (None, dicts, MagicMocks, etc.)
-    return None. Booleans are rejected because ``bool`` is a subclass of ``int`` in
-    Python, so ``int(True)`` silently becomes ``1`` — a valid-looking device ID. Zero
-    and negative values are also rejected since LibreNMS IDs are strictly positive
-    integers. An int wider than 19 digits is rejected like its text form.
-
-    Args:
-        value: The raw LibreNMS id value to coerce.
-
-    Returns:
-        int | None: The positive integer id, or None if it can't be coerced.
-
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if 0 < value < 10**_ID_TEXT_MAX_DIGITS else None
-    if isinstance(value, str):
-        if not _ASCII_POSITIVE_INTEGER_RE.fullmatch(value):
-            return None
-        try:
-            coerced = int(value)
-        except ValueError:
-            return None
-        return coerced if coerced > 0 else None
-    return None
-
-
 def normalize_vlan_vid(value) -> int | None:
     """Return one valid NetBox VLAN VID, or None when the source value is unusable."""
     from ipam.models import VLAN
@@ -3806,12 +3754,6 @@ class AmbiguousLibreNMSIdError(LookupError):
     "not found" and proceed (importing/binding), so :func:`find_by_librenms_id` raises
     this instead and callers fail closed.
     """
-
-
-def librenms_id_text_pattern(*values: int) -> str:
-    """Return one SQL regex for the stored text forms of these coerce_librenms_id() results that it also reads."""
-    forms = "|".join(f"0{{0,{_ID_TEXT_MAX_DIGITS - len(str(value))}}}{value}" for value in values)
-    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}(?:{forms}){_ID_TEXT_SPACE}$"
 
 
 def build_librenms_id_qs(server_key, value):

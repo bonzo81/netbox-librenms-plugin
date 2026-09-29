@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tables.interfaces import (
     VCInterfaceTable,
 )
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleTable
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
@@ -37,7 +38,6 @@ from netbox_librenms_plugin.utils import (
     get_untagged_vlan_css_class,
     get_vlan_sync_css_class,
     is_valid_ports_payload,
-    normalize_librenms_port_id,
     normalize_vlan_vid,
     render_vlan_sync_action,
     resolve_interface_row_device,

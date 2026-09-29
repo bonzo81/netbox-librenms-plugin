@@ -19,10 +19,10 @@ from ..import_validation_helpers import (
 )
 from ..ip_addressing import parse_host_address
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
+from ..librenms_ids import coerce_librenms_id
 from ..utils import (
     AmbiguousLibreNMSIdError,
     cached_row_matches,
-    coerce_librenms_id,
     exception_text_for,
     find_by_librenms_id,
     find_devices_by_serial,

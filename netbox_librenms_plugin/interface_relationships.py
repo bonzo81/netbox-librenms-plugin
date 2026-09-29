@@ -7,13 +7,13 @@ from django.db.models import Q
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     build_librenms_ids_qs,
     get_librenms_device_id,
     interface_name_fallback_matches_port,
     invert_relationship_edges,
     is_list_of_dicts,
-    normalize_librenms_port_id,
     normalize_relationship_maps,
     normalize_stacked_ports,
 )

@@ -18,6 +18,7 @@ from netbox_librenms_plugin.interface_diff import (
     syncable_mac_address,
     synced_description,
 )
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
@@ -28,7 +29,6 @@ from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     interface_name_fallback_matches_port,
     interface_name_rejection_reason,
-    normalize_librenms_port_id,
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.transactions import first_at_version, row_changed, save_at_version

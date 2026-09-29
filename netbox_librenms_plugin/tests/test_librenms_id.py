@@ -570,7 +570,8 @@ class TestLibreNMSIdAcceptedFormsContract:
         """The legacy tolerance set: the reader resolves it and a real query finds the row."""
         from dcim.models import Device
 
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id, get_librenms_device_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.utils import find_by_librenms_id, get_librenms_device_id
 
         device = _dev(stored)
 
@@ -583,7 +584,8 @@ class TestLibreNMSIdAcceptedFormsContract:
         """Forms only a bare int() accepts: the reader resolves them, the lookup is blind to them."""
         from dcim.models import Device
 
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id, get_librenms_device_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.utils import find_by_librenms_id, get_librenms_device_id
 
         device = _dev(stored)
 

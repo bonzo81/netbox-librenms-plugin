@@ -19,6 +19,7 @@ from django.core.exceptions import ValidationError
 
 from netbox_librenms_plugin.constants import INTERFACE_SYNC_EXTRA_FIELDS, INTERFACE_SYNC_FIELD_PAIRS
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, rule_names
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     bounded_interface_text,
     check_vlan_group_matches,
@@ -29,7 +30,6 @@ from netbox_librenms_plugin.utils import (
     hidden_refusal_text,
     is_active_superuser,
     netbox_interface_clean,
-    normalize_librenms_port_id,
     refused_model_field,
 )
 

@@ -52,6 +52,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
@@ -68,7 +69,6 @@ from netbox_librenms_plugin.utils import (
     interface_name_fallback_matches_port,
     is_list_of_dicts,
     netbox_interface_clean,
-    normalize_librenms_port_id,
     normalize_relationship_maps,
     reported_name_owners,
     resolve_interface_row_device,

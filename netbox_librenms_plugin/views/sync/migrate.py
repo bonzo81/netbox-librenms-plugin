@@ -34,10 +34,10 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
     sync_subject_key,
 )
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
     DEVICE_IP_FK_LABELS,
-    coerce_librenms_id,
     get_migrated_to_marker,
     set_device_ip_fk,
     validation_error_detail,
@@ -64,7 +64,7 @@ def _parse_marker_winner_pk(device_id):
     A marker id from a tampered/legacy source may arrive as a string: accept ONLY a plain digit
     string (``str.isdecimal()``) so whitespace/sign/decimal forms (``" 5 "``, ``"+5"``, ``"1.9"``)
     fail closed. This is deliberately stricter than the raw ``int()``
-    :func:`~netbox_librenms_plugin.utils.coerce_librenms_id` applies to LibreNMS ids. The
+    :func:`~netbox_librenms_plugin.librenms_ids.coerce_librenms_id` applies to LibreNMS ids. The
     int/positive-value coercion itself is delegated to ``coerce_librenms_id`` (bool rejected,
     positive int only) so that rule lives in one place and can't drift from the rest of the plugin's
     id handling. This function is shared by :func:`_resolve_winner_for_donor` and
