@@ -23,6 +23,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_module_type,
 )
+from netbox_librenms_plugin.tests.view_test_helpers import change_logging, make_request
 
 PROBE = "before_state_guard_probe.py"
 
@@ -55,6 +56,21 @@ SAVE = """
 def save(obj):
     obj.description = "changed"
     obj.save()
+"""
+
+SNAPSHOT_AND_SAVE = """
+def snapshot_and_save(obj):
+    obj.snapshot()
+    obj.description = "changed"
+    obj.save()
+"""
+
+SAVE_THEN_ADD = """
+def save_then_add(obj, tag):
+    obj.snapshot()
+    obj.description = "changed"
+    obj.save()
+    obj.tags.add(tag)
 """
 
 
@@ -288,17 +304,8 @@ class TestManyToMany:
 
         assert found_by(snapshot_and_add, stored(make_device("bsg-tag-fresh")), make_tag()) == []
 
-    def test_a_tag_change_after_a_plugin_save_is_not_a_violation(self):
+    def test_a_tag_change_after_a_plugin_save_in_the_same_request_is_not_a_violation(self):
         """NetBox merges the change into the change log record of the save in the same request."""
-        save_then_add = plugin_function(
-            """
-            def save_then_add(obj, tag):
-                obj.snapshot()
-                obj.description = "changed"
-                obj.save()
-                obj.tags.add(tag)
-            """
-        )
         create_then_add = plugin_function(
             """
             def create_then_add(tag):
@@ -311,8 +318,29 @@ class TestManyToMany:
         )
         tag = make_tag()
 
-        assert found_by(save_then_add, stored(make_device("bsg-save-add")), tag) == []
-        assert found_by(create_then_add, tag) == []
+        with change_logging(make_request()):
+            assert found_by(plugin_function(SAVE_THEN_ADD), stored(make_device("bsg-save-add")), tag) == []
+            assert found_by(create_then_add, tag) == []
+
+    def test_a_tag_change_in_a_later_request_than_the_plugin_save_is_a_violation(self):
+        """NetBox merges only into a change log record of the same request."""
+        device = stored(make_device("bsg-save-then-later-add"))
+        add_tag = plugin_function("def add_tag(obj, tag):\n    obj.tags.add(tag)\n")
+
+        with change_logging(make_request()):
+            assert found_by(plugin_function(SNAPSHOT_AND_SAVE), device) == []
+        with change_logging(make_request()):
+            found = found_by(add_tag, device, make_tag())
+
+        assert found == [(PROBE, "add_tag", "dcim.Device", "m2m pre_add", device.pk)]
+
+    def test_a_tag_change_after_a_plugin_save_without_a_request_is_a_violation(self):
+        """With no request, NetBox writes no change log record that the change could merge into."""
+        device = stored(make_device("bsg-save-add-no-request"))
+
+        assert found_by(plugin_function(SAVE_THEN_ADD), device, make_tag()) == [
+            (PROBE, "save_then_add", "dcim.Device", "m2m pre_add", device.pk)
+        ]
 
     def test_a_tag_change_after_a_save_that_a_test_asks_for_is_a_violation(self):
         """The save of the test is not a save of the request that the plugin code runs in."""

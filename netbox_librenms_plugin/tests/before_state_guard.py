@@ -19,6 +19,7 @@ import django
 import taggit
 from django.db.models import signals
 from django.db.models.query import QuerySet
+from netbox.context import current_request
 from netbox.models.features import ChangeLoggingMixin
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -138,8 +139,9 @@ def _on_post_save(sender, instance, raw=False, **kwargs):
     instance.__dict__[_CONSUMED] = instance.__dict__.get("_prechange_snapshot")
     caller, outer_save = _caller(instance)
     _last_saves[id(instance)] = (instance, outer_save)
-    # NetBox merges a later m2m change of the same request into the change log record of this save.
-    instance.__dict__[_MERGES] = caller is not None and _file(caller)[0] != _TESTS
+    # NetBox merges a later m2m change into the change log record of this save only in the same request.
+    plugin_save = caller is not None and _file(caller)[0] != _TESTS
+    instance.__dict__[_MERGES] = current_request.get() if plugin_save else None
 
 
 def _on_m2m_changed(sender, instance, action, pk_set, **kwargs):
@@ -147,7 +149,9 @@ def _on_m2m_changed(sender, instance, action, pk_set, **kwargs):
         return
     if instance._state.adding or not isinstance(instance, ChangeLoggingMixin):
         return
-    if not _has_fresh_before_state(instance) and not instance.__dict__.get(_MERGES):
+    request = current_request.get()
+    merges = request is not None and instance.__dict__.get(_MERGES) is request
+    if not _has_fresh_before_state(instance) and not merges:
         _check_instance(instance, f"m2m {action}", manager=True)
 
 
