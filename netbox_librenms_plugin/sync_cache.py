@@ -18,9 +18,9 @@ from django.utils.dateparse import parse_datetime
 
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
 from netbox_librenms_plugin.server_mappings import is_server_key, iter_server_mapping_entries
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
-    coerce_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
     get_migrated_to_marker,

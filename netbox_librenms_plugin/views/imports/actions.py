@@ -80,11 +80,11 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import (
     IMPORT_CONTEXT_COLUMNS_PREFERENCE,
     acquire_advisory_transaction_lock,
     add_librenms_server_mapping,
-    coerce_librenms_id,
     coerce_model_pk,
     get_librenms_sync_device,
     is_legacy_librenms_id,
@@ -3710,7 +3710,7 @@ class PromoteToHostView(
         if validated_existing.pk != existing_device.pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match validation result")
 
-        from netbox_librenms_plugin.utils import coerce_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
         # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
         # non-numeric strings, zero/negatives) in one place — same guard used elsewhere.

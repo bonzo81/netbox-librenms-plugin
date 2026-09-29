@@ -29,6 +29,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.transactions import (
     FOLLOW_UP_FAILED_MESSAGE,
     TRY_AGAIN_MESSAGE,
@@ -45,7 +46,6 @@ from netbox_librenms_plugin.utils import (
     build_librenms_id_qs,
     cable_path_reaches,
     classify_cable_action,
-    coerce_librenms_id,
     find_interface_by_librenms_port_id,
     get_cable_sync_settings,
     get_librenms_cable_tag,

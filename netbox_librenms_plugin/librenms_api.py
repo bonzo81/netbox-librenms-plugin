@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 def normalized_pair_key(first_port, second_port):
     """Return one order-independent key for a port pair, or None when it names a single port."""
-    from netbox_librenms_plugin.utils import normalize_librenms_port_id
+    from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
     first_id = normalize_librenms_port_id(first_port.get("port_id"))
     second_id = normalize_librenms_port_id(second_port.get("port_id"))
@@ -536,7 +536,7 @@ class LibreNMSAPI:
         """
         Coerce a raw LibreNMS ID value to int or None.
 
-        Thin wrapper around :func:`netbox_librenms_plugin.utils.coerce_librenms_id`
+        Thin wrapper around :func:`netbox_librenms_plugin.librenms_ids.coerce_librenms_id`
         kept for back-compat with internal callers in this module.
 
         Args:
@@ -546,7 +546,7 @@ class LibreNMSAPI:
             int | None: The coerced id, or None if it can't be coerced.
 
         """
-        from netbox_librenms_plugin.utils import coerce_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
         return coerce_librenms_id(value)
 
@@ -995,7 +995,7 @@ class LibreNMSAPI:
             ports = []
         if not isinstance(port_stack, list):
             port_stack = []
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         # Ignore malformed port items without losing valid relationships from the same payload.
         safe_ports = [port for port in ports if isinstance(port, dict)]

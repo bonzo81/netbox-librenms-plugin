@@ -20,9 +20,12 @@ from netbox_librenms_plugin.interface_rules import interface_rules_for_request, 
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
+from netbox_librenms_plugin.librenms_ids import (
+    coerce_librenms_id,
+    normalize_librenms_port_id,
+)
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
-    coerce_librenms_id,
     get_interface_name_field,
     get_librenms_device_id,
     get_virtual_chassis_members,
@@ -32,7 +35,6 @@ from netbox_librenms_plugin.utils import (
     index_ip_port_records,
     ip_row_port_record,
     normalize_ip_sync_row_id,
-    normalize_librenms_port_id,
     PortDisclosure,
     resolve_create_missing_interfaces,
     resolve_ip_source_interface,

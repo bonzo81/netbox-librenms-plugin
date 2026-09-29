@@ -197,7 +197,7 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
                 }
 
     """
-    from netbox_librenms_plugin.utils import coerce_librenms_id
+    from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
     # Key by (model_name, nb_pk) to avoid false collisions when a Device
     # and a VirtualMachine happen to share the same integer pk.

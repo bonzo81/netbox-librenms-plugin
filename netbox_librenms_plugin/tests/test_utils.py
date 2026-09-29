@@ -376,13 +376,13 @@ class TestConversionHelpers:
         assert result == ""
 
     def test_normalize_librenms_port_id_accepts_positive_int_and_str(self):
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         assert normalize_librenms_port_id(42) == 42
         assert normalize_librenms_port_id("42") == 42
 
     def test_normalize_librenms_port_id_rejects_invalid_values(self):
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         assert normalize_librenms_port_id(None) is None
         assert normalize_librenms_port_id(True) is None
@@ -400,7 +400,7 @@ class TestConversionHelpers:
         """The length cap must hold with CPython's int_max_str_digits limit disabled."""
         import sys
 
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         previous = sys.get_int_max_str_digits()
         sys.set_int_max_str_digits(0)

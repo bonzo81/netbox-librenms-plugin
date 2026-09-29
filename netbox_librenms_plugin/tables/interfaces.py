@@ -30,6 +30,7 @@ from netbox_librenms_plugin.interface_diff import (
     parse_vlan_group_id,
 )
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, rule_names
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     check_vlan_group_matches,
@@ -42,7 +43,6 @@ from netbox_librenms_plugin.utils import (
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
     interface_name_fallback_matches_port,
-    normalize_librenms_port_id,
     render_vc_member_options,
     resolve_interface_row_device,
 )

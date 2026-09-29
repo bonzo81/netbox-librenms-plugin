@@ -24,6 +24,7 @@ from netbox_librenms_plugin.constants import (
 )
 from netbox_librenms_plugin.interface_rules import PORT_RECORD_KEYS, interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     apply_cable_manual_picks,
@@ -37,7 +38,6 @@ from netbox_librenms_plugin.utils import (
     cable_path_reaches,
     cable_snapshot_token,
     cache_remaining_ttl,
-    coerce_librenms_id,
     find_interface_by_librenms_port_id,
     get_interface_name_field,
     get_librenms_cable_tag,

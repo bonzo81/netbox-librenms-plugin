@@ -23,18 +23,20 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.librenms_ids import (
+    coerce_librenms_id,
+    normalize_librenms_port_id,
+)
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
     cache_remaining_ttl,
-    coerce_librenms_id,
     get_interface_name_field,
     get_interface_port_identity_sets,
     get_librenms_oob,
     get_librenms_sync_device,
     is_list_of_dicts,
     is_valid_ports_payload,
-    normalize_librenms_port_id,
     normalize_relationship_maps,
     reported_name_owners,
     resolve_interface_row_device,
