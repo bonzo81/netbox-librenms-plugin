@@ -265,14 +265,17 @@ def update_existing_row(queryset, apply):
     """
     Lock the one row of *queryset*, record its before-state, change it, validate it, and save it.
 
+    This is the one place that locks the row: the caller passes its scope, not a row it locked.
     The row is read ``FOR UPDATE`` in a savepoint. ``snapshot()`` records the before-state for
     NetBox's change log. Then ``apply(row)`` sets the new values; it can also check the locked row
-    and raise to stop the write. An exception from ``apply``, ``full_clean()`` or ``save()`` rolls
-    the savepoint back and propagates.
+    and raise to stop the write. When ``apply`` returns False, the row already holds the values,
+    and it is not validated or saved. An exception from ``apply``, ``full_clean()`` or ``save()``
+    rolls the savepoint back and propagates.
 
     Args:
         queryset (QuerySet): The rows that the caller may change, filtered to one row.
-        apply (Callable[[Model], object]): Sets the new values on the locked row.
+        apply (Callable[[Model], bool | None]): Sets the new values on the locked row, or returns
+            False when the row needs no write.
 
     Returns:
         Model: The saved row.
@@ -286,7 +289,8 @@ def update_existing_row(queryset, apply):
         # of=("self",): a permission-restricted queryset joins other tables that must not be locked.
         row = queryset.select_for_update(of=("self",)).get()
         row.snapshot()
-        apply(row)
+        if apply(row) is False:
+            return row
         row.full_clean()
         row.save()
     return row

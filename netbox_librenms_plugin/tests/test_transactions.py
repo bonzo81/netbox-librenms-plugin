@@ -316,6 +316,21 @@ def test_a_write_that_fails_validation_leaves_the_row_and_the_change_log_unchang
 
 
 @pytest.mark.django_db
+def test_a_row_that_already_holds_the_values_is_neither_validated_nor_saved():
+    from dcim.models import Site
+
+    site = _site("existing-row-unchanged")
+    Site.objects.filter(pk=site.pk).update(slug="not a slug")
+    stored = Site.objects.values_list("last_updated", flat=True).get(pk=site.pk)
+
+    with _netbox_request_context():
+        update_existing_row(Site.objects.filter(pk=site.pk), lambda row: False)
+
+    assert Site.objects.values_list("last_updated", flat=True).get(pk=site.pk) == stored
+    assert _site_changes(site) == []
+
+
+@pytest.mark.django_db
 def test_a_missing_row_raises_does_not_exist_without_applying_the_change():
     from dcim.models import Site
 
