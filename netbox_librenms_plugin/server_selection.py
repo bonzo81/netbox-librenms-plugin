@@ -6,8 +6,7 @@ from enum import StrEnum
 from django.conf import settings as django_settings
 
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.server_mappings import PreferenceStatus, read_mapping
-from netbox_librenms_plugin.utils import get_librenms_sync_device
+from netbox_librenms_plugin.server_mappings import PreferenceStatus, get_librenms_sync_device, read_mapping
 
 
 class ServerSelectionState(StrEnum):
@@ -143,10 +142,10 @@ def _servers_config(plugin_config) -> dict:
     return servers if isinstance(servers, dict) else {}
 
 
-def build_server_mappings(owner, active_key=None, *, plugin_config=None) -> tuple[ServerMapping, ...]:
-    """Build the owner's per-server mapping rows, excluding reserved metadata."""
+def build_server_mappings(owner, active_key=None, *, plugin_config=None, mapping=None) -> tuple[ServerMapping, ...]:
+    """Build the owner's per-server mapping rows, excluding reserved metadata; *mapping* replaces the stored one."""
     plugin_config = _plugin_config() if plugin_config is None else plugin_config
-    mapping_state = read_mapping(owner)
+    mapping_state = read_mapping(owner) if mapping is None else mapping
     if not mapping_state.servers:
         return ()
 

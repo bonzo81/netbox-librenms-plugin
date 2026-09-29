@@ -7,7 +7,6 @@ from django.test import RequestFactory
 
 from netbox_librenms_plugin.server_mappings import (
     MappingRole,
-    decode_stored_mapping,
     find_mapping,
     name_match_may_be_port,
     read_mapping,
@@ -148,7 +147,7 @@ class TestGetLibreNMSSyncDevice:
         return vc, members
 
     def test_explicit_server_mapping_has_highest_priority(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         _vc, (first, second, _third) = self._members("mapping")
         _set_mapping(first, {"other": 10})
@@ -158,7 +157,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(first, server_key=None) == first
 
     def test_legacy_mapping_is_a_server_fallback(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         _vc, (first, second, _third) = self._members("legacy")
         _set_mapping(second, 55)
@@ -166,7 +165,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(first, server_key="default") == second
 
     def test_float_mapping_is_rejected_in_favor_of_a_valid_mapping(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         _vc, (first, second, third) = self._members("float")
         _set_mapping(first, {"default": 1.0})
@@ -175,7 +174,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(first, server_key=None) == third
 
     def test_master_then_any_primary_ip_then_lowest_position_fallbacks(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         vc, (first, second, third) = self._members("fallback")
         _add_primary_ip(second, "second")
@@ -192,7 +191,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(third, server_key="default") == first
 
     def test_standalone_device_is_its_own_sync_device(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         device = make_device("sync-standalone")
         assert get_librenms_sync_device(device, server_key="default") == device
@@ -453,7 +452,9 @@ class TestSmallRenderingAndShapeHelpers:
         [(42, True), (" 42 ", True), (True, False), ({"default": 42}, False), (None, False), ("abc", False)],
     )
     def test_legacy_identifier_shape(self, stored, expected):
-        assert decode_stored_mapping(stored).legacy.is_legacy is expected
+        from dcim.models import Device
+
+        assert read_mapping(Device(custom_field_data={"librenms_id": stored})).legacy.is_legacy is expected
 
 
 class TestNetBoxVersionGates:

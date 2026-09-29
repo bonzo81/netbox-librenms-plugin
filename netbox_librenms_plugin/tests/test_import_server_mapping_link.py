@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.tests.claim_race_helpers import DEVICE_CLAIM_SQL, held_device_claim
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
@@ -22,25 +23,22 @@ from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_serv
 
 
 class _MappingClaimBarrier:
-    """Hold competing mapping claims at the server-scoped ID advisory lock."""
+    """Hold competing mapping claims at the server-scoped ID claim, which does not wait."""
 
     def __init__(self, claim_barrier):
         self.claim_barrier = claim_barrier
         self.target_lock_seen = False
-        self.advisory_lock_seen = False
-        self.claim_wait_done = False
+        self.claim_seen = False
         self.claim_lock_preceded_the_target_lock = None
 
     def __call__(self, execute, sql, params, many, context):
-        if "pg_advisory_xact_lock" in sql:
+        if DEVICE_CLAIM_SQL in sql:
             # One wrapper per thread, so this rendezvous holds the two claims together. A second
-            # advisory lock in either path would otherwise wait alone and break the barrier.
-            if not self.claim_wait_done:
-                self.claim_wait_done = True
+            # claim in either path would otherwise wait alone and break the barrier.
+            if not self.claim_seen:
+                self.claim_seen = True
                 self.claim_barrier.wait(timeout=5)
-            result = execute(sql, params, many, context)
-            self.advisory_lock_seen = True
-            return result
+            return execute(sql, params, many, context)
 
         result = execute(sql, params, many, context)
         if (
@@ -49,7 +47,7 @@ class _MappingClaimBarrier:
             and ('FROM "dcim_device"' in sql or 'FROM "virtualization_virtualmachine"' in sql)
         ):
             self.target_lock_seen = True
-            self.claim_lock_preceded_the_target_lock = self.advisory_lock_seen
+            self.claim_lock_preceded_the_target_lock = self.claim_seen
         return result
 
 
@@ -480,11 +478,44 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
     # Two racing lookups plus the winner's post-action re-read; a fourth would be an unnoticed refetch.
     assert [request["path"] for request in servers.secondary.requests].count("/api/v0/devices/49801") == 3
     assert not any(b"Device not found after action" in content for _status, content in outcomes)
-    assert all(wrapper.target_lock_seen for wrapper in wrappers)
-    assert all(wrapper.advisory_lock_seen for wrapper in wrappers)
-    assert all(wrapper.claim_lock_preceded_the_target_lock for wrapper in wrappers)
     assert len(owners) == 1
-    assert sum(b"LibreNMS ID conflict" in content for _status, content in outcomes) == 1
+    assert all(wrapper.claim_seen for wrapper in wrappers)
+    # The claim does not wait: the loser refuses at once while the winner holds it ("try again"),
+    # or, when it claims after the winner's commit, it finds the winner as the owner.
+    refused = [
+        (content, wrapper)
+        for (_status, content), wrapper in zip(outcomes, wrappers, strict=True)
+        if b"LibreNMS ID conflict" in content or b"try again" in content
+    ]
+    assert len(refused) == 1
+    content, loser = refused[0]
+    (winner,) = [wrapper for wrapper in wrappers if wrapper is not loser]
+    assert winner.target_lock_seen and winner.claim_lock_preceded_the_target_lock
+    if b"try again" in content:
+        assert loser.target_lock_seen is False
+    else:
+        assert loser.claim_lock_preceded_the_target_lock
+
+
+@pytest.mark.django_db
+def test_a_link_that_meets_a_held_claim_answers_try_again_and_writes_nothing(client, servers):
+    from django.contrib.messages import get_messages
+
+    from netbox_librenms_plugin.middleware import REQUEST_FAILED_EVENT, TRY_AGAIN_MESSAGE
+
+    device = make_device("held-claim-link-device", librenms_cf={"primary": 49901})
+    _register_import_device(servers.secondary, librenms_device(49902, device.name))
+    client.force_login(make_superuser("held-claim-linker"))
+
+    with held_device_claim("secondary", 49902):
+        response = client.post(_action_url(49902), _link_payload(device), headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert TRY_AGAIN_MESSAGE in response.content.decode()
+    assert REQUEST_FAILED_EVENT in response["HX-Trigger"]
+    assert not list(get_messages(response.wsgi_request))
+    device.refresh_from_db()
+    assert device.custom_field_data["librenms_id"] == {"primary": 49901}
 
 
 @pytest.mark.django_db

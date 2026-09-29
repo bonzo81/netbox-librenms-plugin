@@ -555,7 +555,7 @@ class TestVirtualChassisHelpers:
     def test_get_librenms_sync_device_no_vc(self):
         """Device without VC returns itself."""
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         device = make_device("utils-standalone-sync")
 
@@ -566,7 +566,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_with_librenms_id(self):
         """VC member with librenms_id is returned (real VC; the member without one iterated first)."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         without_id, with_id = _two_member_vc("sync-withid", None, {"default": 123})
         assert get_librenms_sync_device(without_id) == with_id
@@ -574,7 +574,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_dict_preferred_over_legacy_bare_int(self):
         """In a partially migrated VC, a per-server dict member is preferred over a legacy bare-int."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         # member_a (legacy bare-int) iterated first — the function should still prefer member_b (dict).
         member_a, member_b = _two_member_vc("sync-dictpref", 42, {"default": 42})
@@ -583,7 +583,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_host_id_preferred_over_oob_only(self):
         """A member holding the real host id wins over an OOB-only member, even iterated first."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         member_a, member_b = _two_member_vc(
             "sync-hostpref",
@@ -595,7 +595,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_oob_only_resolves_when_no_host_id(self):
         """When no member has a host id, an OOB-only mapping still resolves the sync device."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         member_a, member_b = _two_member_vc("sync-oobonly", None, {"default": {"oob": {"id": 7, "type": "drac"}}})
         assert get_librenms_sync_device(member_a, server_key="default") == member_b
@@ -603,7 +603,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
         """When no member has a per-server dict, fall back to legacy bare-int."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         # member_b (no id) iterated first, member_a (legacy bare-int) second → member_a wins.
         member_b, member_a = _two_member_vc("sync-legacy", None, 42)
@@ -612,7 +612,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_dict_for_different_server_falls_through(self):
         """Per-server dict with a different key does not match; legacy bare-int resolves instead."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         # member_a: legacy bare-int (universal); member_b: dict only for "production".
         member_a, member_b = _two_member_vc("sync-diffserver", 42, {"production": 99})
@@ -621,7 +621,7 @@ class TestVirtualChassisHelpers:
     def test_get_librenms_sync_device_fallback_to_member_with_ip(self):
         """Priority 3: no dict member, master has no IP, another member has primary IP → that member."""
         from netbox_librenms_plugin.tests.conftest import ip_on
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         master, member_with_ip = _two_member_vc("sync-primary-ip", None, None)
         address = ip_on(member_with_ip, "198.18.20.1/24", "management")
@@ -637,7 +637,7 @@ class TestVirtualChassisHelpers:
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         vc = VirtualChassis.objects.create(name="sync-lowest-position")
         members = {}
@@ -681,7 +681,7 @@ class TestVirtualChassisHelpers:
         LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
         A member whose resolved ID is 0 must be skipped so a real ID is preferred.
         """
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         member_zero, member_real = _two_member_vc("sync-zero-id", {"default": 0}, {"default": 5})
 

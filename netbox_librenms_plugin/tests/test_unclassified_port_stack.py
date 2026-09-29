@@ -15,8 +15,7 @@ does not poll.
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-from netbox_librenms_plugin.utils import set_librenms_device_id
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, seed_own_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -287,7 +286,7 @@ class TestTheRefreshReadsThePortStack:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device("unclassified-stack-refresh")
-        set_librenms_device_id(device, 42, SERVER_KEY)
+        seed_own_mapping(device, 42, SERVER_KEY)
         device.save()
         live_librenms.api.cache_timeout = 300
         live_librenms.server.device_info_response(42, os="linux")
@@ -364,9 +363,9 @@ class TestTheTabRendersIt:
 
         device = make_device(name)
         interface = make_interface(device, "pnet0")
-        set_librenms_device_id(interface, 8002, SERVER_KEY)
+        seed_own_mapping(interface, 8002, SERVER_KEY)
         interface.save()
-        set_librenms_device_id(device, 42, SERVER_KEY)
+        seed_own_mapping(device, 42, SERVER_KEY)
         device.save()
         cache.set(CacheMixin().get_cache_key(device, "ports", SERVER_KEY), cached, 300)
         return device

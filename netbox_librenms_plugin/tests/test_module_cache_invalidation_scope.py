@@ -240,11 +240,11 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             make_module_bay,
             make_virtual_chassis_members,
         )
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         _vc, (page_device, sibling) = make_virtual_chassis_members("collateral-vc")
         for member in (page_device, sibling):
-            set_librenms_device_id(member, 11, "default")
+            seed_own_mapping(member, 11, "default")
             member.save()
         make_module_bay(sibling, "Bay 1")
 

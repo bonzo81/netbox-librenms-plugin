@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_bay,
     make_module_type,
     make_superuser,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
@@ -37,7 +38,6 @@ from netbox_librenms_plugin.utils import (
     module_inventory_binding_token,
     module_inventory_snapshot_digest,
     netbox_relocates_module_subtree,
-    set_librenms_device_id,
 )
 
 HIDDEN = "(only a superuser sees the message)"
@@ -116,7 +116,7 @@ def _row(index, model, name, **extra):
 
 
 def _linked(device):
-    set_librenms_device_id(device, device.pk, "default")
+    seed_own_mapping(device, device.pk, "default")
     device.save(update_fields=["custom_field_data"])
     return device
 

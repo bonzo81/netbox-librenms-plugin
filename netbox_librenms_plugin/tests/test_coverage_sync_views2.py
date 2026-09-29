@@ -17,9 +17,10 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_vm,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-from netbox_librenms_plugin.utils import get_librenms_cable_tag, set_librenms_device_id
+from netbox_librenms_plugin.utils import get_librenms_cable_tag
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
@@ -44,7 +45,7 @@ def _seed(view, obj, data_type, payload):
 
 
 def _set_id(obj, value):
-    set_librenms_device_id(obj, value, SERVER_KEY)
+    seed_own_mapping(obj, value, SERVER_KEY)
     obj.save(update_fields=["custom_field_data"])
 
 

@@ -19,9 +19,8 @@ from ipam.models import IPAddress
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser, seed_own_mapping
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _platform, _port
-from netbox_librenms_plugin.utils import set_librenms_device_id
 
 SERVER_KEY = "default"
 IGNORE = InterfaceTypeMapping.ACTION_IGNORE
@@ -37,7 +36,7 @@ def _device(name, platform):
 
 def _bound(device, name, port_id):
     interface = make_interface(device, name, iface_type="virtual")
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_own_mapping(interface, port_id, SERVER_KEY)
     interface.save()
     return interface
 

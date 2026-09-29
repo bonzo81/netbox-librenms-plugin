@@ -1,10 +1,10 @@
-"""Tests for the object server mapping module and the writers that still edit stored mappings.
+"""Tests for the object server mapping module: its readers, its builders and their persistence.
 
 The readers run against real NetBox rows (``@pytest.mark.django_db``): a snapshot decodes the
 stored ``librenms_id`` custom field, and the lookups issue real JSON-field queries. A fabricated
-object would let the stored shape or the JSON-path query drift from production. The writer
-classes below cover ``set_librenms_device_id``, ``migrate_legacy_librenms_id``, the OOB setters,
-merge and the migration marker, and read their results back through the snapshot.
+object would let the stored shape or the JSON-path query drift from production. The builder
+classes below cover ``assign_own``, ``convert_legacy``, the OOB builders, merge and the migration
+marker; a test puts a built change on its object with ``apply_mapping_change``.
 """
 
 import itertools
@@ -17,25 +17,33 @@ from django.test.utils import CaptureQueriesContext
 
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    ChangeOutcome,
     ContainerStatus,
     MappingRole,
     PreferenceStatus,
-    decode_stored_mapping,
+    assign_own,
+    attach_oob,
+    clear_oob,
+    convert_legacy,
     find_mapping,
     find_port_owner,
     port_holders,
     identity_q,
     mapped_device_servers,
+    mark_migrated,
+    merge_links,
     name_match_may_be_port,
     read_mapping,
     read_mappings,
     resolve_device_port,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    apply_mapping_change,
     make_device,
     make_interface,
     make_virtual_chassis_members,
     make_vm,
+    transactional_db_with_all_apps,
 )
 
 _UNSET = object()
@@ -64,6 +72,20 @@ def _bind(interface, value):
     interface.custom_field_data["librenms_id"] = value
     interface.save()
     return interface
+
+
+def _decoded(value):
+    """Return the snapshot of a stored value, read from an unsaved Device (no query)."""
+    from dcim.models import Device
+
+    return read_mapping(Device(custom_field_data={"librenms_id": value}))
+
+
+def _merge_into_winner(winner, donor, server):
+    """Build the merge, put the winner's side on *winner*, and return the summary."""
+    merge = merge_links(winner, donor, server)
+    apply_mapping_change(winner, merge.winner)
+    return merge.summary
 
 
 @pytest.mark.django_db
@@ -328,7 +350,7 @@ class TestMappingDecoding:
     def test_the_raw_decoder_agrees_with_the_object_reader(self):
         stored = {"default": {"id": "42", "oob": {"type": "idrac"}}, "_preferred_server": 1}
 
-        assert decode_stored_mapping(stored) == read_mapping(_dev(stored))
+        assert _decoded(stored) == read_mapping(_dev(stored))
 
 
 @pytest.mark.django_db
@@ -658,6 +680,153 @@ class TestBulkRead:
             read_mappings(Interface.objects.all(), fields=("name", "custom_field_data"))
 
 
+def _locked(obj):
+    return type(obj).objects.select_for_update().get(pk=obj.pk)
+
+
+def _record_writes(writes):
+    def write(row, fields):
+        writes.append(fields)
+        row.save()
+        return row
+
+    return write
+
+
+@pytest.mark.django_db
+class TestPersistMapping:
+    """``persist_mapping`` claims again, checks the owners and the baseline, and then calls the save once."""
+
+    def test_a_held_claim_refuses_at_once_and_writes_nothing(self):
+        from netbox_librenms_plugin.server_mappings import IdentityBusy, assign_own, persist_mapping
+        from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+
+        device = _dev()
+        writes = []
+        with held_device_claim("default", 7101), transaction.atomic():
+            row = _locked(device)
+            with pytest.raises(IdentityBusy):
+                persist_mapping(row, assign_own(row, "default", 7101), write=_record_writes(writes))
+
+        assert writes == []
+        device.refresh_from_db()
+        assert read_mapping(device).own_id("default") is None
+
+    def test_an_owner_of_the_other_model_is_refused(self):
+        from netbox_librenms_plugin.server_mappings import IdentityOwned, assign_own, persist_mapping
+
+        device = _dev()
+        owner = make_vm(f"persist-owner-{next(_counter)}")
+        owner.custom_field_data["librenms_id"] = {"default": 7102}
+        owner.save()
+        writes = []
+        with transaction.atomic():
+            row = _locked(device)
+            with pytest.raises(IdentityOwned) as refused:
+                persist_mapping(row, assign_own(row, "default", 7102), write=_record_writes(writes))
+
+        assert refused.value.owner == owner
+        assert writes == []
+
+    def test_the_save_runs_once_with_the_mapping_and_the_writers_fields(self):
+        from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping
+
+        device = _dev({"other": 7103})
+        writes = []
+        with transaction.atomic():
+            row = _locked(device)
+            row.serial = "PERSIST-SERIAL"
+            persist_mapping(row, assign_own(row, "default", 7104), write=_record_writes(writes))
+
+        assert len(writes) == 1
+        device.refresh_from_db()
+        assert device.serial == "PERSIST-SERIAL"
+        assert [(entry.server, entry.own_id) for entry in read_mapping(device).servers] == [
+            ("other", 7103),
+            ("default", 7104),
+        ]
+
+    def test_a_mapping_that_changed_after_the_build_is_refused(self):
+        from netbox_librenms_plugin.server_mappings import MappingChanged, assign_own, persist_mapping
+
+        device = _dev({"other": 7105})
+        stale = assign_own(device, "default", 7106)
+        type(device).objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": {"other": 7107}})
+        writes = []
+        with transaction.atomic(), pytest.raises(MappingChanged):
+            persist_mapping(_locked(device), stale, write=_record_writes(writes))
+
+        assert writes == []
+
+    def test_another_custom_field_is_not_a_mapping_change(self):
+        from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping
+
+        device = _dev({"other": 7108})
+        change = assign_own(device, "default", 7109)
+        stored = {**device.custom_field_data, "unrelated_field": "edited"}
+        type(device).objects.filter(pk=device.pk).update(custom_field_data=stored)
+        with transaction.atomic():
+            persist_mapping(_locked(device), change, write=_record_writes([]))
+
+        device.refresh_from_db()
+        assert device.custom_field_data["unrelated_field"] == "edited"
+        assert read_mapping(device).own_id("default") == 7109
+
+    def test_a_change_persists_only_on_its_own_row(self):
+        from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping
+
+        change = assign_own(_dev(), "default", 7110)
+        with transaction.atomic(), pytest.raises(ValueError, match="belongs to"):
+            persist_mapping(_locked(_dev()), change, write=_record_writes([]))
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("competitor", ["committed", "holding"])
+def test_a_change_kept_across_a_savepoint_rollback_is_claimed_and_checked_again(competitor):
+    """The rollback releases the first claim, so persistence claims again and reads the owners again."""
+    import json
+
+    from netbox_librenms_plugin.server_mappings import (
+        IdentityBusy,
+        IdentityOwned,
+        assign_own,
+        lock_librenms_id_assignment,
+        persist_mapping,
+    )
+    from netbox_librenms_plugin.tests.claim_race_helpers import device_claim_key
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
+
+    device = make_device(f"retained-change-{competitor}")
+    vm = make_vm(f"retained-change-competitor-{competitor}")
+    bound = json.dumps({"librenms_id": {"default": 7201}})
+
+    class _RolledBack(Exception):
+        pass
+
+    with second_connection() as other, transaction.atomic():
+        try:
+            with transaction.atomic():
+                lock_librenms_id_assignment(7201, "default")
+                change = assign_own(_locked(device), "default", 7201)
+                raise _RolledBack
+        except _RolledBack:
+            pass
+        with other.cursor() as cursor:
+            cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [device_claim_key("default", 7201)])
+            assert cursor.fetchone()[0] is True
+            cursor.execute(
+                "UPDATE virtualization_virtualmachine SET custom_field_data = %s WHERE id = %s", [bound, vm.pk]
+            )
+        if competitor == "committed":
+            other.commit()
+        expected = IdentityOwned if competitor == "committed" else IdentityBusy
+        with pytest.raises(expected):
+            persist_mapping(_locked(device), change, write=_record_writes([]))
+
+    device.refresh_from_db()
+    assert read_mapping(device).own_id("default") is None
+
+
 MOVED_OUT_OF_UTILS = frozenset(
     {
         "AmbiguousLibreNMSIdError",
@@ -670,6 +839,29 @@ MOVED_OUT_OF_UTILS = frozenset(
         "readable_legacy_id",
     }
 )
+# The write side moved whole into server_mappings; utils keeps no name of it, not even an import.
+WRITE_SIDE_NAMES = frozenset(
+    {
+        "set_librenms_device_id",
+        "add_librenms_server_mapping",
+        "lock_librenms_id_assignment",
+        "set_librenms_oob",
+        "clear_librenms_oob",
+        "migrate_legacy_librenms_id",
+        "merge_librenms_links",
+        "mark_librenms_migrated",
+        "claim_librenms_port_binding",
+        "LibreNMSPortBindingConflict",
+        "LibreNMSPortBindingBusy",
+        "get_librenms_sync_device",
+    }
+)
+
+
+def test_utils_holds_no_write_side_name():
+    from netbox_librenms_plugin import utils
+
+    assert sorted(name for name in WRITE_SIDE_NAMES if hasattr(utils, name)) == []
 
 
 def test_no_module_imports_a_mapping_or_id_name_from_utils():
@@ -687,89 +879,80 @@ def test_no_module_imports_a_mapping_or_id_name_from_utils():
                 offenders += [
                     f"{path.name}:{node.lineno} {alias.name}"
                     for alias in node.names
-                    if alias.name in MOVED_OUT_OF_UTILS
+                    if alias.name in MOVED_OUT_OF_UTILS | WRITE_SIDE_NAMES
                 ]
 
     assert offenders == []
 
 
 @pytest.mark.django_db
-class TestMigrateLegacyLibreNMSId:
-    """Tests for migrate_legacy_librenms_id() — mutates custom_field_data, never saves."""
+class TestConvertLegacy:
+    """Tests for convert_legacy(): it returns a change and never mutates or saves."""
 
     def test_returns_true_when_migrated(self):
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
-        assert migrate_legacy_librenms_id(_dev(42), "default") is True
+        assert convert_legacy(_dev(42), "default").changed is True
 
     def test_migrates_integer_to_dict_format(self):
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         dev = _dev(42)
-        migrate_legacy_librenms_id(dev, "production")
+        apply_mapping_change(dev, convert_legacy(dev, "production"))
         assert dev.custom_field_data["librenms_id"] == {"production": 42}
 
     def test_returns_false_when_already_dict(self):
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
-        assert migrate_legacy_librenms_id(_dev({"default": 42}), "default") is False
+        assert convert_legacy(_dev({"default": 42}), "default").changed is False
 
     def test_returns_false_when_value_is_none(self):
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
-        assert migrate_legacy_librenms_id(_dev(None), "default") is False
+        assert convert_legacy(_dev(None), "default").changed is False
 
     def test_returns_false_for_boolean_value(self):
         """A bool is an int subclass, so True/False must not be migrated."""
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         dev = _dev(True)
-        assert migrate_legacy_librenms_id(dev, "default") is False
+        assert convert_legacy(dev, "default").changed is False
         assert dev.custom_field_data["librenms_id"] is True  # unchanged
 
     def test_does_not_save(self):
-        """migrate_legacy_librenms_id must NOT persist — caller is responsible."""
+        """convert_legacy must NOT persist: persistence is the writer's."""
         from dcim.models import Device
 
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
-
         dev = _dev(7)
-        migrate_legacy_librenms_id(dev, "default")
+        apply_mapping_change(dev, convert_legacy(dev, "default"))
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == 7
 
     def test_preserves_value_in_migrated_dict(self):
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         dev = _dev(99)
-        migrate_legacy_librenms_id(dev, "secondary")
+        apply_mapping_change(dev, convert_legacy(dev, "secondary"))
         assert dev.custom_field_data["librenms_id"]["secondary"] == 99
 
 
 @pytest.mark.django_db
 class TestLibreNMSIdRoundtrip:
-    """get_librenms_device_id should see the value set by set_librenms_device_id."""
+    """The reader sees the value that an applied builder change sets."""
 
     def test_set_then_get_returns_same_value(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = _dev()
-        set_librenms_device_id(dev, 42, "production")
+        seed_own_mapping(dev, 42, "production")
         assert read_mapping(dev).own_id("production") == 42
 
     def test_set_multiple_servers_get_correct_each(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = _dev()
-        set_librenms_device_id(dev, 10, "primary")
-        set_librenms_device_id(dev, 20, "secondary")
+        seed_own_mapping(dev, 10, "primary")
+        seed_own_mapping(dev, 20, "secondary")
         assert read_mapping(dev).own_id("primary") == 10
         assert read_mapping(dev).own_id("secondary") == 20
 
     def test_migrate_then_get_returns_value(self):
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         dev = _dev(55)
-        migrate_legacy_librenms_id(dev, "default")
+        apply_mapping_change(dev, convert_legacy(dev, "default"))
         assert read_mapping(dev).own_id("default") == 55
 
 
@@ -801,7 +984,7 @@ class TestLegacyClassification:
         ],
     )
     def test_classifies_legacy_values(self, value, expected):
-        assert decode_stored_mapping(value).legacy.is_legacy is expected
+        assert _decoded(value).legacy.is_legacy is expected
 
     def test_defined_exactly_once(self):
         """Guard the wide rule has exactly one module-level def (a duplicate silently shadows the other)."""
@@ -813,79 +996,62 @@ class TestLegacyClassification:
         defs = [
             node
             for node in ast.parse(inspect.getsource(server_mappings)).body
-            if isinstance(node, ast.FunctionDef) and node.name == "readable_legacy_id"
+            if isinstance(node, ast.FunctionDef) and node.name == "_readable_legacy_id"
         ]
-        assert len(defs) == 1, f"readable_legacy_id defined {len(defs)}x — a duplicate shadows the other"
+        assert len(defs) == 1, f"_readable_legacy_id defined {len(defs)}x — a duplicate shadows the other"
 
 
 @pytest.mark.django_db
-class TestSetLibreNMSDeviceId:
-    """Tests for set_librenms_device_id in utils.py."""
+class TestAssignOwn:
+    """Tests for assign_own(): the general setter returns a change and its outcome."""
 
-    def test_legacy_bare_int_cf_skips_write(self):
-        """A legacy bare-int cf value is left untouched (no silent migration) — the refactored guard still fails closed."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+    @pytest.mark.parametrize("stored", [42, "42"])
+    def test_a_legacy_value_is_skipped_not_migrated(self, stored):
+        """A legacy bare-int or numeric-string value is left untouched (no silent migration)."""
+        change = assign_own(_dev(stored), "primary", 99)
 
-        dev = _dev(42)  # legacy bare-int format
-        set_librenms_device_id(dev, 99, server_key="primary")
-        assert dev.custom_field_data["librenms_id"] == 42
-
-    def test_legacy_numeric_string_cf_skips_write(self):
-        """A legacy numeric-string cf value is also left untouched by the shared predicate."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        dev = _dev("42")
-        set_librenms_device_id(dev, 99, server_key="primary")
-        assert dev.custom_field_data["librenms_id"] == "42"
+        assert change.outcome is ChangeOutcome.SKIPPED_LEGACY
+        assert change.changed is False
+        assert change.after == change.before
 
     def test_stores_int_for_valid_device_id(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
         dev = _dev(None)
-        set_librenms_device_id(dev, 42, server_key="primary")
+        apply_mapping_change(dev, assign_own(dev, "primary", 42))
         assert dev.custom_field_data["librenms_id"] == {"primary": 42}
 
-    def test_invalid_device_id_not_stored(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+    @pytest.mark.parametrize(("stored", "identity"), [(None, "not-an-int"), ({"primary": 10}, None), (None, True)])
+    def test_an_invalid_id_is_skipped_and_claims_nothing(self, stored, identity):
+        change = assign_own(_dev(stored), "primary", identity)
 
-        dev = _dev()
-        set_librenms_device_id(dev, "not-an-int", server_key="primary")
-        assert dev.custom_field_data.get("librenms_id") in (None, {})
-
-    def test_invalid_device_id_does_not_overwrite_existing(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        dev = _dev({"primary": 10})
-        set_librenms_device_id(dev, None, server_key="primary")
-        assert dev.custom_field_data["librenms_id"] == {"primary": 10}
-
-    def test_legacy_bare_int_blocks_write(self):
-        """Legacy bare-integer value blocks the write (no silent migration)."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        dev = _dev(7)
-        set_librenms_device_id(dev, 99, server_key="secondary")
-        assert dev.custom_field_data["librenms_id"] == 7
+        assert change.outcome is ChangeOutcome.SKIPPED_INVALID_ID
+        assert change.changed is False
+        assert change._claims == ()
 
     def test_adds_new_server_key_to_existing_dict(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
         dev = _dev({"primary": 5})
-        set_librenms_device_id(dev, 20, server_key="secondary")
+        apply_mapping_change(dev, assign_own(dev, "secondary", 20))
         assert dev.custom_field_data["librenms_id"] == {"primary": 5, "secondary": 20}
 
     def test_string_integer_is_coerced(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        dev = _dev()
-        set_librenms_device_id(dev, "42", server_key="primary")
-        assert dev.custom_field_data["librenms_id"] == {"primary": 42}
+        change = assign_own(_dev(), "primary", "42")
+        assert change.outcome is ChangeOutcome.APPLIED
+        assert change.after.own_id("primary") == 42
 
     def test_unexpected_cf_type_reset_to_empty(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
         dev = _dev("unexpected-string")
-        set_librenms_device_id(dev, 5, server_key="primary")
+        apply_mapping_change(dev, assign_own(dev, "primary", 5))
+        assert dev.custom_field_data["librenms_id"] == {"primary": 5}
+
+    def test_the_same_id_is_unchanged(self):
+        change = assign_own(_dev({"primary": 5}), "primary", 5)
+        assert change.outcome is ChangeOutcome.UNCHANGED
+        assert change.changed is False
+
+    def test_a_builder_runs_no_query_and_does_not_mutate(self, django_assert_num_queries):
+        dev = _dev({"primary": 5})
+        with django_assert_num_queries(0):
+            change = assign_own(dev, "primary", 6)
+        assert change.changed is True
         assert dev.custom_field_data["librenms_id"] == {"primary": 5}
 
 
@@ -895,16 +1061,16 @@ class TestLegacyClassificationPositivity:
     def test_positive_int_and_string_are_legacy(self):
         # int() coercion accepts surrounding whitespace / a leading +, so these stay legacy.
         for value in (42, "42", " 42 ", "+42"):
-            assert decode_stored_mapping(value).legacy.is_legacy is True, value
+            assert _decoded(value).legacy.is_legacy is True, value
 
     def test_zero_and_negative_are_not_legacy(self):
         """A LibreNMS device id is a positive PK; 0 / negative is not a real link and must not migrate."""
         for value in (0, -1, "0", " 0 ", "-1", "-42", "+0"):
-            assert decode_stored_mapping(value).legacy.is_legacy is False, value
+            assert _decoded(value).legacy.is_legacy is False, value
 
     def test_non_numeric_and_dict_and_bool_are_not_legacy(self):
         for value in (None, True, False, "abc", "", {"default": 42}):
-            assert decode_stored_mapping(value).legacy.is_legacy is False, value
+            assert _decoded(value).legacy.is_legacy is False, value
 
 
 @pytest.mark.django_db
@@ -925,7 +1091,7 @@ class TestLibreNMSIdAcceptedFormsContract:
 
     These tests CHARACTERISE that split rather than endorse it. Narrowing the reader was
     tried and reverted: it only makes sense together with narrowing the classifier, and
-    once both are narrow ``set_librenms_device_id`` treats the value as corrupt and resets
+    once both are narrow ``assign_own`` treats the value as corrupt and resets
     the field, destroying a mapping the reader still resolves. Any change to either side
     must break these tests and be a deliberate decision.
     """
@@ -972,37 +1138,35 @@ class TestLibreNMSIdAcceptedFormsContract:
 
     @pytest.mark.parametrize("stored,_resolved", TOLERATED + READER_ONLY, ids=lambda v: repr(v))
     def test_the_setter_keeps_every_value_the_reader_resolves(self, stored, _resolved):
-        """set_librenms_device_id refuses a legacy value, so it never resets a mapping the reader still resolves."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        """assign_own refuses a legacy value, so it never resets a mapping the reader still resolves."""
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = _dev(stored)
-        set_librenms_device_id(device, 99, "primary")
+        seed_own_mapping(device, 99, "primary")
 
         assert device.custom_field_data["librenms_id"] == stored
 
 
 @pytest.mark.django_db
-class TestMigrateLegacyRejectsNonPositive:
-    """migrate_legacy_librenms_id must never canonicalise a non-positive id into the JSON form."""
+class TestConvertLegacyRejectsNonPositive:
+    """convert_legacy must never canonicalise a non-positive id into the JSON form."""
 
     def test_zero_is_not_migrated(self):
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         obj = _dev(0)
-        assert migrate_legacy_librenms_id(obj, "default") is False
+        assert convert_legacy(obj, "default").changed is False
         assert obj.custom_field_data["librenms_id"] == 0  # left untouched, not {"default": 0}
 
     def test_negative_is_not_migrated(self):
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         obj = _dev("-5")
-        assert migrate_legacy_librenms_id(obj, "default") is False
+        assert convert_legacy(obj, "default").changed is False
         assert obj.custom_field_data["librenms_id"] == "-5"
 
 
 @pytest.mark.django_db
 class TestOOBHelpers:
-    """Tests for the OOB snapshot facts, set_librenms_oob, clear_librenms_oob, and the dict-with-id form in the reader, the setter and find_mapping."""
+    """Tests for the OOB snapshot facts, attach_oob, clear_oob, and the dict-with-id form in the reader, assign_own and find_mapping."""
 
     # ── get_librenms_device_id: dict-with-id form ─────────────────────────────
 
@@ -1020,22 +1184,22 @@ class TestOOBHelpers:
         dev = _dev({"primary": {"id": "42"}})
         assert read_mapping(dev).own_id("primary") == 42
 
-    # ── set_librenms_device_id: oob preservation ─────────────────────────────
+    # ── assign_own: oob preservation ─────────────────────────────────────────
 
     def test_set_preserves_oob_when_entry_has_oob(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "drac", "ip": "10.0.0.5"}}})
-        set_librenms_device_id(dev, 99, server_key="primary")
+        seed_own_mapping(dev, 99, server_key="primary")
         assert dev.custom_field_data["librenms_id"] == {
             "primary": {"id": 99, "oob": {"id": 17, "type": "drac", "ip": "10.0.0.5"}}
         }
 
     def test_set_bare_int_when_no_oob_present(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = _dev({"primary": 42})
-        set_librenms_device_id(dev, 99, server_key="primary")
+        seed_own_mapping(dev, 99, server_key="primary")
         assert dev.custom_field_data["librenms_id"] == {"primary": 99}
 
     # ── find_by_librenms_id: dict-with-id and oob id lookups ─────────────────
@@ -1070,79 +1234,70 @@ class TestOOBHelpers:
         assert (entry.oob_recorded, entry.oob_id, entry.oob_type) == (True, 17, "drac")
         assert dev.custom_field_data["librenms_id"]["primary"]["oob"] == oob_data
 
-    # ── set_librenms_oob ──────────────────────────────────────────────────────
+    # ── attach_oob ────────────────────────────────────────────────────────────
 
     def test_set_oob_round_trip(self):
-        """set_librenms_oob stores only id + type; ip/version are not persisted."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        """attach_oob stores only id + type; ip/version are not persisted."""
 
         dev = _dev({"primary": 42})
-        set_librenms_oob(dev, 17, "primary", oob_type="drac")
+        apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="drac"))
         assert dev.custom_field_data["librenms_id"]["primary"]["oob"] == {"id": 17, "type": "drac"}
         assert read_mapping(dev).oob_id("primary") == 17
 
     def test_set_oob_promotes_bare_int_entry(self):
-        """set_librenms_oob promotes a bare-int entry to dict form, preserving the main id."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        """attach_oob promotes a bare-int entry to dict form, preserving the main id."""
 
         dev = _dev({"primary": 42})
-        set_librenms_oob(dev, 17, "primary", oob_type="idrac")
+        apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="idrac"))
         assert read_mapping(dev).own_id("primary") == 42
 
     def test_set_oob_fails_closed_on_non_positive_int_host_id(self):
         """A stored bare-int host id of 0 or negative is corrupt → raise."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
 
         for bad in (0, -5):
             dev = _dev({"primary": bad})
             with pytest.raises(ValueError, match="not a valid id"):
-                set_librenms_oob(dev, 17, "primary", oob_type="idrac")
+                apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="idrac"))
 
     def test_set_oob_rejects_unknown_type(self):
-        """set_librenms_oob raises ValueError for a type that doesn't match OOB_TYPE_PATTERN."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        """attach_oob raises ValueError for a type that doesn't match OOB_TYPE_PATTERN."""
 
         dev = _dev({"primary": 42})
         with pytest.raises(ValueError, match="does not match any known OOB type"):
-            set_librenms_oob(dev, 17, "primary", oob_type="ubuntu")
+            apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="ubuntu"))
 
     def test_set_oob_fails_closed_on_corrupt_host_string(self):
         """A non-empty, unparseable stored host id must raise rather than be collapsed to {}."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
 
         dev = _dev({"primary": "not-an-id"})
         with pytest.raises(ValueError, match="not a valid id"):
-            set_librenms_oob(dev, 17, "primary", oob_type="idrac")
+            apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="idrac"))
 
     def test_set_oob_fails_closed_on_corrupt_dict_host_id(self):
         """A dict-form entry with a non-empty unparseable host id (e.g. {"id": "abc"}) must raise."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
 
         dev = _dev({"primary": {"id": "abc"}})
         with pytest.raises(ValueError, match="not a valid id"):
-            set_librenms_oob(dev, 17, "primary", oob_type="idrac")
+            apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="idrac"))
 
     def test_set_oob_lenient_on_dict_without_host_id(self):
         """A dict entry with no host id (absent/None) stays lenient — OOB is attached."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
 
         dev = _dev({"primary": {"id": None}})
-        set_librenms_oob(dev, 17, "primary", oob_type="idrac")  # must not raise
+        apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="idrac"))  # must not raise
         assert dev.custom_field_data["librenms_id"]["primary"]["oob"] == {"id": 17, "type": "idrac"}
 
     def test_set_oob_lenient_on_empty_host_string(self):
         """An empty/whitespace host string is treated leniently (→ fresh dict), not an error."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
 
         dev = _dev({"primary": "   "})
-        set_librenms_oob(dev, 17, "primary", oob_type="idrac")  # must not raise
+        apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="idrac"))  # must not raise
 
     def test_set_oob_accepts_generic_oob_sentinel(self):
-        """set_librenms_oob must accept "oob" as a generic fallback type."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        """attach_oob must accept "oob" as a generic fallback type."""
 
         dev = _dev({"default": 99})
-        set_librenms_oob(dev, 55, "default", oob_type="oob")
+        apply_mapping_change(dev, attach_oob(dev, "default", 55, oob_type="oob"))
         entry = read_mapping(dev).server("default")
         assert entry.oob_recorded
         assert entry.oob_id == 55
@@ -1150,66 +1305,58 @@ class TestOOBHelpers:
 
     def test_set_oob_generic_sentinel_case_insensitive(self):
         """The "oob" sentinel is accepted case-insensitively (OOB, Oob, etc.)."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
 
         dev = _dev({"default": 99})
-        set_librenms_oob(dev, 55, "default", oob_type="OOB")  # should not raise
+        apply_mapping_change(dev, attach_oob(dev, "default", 55, oob_type="OOB"))  # should not raise
         assert dev.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "oob"
 
     def test_set_oob_does_not_save(self):
-        """set_librenms_oob must NOT persist — caller is responsible (verified by reload)."""
+        """attach_oob must NOT persist: persistence is the writer's (verified by reload)."""
         from dcim.models import Device
 
-        from netbox_librenms_plugin.utils import set_librenms_oob
-
         dev = _dev({"primary": 42})
-        set_librenms_oob(dev, 17, "primary", oob_type="ilo")
+        apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="ilo"))
         # DB row still holds the bare-int entry; the OOB promotion lives only in memory.
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"primary": 42}
 
-    # ── clear_librenms_oob ────────────────────────────────────────────────────
+    # ── clear_oob ─────────────────────────────────────────────────────────────
 
     def test_clear_oob_removes_oob_sub_key(self):
-        from netbox_librenms_plugin.utils import clear_librenms_oob
 
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "drac"}}})
-        clear_librenms_oob(dev, "primary")
+        apply_mapping_change(dev, clear_oob(dev, "primary"))
         assert not read_mapping(dev).has_oob("primary")
         assert dev.custom_field_data["librenms_id"]["primary"] == {"id": 42}
 
     def test_clear_oob_is_noop_when_no_oob(self):
-        from netbox_librenms_plugin.utils import clear_librenms_oob
 
         dev = _dev({"primary": {"id": 42}})
-        clear_librenms_oob(dev, "primary")
+        apply_mapping_change(dev, clear_oob(dev, "primary"))
         assert dev.custom_field_data["librenms_id"] == {"primary": {"id": 42}}
 
     def test_clear_oob_does_not_save(self):
-        """clear_librenms_oob must NOT persist — caller is responsible (verified by reload)."""
+        """clear_oob must NOT persist: persistence is the writer's (verified by reload)."""
         from dcim.models import Device
 
-        from netbox_librenms_plugin.utils import clear_librenms_oob
-
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "bmc"}}})
-        clear_librenms_oob(dev, "primary")
+        apply_mapping_change(dev, clear_oob(dev, "primary"))
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {
             "primary": {"id": 42, "oob": {"id": 17, "type": "bmc"}}
         }
 
 
 @pytest.mark.django_db
-class TestMergeLibreNMSLinks:
-    """Tests for merge_librenms_links() — winner-wins conflict policy."""
+class TestMergeLinks:
+    """Tests for merge_links() — winner-wins conflict policy."""
 
     def _make_dev(self, name, librenms_id_dict):
         return _dev(librenms_id_dict, name=f"{name}-{next(_counter)}")
 
     def test_winner_inherits_id_when_winner_has_no_id(self):
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {}})
         donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         assert winner.custom_field_data["librenms_id"]["default"]["id"] == 99
         assert summary["host_id_from_donor"] == 99
@@ -1217,12 +1364,11 @@ class TestMergeLibreNMSLinks:
 
     def test_winner_inherits_string_id_coerced_to_int(self):
         """inherit-id branch must coerce donor_id to int, matching the demote branch."""
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {}})
         # Simulate a custom field value that arrived as a JSON string (e.g. "99").
         donor = self._make_dev("router-spare", {"default": {"id": "99"}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         stored = winner.custom_field_data["librenms_id"]["default"]["id"]
         assert stored == 99
@@ -1231,11 +1377,10 @@ class TestMergeLibreNMSLinks:
         assert isinstance(summary["host_id_from_donor"], int)
 
     def test_donor_id_demoted_to_oob_when_winner_has_id_and_donor_name_matches_oob_pattern(self):
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         assert winner.custom_field_data["librenms_id"]["default"]["id"] == 42
         assert winner.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 99
@@ -1246,22 +1391,19 @@ class TestMergeLibreNMSLinks:
         """Two distinct donor links cannot be compressed into the winner's one free OOB slot."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99, "oob": {"id": 77, "type": "ilo"}}})
         with pytest.raises(ValueError, match="two distinct LibreNMS links"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
         assert winner.custom_field_data["librenms_id"]["default"] == {"id": 42}
 
     def test_donor_id_demoted_to_oob_generic_when_no_pattern_in_name(self):
         """Donor id is always demoted; type falls back to 'oob' when no keyword in name."""
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("eve-ng-03-spare", {"default": {"id": 99}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         assert winner.custom_field_data["librenms_id"]["default"]["id"] == 42
         assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 99, "type": "oob"}
@@ -1273,11 +1415,10 @@ class TestMergeLibreNMSLinks:
         The blank id is dropped (validated up-front); with no other metadata the inherited oob
         collapses to {} and must not be written — a persisted empty dict reads as an occupied slot.
         """
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("host-win", {"default": {}})
         donor = self._make_dev("host-don", {"default": {"oob": {"id": "  "}}})  # blank id, nothing else
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         entry = winner.custom_field_data["librenms_id"]["default"]
         assert "oob" not in entry, f"empty oob slot persisted: {entry}"
@@ -1290,14 +1431,13 @@ class TestMergeLibreNMSLinks:
         whose host id should demote into the (still-free) oob slot. Before the fix the first merge
         wrote oob={}, which the second merge read as occupied → the second donor id was lost.
         """
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
-        merge_librenms_links(winner, self._make_dev("blank-oob", {"default": {"oob": {"id": " "}}}), "default")
+        _merge_into_winner(winner, self._make_dev("blank-oob", {"default": {"oob": {"id": " "}}}), "default")
         # The blank-only oob left the slot free, not occupied by {}.
         assert "oob" not in winner.custom_field_data["librenms_id"]["default"]
 
-        summary = merge_librenms_links(winner, self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}}), "default")
+        summary = _merge_into_winner(winner, self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}}), "default")
         assert winner.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 99
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
 
@@ -1305,21 +1445,19 @@ class TestMergeLibreNMSLinks:
         # A donor name carrying a generic 'oob' token BEFORE the vendor token (e.g.
         # 'leaf01-oob-idrac9') must demote with the vendor type ('idrac'), matching the import-path
         # normalize_oob_type — not the raw first-match search that would pick the generic 'oob'.
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("leaf01-oob-idrac9", {"default": {"id": 99}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 99, "type": "idrac"}
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
 
     def test_winner_inherits_donor_oob_when_winner_has_none(self):
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 77, "type": "ipmi"}
         assert summary["oob_from_donor"] == {"id": 77, "type": "ipmi"}
@@ -1328,50 +1466,41 @@ class TestMergeLibreNMSLinks:
         """A corrupt donor oob link ({"oob": {"id": "abc"}}) must not be inherited verbatim; the inherit branch coerces the host id and raises on a non-empty invalid value."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": "abc", "type": "ipmi"}}})
         with pytest.raises(ValueError, match="unparseable librenms_id.*oob id"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
     def test_non_dict_donor_oob_shape_fails_closed(self):
         """A corrupt non-dict donor oob (e.g. a list) is corrupted state, not 'no OOB link' — fail closed rather than silently drop it during merge."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("eve-ng-02-old", {"default": {"id": 7, "oob": ["not", "a", "dict"]}})
         with pytest.raises(ValueError, match="unsupported librenms_id.*oob shape"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
     def test_non_dict_winner_oob_shape_fails_closed(self):
         """A corrupt non-dict winner oob (e.g. a string) must fail closed, not be silently overwritten by donor data."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": "garbage"}})
         donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
         with pytest.raises(ValueError, match="unsupported librenms_id.*oob shape"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
     def test_malformed_winner_oob_id_fails_closed(self):
         """A winner oob with a non-blank unparseable id ({"oob": {"id": "abc"}} / {"id": 0}) only passes the shape check, so it would look 'occupied' and skip inheriting the donor's real controller — losing it once the donor is marked migrated. It must fail closed instead."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         for bad_id in ("abc", 0):
             winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": {"id": bad_id, "type": "ipmi"}}})
             donor = self._make_dev("idrac-jhw6nc4", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
             with pytest.raises(ValueError, match="unparseable librenms_id.*oob id"):
-                merge_librenms_links(winner, donor, "default")
+                _merge_into_winner(winner, donor, "default")
 
     def test_blank_winner_oob_id_is_lenient(self):
         """A blank/whitespace winner oob id must NOT fail closed (matches the lenient host-id handling) — the merge proceeds without raising."""
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         # Winner holds a host id and a blank-id oob slot; the donor carries only the SAME host id
         # (a duplicate mapping, not an orphan) so the blank-oob leniency is exercised without
@@ -1379,50 +1508,45 @@ class TestMergeLibreNMSLinks:
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": {"id": "  ", "type": "ipmi"}}})
         donor = self._make_dev("eve-ng-02-dup", {"default": {"id": 42}})
         # Must not raise; the blank winner oob id is treated leniently as "no id".
-        merge_librenms_links(winner, donor, "default")
+        _merge_into_winner(winner, donor, "default")
 
     def test_distinct_donor_host_id_with_winner_holding_both_slots_fails_closed(self):
         """A distinct donor host id with the winner holding both its host and oob slots fails closed."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("eve-ng-02", {"default": {"id": 100, "oob": {"id": 50, "type": "idrac"}}})
         donor = self._make_dev("router-spare", {"default": {"id": 200}})
         with pytest.raises(ValueError, match="already holds both a LibreNMS host id and an OOB link"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
         # The donor's link must be left untouched (nothing captured, no partial mutation of winner).
         assert winner.custom_field_data["librenms_id"]["default"] == {"id": 100, "oob": {"id": 50, "type": "idrac"}}
 
     def test_duplicate_donor_host_id_with_winner_holding_both_slots_is_allowed(self):
         """A donor host id equal to the winner's is a duplicate mapping, not an orphan, so it is allowed."""
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 100, "oob": {"id": 50, "type": "idrac"}}})
         donor = self._make_dev("eve-ng-02-dup", {"default": {"id": 100}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
         # Winner is unchanged (same host id, keeps its own oob); nothing was demoted or dropped.
         assert winner.custom_field_data["librenms_id"]["default"] == {"id": 100, "oob": {"id": 50, "type": "idrac"}}
         assert summary["donor_id_demoted_to_oob"] is None
 
     def test_donor_oob_id_coerced_to_int_on_inherit(self):
         """A numeric-string donor oob id is normalized to int when inherited."""
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": "77", "type": "ipmi"}}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 77, "type": "ipmi"}
         assert summary["oob_from_donor"] == {"id": 77, "type": "ipmi"}
 
     def test_blank_donor_oob_id_is_lenient_and_dropped(self):
         """A blank/whitespace donor oob id ({"oob": {"id": " "}}) must be treated as 'no oob id' (lenient) — the same as a blank host id and an absent oob id — not raise like a non-blank corrupt one."""
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("idrac-x", {"default": {"oob": {"id": "   ", "type": "drac"}}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         inherited = winner.custom_field_data["librenms_id"]["default"]["oob"]
         assert inherited == {"type": "drac"}  # blank id dropped, type preserved
@@ -1435,11 +1559,10 @@ class TestMergeLibreNMSLinks:
         # real controller link. Treating the truthy-but-idless oob as "occupied" used to skip
         # demotion and inherit the useless metadata, silently losing the donor host id once the
         # donor was marked migrated.
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 50}})
         donor = self._make_dev("idrac-host", {"default": {"id": 99, "oob": {"type": "idrac"}}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         oob = winner.custom_field_data["librenms_id"]["default"]["oob"]
         assert oob == {"id": 99, "type": "idrac"}  # host id preserved + type metadata folded in
@@ -1453,19 +1576,16 @@ class TestMergeLibreNMSLinks:
         # demoted/dropped just because the donor also carries a host id.
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("eve-ng-02", {"default": {"id": 50}})
         donor = self._make_dev("idrac-host", {"default": {"id": 99, "oob": {"id": "abc", "type": "idrac"}}})
         with pytest.raises(ValueError, match="unparseable librenms_id.*oob id"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
     def test_winner_oob_never_overwritten(self):
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": {"id": 11, "type": "drac"}}})
         donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
 
         assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 11, "type": "drac"}
         assert summary["oob_from_donor"] is None
@@ -1473,59 +1593,51 @@ class TestMergeLibreNMSLinks:
     def test_legacy_bare_int_raises(self):
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("legacy-winner", 42)
         donor = self._make_dev("idrac-x", {"default": {"id": 99}})
         with pytest.raises(ValueError):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
     def test_malformed_donor_id_raises_clear_error_in_inherit_branch(self):
         """coerce_librenms_id raises ValueError with a clear message for non-numeric donor ids."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("eve-ng-02", {"default": {}})
         donor = self._make_dev("router-spare", {"default": {"id": "not-a-number"}})
         with pytest.raises(ValueError, match="unparseable librenms_id"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
     def test_malformed_per_server_string_id_fails_closed(self):
         """A bare per-server string entry ({server_key: 'abc'}) that can't be parsed must raise, not silently collapse to {} (which would drop/swap link state)."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         # Bad winner string id.
         winner = self._make_dev("eve-ng-02", {"default": "abc"})
         donor = self._make_dev("router-spare", {"default": {"id": 99}})
         with pytest.raises(ValueError, match="unparseable librenms_id"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
         # Bad donor string id.
         winner = self._make_dev("eve-ng-02", {"default": {}})
         donor = self._make_dev("router-spare", {"default": "xyz"})
         with pytest.raises(ValueError, match="unparseable librenms_id"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
     def test_empty_per_server_string_id_is_lenient(self):
         """An empty/whitespace string is treated as 'no id', not a hard error."""
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": "  "})
         donor = self._make_dev("router-spare", {"default": {"id": 99}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
         # Winner had no usable id → inherits donor's host id.
         assert summary["host_id_from_donor"] == 99
 
     def test_blank_dict_form_id_is_lenient(self):
         """A blank/whitespace dict-form id ({"id": " "}) must be treated as 'no id' (lenient), the same as a blank top-level string — not raise like a non-blank corrupt id ('abc')."""
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": "   "}})
         donor = self._make_dev("router-spare", {"default": {"id": 99}})
-        summary = merge_librenms_links(winner, donor, "default")
+        summary = _merge_into_winner(winner, donor, "default")
         # Winner's blank id is "no id" → it inherits the donor's host id rather than raising.
         assert winner.custom_field_data["librenms_id"]["default"]["id"] == 99
         assert summary["host_id_from_donor"] == 99
@@ -1534,66 +1646,57 @@ class TestMergeLibreNMSLinks:
         """Same clear error when demoting donor id into winner's oob slot."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": "bad"}})
         with pytest.raises(ValueError, match="unparseable librenms_id"):
-            merge_librenms_links(winner, donor, "default")
+            _merge_into_winner(winner, donor, "default")
 
     def test_falsy_corrupt_top_level_librenms_id_fails_closed(self):
         """A top-level librenms_id of False/0 must raise, not collapse to {} via `or {}` and merge as 'no mapping'."""
         import pytest
-
-        from netbox_librenms_plugin.utils import merge_librenms_links
 
         for bad in (False, 0):
             # Corrupt winner.
             winner = self._make_dev("eve-ng-02", bad)
             donor = self._make_dev("router-spare", {"default": {"id": 99}})
             with pytest.raises(ValueError, match="legacy bare-integer or corrupt"):
-                merge_librenms_links(winner, donor, "default")
+                _merge_into_winner(winner, donor, "default")
 
             # Corrupt donor.
             winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
             donor = self._make_dev("router-spare", bad)
             with pytest.raises(ValueError, match="legacy bare-integer or corrupt"):
-                merge_librenms_links(winner, donor, "default")
+                _merge_into_winner(winner, donor, "default")
 
     def test_unsupported_winner_entry_shape_fails_closed(self):
         """A non-None winner entry of an unsupported type (bool/float/list) must raise, not collapse to {} (which would let the winner inherit the donor's id)."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         for bad in (True, 1.5, [99], (1, 2)):
             winner = self._make_dev("eve-ng-02", {"default": bad})
             donor = self._make_dev("router-spare", {"default": {"id": 99}})
             with pytest.raises(ValueError, match="unsupported librenms_id"):
-                merge_librenms_links(winner, donor, "default")
+                _merge_into_winner(winner, donor, "default")
 
     def test_unsupported_donor_entry_shape_fails_closed(self):
         """A non-None donor entry of an unsupported type must raise rather than silently becoming {} (dropping the donor's link during merge)."""
         import pytest
 
-        from netbox_librenms_plugin.utils import merge_librenms_links
-
         for bad in (True, 1.5, [99], (1, 2)):
             winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
             donor = self._make_dev("router-spare", {"default": bad})
             with pytest.raises(ValueError, match="unsupported librenms_id"):
-                merge_librenms_links(winner, donor, "default")
+                _merge_into_winner(winner, donor, "default")
 
 
 @pytest.mark.django_db
-class TestMarkLibreNMSMigrated:
-    """Tests for mark_librenms_migrated()."""
+class TestMarkMigrated:
+    """Tests for mark_migrated()."""
 
     def test_clears_id_and_oob_and_writes_marker(self):
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         donor = _dev({"default": {"id": 99, "oob": {"id": 11, "type": "drac"}}})
-        mark_librenms_migrated(donor, winner_pk=42, server_key="default", at="2025-01-01T00:00:00Z")
+        apply_mapping_change(donor, mark_migrated(donor, 42, "default", at="2025-01-01T00:00:00Z"))
 
         entry = donor.custom_field_data["librenms_id"]["default"]
         assert "id" not in entry
@@ -1605,10 +1708,9 @@ class TestMarkLibreNMSMigrated:
         }
 
     def test_default_timestamp_is_iso_z(self):
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         donor = _dev({"default": {"id": 99}})
-        mark_librenms_migrated(donor, winner_pk=42, server_key="default")
+        apply_mapping_change(donor, mark_migrated(donor, 42, "default"))
 
         ts = donor.custom_field_data["librenms_id"]["default"]["_migrated_to"]["at"]
         # Contract: an ISO-8601 UTC string ending in "Z" (tolerate fractional seconds).
@@ -1620,12 +1722,10 @@ class TestMarkLibreNMSMigrated:
     def test_rejects_bool_and_non_positive_winner_pk(self):
         import pytest
 
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
-
         for bad in (True, 0, -1):
             donor = _dev({"default": {"id": 99}})
             with pytest.raises(ValueError):
-                mark_librenms_migrated(donor, winner_pk=bad, server_key="default")
+                apply_mapping_change(donor, mark_migrated(donor, bad, "default"))
 
     def test_fails_closed_on_legacy_or_corrupt_top_level_librenms_id(self):
         """A legacy bare-int/bare-string or corrupt top-level librenms_id must raise, not collapse.
@@ -1635,12 +1735,10 @@ class TestMarkLibreNMSMigrated:
         """
         import pytest
 
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
-
         for legacy in (42, "42", True, [1, 2]):
             donor = _dev(legacy)
             with pytest.raises(ValueError):
-                mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+                apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
             # Untouched: no marker stamped, original value preserved for the caller to migrate.
             assert donor.custom_field_data["librenms_id"] == legacy
 
@@ -1650,31 +1748,28 @@ class TestMarkLibreNMSMigrated:
         The top-level guard rejects a corrupt librenms_id, but a per-server value such as
         ``{"default": True}`` / ``{"default": ["bad"]}`` was previously collapsed to ``{}`` and
         stamped migrated — hiding the malformed donor state behind ``_migrated_to``. Mirror the
-        per-entry validation from merge_librenms_links() and fail closed instead.
+        per-entry validation from _merge_into_winner() and fail closed instead.
         """
         import pytest
-
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for corrupt in (True, ["bad"], 3.5, "notanid"):
             donor = _dev({"default": corrupt})
             with pytest.raises(ValueError):
-                mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+                apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
             # The raise happens before any mutation: no marker stamped, entry untouched.
             assert donor.custom_field_data["librenms_id"] == {"default": corrupt}
 
     def test_blank_or_numeric_string_per_server_entry_does_not_raise(self):
         """A blank string is "no link" (collapse to {}); a numeric string is a valid id — neither raises."""
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         # Blank string → no recoverable link → collapses to {} and stamps the marker (no raise).
         donor = _dev({"default": ""})
-        mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
+        apply_mapping_change(donor, mark_migrated(donor, 99, "default", at="2025-01-01T00:00:00Z"))
         assert donor.custom_field_data["librenms_id"]["default"]["_migrated_to"]["device_id"] == 99
 
         # Numeric string → a real id → also valid, marker stamped, id cleared.
         donor2 = _dev({"default": "77"})
-        mark_librenms_migrated(donor2, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
+        apply_mapping_change(donor2, mark_migrated(donor2, 99, "default", at="2025-01-01T00:00:00Z"))
         entry = donor2.custom_field_data["librenms_id"]["default"]
         assert "id" not in entry
         assert entry["_migrated_to"]["device_id"] == 99
@@ -1683,22 +1778,19 @@ class TestMarkLibreNMSMigrated:
         """A dict entry with a non-dict oob, or an oob with a non-blank unparseable id, must raise."""
         import pytest
 
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
-
         for corrupt_oob in ("garbage", ["bad"], 7, {"id": "abc"}):
             donor = _dev({"default": {"oob": corrupt_oob}})
             with pytest.raises(ValueError):
-                mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+                apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
             # The raise happens before any mutation: no marker stamped, oob preserved to migrate first.
             assert donor.custom_field_data["librenms_id"]["default"] == {"oob": corrupt_oob}
 
     def test_valid_or_blank_nested_oob_does_not_raise(self):
         """A well-formed oob (numeric/blank id, or empty dict) is popped and the marker is stamped."""
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for ok_oob in ({"id": 55}, {"id": "55"}, {"id": ""}, {}):
             donor = _dev({"default": {"oob": ok_oob}})
-            mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
+            apply_mapping_change(donor, mark_migrated(donor, 99, "default", at="2025-01-01T00:00:00Z"))
             entry = donor.custom_field_data["librenms_id"]["default"]
             assert "oob" not in entry
             assert entry["_migrated_to"]["device_id"] == 99
@@ -1712,22 +1804,19 @@ class TestMarkLibreNMSMigrated:
         """
         import pytest
 
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
-
         for corrupt_id in ("abc", 0, True):
             donor = _dev({"default": {"id": corrupt_id}})
             with pytest.raises(ValueError):
-                mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+                apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
             # The raise happens before any mutation: no marker stamped, id preserved to migrate first.
             assert donor.custom_field_data["librenms_id"]["default"] == {"id": corrupt_id}
 
     def test_valid_or_blank_dict_host_id_does_not_raise(self):
         """A dict entry with a numeric/blank/absent id is popped and the marker stamped (no raise)."""
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         for ok_id in ({"id": 55}, {"id": "55"}, {"id": ""}, {"id": None}, {}):
             donor = _dev({"default": dict(ok_id)})
-            mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
+            apply_mapping_change(donor, mark_migrated(donor, 99, "default", at="2025-01-01T00:00:00Z"))
             entry = donor.custom_field_data["librenms_id"]["default"]
             assert "id" not in entry
             assert entry["_migrated_to"]["device_id"] == 99
@@ -1735,10 +1824,9 @@ class TestMarkLibreNMSMigrated:
     @pytest.mark.django_db
     def test_after_marker_find_by_librenms_id_no_longer_matches(self):
         """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned by find_by_librenms_id, queried against the REAL Device model."""
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         donor = _dev({"default": {"id": 99}})
-        mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+        apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
         donor.save()
         donor.refresh_from_db()
 
@@ -1756,7 +1844,7 @@ class TestNormalizeMergeEntry:
 
     @staticmethod
     def _norm(entry, *, copy=True, owner="winner"):
-        from netbox_librenms_plugin.utils import _normalize_merge_entry
+        from netbox_librenms_plugin.server_mappings import _normalize_merge_entry
 
         return _normalize_merge_entry(entry, owner_label=owner, owner_name="X", server_key="default", copy_dict=copy)
 

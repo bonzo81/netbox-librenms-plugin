@@ -204,11 +204,11 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
     from django.db.models import Model
 
-    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     if not isinstance(device.custom_field_data, dict):
         device.custom_field_data = {}
-    set_librenms_device_id(device, librenms_id, server_key)
+    seed_own_mapping(device, librenms_id, server_key)
     device.save(update_fields=["custom_field_data"])
     if isinstance(device, Model):
         # cf is a cached_property over the APPLICABLE custom fields. Drop the cached value so the
@@ -218,12 +218,12 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
     else:
         # A stub caller has no cached_property to invalidate, so give it the written mapping.
         device.cf = device.custom_field_data
-    # set_librenms_device_id() only logs and returns when it refuses a write (legacy bare
+    # assign_own() only logs and skips when it refuses a write (legacy bare
     # integer, non-positive id), which would leave the payload claiming a mapping the device
     # does not have; every caller would then fail on the production staleness guard instead.
     stored = read_mapping(device).own_id(server_key)
     assert stored == librenms_id, (
-        f"set_librenms_device_id declined the write (stored {stored!r}, wanted {librenms_id!r}); "
+        f"assign_own declined the write (stored {stored!r}, wanted {librenms_id!r}); "
         "the payload fingerprint would not match the device mapping"
     )
     return {

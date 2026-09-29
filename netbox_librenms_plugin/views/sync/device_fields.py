@@ -17,25 +17,23 @@ from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.server_mappings import (
-    PREFERRED_SERVER_FIELD,
     AmbiguousLibreNMSIdError,
     ContainerStatus,
-    MappingRole,
-    decode_stored_mapping,
-    find_mapping,
+    IdentityOwned,
+    convert_legacy,
+    get_librenms_sync_device,
+    persist_mapping,
     read_mapping,
+    release_server,
     require_server_key,
-    with_preferred_server,
-    without_server_mapping,
+    set_preference,
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
     find_matching_platform,
-    get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
-    migrate_legacy_librenms_id,
     normalize_serial,
     resolve_naming_preferences,
     validation_error_detail,
@@ -909,6 +907,12 @@ def _has_removable_mapping(mapping, server_key):
     return mapping.server(server_key) is not None or (server_key == "default" and mapping.legacy.is_legacy)
 
 
+def _save_mapping_fields(row, fields):
+    """Validate only the mapping storage that *fields* names, then save only it: other fields may be invalid."""
+    row.clean_fields(exclude={field.name for field in row._meta.fields if field.name not in fields})
+    row.save(update_fields=[*fields, "last_updated"])
+
+
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
 
@@ -986,18 +990,15 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             if _has_removable_mapping(read_mapping(obj_locked), server_key) and not _is_protected:
                 obj_locked.snapshot()
                 # A legacy value has no server entry, so removing it leaves an empty mapping.
-                cf = without_server_mapping(obj_locked.custom_field_data.get("librenms_id"), server_key)
-                obj_locked.custom_field_data["librenms_id"] = cf
-                # The count reads the edited object, so a preference for the removed server goes.
-                usable_count = sum(mapping.is_selectable for mapping in build_server_mappings(obj_locked))
+                change = release_server(obj_locked, server_key, clear_preference=False)
+                # The count reads the mapping after the removal, so a preference for the removed server goes.
+                usable_count = sum(
+                    mapping.is_selectable for mapping in build_server_mappings(obj_locked, mapping=change.after)
+                )
                 if usable_count <= 1:
-                    cf.pop(PREFERRED_SERVER_FIELD, None)
-                obj_locked.custom_field_data["librenms_id"] = cf if decode_stored_mapping(cf).servers else None
+                    change = release_server(obj_locked, server_key, clear_preference=True)
                 try:
-                    obj_locked.clean_fields(
-                        exclude={field.name for field in obj_locked._meta.fields if field.name != "custom_field_data"}
-                    )
-                    obj_locked.save(update_fields=["custom_field_data", "last_updated"])
+                    persist_mapping(obj_locked, change, write=_save_mapping_fields)
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     logger.exception(
@@ -1058,7 +1059,6 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 self.restricted_queryset(model, "change").select_for_update(of=("self",)),
                 pk=pk,
             )
-            raw_mapping = owner.custom_field_data.get("librenms_id")
             mappings = build_server_mappings(owner)
             selectable_keys = {mapping.server_key for mapping in mappings if mapping.is_selectable}
             active_server_key = submitted_active_key if submitted_active_key in selectable_keys else None
@@ -1070,12 +1070,8 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
             owner.snapshot()
-            owner.custom_field_data["librenms_id"] = with_preferred_server(raw_mapping, requested_key)
             try:
-                owner.clean_fields(
-                    exclude={field.name for field in owner._meta.fields if field.name != "custom_field_data"}
-                )
-                owner.save(update_fields=["custom_field_data", "last_updated"])
+                persist_mapping(owner, set_preference(owner, requested_key), write=_save_mapping_fields)
             except ValidationError as exc:
                 transaction.set_rollback(True)
                 logger.warning(
@@ -1151,8 +1147,8 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         model, obj = self._get_model_and_object(object_type, pk)
         # Rebind the API client to the POST-scoped server before any lookup/migration so the
-        # legacy-ID conversion is verified (get_device_info), conflict-checked
-        # (find_mapping) and written (migrate_legacy_librenms_id) under the same server
+        # legacy-ID conversion is verified (get_device_info), conflict-checked and written
+        # (convert_legacy and its persistence) under the same server
         # namespace the user is acting on — otherwise a multi-server page could check server A
         # while redirecting back to server B and write the mapping under the wrong key.
         server_key = self.rebind_api_for_posted_server(request.POST)
@@ -1201,26 +1197,11 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             locked_serial = (getattr(locked, "serial", None) or "").strip()
             if locked_id != librenms_id or locked_serial != netbox_serial:
                 raise _WriteRefused("Device data changed before lock was acquired; aborting conversion.")
-            # Check that no other object already owns this ID (server-scoped or legacy)
-            try:
-                match = find_mapping(
-                    model.objects.all(),
-                    server=server_key,
-                    identity=librenms_id,
-                    roles=(MappingRole.OWN, MappingRole.OOB),
-                )
-            except AmbiguousLibreNMSIdError:
-                raise _WriteRefused(
-                    f"librenms_id {librenms_id} is ambiguous — it matches more than one "
-                    f"{model.__name__}; cannot convert. Resolve the duplicate assignment first."
-                ) from None
-            if match is not None and match.pk != locked.pk:
-                raise _WriteRefused(
-                    f"Another {model.__name__} already has librenms_id {librenms_id} "
-                    f"for server '{server_key}'; cannot convert."
-                )
-            if not migrate_legacy_librenms_id(locked, server_key):
+            change = convert_legacy(locked, server_key)
+            if not change.changed:
                 raise _WriteRefused("librenms_id is already in the server-scoped JSON format.", messages.WARNING)
+            # The save claims the ID and reads its owners on both models.
+            return change
 
         try:
             update_existing_row(self.restricted_queryset(model, "change").filter(pk=pk), convert)
@@ -1229,6 +1210,20 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return self._sync_url(object_type, pk)
         except _WriteRefused as exc:
             messages.add_message(request, exc.level, str(exc))
+            return self._sync_url(object_type, pk)
+        except IdentityOwned as exc:
+            messages.error(
+                request,
+                f"Another {type(exc.owner).__name__} already has librenms_id {librenms_id} "
+                f"for server '{server_key}'; cannot convert.",
+            )
+            return self._sync_url(object_type, pk)
+        except AmbiguousLibreNMSIdError:
+            messages.error(
+                request,
+                f"librenms_id {librenms_id} is ambiguous — it matches more than one object; "
+                "cannot convert. Resolve the duplicate assignment first.",
+            )
             return self._sync_url(object_type, pk)
         except ValidationError as exc:
             if classify_conflict(exc):
