@@ -7442,6 +7442,32 @@ class TestMappingChangeScope:
 
     @transactional_db_with_all_apps()
     @pytest.mark.parametrize("kind", ["device_type", "platform"])
+    def test_a_lock_conflict_on_the_mapping_row_gives_the_try_again_answer(self, kind, client, caplog):
+        """Another session holds the mapping row, so the locked write meets a real 55P03 that the middleware answers."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+
+        case = self._concurrent_mapping_case(kind, f"locked-mapping-{kind}".replace("_", "-"), ["add", "change"])
+        row = case.model.objects.create(**case.key, **{case.field: case.other})
+        client.force_login(case.user)
+        url = reverse(f"plugins:netbox_librenms_plugin:add_{kind}_mapping", kwargs={"device_id": case.device_id})
+
+        with second_connection() as other:
+            lock_row(other, case.model, row.pk)
+            with lock_timeout(200), caplog.at_level("ERROR"):
+                response = client.post(url, {"server_key": self.server_key, **case.data}, HTTP_HX_REQUEST="true")
+
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert TRY_AGAIN_MESSAGE in response.content.decode()
+        row.refresh_from_db()
+        assert getattr(row, f"{case.field}_id") == case.other.pk
+        assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == []
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("kind", ["device_type", "platform"])
     @pytest.mark.parametrize("statement, occurrence", [("SELECT", 3), ("INSERT", 1)], ids=["unique-check", "insert"])
     def test_a_mapping_created_just_before_the_insert_asks_to_try_again(self, kind, statement, occurrence):
         """The row appears after the helper's own read: before the unique check, or between that check and the INSERT."""

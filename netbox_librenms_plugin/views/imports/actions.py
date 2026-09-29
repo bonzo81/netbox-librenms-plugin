@@ -367,6 +367,31 @@ _MAPPING_CREATED_CONCURRENTLY = "Mapping was created concurrently. Please try ag
 
 def _write_mapping_in_scope(view, model, lookup, duplicate_message, *, field, target, existing_mapping, create):
     """
+    Run ``_write_mapping_rows`` in one atomic block, and return its error answer, or None.
+
+    A lock conflict propagates, so the lock-conflict middleware gives the "try again" answer.
+    """
+    try:
+        with transaction.atomic():
+            return _write_mapping_rows(
+                view,
+                model,
+                lookup,
+                duplicate_message,
+                field=field,
+                target=target,
+                existing_mapping=existing_mapping,
+                create=create,
+            )
+    except (ValidationError, IntegrityError) as exc:
+        if classify_conflict(exc):
+            raise
+        logger.exception("%s: failed to save mapping: %s", type(view).__name__, exc)
+        return _htmx_error_response("Error saving mapping. Please try again.")
+
+
+def _write_mapping_rows(view, model, lookup, duplicate_message, *, field, target, existing_mapping, create):
+    """
     Point the one mapping of *lookup* at *target*, or create it with ``create()`` when it does not exist.
 
     Shared by the device-type and platform mapping views so the permission guarantee cannot drift
@@ -2534,25 +2559,20 @@ class AddDeviceTypeMappingView(
         except DeviceType.DoesNotExist:
             return _htmx_error_response("Selected device type not found.")
 
-        try:
-            with transaction.atomic():
-                # Key on the NORMALISED hardware string (mapping_hardware), as the upfront read does.
-                if error := _write_mapping_in_scope(
-                    self,
-                    DeviceTypeMapping,
-                    {"librenms_hardware__iexact": mapping_hardware},
-                    "Multiple mappings exist for this hardware string. Remove duplicates before updating.",
-                    field="netbox_device_type",
-                    target=device_type,
-                    existing_mapping=existing_mapping,
-                    create=lambda: DeviceTypeMapping.objects.create(
-                        librenms_hardware=mapping_hardware.lower(), netbox_device_type=device_type
-                    ),
-                ):
-                    return error
-        except Exception as exc:
-            logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
-            return _htmx_error_response("Error saving mapping. Please try again.")
+        # Key on the NORMALISED hardware string (mapping_hardware), as the upfront read does.
+        if error := _write_mapping_in_scope(
+            self,
+            DeviceTypeMapping,
+            {"librenms_hardware__iexact": mapping_hardware},
+            "Multiple mappings exist for this hardware string. Remove duplicates before updating.",
+            field="netbox_device_type",
+            target=device_type,
+            existing_mapping=existing_mapping,
+            create=lambda: DeviceTypeMapping.objects.create(
+                librenms_hardware=mapping_hardware.lower(), netbox_device_type=device_type
+            ),
+        ):
+            return error
 
         # Repopulate (rather than clear) the cache with the LibreNMS device we already fetched
         # at the top of this request. Re-validation reads the new mapping from the NetBox DB, so
@@ -4229,24 +4249,17 @@ class AddPlatformMappingView(
         except Platform.DoesNotExist:
             return _htmx_error_response("Selected platform not found.")
 
-        try:
-            with transaction.atomic():
-                if error := _write_mapping_in_scope(
-                    self,
-                    PlatformMapping,
-                    {"librenms_os__iexact": librenms_os},
-                    "Multiple mappings exist for this OS string. Remove duplicates before updating.",
-                    field="netbox_platform",
-                    target=platform,
-                    existing_mapping=existing_mapping,
-                    create=lambda: PlatformMapping.objects.create(
-                        librenms_os=librenms_os.lower(), netbox_platform=platform
-                    ),
-                ):
-                    return error
-        except Exception as exc:
-            logger.exception("AddPlatformMappingView: failed to save mapping: %s", exc)
-            return _htmx_error_response("Error saving mapping. Please try again.")
+        if error := _write_mapping_in_scope(
+            self,
+            PlatformMapping,
+            {"librenms_os__iexact": librenms_os},
+            "Multiple mappings exist for this OS string. Remove duplicates before updating.",
+            field="netbox_platform",
+            target=platform,
+            existing_mapping=existing_mapping,
+            create=lambda: PlatformMapping.objects.create(librenms_os=librenms_os.lower(), netbox_platform=platform),
+        ):
+            return error
 
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)
