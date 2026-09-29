@@ -3496,14 +3496,16 @@ def test_module_validation_details_are_plain_text(details, expected):
     assert _module_write_failure(ValidationError(details), Module, user) == expected
 
 
-def test_module_database_conflict_details_are_preserved():
+def test_module_database_conflicts_use_safe_error_text():
     from django.db import IntegrityError
     from dcim.models import Module
     from django.contrib.auth import get_user_model
     from netbox_librenms_plugin.views.sync.modules import _module_write_failure
 
     user = get_user_model()(is_superuser=True, is_active=True)
-    assert _module_write_failure(IntegrityError("Duplicate module."), Module, user) == "Duplicate module."
+    assert _module_write_failure(IntegrityError("Duplicate module."), Module, user) == (
+        "A database constraint rejected the change. Refresh the data and try again."
+    )
 
 
 @pytest.mark.django_db
