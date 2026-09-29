@@ -6,8 +6,6 @@ import pytest
 from django.contrib.auth import get_user
 from django.contrib.messages import get_messages
 from django.urls import reverse
-from ipam.models import VRF, IPAddress
-from tenancy.models import Tenant
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser, make_vm
@@ -117,6 +115,8 @@ class TestTheCreateAffordance:
         ],
     )
     def test_a_matching_vrf_is_suggested_instead(self, client, seeded, existing):
+        from ipam.models import VRF
+
         vrf = VRF.objects.create(**existing)
         owner = seeded(f"vrf-match-{existing['name']}")
 
@@ -126,6 +126,9 @@ class TestTheCreateAffordance:
         assert all(_selected_vrf(rows[row_id], vrf) for row_id in RD_ROWS)
 
     def test_a_name_two_vrfs_share_offers_nothing(self, client, seeded):
+        from ipam.models import VRF
+        from tenancy.models import Tenant
+
         for index in (1, 2):
             tenant = Tenant.objects.create(name=f"VRF create tenant {index}", slug=f"vrf-create-tenant-{index}")
             VRF.objects.create(name=NO_RD_VRF, tenant=tenant)
@@ -137,6 +140,8 @@ class TestTheCreateAffordance:
         assert "mdi-lightbulb-on-outline" not in rows[NO_RD_ROW]
 
     def test_an_address_netbox_holds_offers_nothing(self, client, seeded):
+        from ipam.models import IPAddress
+
         IPAddress.objects.create(address=RD_ROWS[0], status="active")
         owner = seeded("vrf-held-address")
 
@@ -151,6 +156,7 @@ class TestVRFVisibility:
 
     def _constrained_client(self, client, name):
         from dcim.models import Device
+        from ipam.models import VRF
 
         user = make_user_with_perms(f"{name}-user", [("view", Device)])
         client.force_login(grant(user, "view", VRF, constraints={"name": "Visible VRF"}))
@@ -160,6 +166,8 @@ class TestVRFVisibility:
         "hidden", [pytest.param({"rd": RD_VRF[1]}, id="rd"), pytest.param({"rd": None}, id="name")]
     )
     def test_a_hidden_matching_vrf_is_not_listed_suggested_or_named_and_blocks_create(self, client, seeded, hidden):
+        from ipam.models import VRF
+
         visible = VRF.objects.create(name="Visible VRF")
         secret = VRF.objects.create(name=RD_VRF[0] if hidden["rd"] is None else "Secret VRF", rd=hidden["rd"])
         owner = seeded(f"vrf-hidden-{hidden['rd']}")
@@ -174,6 +182,8 @@ class TestVRFVisibility:
         assert not _offers_create(row)
 
     def test_a_create_blocked_by_a_hidden_vrf_is_refused_without_naming_it(self, client, seeded):
+        from ipam.models import VRF
+
         VRF.objects.create(name="Secret VRF", rd=RD_VRF[1])
         owner = seeded("vrf-hidden-post")
         client = self._constrained_client(client, "vrf-hidden-post")
@@ -186,6 +196,8 @@ class TestVRFVisibility:
         assert len(refusals) == 1 and "Secret VRF" not in refusals[0]
 
     def test_a_viewable_matching_vrf_is_still_suggested(self, client, seeded):
+        from ipam.models import VRF
+
         visible = VRF.objects.create(name="Visible VRF", rd=RD_VRF[1])
         owner = seeded("vrf-visible-match")
 
@@ -199,6 +211,7 @@ class TestCreate:
 
     def test_the_vrf_is_created_with_its_rd_and_every_row_on_it_preselects_it(self, client, seeded):
         from core.models import ObjectChange
+        from ipam.models import IPAddress, VRF
 
         owner = seeded("vrf-create-rd")
         client = _superuser_client(client)
@@ -219,6 +232,7 @@ class TestCreate:
     def test_the_create_holds_the_vrf_name_lock_until_the_transaction_ends(self, client, seeded):
         """Read from pg_locks: the test transaction stays open, so the create's advisory lock is still held."""
         from django.db import connection
+        from ipam.models import VRF
 
         from netbox_librenms_plugin.utils import advisory_lock_key
         from netbox_librenms_plugin.views.sync.ip_addresses import vrf_create_lock_identity
@@ -238,6 +252,8 @@ class TestCreate:
             assert cursor.fetchone()[0] == 1
 
     def test_a_vrf_without_an_rd_is_created_with_none_and_matches_by_name(self, client, seeded):
+        from ipam.models import VRF
+
         owner = seeded("vrf-create-no-rd")
         client = _superuser_client(client)
 
@@ -248,6 +264,8 @@ class TestCreate:
         assert _selected_vrf(_rows(client, owner)[NO_RD_ROW], vrf)
 
     def test_a_virtual_machine_page_creates_the_vrf(self, client, seeded):
+        from ipam.models import VRF
+
         owner = seeded("vrf-create-vm", object_type="virtualmachine")
         client = _superuser_client(client)
 
@@ -266,6 +284,8 @@ class TestRefusals:
     )
     def test_a_vrf_created_after_the_row_was_derived_is_refused_not_adopted(self, client, seeded, monkeypatch, rival):
         """The existence check inside the transaction; the lock that serializes it is pinned separately."""
+        from ipam.models import VRF
+
         from netbox_librenms_plugin.views.sync.ip_addresses import CreateVRFFromIPRowView
 
         owner = seeded(f"vrf-late-{rival['name']}")
@@ -290,6 +310,8 @@ class TestRefusals:
         ids=["untagged-row", "row-not-in-snapshot", "invalid"],
     )
     def test_a_row_without_the_action_is_refused(self, client, seeded, row_id):
+        from ipam.models import VRF
+
         owner = seeded(f"vrf-no-action-{row_id}")
 
         response = _create(_superuser_client(client), owner, row_id)
@@ -298,6 +320,8 @@ class TestRefusals:
         assert len(_messages(response, "danger")) == 1
 
     def test_a_row_whose_vrf_now_exists_is_refused_by_the_rederived_rule(self, client, seeded):
+        from ipam.models import VRF
+
         owner = seeded("vrf-exists-now")
         VRF.objects.create(name=RD_VRF[0])
 
@@ -308,6 +332,7 @@ class TestRefusals:
 
     def test_missing_add_vrf_permission_is_refused(self, client, seeded):
         from dcim.models import Device
+        from ipam.models import VRF
 
         owner = seeded("vrf-no-add")
         client.force_login(make_user_with_perms("vrf-no-add-user", [("view", Device)]))
@@ -319,6 +344,7 @@ class TestRefusals:
 
     def test_a_constrained_add_grant_rolls_the_create_back(self, client, seeded):
         from dcim.models import Device
+        from ipam.models import VRF
 
         owner = seeded("vrf-constrained")
         user = make_user_with_perms("vrf-constrained-user", [("view", Device)])
@@ -331,6 +357,8 @@ class TestRefusals:
         assert len(_messages(response, "danger")) == 1
 
     def test_a_migrated_donor_is_refused(self, client, seeded):
+        from ipam.models import VRF
+
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         owner = seeded("vrf-migrated")

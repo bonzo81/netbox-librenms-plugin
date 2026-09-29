@@ -19,6 +19,7 @@ import time
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     configured_server_key,
     make_device,
     make_interface,
@@ -26,9 +27,6 @@ from netbox_librenms_plugin.tests.conftest import (
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
-
-# The port keys an interface write needs, for rows whose test does not care about their values.
-_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 
 def _ports_payload(*ports):

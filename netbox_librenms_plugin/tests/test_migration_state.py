@@ -389,3 +389,40 @@ def test_the_seeded_ignore_rules_are_present_before_a_test_body_runs():
     from netbox_librenms_plugin.models import InventoryIgnoreRule
 
     assert InventoryIgnoreRule.objects.count() == _seeded_ignore_rule_count()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "librenms_type, netbox_type, error",
+    [
+        ("legacy-test", "", "empty NetBox type"),
+        ("", "1000base-t", "empty LibreNMS type"),
+        ("legacy-test", "1000base-t", None),
+    ],
+)
+def test_interface_rules_validate_legacy_output_before_schema_changes(librenms_type, netbox_type, error):
+    from django.db import connection, migrations
+    from django.db.migrations.loader import MigrationLoader
+
+    loader = MigrationLoader(connection)
+    state = loader.project_state(("netbox_librenms_plugin", "0021_widen_linux_bridge_pattern"))
+    model = state.apps.get_model("netbox_librenms_plugin", "InterfaceTypeMapping")
+    model._meta.db_table = "test_legacy_interface_type_mapping"
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0022_interface_rules")
+    operation = module.Migration.operations[0]
+    assert isinstance(operation, migrations.RunPython)
+    with connection.schema_editor() as editor:
+        editor.create_model(model)
+    try:
+        row = model.objects.create(librenms_type=librenms_type, netbox_type=netbox_type)
+        with connection.schema_editor() as editor:
+            if error:
+                with pytest.raises(RuntimeError, match=error):
+                    operation.code(state.apps, editor)
+            else:
+                operation.code(state.apps, editor)
+        row.refresh_from_db()
+        assert row.netbox_type == netbox_type
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(model)

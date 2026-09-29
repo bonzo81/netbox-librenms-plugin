@@ -2820,9 +2820,11 @@ class BaseCableTableView(
         ]
         if not rows:
             return
+        rules = interface_rules_for_request(self.request)
+        if not rules.ignores_any_port:
+            return
         owner_ids = {port_owner_id(link, side) for link, ports in rows for side, *_ in ports}
         owners = Device.objects.in_bulk(owner_ids - {None})
-        rules = interface_rules_for_request(self.request)
         decided = [
             (link, [(port_id, record, owners.get(port_owner_id(link, side))) for side, port_id, record in ports])
             for link, ports in rows

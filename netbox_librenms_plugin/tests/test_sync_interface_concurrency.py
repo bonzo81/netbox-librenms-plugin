@@ -8,13 +8,12 @@ import pytest
 from django.apps import apps
 
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     configure_default_librenms_server,
     configured_server_key,
     make_virtual_chassis_members,
 )
 
-# The port keys an interface write needs, for rows whose test does not care about their values.
-_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 # Window a competing thread must NOT get through while the row lock is held. A negative wait
 # proves only that nothing happened inside it, so keep the four sites on one name and raise it

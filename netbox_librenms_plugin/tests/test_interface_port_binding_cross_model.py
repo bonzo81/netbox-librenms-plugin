@@ -9,6 +9,7 @@ from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     configure_default_librenms_server,
     make_cluster,
     make_device,
@@ -24,8 +25,6 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-# The port keys an interface write needs, for rows whose test does not care about their values.
-_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 SERVER_KEY = "default"
 PORT = 9301

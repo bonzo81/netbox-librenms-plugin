@@ -2,12 +2,16 @@
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision, typed_maps
+from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
+    make_device,
+    make_interface,
+    stamp_rule_decision,
+    typed_maps,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
 from netbox_librenms_plugin.utils import _get_netbox_version_tuple, normalize_relationship_maps
 
-# The port keys an interface write needs, for rows whose test does not care about their values.
-_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 pytestmark = pytest.mark.django_db
 

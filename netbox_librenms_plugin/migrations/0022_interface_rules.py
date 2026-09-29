@@ -4,6 +4,22 @@ from django.db import migrations, models
 RULE_EXISTS = "A rule with the same platform, LibreNMS type, name pattern and speed already exists."
 
 
+def validate_legacy_mappings(apps, schema_editor):
+    """Stop before schema changes when an existing mapping lacks a type or selector."""
+    mappings = apps.get_model("netbox_librenms_plugin", "InterfaceTypeMapping")
+    if mappings.objects.using(schema_editor.connection.alias).filter(netbox_type="").exists():
+        raise RuntimeError(
+            "Interface type mappings contain an empty NetBox type. "
+            "Set a valid type or remove each invalid mapping before retrying the migration."
+        )
+
+    if mappings.objects.using(schema_editor.connection.alias).filter(librenms_type="").exists():
+        raise RuntimeError(
+            "Interface type mappings contain an empty LibreNMS type. "
+            "Set a valid type or remove each invalid mapping before retrying the migration."
+        )
+
+
 class Migration(migrations.Migration):
     """Turn interface type mappings into interface rules; existing rows become global Set type rules."""
 
@@ -14,7 +30,7 @@ class Migration(migrations.Migration):
 
     operations = [
         # No reverse: it would turn platform- and pattern-scoped rules into global ones.
-        migrations.RunPython(migrations.RunPython.noop, reverse_code=None),
+        migrations.RunPython(validate_legacy_mappings, reverse_code=None),
         migrations.RemoveConstraint(
             model_name="interfacetypemapping",
             name="unique_interface_type_mapping",

@@ -13,6 +13,7 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_interface_by_port_id,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     configure_default_librenms_server,
     make_device,
     make_interface,
@@ -31,8 +32,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     post as _post,
 )
 
-# The port keys an interface write needs, for rows whose test does not care about their values.
-_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
 pytestmark = pytest.mark.django_db

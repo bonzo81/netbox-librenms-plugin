@@ -421,7 +421,7 @@ def test_a_source_port_bound_on_a_hidden_member_is_not_named(live_librenms):
     assert target.ip_addresses.count() == 0
 
 
-def _ip_render_queries(client, tag, count, first_port):
+def _ip_render_queries(client, tag, count, first_port, *, blocked=True):
     """Seed *count* rows that a global rule refuses, render the IP tab from its cache, and count queries."""
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -441,7 +441,7 @@ def _ip_render_queries(client, tag, count, first_port):
     with CaptureQueriesContext(connection) as queries:
         response = client.get(url, {"server_key": SERVER_KEY})
     assert response.status_code == 200
-    assert unescape(response.content.decode()).count("Not synced: LibreNMS port") == count
+    assert unescape(response.content.decode()).count("Not synced: LibreNMS port") == (count if blocked else 0)
     # NetBox reloads its config revision on its own schedule; that is not part of the table.
     return sum("core_configrevision" not in query["sql"] for query in queries.captured_queries)
 
@@ -466,7 +466,6 @@ def test_the_ip_table_decides_blocking_rows_in_a_fixed_number_of_queries(live_li
     two = _ip_render_queries(client, "ip-assign-queries-2", 2, 7500)
     twenty = _ip_render_queries(client, "ip-assign-queries-20", 20, 7600)
 
-    print(f"IP table queries: N=2 -> {two}, N=20 -> {twenty}")
     assert twenty == two
 
 
@@ -516,3 +515,28 @@ def test_a_missing_port_record_refuses_only_when_an_ignore_rule_could_apply(clie
     else:
         assert "Refresh needed" not in cell
         assert created.assigned_object == eth
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("set_type_rule", [False, True])
+def test_ip_render_skips_disclosure_queries_without_ignore_rules(client, settings, librenms_server, set_type_rule):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server
+
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    InterfaceTypeMapping.objects.all().delete()
+    if set_type_rule:
+        InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
+    client.force_login(make_superuser("ip-no-ignore-user"))
+
+    with CaptureQueriesContext(connection) as queries:
+        _ip_render_queries(client, "ip-no-ignore", 2, 8100, blocked=False)
+
+    scans = [
+        query["sql"]
+        for query in queries.captured_queries
+        if 'FROM "virtualization_vminterface"' in query["sql"] and " ~ " in query["sql"]
+    ]
+    assert scans == []

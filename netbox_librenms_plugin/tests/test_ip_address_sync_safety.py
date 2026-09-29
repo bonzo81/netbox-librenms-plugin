@@ -23,6 +23,7 @@ from ipam.models import IPAddress, VRF
 from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     make_device,
     make_interface,
     make_ip,
@@ -31,9 +32,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
-
-# The port keys an interface write needs, for rows whose test does not care about their values.
-_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 
 @pytest.mark.django_db

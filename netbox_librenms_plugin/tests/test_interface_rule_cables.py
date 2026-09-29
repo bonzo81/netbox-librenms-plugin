@@ -344,7 +344,7 @@ def test_the_advertised_port_of_a_neighbour_the_caller_cannot_see_is_not_named(l
         assert secret not in response.content.decode()
 
 
-def _cable_render_queries(client, tag, count, first_port):
+def _cable_render_queries(client, tag, count, first_port, *, blocked=True):
     """Seed *count* rows whose local port a global rule refuses, render the cable tab, and count queries."""
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -371,7 +371,7 @@ def _cable_render_queries(client, tag, count, first_port):
     with CaptureQueriesContext(connection) as queries:
         response = client.get(url, {"server_key": SERVER_KEY})
     assert response.status_code == 200
-    assert unescape(response.content.decode()).count("Not synced: LibreNMS port") == count
+    assert unescape(response.content.decode()).count("Not synced: LibreNMS port") == (count if blocked else 0)
     # NetBox reloads its config revision on its own schedule; that is not part of the table.
     return sum("core_configrevision" not in query["sql"] for query in queries.captured_queries)
 
@@ -646,3 +646,28 @@ def test_the_far_end_create_is_not_offered_when_the_local_port_is_ignored(client
     assert "Create the remote interface" not in html
     assert offer.status_code == 409
     assert f"LibreNMS port 100 (Te1/1): ignored by interface rule {rule.pk}" in offer.content.decode()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("set_type_rule", [False, True])
+def test_cable_render_skips_disclosure_queries_without_ignore_rules(client, settings, librenms_server, set_type_rule):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server
+
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    InterfaceTypeMapping.objects.all().delete()
+    if set_type_rule:
+        InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
+    client.force_login(make_superuser("cable-no-ignore-user"))
+
+    with CaptureQueriesContext(connection) as queries:
+        _cable_render_queries(client, "cable-no-ignore", 2, 8100, blocked=False)
+
+    scans = [
+        query["sql"]
+        for query in queries.captured_queries
+        if 'FROM "virtualization_vminterface"' in query["sql"] and " ~ " in query["sql"]
+    ]
+    assert scans == []

@@ -711,6 +711,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             for enriched_ip, interface in assignments
         ]
         rules = interface_rules_for_request(self.request)
+        if not rules.ignores_any_port:
+            return
         disclose = PortDisclosure(self.request.user, server_key)
         disclose.preload((port_id, owner) for _row, ports in decided for port_id, _record, _platform, owner in ports)
         for enriched_ip, ports in decided:

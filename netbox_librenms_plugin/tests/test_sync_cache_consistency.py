@@ -29,6 +29,7 @@ from netbox_librenms_plugin.sync_cache import (
     sync_subject_key,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     make_module_bay,
     make_module_type,
     configure_librenms_servers,
@@ -47,9 +48,6 @@ from netbox_librenms_plugin.utils import (
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-# The port keys an interface write needs, for rows whose test does not care about their values.
-_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
 
 
 def test_browser_contract_serializes_states_from_the_domain_enum():

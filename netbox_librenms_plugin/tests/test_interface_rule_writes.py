@@ -1074,6 +1074,12 @@ def test_a_sync_post_and_the_tab_it_renders_read_the_rules_once(superuser_client
 
 # The only production functions that assign a ``.type`` attribute, and why each one may.
 _TYPE_WRITERS = {
+    (
+        "views/imports/actions.py",
+        "_resolve_oob_interface",
+    ): "OOB management interface creation uses the neutral other type",
+    ("views/sync/cables.py", "_create_remote_interface"): "remote creation uses the type from its checked proposal",
+    ("views/sync/modules.py", "get"): "unsaved interface used only to display the template type label",
     ("interface_sync.py", "update_interface_from_port"): "the writer; the value comes from planned_interface_type",
     ("interface_diff.py", "type_change_refusal"): "the unsaved copy that NetBox validates",
     ("views/sync/modules.py", "_apply_module_interface_type"): "module apply, after type_change_refusal",
@@ -1092,10 +1098,12 @@ def _dict_type_value(node):
 
 
 def _orm_type_write(call):
-    """Return what an ORM ``update``, ``bulk_update`` or ``*_or_create`` call writes to ``type``, or None."""
+    """Return the type written by an ORM update or creation, or None."""
     method = call.func.attr if isinstance(call.func, ast.Attribute) else None
     keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg is not None}
-    if method == "update":
+    if method in ("update", "create") or (
+        isinstance(call.func, ast.Name) and call.func.id in ("Interface", "VMInterface")
+    ):
         unpacked = (_dict_type_value(keyword.value) for keyword in call.keywords if keyword.arg is None)
         return keywords.get("type") or next((value for value in unpacked if value is not None), None)
     if method == "bulk_update":
@@ -1116,7 +1124,7 @@ def _type_writes(source):
     Return ``(function, line, value)`` for each ``type`` write in *source*.
 
     A write is ``x.type = value``, ``setattr(x, "type", value)``, or an ORM ``update``, ``bulk_update``,
-    ``update_or_create`` or ``get_or_create`` call that writes ``type``.
+    ``update_or_create``, ``get_or_create``, ``create`` or interface constructor that writes ``type``.
     """
     found = []
 
@@ -1239,3 +1247,17 @@ def test_only_the_matcher_and_the_rule_management_read_rules():
         offenders.extend(f"{relative}:{line}" for line in _rule_queries(path.read_text()))
 
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "Interface.objects.create(name='eth0', type='other')",
+        "Interface.objects.create(**{'type': 'other'})",
+        "Interface(name='eth0', type='other')",
+        "VMInterface(**{'type': 'other'})",
+        "Interface.objects.bulk_create([Interface(type='other')])",
+    ],
+)
+def test_the_type_guard_finds_creation_writes(expression):
+    assert _type_writes("def create_port():\n    " + expression + "\n") == [("create_port", 2, "'other'")]

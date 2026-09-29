@@ -572,6 +572,10 @@ def make_required_interface_custom_field(name):
     return custom_field
 
 
+# Optional port values in fixtures that provide their own ifName.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
+
+
 def stamp_rule_decision(record, *, platform_id=None, rules=None):
     """
     Give a hand-built interface row the rule decision the interfaces tab view stamps on it.
