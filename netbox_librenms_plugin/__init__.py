@@ -162,6 +162,10 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
             },
         )
 
+        if not created:
+            # The type update and the object-type add below record this before-state.
+            cf.snapshot()
+
         # Migrate legacy integer-typed field to JSON so the multi-server
         # dict format {"server_key": device_id} is accepted by the UI/API.
         if not created and cf.type == "integer":
