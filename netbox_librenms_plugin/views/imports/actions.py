@@ -429,6 +429,10 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
     return locked_target, None
 
 
+class _OobIpClaimed(Exception):
+    """The locked OOB address is no longer free to re-home to the interface."""
+
+
 def _oob_ip_is_reassignable(candidate, interface) -> bool:
     """
     Return whether *candidate* may be re-homed to *interface* without taking another device's IP.
@@ -3205,33 +3209,42 @@ class AddAsOOBView(
                         )
                     )
                 else:
-                    oob_ip, attach_reason = self._attach_oob_ip(request, oob_ip_str, oob_iface)
-                    if oob_ip is None:
-                        if attach_reason == "permission_change":
-                            msg = (
-                                f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission "
-                                "to reassign the existing IP address."
-                            )
-                        elif attach_reason == "permission_add":
-                            msg = (
-                                f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission "
-                                "to add a new IP address."
-                            )
-                        else:
-                            msg = (
-                                f"OOB linked, but couldn't set OOB IP {oob_ip_str} "
-                                "(invalid, or already assigned to another device)."
-                            )
-                        deferred_messages.append((messages.WARNING, msg))
-                    else:
-                        # Guarded write: set_device_ip_fk() enforces that oob_ip is assigned to
-                        # an interface on sync_device (it is — _attach_oob_ip() just hung it
-                        # on oob_iface) before the batched update_fields save below, which skips
-                        # full_clean() and would otherwise accept an off-device address.
-                        update_fields.append(set_device_ip_fk(sync_device, "oob_ip", oob_ip, save=False))
+                    try:
+                        oob_ip, attach_reason = self._attach_oob_ip(request, oob_ip_str, oob_iface)
+                    except ValidationError as exc:
+                        from ipam.models import IPAddress
+
+                        refusal = exception_text_for(exc, IPAddress, request.user)
                         deferred_messages.append(
-                            (messages.INFO, f"Set OOB IP {oob_ip_str} on interface {oob_iface.name}.")
+                            (messages.WARNING, f"OOB linked, but OOB IP {oob_ip_str} not set — {refusal}")
                         )
+                    else:
+                        if oob_ip is None:
+                            if attach_reason == "permission_change":
+                                msg = (
+                                    f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission "
+                                    "to reassign the existing IP address."
+                                )
+                            elif attach_reason == "permission_add":
+                                msg = (
+                                    f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission "
+                                    "to add a new IP address."
+                                )
+                            else:
+                                msg = (
+                                    f"OOB linked, but couldn't set OOB IP {oob_ip_str} "
+                                    "(invalid, or already assigned to another device)."
+                                )
+                            deferred_messages.append((messages.WARNING, msg))
+                        else:
+                            # Guarded write: set_device_ip_fk() enforces that oob_ip is assigned to
+                            # an interface on sync_device (it is — _attach_oob_ip() just hung it
+                            # on oob_iface) before the batched update_fields save below, which skips
+                            # full_clean() and would otherwise accept an off-device address.
+                            update_fields.append(set_device_ip_fk(sync_device, "oob_ip", oob_ip, save=False))
+                            deferred_messages.append(
+                                (messages.INFO, f"Set OOB IP {oob_ip_str} on interface {oob_iface.name}.")
+                            )
             elif oob_ip_str:
                 # The device already has an OOB IP set. Don't silently overwrite it — that could
                 # clobber an operator-set address — but don't let the user believe the controller's
@@ -3552,39 +3565,36 @@ class AddAsOOBView(
         host_rows = list(IPAddress.objects.filter(address__net_host=str(parsed), vrf__isnull=True)[:2])
         if len(host_rows) > 1:
             return None, "conflict"
-        existing = None
         if host_rows:
             # Ownership belongs to the data, not the caller, so judge it before taking any lock:
             # a row owned elsewhere is refused without ever being pinned.
             if not _oob_ip_is_reassignable(host_rows[0], interface):
                 return None, "conflict"
-            existing = (
-                IPAddress.objects.restrict(request.user, "change")
-                # of=("self",): restrict() joins the permission tables, and a bare
-                # select_for_update() would try to lock those joined rows too.
-                .select_for_update(of=("self",))
-                .filter(pk=host_rows[0].pk)
-                .first()
-            )
-            # The row was there a moment ago, so a miss means the caller's change grant does not
-            # cover it (or it was deleted in the race). Refuse either way rather than lock it.
-            if existing is None:
-                return None, "permission_change"
-        if existing is not None:
-            # Re-verify from the locked row: the pre-check above read it unlocked, so a concurrent
-            # attach could have claimed it in between.
-            if not _oob_ip_is_reassignable(existing, interface):
-                return None, "conflict"
-            if existing.assigned_object != interface:
-                # Re-homing an existing IP is a 'change'. The lock above already ran through the
-                # caller's change scope, so reaching here means the grant covers this row: the
-                # unlocked pre-flight in _missing_oob_ip_permissions can race a concurrent create
-                # and wave through an 'add'-only user, and the scoped lock is what catches that.
-                existing = update_existing_row(
-                    IPAddress.objects.restrict(request.user, "change").filter(pk=existing.pk),
-                    lambda row: setattr(row, "assigned_object", interface),
+
+            def rehome(row):
+                # Re-verify from the locked row: a concurrent attach could have claimed it since the read above.
+                if not _oob_ip_is_reassignable(row, interface):
+                    raise _OobIpClaimed
+                if row.assigned_object == interface:
+                    return False
+                row.assigned_object = interface
+
+            # Re-homing an existing IP is a 'change', so the row is locked only inside the caller's
+            # change scope: the unlocked pre-flight in _missing_oob_ip_permissions can race a
+            # concurrent create and wave through an 'add'-only user, and this scope catches that.
+            try:
+                return (
+                    update_existing_row(
+                        IPAddress.objects.restrict(request.user, "change").filter(pk=host_rows[0].pk), rehome
+                    ),
+                    None,
                 )
-            return existing, None
+            except IPAddress.DoesNotExist:
+                # The row was there a moment ago, so the caller's change grant does not cover it,
+                # or it was deleted in the race.
+                return None, "permission_change"
+            except _OobIpClaimed:
+                return None, "conflict"
 
         # No row exists under the lock → this is a create, which needs 'add'. Re-verify
         # it here: the unlocked pre-flight in _missing_oob_ip_permissions may have seen an

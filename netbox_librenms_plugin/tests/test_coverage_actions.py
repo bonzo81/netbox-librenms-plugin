@@ -5254,6 +5254,52 @@ class TestAddAsOOBViewPost:
         warnings = view_message_texts(request, "warning")
         assert not any("different OOB IP" in body for body in warnings), warnings
 
+    @pytest.mark.parametrize("superuser", [True, False], ids=["superuser", "writer"])
+    def test_an_oob_ip_that_fails_validation_is_reported_and_left_unchanged(self, superuser):
+        """NetBox refuses a broadcast address on an interface; the link commits and the address stays as it was."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        view = self._make_view()
+        existing_device = make_device(
+            f"oob-invalid-ip-{superuser}",
+            serial=f"OOB-INVALID-IP-{superuser}",
+            librenms_cf={self.server_key: {"id": 10}},
+        )
+        iface = make_interface(existing_device, "idrac0")
+        broadcast = make_ip("198.18.9.255/24")
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, ip="198.18.9.255", generic=True)
+        user = (
+            make_superuser(f"oob-invalid-ip-{superuser}-user")
+            if superuser
+            else self._device_writer("oob-invalid-ip-writer", [("view", Interface), ("change", IPAddress)])
+        )
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "existing_device_id": str(existing_device.pk),
+                "oob_interface_id": str(iface.pk),
+            },
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=17)
+
+        assert response.status_code == 200
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        assert entry["oob"] == {"id": 17, "type": "oob"}
+        assert Device.objects.get(pk=existing_device.pk).oob_ip_id is None
+        broadcast.refresh_from_db()
+        assert broadcast.assigned_object is None
+        detail = (
+            "__all__: 198.18.9.255 is a broadcast address, which may not be assigned to an interface."
+            if superuser
+            else "NetBox refuses the IP address (only a superuser sees the message)"
+        )
+        assert view_message_texts(request, "warning") == [f"OOB linked, but OOB IP 198.18.9.255 not set — {detail}"]
+
     def test_aborts_when_librenms_id_owned_by_another_device(self):
         """The incoming OOB controller id must not already belong to another NetBox device."""
         from dcim.models import Device
@@ -6554,6 +6600,23 @@ class TestAttachOOBIp:
         existing.refresh_from_db()
         assert existing.assigned_object == iface
         assert_update_logged(existing, "assigned_object_id", None, iface.pk)
+
+    def test_an_address_already_on_the_interface_is_returned_without_a_write(self):
+        from django.db import transaction
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+
+        view = self._view()
+        dev = make_device("oob-ip-already-home")
+        iface = make_interface(dev, "idrac0")
+        existing = make_ip("10.0.0.9/24", assigned_object=iface)
+        stored = IPAddress.objects.values_list("last_updated", flat=True).get(pk=existing.pk)
+        request = make_request("post", user=make_user_with_perms("oob-ip-already-home", [("change", IPAddress)]))
+        with change_logging(request), transaction.atomic():
+            ip, reason = view._attach_oob_ip(request, "10.0.0.9", iface)
+        assert ip.pk == existing.pk and reason is None
+        assert IPAddress.objects.values_list("last_updated", flat=True).get(pk=existing.pk) == stored
 
     def test_vrf_scoped_ip_not_rehomed_creates_global_ip(self):
         """A same-host IP that lives in a VRF must NOT be re-homed: the create path makes a global (no-VRF) /32, so the lookup must be scoped to the global table — overlapping RFC1918 space in a tenant VRF is a different address."""
