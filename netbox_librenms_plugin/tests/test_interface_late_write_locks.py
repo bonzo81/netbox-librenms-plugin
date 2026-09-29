@@ -286,6 +286,8 @@ def test_a_versioned_save_of_a_model_with_no_version_check_fails():
     from dcim.models import Site
 
     site = Site.objects.create(name="late-lock-unchecked", slug="late-lock-unchecked")
+    # The callers of save_at_version take the before-state of the row.
+    site.snapshot()
     site.description = "changed"
 
     with pytest.raises(RuntimeError, match="No row-version check is connected for Site"):

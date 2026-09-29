@@ -68,6 +68,26 @@ def _isolate_test_cache(settings):
     yield
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _install_before_state_guard():
+    """Watch every write of a change-logged row for the whole session."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    with before_state_guard.installed():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_missing_before_state(_install_before_state_guard):
+    """Fail a test in which plugin code wrote a change-logged row without a fresh before-state."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    before_state_guard.reset()
+    yield
+    if before_state_guard.violations:
+        pytest.fail(before_state_guard.report(), pytrace=False)
+
+
 @pytest.fixture(scope="session")
 def django_db_modify_db_settings(django_db_modify_db_settings):
     """Give each pytest worker a private PostgreSQL database."""
