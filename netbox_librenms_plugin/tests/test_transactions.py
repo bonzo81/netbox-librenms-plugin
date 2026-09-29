@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     lock_row,
     lock_row_nowait,
     lock_timeout,
+    raised_sqlstates,
     second_connection,
     wrapped_database_error,
 )
@@ -29,6 +30,7 @@ from netbox_librenms_plugin.transactions import (
     classify_conflict,
     database_error_sqlstate,
     run_transaction,
+    update_existing_row,
 )
 from netbox_librenms_plugin.utils import (
     DATABASE_ERROR_MESSAGE,
@@ -241,6 +243,104 @@ def test_a_failure_after_a_commit_is_never_a_conflict():
         error = exc
 
     assert classify_conflict(error) is False
+
+
+# ---------------------------------------------------------------------------
+# update_existing_row
+# ---------------------------------------------------------------------------
+
+
+def _site_changes(site):
+    from core.models import ObjectChange
+    from dcim.models import Site
+
+    return list(
+        ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(Site), changed_object_id=site.pk, action="update"
+        ).order_by("pk")
+    )
+
+
+def _set_description(value):
+    def apply(row):
+        row.description = value
+
+    return apply
+
+
+@pytest.mark.django_db
+def test_an_existing_row_write_records_the_row_before_and_after():
+    from dcim.models import Site
+
+    site = _site("existing-row-write")
+
+    with _netbox_request_context():
+        written = update_existing_row(Site.objects.filter(pk=site.pk), _set_description("after"))
+
+    assert Site.objects.get(pk=site.pk).description == written.description == "after"
+    [change] = _site_changes(site)
+    assert change.prechange_data["description"] == ""
+    assert change.postchange_data["description"] == "after"
+
+
+@pytest.mark.django_db
+def test_a_second_write_of_the_same_row_records_the_first_write_as_its_before_state():
+    from dcim.models import Site
+
+    site = _site("existing-row-second-write")
+
+    with _netbox_request_context():
+        update_existing_row(Site.objects.filter(pk=site.pk), _set_description("first"))
+        update_existing_row(Site.objects.filter(pk=site.pk), _set_description("second"))
+
+    first, second = _site_changes(site)
+    assert (first.prechange_data["description"], first.postchange_data["description"]) == ("", "first")
+    assert (second.prechange_data["description"], second.postchange_data["description"]) == ("first", "second")
+
+
+@pytest.mark.django_db
+def test_a_write_that_fails_validation_leaves_the_row_and_the_change_log_unchanged():
+    from dcim.models import Site
+
+    site = _site("existing-row-invalid")
+
+    def apply(row):
+        row.description = "not saved"
+        row.slug = "not a slug"
+
+    with _netbox_request_context(), pytest.raises(ValidationError):
+        update_existing_row(Site.objects.filter(pk=site.pk), apply)
+
+    assert Site.objects.filter(pk=site.pk, slug=site.slug, description="").exists()
+    assert _site_changes(site) == []
+
+
+@pytest.mark.django_db
+def test_a_missing_row_raises_does_not_exist_without_applying_the_change():
+    from dcim.models import Site
+
+    applied = []
+
+    with pytest.raises(Site.DoesNotExist):
+        update_existing_row(Site.objects.filter(name="existing-row-absent"), applied.append)
+
+    assert applied == []
+
+
+@transactional_db_with_all_apps()
+def test_an_existing_row_write_waits_for_the_row_lock_before_it_applies_the_change():
+    from dcim.models import Site
+
+    site = _site("existing-row-locked")
+    applied = []
+
+    with second_connection() as other:
+        lock_row(other, Site, site.pk)
+        with lock_timeout(200), raised_sqlstates() as sqlstates, pytest.raises(OperationalError):
+            update_existing_row(Site.objects.filter(pk=site.pk), applied.append)
+
+    assert sqlstates == ["55P03"]
+    assert applied == []
 
 
 # ---------------------------------------------------------------------------
