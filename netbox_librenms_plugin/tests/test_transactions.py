@@ -329,6 +329,71 @@ def test_a_row_that_already_holds_the_values_is_neither_validated_nor_saved():
     assert _site_changes(site) == []
 
 
+def _device_updates(device):
+    from core.models import ObjectChange
+
+    return list(
+        ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(device), changed_object_id=device.pk, action="update"
+        )
+    )
+
+
+@pytest.mark.django_db
+def test_a_mapping_change_saves_with_the_other_fields_in_one_validated_save():
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import assign_own, read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("existing-row-mapping")
+
+    def apply(row):
+        row.description = "linked"
+        return assign_own(row, "default", 7401)
+
+    with _netbox_request_context():
+        update_existing_row(Device.objects.filter(pk=device.pk), apply)
+
+    stored = Device.objects.get(pk=device.pk)
+    assert (stored.description, read_mapping(stored).own_id("default")) == ("linked", 7401)
+    [change] = _device_updates(device)
+    assert change.prechange_data["description"] == ""
+    assert change.postchange_data["custom_fields"]["librenms_id"] == {"default": 7401}
+
+
+@pytest.mark.django_db
+def test_a_mapping_change_on_an_invalid_row_saves_nothing():
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import assign_own, read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("existing-row-mapping-invalid")
+
+    def apply(row):
+        row.status = "not-a-status"
+        return assign_own(row, "default", 7402)
+
+    with _netbox_request_context(), pytest.raises(ValidationError):
+        update_existing_row(Device.objects.filter(pk=device.pk), apply)
+
+    assert read_mapping(Device.objects.get(pk=device.pk)).own_id("default") is None
+    assert _device_updates(device) == []
+
+
+@pytest.mark.django_db
+def test_an_apply_result_that_is_neither_false_nor_a_change_is_refused():
+    from dcim.models import Site
+
+    site = _site("existing-row-truthy-result")
+
+    with pytest.raises(TypeError, match="MappingChange"):
+        update_existing_row(Site.objects.filter(pk=site.pk), lambda row: True)
+
+    assert _site_changes(site) == []
+
+
 @pytest.mark.django_db
 def test_a_missing_row_raises_does_not_exist_without_applying_the_change():
     from dcim.models import Site

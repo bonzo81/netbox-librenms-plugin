@@ -6207,6 +6207,30 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert entry == {"id": 5, "oob": {"id": "abc"}}
         assert "_migrated_to" not in entry
 
+    def test_a_refused_winner_save_rolls_back_the_donor_saved_before_it(self):
+        """The donor saves first; when the winner's save refuses, the whole group rolls back and the refusal shows."""
+        from django.db import IntegrityError, connection
+
+        winner = make_device("merge-refused-winner", librenms_cf={self.server_key: {"id": 20}})
+        donor = make_device("merge-refused-donor", librenms_cf={self.server_key: {"id": 10}})
+
+        def refuse_the_winner_update(execute, sql, params, many, context):
+            # A database refusal is not reproducible here without a second writer; inject it at the statement.
+            if sql.startswith('UPDATE "dcim_device"') and params and params[-1] == winner.pk:
+                raise IntegrityError("injected refusal of the winner's save")
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(refuse_the_winner_update):
+            resp = self._post_merge(winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"integrity constraint" in resp.content
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.custom_field_data["librenms_id"] == {self.server_key: {"id": 10}}
+        assert winner.custom_field_data["librenms_id"] == {self.server_key: {"id": 20}}
+
     def test_oob_transfer_valueerror_fails_closed_and_rolls_back(self, monkeypatch):
         """A ValueError from the oob_ip transfer (the TOCTOU race the lock guards) fails closed with rollback, not a 500."""
         import netbox_librenms_plugin.views.imports.actions as actions_mod
