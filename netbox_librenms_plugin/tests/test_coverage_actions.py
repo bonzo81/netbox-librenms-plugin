@@ -1,9 +1,13 @@
 """Coverage tests for views/imports/actions.py missing lines."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from functools import partial
 from types import SimpleNamespace as Namespace
 
 import pytest
+from django.db import connection, connections
 from django.test import RequestFactory
 from django.urls import reverse as url_for
 
@@ -7156,6 +7160,32 @@ class TestSuggestOobInterfaceReusesMaterializedList:
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _another_session_commits_before(create, model, statement, *, occurrence):
+    """Run ``create()`` in another session and commit it just before the *occurrence*-th *statement* on *model*'s table."""
+    table = f'"{model._meta.db_table}"'
+    seen = 0
+
+    def in_own_session():
+        try:
+            create()
+        finally:
+            connections.close_all()
+
+    def hook(execute, sql, params, many, context):
+        nonlocal seen
+        if sql.lstrip().upper().startswith(statement) and table in sql:
+            seen += 1
+            if seen == occurrence:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(in_own_session).result()
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(hook):
+        yield
+    assert seen >= occurrence, f"only {seen} {statement} statement(s) on {table} ran"
+
+
 @pytest.mark.django_db
 class TestMappingChangeScope:
     """Natural-key mapping updates must remain inside constrained change grants."""
@@ -7326,6 +7356,104 @@ class TestMappingChangeScope:
         allowed.refresh_from_db()
         assert allowed.netbox_platform_id == new_platform.pk
         assert_update_logged(allowed, "netbox_platform", old_platform.pk, new_platform.pk)
+
+    def _concurrent_mapping_case(self, kind, username, actions):
+        """Return a device whose LibreNMS key has no mapping, two targets, and a user with *actions* on the mapping."""
+        from dcim.models import DeviceType, Platform
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping, PlatformMapping
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView, AddPlatformMappingView
+
+        if kind == "device_type":
+            other = make_device(f"{username}-type-holder").device_type
+            target = DeviceType.objects.create(
+                manufacturer=other.manufacturer, model=f"{username} Target", slug=f"{username}-target"
+            )
+            raw_hardware = f"{username} Hardware"
+            key = apply_normalization_rules(value=raw_hardware, scope="device_type").lower()
+            _device, device_id = self._register_device(f"{username}-device", hardware=raw_hardware)
+            case = Namespace(
+                view=AddDeviceTypeMappingView,
+                model=DeviceTypeMapping,
+                field="netbox_device_type",
+                key={"librenms_hardware": key},
+                data={"device_type_id": str(target.pk)},
+                target_model=DeviceType,
+            )
+        else:
+            other = Platform.objects.create(name=f"{username} Other", slug=f"{username}-other")
+            target = Platform.objects.create(name=f"{username} Target", slug=f"{username}-target")
+            _device, device_id = self._register_device(f"{username}-device", os=f"{username}-os")
+            case = Namespace(
+                view=AddPlatformMappingView,
+                model=PlatformMapping,
+                field="netbox_platform",
+                key={"librenms_os": f"{username}-os"},
+                data={"platform_id": str(target.pk)},
+                target_model=Platform,
+            )
+        case.other, case.target, case.device_id = other, target, device_id
+        case.user = make_view_user(
+            username, [("view", case.target_model), *((action, case.model) for action in actions)]
+        )
+        return case
+
+    def _post_with_request(self, case):
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, **case.data},
+            user=case.user,
+            HTTP_HX_REQUEST="true",
+        )
+        with change_logging(request):
+            return request, post_view(case.view(), request, device_id=case.device_id)
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("kind", ["device_type", "platform"])
+    def test_a_mapping_created_after_the_read_is_not_changed_without_change_permission(self, kind):
+        """The upfront read found no mapping, so the user needed only 'add'; the new row is outside any change grant."""
+        from core.models import ObjectChange
+
+        case = self._concurrent_mapping_case(kind, f"race-add-only-{kind}".replace("_", "-"), ["add"])
+        create = partial(case.model.objects.create, **case.key, **{case.field: case.other})
+
+        with _another_session_commits_before(create, case.model, "SELECT", occurrence=2):
+            _request, response = self._post_with_request(case)
+
+        assert b"Mapping was created concurrently. Please try again." in response.content
+        row = case.model.objects.get(**case.key)
+        assert getattr(row, f"{case.field}_id") == case.other.pk
+        assert not ObjectChange.objects.filter(changed_object_id=row.pk, action="update").exists()
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("kind", ["device_type", "platform"])
+    def test_a_mapping_created_after_the_read_is_changed_with_change_permission(self, kind):
+        case = self._concurrent_mapping_case(kind, f"race-add-change-{kind}".replace("_", "-"), ["add", "change"])
+        create = partial(case.model.objects.create, **case.key, **{case.field: case.other})
+
+        with _another_session_commits_before(create, case.model, "SELECT", occurrence=2):
+            request, response = self._post_with_request(case)
+
+        assert view_message_texts(request, "error") == []
+        assert b' id="htmx-modal-content"' in response.content
+        row = case.model.objects.get(**case.key)
+        assert_update_logged(row, case.field, case.other.pk, case.target.pk)
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("kind", ["device_type", "platform"])
+    @pytest.mark.parametrize("statement, occurrence", [("SELECT", 3), ("INSERT", 1)], ids=["unique-check", "insert"])
+    def test_a_mapping_created_just_before_the_insert_asks_to_try_again(self, kind, statement, occurrence):
+        """The row appears after the helper's own read: before the unique check, or between that check and the INSERT."""
+        case = self._concurrent_mapping_case(kind, f"race-insert-{kind}-{statement}".replace("_", "-").lower(), ["add"])
+        create = partial(case.model.objects.create, **case.key, **{case.field: case.other})
+
+        with _another_session_commits_before(create, case.model, statement, occurrence=occurrence):
+            request, response = self._post_with_request(case)
+
+        assert b"Mapping was created concurrently. Please try again." in response.content
+        row = case.model.objects.get(**case.key)
+        assert getattr(row, f"{case.field}_id") == case.other.pk
 
 
 # ---------------------------------------------------------------------------

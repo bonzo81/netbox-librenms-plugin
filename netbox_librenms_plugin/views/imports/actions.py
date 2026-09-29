@@ -362,12 +362,7 @@ def _mapping_change_is_allowed(view, model, pk) -> bool:
     return view.restricted_queryset(model, "change").filter(pk=pk).exists()
 
 
-class _MappingWriteRefused(Exception):
-    """The permission check of the locked mapping refused the write; ``response`` is the answer."""
-
-    def __init__(self, response):
-        super().__init__()
-        self.response = response
+_MAPPING_CREATED_CONCURRENTLY = "Mapping was created concurrently. Please try again."
 
 
 def _write_mapping_in_scope(view, model, lookup, duplicate_message, *, field, target, existing_mapping, create):
@@ -393,40 +388,40 @@ def _write_mapping_in_scope(view, model, lookup, duplicate_message, *, field, ta
         HttpResponse | None: The error answer when the caller must stop, else None.
 
     """
-    view_permission = ("view", type(target))
     present_pks = list(model.objects.filter(**lookup).values_list("pk", flat=True)[:2])
     if len(present_pks) > 1:
         return _htmx_error_response(duplicate_message)
     if not present_pks:
         if existing_mapping:
             # The mapping was deleted after the upfront read, so this is a create: it needs 'add'.
-            view.required_object_permissions = {"POST": [view_permission, ("add", model)]}
+            view.required_object_permissions = {"POST": [("view", type(target)), ("add", model)]}
             if error := view.require_object_permissions("POST"):
                 return error
         try:
             create()
         except IntegrityError:
             # A concurrent request created it: select_for_update() cannot lock an absent row.
-            return _htmx_error_response("Mapping was created concurrently. Please try again.")
+            return _htmx_error_response(_MAPPING_CREATED_CONCURRENTLY)
+        except ValidationError:
+            # full_clean() on save found the row that a concurrent request committed after the read above.
+            if not model.objects.filter(**lookup).exists():
+                raise
+            return _htmx_error_response(_MAPPING_CREATED_CONCURRENTLY)
         return None
 
     def point_at_target(row):
         if getattr(row, f"{field}_id") == target.pk:
             return False
-        if not existing_mapping:
-            # A concurrent request created the row after the upfront read, and this write changes it.
-            view.required_object_permissions = {"POST": [view_permission, ("change", model)]}
-            if error := view.require_object_permissions("POST"):
-                raise _MappingWriteRefused(error)
         setattr(row, field, target)
 
     try:
+        # The change scope is the permission check: a row that a concurrent request created is changed only inside it.
         update_existing_row(view.restricted_queryset(model, "change").filter(pk=present_pks[0]), point_at_target)
     except model.DoesNotExist:
+        if not existing_mapping:
+            return _htmx_error_response(_MAPPING_CREATED_CONCURRENTLY)
         # The row left this caller's change scope (or was deleted) after the unlocked read.
         return _htmx_error_response("Existing mapping is no longer available.")
-    except _MappingWriteRefused as refused:
-        return refused.response
     return None
 
 
