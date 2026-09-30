@@ -269,6 +269,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                     prefetched_data["interfaces_by_librenms_id"],
                     prefetched_data["interfaces_by_name"],
                     prefetched_data["interfaces_by_pk"],
+                    server_key=prefetched_data["server_key"],
                 )
                 ip_matches = [
                     ip for ip in ip_matches if source_interface is not None and ip.assigned_object == source_interface
@@ -409,6 +410,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "interfaces_by_name": interfaces_by_name,
             # Carries the rename-safe interface_url fallback in resolve_ip_source_interface().
             "interfaces_by_pk": interfaces_by_pk,
+            "server_key": server_key,
             "all_interfaces": all_interfaces,
             "owner_by_id": {owner.pk: owner for owner in owners},
             "device": obj,
@@ -645,6 +647,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             prefetched_data["interfaces_by_librenms_id"],
             prefetched_data["interfaces_by_name"],
             prefetched_data["interfaces_by_pk"],
+            server_key=prefetched_data["server_key"],
         )
 
     def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
