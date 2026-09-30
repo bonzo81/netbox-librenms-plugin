@@ -4957,7 +4957,7 @@ class TestMatchedInterfaceLinking:
         view = self._view()
         member = make_device("interface-member-context")
         interface = self._make_interface(member, "Te1/1/1", port_id=42)
-        context = view._build_member_contexts(member, vc_members=[])
+        context = view._build_member_contexts(member, vc_members=[], index_map={})
 
         assert context[member.pk]["interfaces_by_port_id"] == {42: interface}
         assert context[member.pk]["interfaces_by_name"] == {"Te1/1/1": interface}
@@ -5013,6 +5013,7 @@ class TestMatchedInterfaceLinking:
         context = {
             "interfaces_by_port_id": {},
             "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface},
+            "held_port_ids": frozenset(),
         }
 
         BaseModuleTableView._attach_interface_match(row, item, context)
@@ -5047,7 +5048,7 @@ class TestMatchedInterfaceLinking:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         row = {"name": "Te1/1/1", "librenms_port_id": None}
-        context = {"interfaces_by_port_id": {42: object()}}
+        context = {"interfaces_by_port_id": {42: object()}, "held_port_ids": frozenset()}
 
         BaseModuleTableView._attach_interface_match(row, {"entPhysicalName": "Te1/1/1"}, context)
 
@@ -5603,6 +5604,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             "sibling_counts": {module_id: len(bays) for module_id, bays in module_scoped_bays.items()},
             "interfaces_by_port_id": {},
             "interfaces_by_name": {},
+            "held_port_ids": frozenset(),
             "server_key": "test-server",
         }
 

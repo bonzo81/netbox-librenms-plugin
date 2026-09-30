@@ -173,6 +173,19 @@ def _render_module_tab(device, user):
 class TestModuleTableShowsTheWriterChoice:
     """The modules table shows the interface that Update Interface then binds."""
 
+    def _seed(self, tag, interface_names, identity):
+        """Install a module with *interface_names* and seed its cached row with port 8811."""
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device_with_module_bays(f"table-choice-{tag}", ["Slot 1"])
+        module = _module_with_interfaces(device, "Slot 1", f"TABLE-CHOICE-{tag.upper()}", interface_names)
+        device.custom_field_data["librenms_id"] = {"default": ADOPTION_LIBRENMS_ID}
+        device.save(update_fields=["custom_field_data"])
+        device.__dict__.pop("cf", None)
+        row = {**_adoption_inventory_row(module.module_type.model, "Slot 1"), "_librenms_port_id": 8811, **identity}
+        cache_key = seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=ADOPTION_LIBRENMS_ID)
+        return device, module, row, cache_key
+
     @pytest.mark.parametrize(
         ("interface_names", "identity", "expected", "source"),
         [
@@ -186,17 +199,9 @@ class TestModuleTableShowsTheWriterChoice:
     ):
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device_with_module_bays(f"table-choice-{source[:5]}", ["Slot 1"])
-        module = _module_with_interfaces(device, "Slot 1", f"TABLE-CHOICE-{source[:5].upper()}", interface_names)
-        set_librenms_device_id(device, ADOPTION_LIBRENMS_ID, "default")
-        device.save(update_fields=["custom_field_data"])
-        device.__dict__.pop("cf", None)
-        row = {**_adoption_inventory_row(module.module_type.model, "Slot 1"), "_librenms_port_id": 8811, **identity}
-        cache_key = seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=ADOPTION_LIBRENMS_ID)
+        device, module, row, cache_key = self._seed(source[:5], interface_names, identity)
         user = make_superuser()
         shown = module.interfaces.get(name=expected)
         try:
@@ -234,6 +239,22 @@ class TestModuleTableShowsTheWriterChoice:
         assert [
             interface.name for interface in module.interfaces.all() if read_mapping(interface).own_id("default") == 8811
         ] == [expected]
+
+    def test_a_port_held_by_another_device_shows_no_match(self, live_librenms):
+        """The writer refuses a port that another device's interface holds, so the table shows no match."""
+        from django.core.cache import cache
+
+        device, module, _row, cache_key = self._seed("held", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        holder = make_interface(make_device("table-choice-holder"), "Ethernet9")
+        holder.custom_field_data["librenms_id"] = {"default": 8811}
+        holder.save(update_fields=["custom_field_data"])
+        try:
+            content = _render_module_tab(device, make_superuser())
+        finally:
+            cache.delete(cache_key)
+
+        assert module.interfaces.get(name="Uplink").get_absolute_url() not in content
+        assert "Update Interface" not in content
 
 
 class TestRecordBindOutcome:
