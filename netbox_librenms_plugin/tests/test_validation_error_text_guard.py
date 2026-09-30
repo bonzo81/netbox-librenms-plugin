@@ -216,12 +216,14 @@ def _callable(expression, local, namespace, imports):
 
 
 def _is_log_call(node, resolve):
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr in LOG_METHODS
-        and isinstance(resolve(node.func.value), (logging.Logger, logging.LoggerAdapter))
-    )
+    """Return whether *node* calls a log method of ``logging`` on a logger, with no override on its class or itself."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in LOG_METHODS):
+        return False
+    logger = resolve(node.func.value)
+    methods = [
+        getattr(cls, node.func.attr) for cls in (logging.Logger, logging.LoggerAdapter) if isinstance(logger, cls)
+    ]
+    return bool(methods) and inspect.getattr_static(logger, node.func.attr, None) is methods[0]
 
 
 def _log_argument(node, parents, resolve):
@@ -262,6 +264,19 @@ def _call_of(read, parents):
 
 def _parents(tree):
     return {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+
+def _ancestors(node, parents):
+    while (node := parents.get(node)) is not None:
+        yield node
+
+
+def _import_stack(read, parents):
+    """Return the imports of each function around *read*, from the outermost to the innermost."""
+    functions = [
+        node for node in _ancestors(read, parents) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    return [_own_imports(function) for function in reversed(functions)]
 
 
 def _statement_bindings(statements):
@@ -464,8 +479,10 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         """Return the module namespace plus the imports of the enclosing functions that *expression* names."""
         return _namespace_with_imports(expression, self.namespace, self.imports)
 
-    def _resolver(self, local):
-        return functools.partial(_callable, local=local, namespace=self.namespace, imports=list(self.imports))
+    def _resolver(self, read, local):
+        return functools.partial(
+            _callable, local=local, namespace=self.namespace, imports=_import_stack(read, self.parents)
+        )
 
     def _reads_current_exception(self, node):
         if not (isinstance(node, ast.Call) and _is_name_chain(node.func)):
@@ -481,7 +498,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
     def visit_Call(self, node):
         if self._reads_current_exception(node):
             local, made, declared = _enclosing(node, self.parents)
-            if (sink := _sink(node, self.parents, False, self._resolver(local))) is not None:
+            if (sink := _sink(node, self.parents, False, self._resolver(node, local))) is not None:
                 self.reads.append((self.file, self._scope(), _store(node, self.parents, made, declared) or sink))
         self.generic_visit(node)
 
@@ -509,7 +526,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
             if not (isinstance(node, ast.Name) and node.id == handler.name and isinstance(node.ctx, ast.Load)):
                 continue
             local, made, declared = _enclosing(node, self.parents)
-            resolve = self._resolver(local)
+            resolve = self._resolver(node, local)
             if (sink := _sink(node, self.parents, True, resolve)) is None:
                 continue
             call = _call_of(node, self.parents)
@@ -542,15 +559,15 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
     def _methods(self, read, receiver, name):
         """Return each method that ``<receiver>.<name>`` can reach in the enclosing class and its subclasses."""
         scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-        method = next((node for node in self._ancestors(read) if isinstance(node, scopes)), None)
+        method = next((node for node in _ancestors(read, self.parents) if isinstance(node, scopes)), None)
         if method is not self.nodes[-1] or not all(isinstance(node, ast.ClassDef) for node in self.nodes[:-1]):
             return None
         positional = [*method.args.posonlyargs, *method.args.args]
         kinds = [ast.unparse(decorator) for decorator in method.decorator_list]
-        rebound = receiver in set().union(*_statement_bindings(method.body))
+        rebound = receiver in set().union(*_statement_bindings(method.body), _own_imports(method))
         if not positional or positional[0].arg != receiver or kinds not in ([], ["classmethod"]) or rebound:
             return None
-        if kinds == [] and name in self.stored:
+        if name in self.stored:
             return None
         qualname = self._scope().rpartition(".")[0]
         try:
@@ -573,10 +590,6 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
                 targets.append((attribute, int(kinds == [])))
         return list(dict.fromkeys(targets))
 
-    def _ancestors(self, node):
-        while (node := self.parents.get(node)) is not None:
-            yield node
-
     def _definition(self, function):
         """Return the ``def`` of *function* when it is a package function, else None."""
         if not _package_function(function, self.file):
@@ -591,13 +604,13 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         key = (function.__code__, parameter)
         if key not in self.followed:
             parents = _parents(definition)
-            imports = [_own_imports(definition)]
             sinks = []
             for statement in definition.body:
                 for node in ast.walk(statement):
                     if not (isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Load)):
                         continue
                     local, made, declared = _enclosing(node, parents)
+                    imports = _import_stack(node, parents)
                     resolve = functools.partial(_callable, local=local, namespace=function.__globals__, imports=imports)
                     if (sink := _sink(node, parents, True, resolve)) is not None:
                         sinks.append(_store(node, parents, made, declared) or sink)
@@ -1143,6 +1156,7 @@ def test_the_scan_reads_each_method_that_a_call_on_self_can_reach():
         ("def __getattr__(self, name):\n        return str", ""),
         ("pass", "match save():\n            case self:\n                pass"),
         ("pass", "try:\n            save()\n        except KeyError as self:\n            pass"),
+        ("pass", "import builtins as self"),
     ],
 )
 def test_the_scan_does_not_follow_a_method_that_the_instance_or_the_receiver_can_replace(member, rebinding):
@@ -1164,6 +1178,71 @@ def test_the_scan_does_not_follow_a_method_that_the_instance_or_the_receiver_can
     ).format(member=member, rebinding=rebinding)
 
     assert _scan(source) == [("View.post", "self.failure")]
+
+
+def test_the_scan_does_not_follow_a_class_method_that_the_class_replaces():
+    source = textwrap.dedent(
+        """
+        class View:
+            @staticmethod
+            def text(error):
+                return exception_text_for(error, Device, None)
+
+            @classmethod
+            def post(cls):
+                cls.text = str
+                try:
+                    save()
+                except ValidationError as exc:
+                    return cls.text(exc)
+        """
+    )
+
+    assert _scan(source) == [("View.post", "cls.text")]
+
+
+def test_the_scan_resolves_a_helper_name_through_the_imports_of_its_nested_function():
+    source = textwrap.dedent(
+        """
+        def helper(error):
+            def render():
+                from builtins import str as exception_text_for
+                return exception_text_for(error)
+            return render()
+
+        def view():
+            try:
+                save()
+            except ValidationError as exc:
+                return helper(exc)
+        """
+    )
+
+    assert _scan(source) == [("view", "helper: exception_text_for")]
+
+
+def test_the_scan_trusts_only_the_log_methods_of_logging():
+    source = textwrap.dedent(
+        """
+        import logging
+
+        class Loud(logging.Logger):
+            def error(self, *args):
+                return str(args)
+
+        log = logging.Logger("guard")
+        log.error = str
+        loud = Loud("guard")
+
+        def view():
+            try:
+                save()
+            except ValidationError as exc:
+                return log.error(exc), loud.error(exc)
+        """
+    )
+
+    assert _scan(source) == [("view", "log.error"), ("view", "loud.error")]
 
 
 def test_the_scan_reads_a_helper_that_another_package_module_defines():
