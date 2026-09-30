@@ -23,7 +23,7 @@ from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_fr
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -478,7 +478,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return index_ip_source_interfaces(interfaces, server_key, obj.pk if isinstance(obj, Device) else None)
 
     @staticmethod
-    def _match_interface(ip_data, by_librenms_id, by_name, by_pk=None):
+    def _match_interface(ip_data, by_librenms_id, by_name, by_pk=None, *, server_key):
         """
         Resolve the NetBox interface for a cached IP row against current state.
 
@@ -499,12 +499,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             by_name (dict): Current interfaces keyed by name.
             by_pk (dict | None): Current interfaces keyed by string PK, scoped to the object's own
                 (and VC members') interfaces; used for the rename-safe ``interface_url`` fallback.
+            server_key (str): The server the maps were built for; a name or PK match bound to a
+                different port on it is refused.
 
         Returns:
             Interface | VMInterface | None: The matched interface, or None if none resolves.
 
         """
-        return resolve_ip_source_interface(ip_data, by_librenms_id, by_name, by_pk)
+        return resolve_ip_source_interface(ip_data, by_librenms_id, by_name, by_pk, server_key=server_key)
 
     def _lock_interface_owner_scope(self, obj):
         """Lock the current interface-owner scope in the shared chassis-first order."""
@@ -1201,7 +1203,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         _acquire_ip_host_lock(parsed, vrf)
 
                     interface = self._match_interface(
-                        ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk
+                        ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk, server_key=server_key
                     )
 
                     if interface is None and create_missing_interfaces:
@@ -1227,6 +1229,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             )
                         interface = locked_interface
                         # The binding and the owner's platform are read under the lock.
+                        if not name_match_may_be_port(
+                            locked_interface, server=server_key, port_id=ip_data.get("port_id")
+                        ):
+                            raise ValueError(
+                                "The matched NetBox interface is now bound to a different LibreNMS port. "
+                                "Refresh the IP data and try again."
+                            )
                         blocked = interface_rules_for_request(request).first_blocked_port(
                             ip_assignment_ports(
                                 cached_ports_by_id,
