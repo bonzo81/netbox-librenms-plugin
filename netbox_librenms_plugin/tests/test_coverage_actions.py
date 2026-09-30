@@ -7786,7 +7786,7 @@ class TestConflictActionsObjectScope:
         target.refresh_from_db()
         assert not target.custom_field_data.get("librenms_id")
 
-    def _post_add_as_oob(self, user, target):
+    def _post_add_as_oob(self, user, target, ip="", extra_post=None):
         """Drive OOB attachment through real HTTP validation and object permissions."""
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
 
@@ -7799,15 +7799,16 @@ class TestConflictActionsObjectScope:
             hardware="Integrated Remote Access Controller",
             os="idrac",
             serial=target.serial,
-            ip="",
+            ip=ip,
         )
         self.librenms_server.vc_inventory_callable(4343, [], {})
         request = make_view_request(
             "post",
-            {"existing_device_id": str(target.pk), "server_key": "default"},
+            {"existing_device_id": str(target.pk), "server_key": "default", **(extra_post or {})},
             user=user,
             HTTP_HX_REQUEST="true",
         )
+        self.last_request = request
         return post_view(AddAsOOBView(), request, device_id=4343)
 
     @pytest.mark.parametrize("visible", [False, True])
@@ -7903,6 +7904,28 @@ class TestConflictActionsObjectScope:
         assert b"Existing device not found" not in response.content
         stored = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
         assert stored["oob"]["id"] == 4343
+
+    @pytest.mark.parametrize("ip", ["192.0.2.77", "2001:db8::77"])
+    def test_add_as_oob_creates_the_oob_ip_on_a_new_interface(self, ip):
+        """The view creates the OOB IP as a host address on a new interface and saves it on the device."""
+        from dcim.models import Device
+        from django.contrib.messages import get_messages
+
+        target = make_device(f"scope-oob-ip-{ip.count(':')}")
+        post = {"oob_interface_id": "__new__", "oob_new_interface_name": "idrac"}
+
+        self._post_add_as_oob(make_superuser(), target, ip=ip, extra_post=post)
+
+        device = Device.objects.get(pk=target.pk)
+        oob_ip = device.oob_ip
+        assert oob_ip is not None
+        assert str(oob_ip.address) == f"{ip}/{32 if ':' not in ip else 128}"
+        assert oob_ip.vrf is None
+        assert oob_ip.assigned_object.name == "idrac"
+        assert oob_ip.assigned_object.device_id == device.pk
+        assert device.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 4343
+        texts = [str(m) for m in get_messages(self.last_request)]
+        assert f"Set OOB IP {ip} on interface idrac." in texts
 
     def test_superuser_is_unaffected_by_the_restricted_lookup(self):
         """A superuser keeps the unrestricted queryset, so every device still resolves."""
