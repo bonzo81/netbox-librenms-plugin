@@ -1441,6 +1441,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     def _build_member_contexts(self, obj, vc_members, index_map):
         """Build per-member bay context data used for row resolution."""
+        from dcim.models import Interface
+
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
         # One lookup for every row: a port that any interface holds is never matched by name or module.
         held = held_port_ids((_get_item_port_identity(item)[0] for item in index_map.values()), server=server_key)
@@ -1458,6 +1460,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "interfaces_by_port_id": interfaces_by_port_id,
                 "interfaces_by_name": interfaces_by_name,
                 "held_port_ids": held,
+                # The match reads every interface, so the table shows only one the user may view.
+                "viewable_interface_ids": frozenset(
+                    self.restricted_queryset(Interface).filter(device=member).values_list("pk", flat=True)
+                ),
                 "server_key": server_key,
             }
         return member_contexts
@@ -1540,7 +1546,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             interface, source = choice.interface, choice.source
             confidence = _CHOICE_CONFIDENCE.get(source)
 
-        if interface is None:
+        if interface is None or interface.pk not in target_context["viewable_interface_ids"]:
             return
 
         row["matched_interface_name"] = getattr(interface, "name", None) or row.get("name") or "-"

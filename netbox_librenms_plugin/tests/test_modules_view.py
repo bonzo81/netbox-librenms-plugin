@@ -4954,13 +4954,18 @@ class TestMatchedInterfaceLinking:
     def test_build_member_contexts_builds_interface_indexes_once_per_member(self):
         from netbox_librenms_plugin.tests.conftest import make_device
 
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
         view = self._view()
+        view.request = make_request("get", user=make_superuser())
         member = make_device("interface-member-context")
         interface = self._make_interface(member, "Te1/1/1", port_id=42)
         context = view._build_member_contexts(member, vc_members=[], index_map={})
 
         assert context[member.pk]["interfaces_by_port_id"] == {42: interface}
         assert context[member.pk]["interfaces_by_name"] == {"Te1/1/1": interface}
+        assert context[member.pk]["viewable_interface_ids"] == {interface.pk}
 
     def test_attach_interface_match_sets_name_and_url(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -4970,7 +4975,7 @@ class TestMatchedInterfaceLinking:
         item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
         device = make_device("interface-attach-port-id")
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
-        context = {"interfaces_by_port_id": {42: iface}}
+        context = {"interfaces_by_port_id": {42: iface}, "viewable_interface_ids": {iface.pk}}
 
         BaseModuleTableView._attach_interface_match(row, item, context)
 
@@ -5014,6 +5019,7 @@ class TestMatchedInterfaceLinking:
             "interfaces_by_port_id": {},
             "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface},
             "held_port_ids": frozenset(),
+            "viewable_interface_ids": {iface.pk},
         }
 
         BaseModuleTableView._attach_interface_match(row, item, context)
@@ -5036,7 +5042,7 @@ class TestMatchedInterfaceLinking:
         }
         item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
-        context = {"interfaces_by_port_id": {42: iface}, "server_key": "default"}
+        context = {"interfaces_by_port_id": {42: iface}, "viewable_interface_ids": {iface.pk}, "server_key": "default"}
 
         BaseModuleTableView._attach_interface_match(row, item, context)
 
