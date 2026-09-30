@@ -3245,8 +3245,8 @@ class SingleCableVerifyView(BaseCableTableView):
                         # Escape LibreNMS-sourced labels to prevent XSS
                         safe_local_port = escape(local_port)
                         remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
-                        remote_device_name = link_data.get("remote_device_display") or link_data.get(
-                            "remote_device", ""
+                        remote_device_name = (
+                            link_data.get("remote_device_display") or link_data.get("remote_device") or ""
                         )
                         safe_remote_device = escape(remote_device_name)
                         safe_cable_status = escape(link_data.get("cable_status", "Missing Ports"))
@@ -3281,8 +3281,8 @@ class SingleCableVerifyView(BaseCableTableView):
                         remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
                         formatted_row["remote_port"] = remote_port_html(remote_port_name, link_data)
                         # Keep remote device name visible, add URL if available
-                        remote_device_name = link_data.get("remote_device_display") or link_data.get(
-                            "remote_device", ""
+                        remote_device_name = (
+                            link_data.get("remote_device_display") or link_data.get("remote_device") or ""
                         )
                         safe_remote_device = escape(remote_device_name)
                         formatted_row["remote_device"] = (

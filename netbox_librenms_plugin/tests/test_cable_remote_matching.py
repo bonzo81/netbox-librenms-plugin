@@ -1774,6 +1774,24 @@ class TestTheVerifiedRowRendersLikeTheTable:
         assert "<img" not in formatted["remote_port"]
         assert "&lt;img" in formatted["remote_port"]
 
+    @pytest.mark.parametrize("local_resolves", [True, False])
+    def test_a_neighbour_with_no_hostname_renders_an_empty_device_cell(self, local_resolves):
+        """LibreNMS can report no neighbour hostname, so the row carries remote_device=None."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key = configured_server_key()
+        tag = "resolved" if local_resolves else "unresolved"
+        local_device = make_device(f"verify-nohost-{tag}")
+        if local_resolves:
+            make_interface(local_device, "eth0")
+        (row_id,) = _seed_cable_rows(local_device, [_row(remote_device=None, remote_device_id=None)], server_key)
+
+        formatted = _verify(_logged_in(make_superuser(f"verify-nohost-{tag}")), local_device, row_id, server_key)
+
+        assert formatted["remote_device"] == ""
+        if not local_resolves:
+            assert formatted["cable_status"] == "Missing Interface"
+
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("advertised_id", [None, 501])
