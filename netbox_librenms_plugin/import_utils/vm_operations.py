@@ -95,6 +95,7 @@ def create_vm_from_librenms(
 
     Raises:
         ValueError: If the VM cannot be created from the validated data.
+        IdentityBusy: If another open transaction holds the LibreNMS identity claim.
 
     """
     from virtualization.models import VirtualMachine
