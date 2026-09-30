@@ -2797,7 +2797,7 @@ def coerce_librenms_id(value) -> int | None:
     return None. Booleans are rejected because ``bool`` is a subclass of ``int`` in
     Python, so ``int(True)`` silently becomes ``1`` — a valid-looking device ID. Zero
     and negative values are also rejected since LibreNMS IDs are strictly positive
-    integers.
+    integers. An int wider than 19 digits is rejected like its text form.
 
     Args:
         value: The raw LibreNMS id value to coerce.
@@ -2809,7 +2809,7 @@ def coerce_librenms_id(value) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value if value > 0 else None
+        return value if 0 < value < 10**_ID_TEXT_MAX_DIGITS else None
     if isinstance(value, str):
         if not _ASCII_POSITIVE_INTEGER_RE.fullmatch(value):
             return None
@@ -3269,12 +3269,9 @@ class AmbiguousLibreNMSIdError(LookupError):
     """
 
 
-def librenms_id_text_pattern(value: int) -> str | None:
-    """Return the SQL regex for the stored text forms of *value* that coerce_librenms_id() reads, or None."""
-    zeros = _ID_TEXT_MAX_DIGITS - len(str(value))
-    if zeros < 0:
-        return None
-    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}0{{0,{zeros}}}{value}{_ID_TEXT_SPACE}$"
+def librenms_id_text_pattern(value: int) -> str:
+    """Return the SQL regex for the stored text forms of a coerce_librenms_id() result that it also reads."""
+    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}0{{0,{_ID_TEXT_MAX_DIGITS - len(str(value))}}}{value}{_ID_TEXT_SPACE}$"
 
 
 def build_librenms_id_qs(server_key, value):
@@ -3344,11 +3341,10 @@ def build_librenms_id_qs(server_key, value):
 
     # Find the padded, signed and spaced text forms that coerce_librenms_id() also reads.
     numeric_pattern = librenms_id_text_pattern(normalized_value)
-    if numeric_pattern is not None:
-        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
-        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
-        host_q |= Q(custom_field_data__librenms_id__regex=numeric_pattern)
-        oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
+    host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
+    host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
+    host_q |= Q(custom_field_data__librenms_id__regex=numeric_pattern)
+    oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
     return host_q, oob_q
 
 
