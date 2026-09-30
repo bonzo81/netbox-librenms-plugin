@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
-from dcim.models import Device
+from dcim.models import Device, Interface
 from django.urls import resolve, reverse
 
 from netbox_librenms_plugin.middleware import REQUEST_FAILED_EVENT, TRY_AGAIN_MESSAGE, LockConflictMiddleware
@@ -16,6 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, bound_interface, seed_ports, sync_port
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     lock_row,
     lock_timeout,
@@ -56,6 +57,36 @@ def test_a_lock_conflict_in_a_view_without_the_runner_is_not_a_500(client, setti
         assert response.status_code == 302
         assert response["Location"] == referer
         assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+
+
+@transactional_db_with_all_apps()
+def test_a_lock_conflict_in_a_relationship_sync_is_a_json_answer(client, settings):
+    """The relationship buttons post with fetch() and parse JSON, so a redirect to an HTML page would hide the answer."""
+    configure_default_librenms_server(settings)
+    device = make_device("middleware-relationship-sync", librenms_cf={SERVER_KEY: {"id": 93}})
+    bound_interface(device, "eth1", 10)
+    bound_interface(device, "Po1", 20, iface_type="lag")
+    seed_ports(
+        device,
+        [sync_port(10, "eth1"), sync_port(20, "Po1", if_type="ieee8023adLag")],
+        lag_members={10: 20},
+    )
+    client.force_login(make_superuser("middleware-relationship-sync-user"))
+
+    with second_connection() as other:
+        lock_row(other, Device, device.pk)
+        with lock_timeout(LOCK_TIMEOUT_MS):
+            response = client.post(
+                reverse(
+                    "plugins:netbox_librenms_plugin:sync_interface_lag",
+                    kwargs={"object_type": "device", "object_id": device.pk},
+                ),
+                {"port_id": "10", "lag_port_id": "20", "server_key": SERVER_KEY},
+            )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": TRY_AGAIN_MESSAGE}
+    assert Interface.objects.get(device=device, name="eth1").lag_id is None
 
 
 SYNC_SCRIPT = Path(__file__).parents[1] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"

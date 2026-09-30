@@ -2665,6 +2665,8 @@ class _BaseRelationshipSyncView(
     source_label: str
     related_label: str
     supports_vm: bool = False
+    # A fetch() caller parses JSON, so the lock-conflict middleware answers with a JSON error.
+    answers_json = True
 
     @staticmethod
     def _migrated_donor_error(obj, server_key):

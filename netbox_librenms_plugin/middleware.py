@@ -4,6 +4,7 @@ import json
 import logging
 
 from django.contrib import messages
+from django.http import JsonResponse
 from utilities.api import is_api_request
 
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict
@@ -18,17 +19,24 @@ FOLLOW_UP_FAILED_MESSAGE = "Changes were saved, but follow-up work failed. Refre
 REQUEST_FAILED_EVENT = "librenmsRequestFailed"
 
 
-def _is_plugin_view(request):
-    """Return True when the resolved view of *request* is defined in this plugin."""
+def _resolved_view(request):
+    """Return the view class (or function) that *request* resolved to, or None."""
     match = request.resolver_match
     if match is None:
-        return False
-    view = getattr(match.func, "view_class", match.func)
-    return view.__module__.partition(".")[0] == PLUGIN_PACKAGE
+        return None
+    return getattr(match.func, "view_class", match.func)
+
+
+def _is_plugin_view(request):
+    """Return True when the resolved view of *request* is defined in this plugin."""
+    view = _resolved_view(request)
+    return view is not None and view.__module__.partition(".")[0] == PLUGIN_PACKAGE
 
 
 def _answer(request, message):
-    """Return the one visible answer: an htmx toast that swaps nothing, or one message and a redirect."""
+    """Return the one visible answer: a JSON error, an htmx toast that swaps nothing, or one message and a redirect."""
+    if getattr(_resolved_view(request), "answers_json", False):
+        return JsonResponse({"error": message}, status=409)
     if request.headers.get("HX-Request") == "true":
         response = _htmx_error_response(message)
         response["HX-Trigger"] = json.dumps({REQUEST_FAILED_EVENT: None})
