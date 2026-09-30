@@ -4967,11 +4967,12 @@ class TestMatchedInterfaceLinking:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         row = {"name": "Te1/1/1", "librenms_port_id": 42}
+        item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
         device = make_device("interface-attach-port-id")
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         context = {"interfaces_by_port_id": {42: iface}}
 
-        BaseModuleTableView._attach_interface_match(row, context)
+        BaseModuleTableView._attach_interface_match(row, item, context)
 
         assert row["matched_interface_name"] == "TenGigabitEthernet1/1/1"
         assert row["matched_interface_url"] == iface.get_absolute_url()
@@ -4986,9 +4987,10 @@ class TestMatchedInterfaceLinking:
         device = make_device("interface-attach-oob")
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         row = {"_source": "oob", "name": "TenGigabitEthernet1/1/1", "librenms_port_id": None}
+        item = {"_source": "oob", "entPhysicalName": "TenGigabitEthernet1/1/1"}
         context = {"interfaces_by_port_id": {}, "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface}}
 
-        BaseModuleTableView._attach_interface_match(row, context)
+        BaseModuleTableView._attach_interface_match(row, item, context)
 
         # No matched_interface_* key may survive for an OOB row — assert the whole payload
         # stays empty so a regression leaving matched_interface_url/source/confidence behind
@@ -5005,6 +5007,7 @@ class TestMatchedInterfaceLinking:
             "librenms_port_id": None,
             "librenms_ifname": "TenGigabitEthernet1/1/1",
         }
+        item = {"entPhysicalName": "Te1/1/1", "entPhysicalDescr": "desc", "_librenms_ifname": "TenGigabitEthernet1/1/1"}
         device = make_device("interface-attach-name")
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         context = {
@@ -5012,7 +5015,7 @@ class TestMatchedInterfaceLinking:
             "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface},
         }
 
-        BaseModuleTableView._attach_interface_match(row, context)
+        BaseModuleTableView._attach_interface_match(row, item, context)
 
         assert row["matched_interface_name"] == "TenGigabitEthernet1/1/1"
         assert row["matched_interface_url"] == iface.get_absolute_url()
@@ -5030,10 +5033,11 @@ class TestMatchedInterfaceLinking:
             "librenms_port_id": 42,
             "installed_module_id": installed.pk,
         }
+        item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         context = {"interfaces_by_port_id": {42: iface}, "server_key": "default"}
 
-        BaseModuleTableView._attach_interface_match(row, context)
+        BaseModuleTableView._attach_interface_match(row, item, context)
 
         assert row["matched_interface_id"] == iface.pk
         assert row["matched_interface_module_id"] is None
@@ -5045,7 +5049,7 @@ class TestMatchedInterfaceLinking:
         row = {"name": "Te1/1/1", "librenms_port_id": None}
         context = {"interfaces_by_port_id": {42: object()}}
 
-        BaseModuleTableView._attach_interface_match(row, context)
+        BaseModuleTableView._attach_interface_match(row, {"entPhysicalName": "Te1/1/1"}, context)
 
         assert "matched_interface_name" not in row
         assert "matched_interface_url" not in row
