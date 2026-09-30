@@ -58,7 +58,6 @@ COMMIT_POINTS = pytest.mark.parametrize("commit_point", [BEFORE_THE_FRESH_READ, 
 PLAIN_AND_HTMX = pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
 ATTRIBUTE_WRITER = "update_interface_attributes"
 VLAN_WRITER = "_update_interface_vlan_assignment"
-CHANGED_TEXT = "NetBox interface {} was changed by another operation. Refresh and try again."
 
 
 @pytest.fixture(autouse=True)
@@ -565,7 +564,7 @@ def test_a_row_that_leaves_the_change_scope_during_the_vlan_write(
 
 
 # ---------------------------------------------------------------------------
-# The IP tab's create-missing path runs outside the runner: a stale row fails alone
+# The IP tab runs in the runner: a stale row retries the whole batch once
 # ---------------------------------------------------------------------------
 
 
@@ -620,7 +619,7 @@ def commit_when_the_ip_tab_writes(monkeypatch, pk, commit):
 
 
 @transactional_db_with_all_apps()
-def test_a_stale_row_in_the_ip_tab_fails_with_the_fixed_text_and_the_other_rows_sync(client, monkeypatch):
+def test_a_stale_row_in_the_ip_tab_retries_the_batch_and_every_row_syncs(client, monkeypatch):
     device = make_device("late-write-ip", librenms_cf={SERVER_KEY: {"id": 42}})
     stale = make_interface(device, "Ethernet1", iface_type="1000base-t")
     fine = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -628,20 +627,20 @@ def test_a_stale_row_in_the_ip_tab_fails_with_the_fixed_text_and_the_other_rows_
     client.force_login(make_superuser("late-write-ip-user"))
 
     with second_connection() as other:
-        commit_at_the_fresh_read(
+        commits = commit_at_the_fresh_read(
             monkeypatch,
             stale.pk,
             lambda: commit_row_change(other, Interface, stale.pk, {"label": "set by another operation"}),
         )
         response = post_ip_sync(client, device, ["198.18.20.10", "198.18.21.10"])
 
+    assert commits.commits == 1
     assert response.status_code == 302
-    errors = [text for level, text in messages_on(response.wsgi_request) if level == "error"]
-    assert errors == [f"Failed to sync IP addresses: 198.18.20.10/24 ({TRY_AGAIN_MESSAGE})"]
+    assert messages_on(response.wsgi_request) == [("success", "Created IP addresses: 198.18.20.10/24, 198.18.21.10/24")]
     stale.refresh_from_db()
-    assert (stale.label, stale.description) == ("set by another operation", "")
-    assert get_librenms_device_id(stale, SERVER_KEY, auto_save=False) is None
-    assert not IPAddress.objects.filter(address="198.18.20.10/24").exists()
+    assert (stale.label, stale.description) == ("set by another operation", "Ethernet1 uplink")
+    assert get_librenms_device_id(stale, SERVER_KEY, auto_save=False) == 7020
+    assert IPAddress.objects.get(address="198.18.20.10/24").assigned_object == stale
     fine.refresh_from_db()
     assert fine.description == "Ethernet2 uplink"
     assert IPAddress.objects.get(address="198.18.21.10/24").assigned_object == fine
@@ -649,7 +648,8 @@ def test_a_stale_row_in_the_ip_tab_fails_with_the_fixed_text_and_the_other_rows_
 
 @transactional_db_with_all_apps()
 @COMMIT_POINTS
-def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_fails_with_the_fixed_text(client, monkeypatch, commit_point):
+def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_is_never_written(client, monkeypatch, commit_point):
+    """The retry finds no interface of the port's name, so it creates one; the renamed row keeps its values."""
     device = make_device(f"late-write-ip-scope-{commit_point}", librenms_cf={SERVER_KEY: {"id": 43}})
     interface = make_interface(device, "eth1", iface_type="1000base-t")
     seed_ip_rows(device, [("198.18.22.10", 7022, "eth1")])
@@ -670,13 +670,13 @@ def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_fails_with_the_fixed_t
 
     assert commits.commits == 1
     assert response.status_code == 302
-    assert messages_on(response.wsgi_request) == [
-        ("error", f"Failed to sync IP addresses: 198.18.22.10/24 ({TRY_AGAIN_MESSAGE})")
-    ]
+    assert messages_on(response.wsgi_request) == [("success", "Created IP addresses: 198.18.22.10/24")]
     interface.refresh_from_db()
     assert (interface.name, interface.description) == ("private-link", "")
     assert get_librenms_device_id(interface, SERVER_KEY, auto_save=False) is None
-    assert not IPAddress.objects.filter(address="198.18.22.10/24").exists()
+    created = Interface.objects.get(device=device, name="eth1")
+    assert get_librenms_device_id(created, SERVER_KEY, auto_save=False) == 7022
+    assert IPAddress.objects.get(address="198.18.22.10/24").assigned_object == created
 
 
 # ---------------------------------------------------------------------------

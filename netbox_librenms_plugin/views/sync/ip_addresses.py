@@ -28,6 +28,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -409,7 +410,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return ip.strip() or None
         except LibreNMSIDConflictError:
             raise
-        except Exception:  # pragma: no cover - defensive
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
+            logger.warning("Management IP lookup failed for %s: %s", obj, exc, exc_info=True)
             return None
 
     @staticmethod
@@ -1007,9 +1011,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         interface_name_field=None,
         bound_ports_by_id=None,
     ):
-        """Sync selected IP rows in one transaction with per-row savepoints."""
-        with transaction.atomic():
-            return self._process_ip_sync(
+        """Sync selected IP rows in one transaction with per-row savepoints; a lock conflict retries the batch once."""
+        return run_transaction(
+            lambda: self._process_ip_sync(
                 request,
                 selected_ips,
                 cached_ips,
@@ -1020,6 +1024,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 interface_name_field=interface_name_field,
                 bound_ports_by_id=bound_ports_by_id,
             )
+        )
 
     def _process_ip_sync(  # noqa: C901
         self,
@@ -1053,10 +1058,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 interfaces in scope; evidence for the interface rules only.
 
         Returns:
-            dict: The per-outcome row lists, errors, conflicts, and batch mutation state.
+            dict: The per-outcome row lists, errors, conflicts, warnings, and batch mutation state.
 
         """
         results = {
+            "warnings": [],
             "created": [],
             "updated": [],
             "unchanged": [],
@@ -1075,9 +1081,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         set_primary = resolve_set_primary_ip(request)
         mgmt_ip = self.get_management_ip(obj) if set_primary else None
         if mgmt_ip and sum(self._same_host(str(row_id).partition("@")[0], mgmt_ip) for row_id in selected_ips) > 1:
-            messages.warning(
-                request,
-                "Primary IP not set: multiple selected source rows match the management IP. Select one row to set it.",
+            results["warnings"].append(
+                "Primary IP not set: multiple selected source rows match the management IP. Select one row to set it."
             )
             mgmt_ip = None
 
@@ -1271,6 +1276,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             row_mutations.add(row_id)
 
             except Exception as exc:
+                if classify_conflict(exc):
+                    raise
                 if interface_maps_before_row is not None:
                     (
                         interfaces_by_librenms_id_before,
@@ -1311,6 +1318,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     def display_sync_results(self, request, results):
         """Display flash messages summarizing the IP sync results."""
+        for warning in results["warnings"]:
+            messages.warning(request, warning)
         if results["created"]:
             messages.success(request, f"Created IP addresses: {', '.join(results['created'])}")
         if results["updated"]:
