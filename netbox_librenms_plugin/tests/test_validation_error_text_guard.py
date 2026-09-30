@@ -17,7 +17,9 @@ an allowlist entry with its reason.
 
 import ast
 import importlib
+import sys
 import textwrap
+import traceback
 from pathlib import Path
 
 import psycopg
@@ -37,13 +39,7 @@ RULE = "exception_text_for"
 SAFE_CALLEES = frozenset({RULE, "classify_conflict", "database_error_sqlstate", "isinstance", "type"})
 # Calls that return the current exception or its text without a read of the bound name.
 CURRENT_EXCEPTION = frozenset(
-    {
-        "sys.exc_info",
-        "sys.exception",
-        "traceback.format_exc",
-        "traceback.format_exception",
-        "traceback.format_exception_only",
-    }
+    {sys.exc_info, sys.exception, traceback.format_exc, traceback.format_exception, traceback.format_exception_only}
 )
 LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
 
@@ -110,13 +106,34 @@ def _resolve(node, namespace):
 
 
 def _can_catch_risky(classes):
-    """Return whether a handler for *classes* can get a risky error; the plugin writes its own classes' text."""
-    return any(
-        issubclass(cls, risky) or issubclass(risky, cls)
-        for cls in classes
-        if not cls.__module__.startswith(f"{PACKAGE.name}.")
-        for risky in RISKY
-    )
+    return any(issubclass(cls, risky) or issubclass(risky, cls) for cls in classes for risky in RISKY)
+
+
+def _own_imports(function):
+    """Return a one-name import statement for each name that *function* imports outside its nested scopes."""
+    imports = {}
+    nodes = list(function.body)
+    while nodes:
+        node = nodes.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                statement = (
+                    ast.Import([alias])
+                    if isinstance(node, ast.Import)
+                    else ast.ImportFrom(node.module, [alias], node.level)
+                )
+                imports[(alias.asname or alias.name).split(".")[0]] = statement
+        nodes.extend(ast.iter_child_nodes(node))
+    return imports
+
+
+def _is_name_chain(node):
+    """Return whether *node* is a name or a chain of attributes on a name, which eval reads without a call."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return isinstance(node, ast.Name)
 
 
 def _is_log_call(node):
@@ -160,7 +177,8 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
     """Collect each read of a caught error that can hold a ValidationError or database error and is not safe."""
 
     def __init__(self, namespace):
-        self.namespaces = [namespace]
+        self.namespace = namespace
+        self.imports = []
         self.scope = []
         self.reads = []
 
@@ -170,14 +188,30 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         self.scope.pop()
 
     def _visit_function(self, node):
-        # A function can import the class that it catches.
-        namespace = dict(self.namespaces[-1])
-        for statement in ast.walk(node):
-            if isinstance(statement, (ast.Import, ast.ImportFrom)):
-                exec(compile(ast.Module([statement], []), "<local import>", "exec"), namespace)
-        self.namespaces.append(namespace)
+        self.imports.append(_own_imports(node))
         self._visit_scope(node)
-        self.namespaces.pop()
+        self.imports.pop()
+
+    def _namespace_for(self, expression):
+        """Return the module namespace plus the imports of the enclosing functions that *expression* names."""
+        names = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
+        statements = [
+            next((imports[name] for imports in reversed(self.imports) if name in imports), None) for name in names
+        ]
+        if not any(statements):
+            return self.namespace
+        namespace = dict(self.namespace)
+        for statement in filter(None, statements):
+            exec(compile(ast.fix_missing_locations(ast.Module([statement], [])), "<local import>", "exec"), namespace)
+        return namespace
+
+    def _reads_current_exception(self, node):
+        if not (isinstance(node, ast.Call) and _is_name_chain(node.func)):
+            return False
+        try:
+            return eval(ast.unparse(node.func), self._namespace_for(node.func)) in CURRENT_EXCEPTION
+        except (NameError, AttributeError):
+            return False
 
     visit_ClassDef = _visit_scope
     visit_FunctionDef = visit_AsyncFunctionDef = _visit_function
@@ -188,7 +222,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
                 self._scan_handler(handler)
                 continue
             try:
-                classes = _resolve(handler.type, self.namespaces[-1])
+                classes = _resolve(handler.type, self._namespace_for(handler.type))
             except (NameError, AttributeError):
                 self.reads.append((".".join(self.scope), f"except {ast.unparse(handler.type)}: cannot resolve"))
                 continue
@@ -202,8 +236,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         parents = {child: parent for parent in ast.walk(handler) for child in ast.iter_child_nodes(parent)}
         for node in ast.walk(handler):
             bound = isinstance(node, ast.Name) and node.id == handler.name and isinstance(node.ctx, ast.Load)
-            current = isinstance(node, ast.Call) and ast.unparse(node.func) in CURRENT_EXCEPTION
-            if not (bound or current):
+            if not (bound or self._reads_current_exception(node)):
                 continue
             if (sink := _sink(node, parents)) is not None:
                 self.reads.append((".".join(self.scope), sink))
@@ -255,14 +288,15 @@ def _scan(source):
     from requests import exceptions as request_errors
 
     namespace = {
-        "__name__": f"{PACKAGE.name}.views.example",
         **{cls.__name__: cls for cls in (ValidationError, AbortRequest, DatabaseError, DataError, IntegrityError)},
         **{cls.__name__: cls for cls in (OperationalError, ProtectedError)},
         "db": db,
         "forms": forms,
         "psycopg": psycopg,
+        "sys": sys,
+        "traceback": traceback,
         "RequestException": request_errors.RequestException,
-        "_WriteRefused": type("_WriteRefused", (RuntimeError,), {"__module__": "example"}),
+        "_WriteRefused": type("_WriteRefused", (RuntimeError,), {}),
     }
     exec(source, namespace)
     return caught_error_reads(source, namespace)
@@ -440,7 +474,7 @@ def test_an_except_expression_that_the_module_cannot_resolve_fails_the_scan():
     assert _scan(source) == [("view", "except type(exc): cannot resolve")]
 
 
-def test_the_scan_skips_a_handler_for_a_validation_error_that_the_plugin_defines():
+def test_the_scan_reads_a_handler_for_a_validation_error_that_the_plugin_defines():
     source = textwrap.dedent(
         """
         class TagNameTaken(ValidationError):
@@ -450,11 +484,11 @@ def test_the_scan_skips_a_handler_for_a_validation_error_that_the_plugin_defines
             try:
                 save()
             except TagNameTaken as exc:
-                form.add_error(None, exc)
+                form.add_error(None, exc.__cause__)
         """
     )
 
-    assert _scan(source) == []
+    assert _scan(source) == [("view", ".__cause__")]
 
 
 def test_the_scan_resolves_a_class_that_the_function_imports():
@@ -489,3 +523,58 @@ def test_the_scan_resolves_the_does_not_exist_class_of_a_model_variable():
     )
 
     assert _scan(source) == [("view", "except model.WriteFailed: cannot resolve")]
+
+
+def test_the_scan_finds_an_imported_reader_of_the_current_exception():
+    source = textwrap.dedent(
+        """
+        from traceback import format_exc as trace_text
+
+        def view():
+            from sys import exception as current
+
+            try:
+                save()
+            except Exception:
+                messages.error(request, trace_text())
+            except BaseException:
+                return current()
+        """
+    )
+
+    assert _scan(source) == [("view", "messages.error"), ("view", "Return")]
+
+
+def test_an_import_in_a_nested_function_does_not_change_the_outer_handler():
+    source = textwrap.dedent(
+        """
+        Caught = Exception
+
+        def view():
+            def later():
+                from builtins import ValueError as Caught
+
+            try:
+                save()
+            except Caught as exc:
+                return str(exc)
+        """
+    )
+
+    assert _scan(source) == [("view", "str")]
+
+
+def test_the_scan_imports_only_the_names_that_an_except_clause_uses():
+    source = textwrap.dedent(
+        """
+        def view():
+            if False:
+                from dcim.models.mixins import NotInThisNetBox
+            try:
+                save()
+            except IntegrityError as exc:
+                return str(exc)
+        """
+    )
+
+    assert _scan(source) == [("view", "str")]
