@@ -1497,6 +1497,17 @@ class TestInterfaceFormatting:
             "librenms_bridge_name",
         }
 
+    def test_a_row_without_a_port_id_matches_by_name_like_the_writer(self):
+        """The sync writes a row with no port ID onto its same-name interface, so the row shows that match."""
+        device = make_device("format-no-port-id")
+        interface = make_interface(device, "Ethernet1")
+        record = _port(port_id=None, name_fallback_allowed=True, _source="main")
+
+        _interface_table(device).format_interface_data(record, device)
+
+        assert record["netbox_interface"] == interface
+        assert record["exists_in_netbox"] is True
+
     def test_matching_alias_is_cleared_in_the_real_formatted_result(self):
         device = make_device("format-alias")
         record = _port(ifAlias="Ethernet1")

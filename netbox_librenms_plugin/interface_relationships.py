@@ -8,7 +8,7 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, name_match_may_be_port, read_mapping
 from netbox_librenms_plugin.utils import (
     invert_relationship_edges,
     is_list_of_dicts,
@@ -217,9 +217,8 @@ def resolve_interface_by_port_id(
         if interface is not None:
             if expected_owner is not None and interface_owner(interface) != expected_owner:
                 return None, f"Interface name '{name_hint}' resolves to a different owner than the selected row"
-            mapping = read_mapping(interface)
-            if not mapping.allows_name_fallback(server_key, target_id):
-                stored_id = normalize_librenms_port_id(mapping.own_id(server_key))
+            if not name_match_may_be_port(interface, server=server_key, port_id=target_id):
+                stored_id = normalize_librenms_port_id(read_mapping(interface).own_id(server_key))
                 return None, f"Interface name '{name_hint}' is already bound to LibreNMS port_id {stored_id}"
             return interface, None
 

@@ -15,11 +15,7 @@ from enum import StrEnum
 
 from django.db.models import JSONField, Q
 
-from netbox_librenms_plugin.librenms_ids import (
-    coerce_librenms_id,
-    librenms_id_text_pattern,
-    normalize_librenms_port_id,
-)
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id, librenms_id_text_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -229,22 +225,6 @@ class MappingState:
         """Return the effective migration target on *server_key*, or None."""
         entry = self.server(require_server_key(server_key))
         return entry.migration.effective if entry is not None else None
-
-    def allows_name_fallback(self, server_key: str, port_id) -> bool:
-        """
-        Return whether a same-name interface may match *port_id* on *server_key*.
-
-        An interface without a binding on the server may match. A present binding must name the
-        requested port, so a malformed binding never counts as unbound.
-        """
-        requested_id = normalize_librenms_port_id(port_id)
-        if requested_id is None:
-            return False
-        if self.container is ContainerStatus.ABSENT:
-            return True
-        if self.container is ContainerStatus.SCOPED and self.server(server_key) is None:
-            return True
-        return self.own_id(server_key) == requested_id
 
 
 @dataclass(frozen=True)
@@ -538,11 +518,20 @@ def name_match_may_be_port(interface, *, server: str, port_id) -> bool:
     Return whether a same-name *interface* may stand for LibreNMS *port_id* on *server*.
 
     A row without a port ID has nothing to contradict. Otherwise the interface must be unbound on
-    the server or bound to that port, so a name never wins over a binding to a different port.
+    the server or bound to that port, so a name never wins over a binding to a different port. A
+    malformed binding never counts as unbound.
     """
-    if coerce_librenms_id(port_id) is None:
+    requested_id = coerce_librenms_id(port_id)
+    if requested_id is None:
         return True
-    return is_server_key(server) and read_mapping(interface).allows_name_fallback(server, port_id)
+    if not is_server_key(server):
+        return False
+    mapping = read_mapping(interface)
+    if mapping.container is ContainerStatus.ABSENT:
+        return True
+    if mapping.container is ContainerStatus.SCOPED and mapping.server(server) is None:
+        return True
+    return mapping.own_id(server) == requested_id
 
 
 def mapped_device_servers(subject, *, active_server: str | None = None) -> tuple[str, ...]:

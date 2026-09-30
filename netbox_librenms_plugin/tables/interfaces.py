@@ -31,7 +31,7 @@ from netbox_librenms_plugin.interface_diff import (
 )
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, rule_names
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     check_vlan_group_matches,
@@ -1148,7 +1148,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 candidate
                 if candidate
                 and port_data.get("name_fallback_allowed", False)
-                and read_mapping(candidate).allows_name_fallback(self.server_key, port_data.get("port_id"))
+                and name_match_may_be_port(candidate, server=self.server_key, port_id=port_data.get("port_id"))
                 else None
             )
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
