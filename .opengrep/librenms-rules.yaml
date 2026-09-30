@@ -273,6 +273,30 @@ rules:
       - metavariable-comparison:
           metavariable: $ROUTE
           comparison: re.match(".*<(str:)?pk>", $ROUTE)
+  - id: no-direct-htmx-request-header-read
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads the HX-Request header directly. Use request.htmx from django-htmx, whose
+      middleware NetBox installs: it is true only when the header is "true". A direct read can
+      treat "HX-Request: false" as an htmx request, and two reads can disagree.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+    patterns:
+      - pattern-either:
+          - pattern: $HEADERS.get($KEY, ...)
+          - pattern: $HEADERS[$KEY]
+          - pattern: $KEY in $HEADERS
+          - pattern: $KEY not in $HEADERS
+      - metavariable-pattern:
+          metavariable: $KEY
+          patterns:
+            - pattern-either:
+                - pattern: '"=~/(?i)^hx-request$/"'
+                - pattern: '"=~/(?i)^http_hx_request$/"'
   - id: no-django-testcase-in-tests
     languages: [python]
     severity: WARNING

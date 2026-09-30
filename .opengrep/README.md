@@ -46,6 +46,7 @@ unchecked until that review.
 | `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
 | `url-numeric-pk-converter` | error | A `path()` route uses `<str:pk>` or `<pk>`, including local string constants. |
+| `no-direct-htmx-request-header-read` | error | Code reads the `HX-Request` header (or `HTTP_HX_REQUEST`) instead of `request.htmx`. |
 | `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
@@ -55,7 +56,8 @@ unchecked until that review.
 `import-disclosure` and its sanitizer-shadow guard exclude tests and migrations. Canonical helper
 definitions carry explicit suppressions. All other local bindings of these names are blocked. The
 requests rule covers
-`netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The two test-convention
+`netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The htmx header rule
+excludes tests, because a test sends the header to build an htmx request. The two test-convention
 rules include only `netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
 in the scan target.
 
@@ -76,6 +78,10 @@ in the same file. It accepts import aliases and imports from `requests.api` and
 `requests.sessions`. It does not report parameters or local variables that shadow the library. It
 does not follow clients passed between functions. The package-wide ban keeps all HTTP in one client
 because rules cannot infer its destination.
+
+The htmx header rule checks `.get()`, subscript and `in` reads whose key is the header name or its
+`META` name, in any letter case, also through a local string constant. It does not see a key built
+at run time.
 
 The URL rule checks `<str:pk>` and `<pk>` in literal routes and local string constants.
 It leaves `<str:id>` alone because external IDs can contain text. The `pk` name is a package
