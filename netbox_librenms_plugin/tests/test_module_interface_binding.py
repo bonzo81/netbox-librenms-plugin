@@ -111,6 +111,25 @@ class TestInterfacePortBinding:
         assert read_mapping(taken).own_id("default") == 8999
         assert read_mapping(module.interfaces.get(name="Uplink1")).own_id("default") == 8804
 
+    def test_a_refused_name_does_not_fall_through_to_the_lone_module_interface(self):
+        """Ethernet1/1 names port 8805 but is bound to 8999, so the unrelated lone Uplink must stay unbound."""
+        device = make_device_with_module_bays("bind-name-refused", ["Slot 1"])
+        taken = make_interface(device, "Ethernet1/1")
+        taken.custom_field_data["librenms_id"] = {"default": 8999}
+        taken.save(update_fields=["custom_field_data"])
+        module = _module_with_interfaces(device, "Slot 1", "BIND-REFUSED-CARD", ["Uplink"])
+        item = {"_librenms_port_id": 8805, "_librenms_ifname": "Ethernet1/1"}
+
+        result = self._bind(device, item, module.pk)
+
+        assert result == {
+            "status": "conflict",
+            "reason": "Ethernet1/1 is already bound to a different LibreNMS port; not overwriting",
+        }
+        taken.refresh_from_db()
+        assert read_mapping(taken).own_id("default") == 8999
+        assert read_mapping(module.interfaces.get(name="Uplink")).own_id("default") is None
+
 
 class TestRecordBindOutcome:
     """A failed bind is reported in the install summary without claiming a change."""

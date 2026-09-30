@@ -846,15 +846,17 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         by_name = {
             interface.name: interface for interface in interfaces.filter(device=device, name__in=interface_names)
         }
+        named = [by_name[name] for name in interface_names if name in by_name]
         # A name never wins over a binding to a different port; try the next name.
         candidate = next(
-            (
-                by_name[name]
-                for name in interface_names
-                if name in by_name and name_match_may_be_port(by_name[name], server=server_key, port_id=port_id)
-            ),
-            None,
+            (match for match in named if name_match_may_be_port(match, server=server_key, port_id=port_id)), None
         )
+        if candidate is None and named:
+            # Every named interface belongs to another port; the module fallback must not guess past them.
+            return {
+                "status": "conflict",
+                "reason": f"{named[0].name} is already bound to a different LibreNMS port; not overwriting",
+            }
 
     if candidate is None and module_pk:
         module_interfaces = interfaces.filter(device=device, module_id=module_pk)
