@@ -1,3 +1,5 @@
+import logging
+
 from django.core.exceptions import ImproperlyConfigured
 from netbox.plugins import PluginConfig
 
@@ -5,6 +7,8 @@ from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
 
 __author__ = "Andy Norwood"
 __version__ = "0.4.8"
+
+logger = logging.getLogger(__name__)
 
 
 class LibreNMSSyncConfig(PluginConfig):
@@ -141,8 +145,6 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
     if db_alias in executed_aliases:
         return
 
-    import logging
-
     try:
         from django.contrib.contenttypes.models import ContentType
         from extras.models import CustomField
@@ -165,9 +167,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         if not created and cf.type == "integer":
             cf.type = "json"
             cf.save(using=db_alias, update_fields=["type", "last_updated"])
-            logging.getLogger("netbox_librenms_plugin").info(
-                "Migrated 'librenms_id' custom field type from integer to json"
-            )
+            logger.info("Migrated 'librenms_id' custom field type from integer to json")
 
         # Ensure the field is assigned to the required object types
         from dcim.models import Device, Interface
@@ -186,9 +186,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
                 cf.object_types.add(ct)
 
         if created:
-            logging.getLogger("netbox_librenms_plugin").info(
-                "Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface"
-            )
+            logger.info("Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface")
 
         # Mark this alias as executed after successful completion to allow retry on failure.
         executed_aliases.add(db_alias)
@@ -196,7 +194,6 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
     except Exception as e:
         # Don't break startup if custom field creation fails (e.g., during initial migration),
         # but log the error so it's not silently swallowed.
-        logger = logging.getLogger("netbox_librenms_plugin")
         logger.exception("Failed to auto-create 'librenms_id' custom field: %s", e)
 
 
