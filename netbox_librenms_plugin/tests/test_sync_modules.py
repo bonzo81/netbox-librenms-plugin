@@ -461,7 +461,7 @@ class TestInventoryIdentityHelpers:
         ],
     )
     def test_port_identity_is_normalized_and_deduplicated(self, row, port_id, names):
-        from netbox_librenms_plugin.views.sync.modules import _get_item_port_identity
+        from netbox_librenms_plugin.views.base.modules_view import _get_item_port_identity
 
         assert _get_item_port_identity(row) == (port_id, names)
 
@@ -475,14 +475,14 @@ class TestInventoryIdentityHelpers:
         ],
     )
     def test_interface_coordinates_follow_real_labels(self, label, expected):
-        from netbox_librenms_plugin.views.sync.modules import _extract_interface_coordinates
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        assert _extract_interface_coordinates(label) == expected
+        assert BaseModuleTableView._extract_interface_numeric_coordinates(label) == expected
 
     def test_unique_coordinate_match_selects_the_real_module_interface(self):
         from dcim.models import Interface, Module
 
-        from netbox_librenms_plugin.views.sync.modules import _select_module_interface_by_coordinates
+        from netbox_librenms_plugin.views.base.modules_view import _select_module_interface_by_coordinates
 
         device = make_device("coordinate-device")
         bay = make_module_bay(device, "Coordinate Bay")
@@ -502,7 +502,7 @@ class TestInventoryIdentityHelpers:
     def test_tied_coordinate_match_fails_closed(self):
         from dcim.models import Interface, Module
 
-        from netbox_librenms_plugin.views.sync.modules import _select_module_interface_by_coordinates
+        from netbox_librenms_plugin.views.base.modules_view import _select_module_interface_by_coordinates
 
         device = make_device("coordinate-tie")
         bay = make_module_bay(device, "Coordinate Tie Bay")

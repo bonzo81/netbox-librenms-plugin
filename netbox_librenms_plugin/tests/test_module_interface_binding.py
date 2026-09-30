@@ -131,6 +131,91 @@ class TestInterfacePortBinding:
         assert read_mapping(module.interfaces.get(name="Uplink")).own_id("default") is None
 
 
+def _render_module_tab(device, user):
+    """Render the real module table from its seeded cache."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    request = make_request(
+        "get",
+        {"tab": "modules", "server_key": "default"},
+        user=user,
+        path=reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk}),
+    )
+    view = DeviceModuleTableView()
+    view.setup(request, pk=device.pk)
+    view.cache_only = True
+    context = view.get_context_data(request, device)
+    return context["table"].as_html(request)
+
+
+class TestModuleTableShowsTheWriterChoice:
+    """The modules table shows the interface that Update Interface then binds."""
+
+    @pytest.mark.parametrize(
+        ("interface_names", "identity", "expected", "source"),
+        [
+            (["Ethernet1/17", "Ethernet1/18"], {"_librenms_ifname": "port 1/17"}, "Ethernet1/17", "coordinates"),
+            (["Uplink"], {"_librenms_ifdescr": "Unmatched Label"}, "Uplink", "lone module interface"),
+        ],
+        ids=["coordinates", "lone-interface"],
+    )
+    def test_the_update_binds_the_interface_the_table_shows(
+        self, live_librenms, interface_names, identity, expected, source
+    ):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device_with_module_bays(f"table-choice-{source[:5]}", ["Slot 1"])
+        module = _module_with_interfaces(device, "Slot 1", f"TABLE-CHOICE-{source[:5].upper()}", interface_names)
+        set_librenms_device_id(device, ADOPTION_LIBRENMS_ID, "default")
+        device.save(update_fields=["custom_field_data"])
+        device.__dict__.pop("cf", None)
+        row = {**_adoption_inventory_row(module.module_type.model, "Slot 1"), "_librenms_port_id": 8811, **identity}
+        cache_key = seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=ADOPTION_LIBRENMS_ID)
+        user = make_superuser()
+        shown = module.interfaces.get(name=expected)
+        try:
+            content = _render_module_tab(device, user)
+            request = make_request(
+                "post",
+                {
+                    "module_id": str(module.pk),
+                    "ent_index": str(ADOPTION_ENT_INDEX),
+                    "server_key": "default",
+                    "inventory_binding": module_inventory_binding_token(
+                        device.pk,
+                        "default",
+                        "update_module_interface",
+                        {"module_id": module.pk},
+                        ADOPTION_ENT_INDEX,
+                        module_inventory_row_digest(row),
+                    ),
+                },
+                user=user,
+                path="/modules/",
+            )
+            view = UpdateModuleInterfaceView()
+            view._librenms_api = live_librenms.api
+            response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert (
+            f'<a href="{shown.get_absolute_url()}" title="Matched by {source}, confidence low">{expected}</a>'
+            in content
+        )
+        assert "Update Interface" in content
+        assert response.status_code == 302
+        assert [
+            interface.name for interface in module.interfaces.all() if read_mapping(interface).own_id("default") == 8811
+        ] == [expected]
+
+
 class TestRecordBindOutcome:
     """A failed bind is reported in the install summary without claiming a change."""
 

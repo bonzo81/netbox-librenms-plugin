@@ -21,7 +21,6 @@ from netbox_librenms_plugin.interface_diff import type_change_refusal
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     find_port_owner,
-    name_match_may_be_port,
     read_mapping,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -55,12 +54,14 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
-    NO_DEVICE_IDENTITY,
-    BaseModuleTableView,
-    DeviceIdentity,
     _PLACEHOLDER_VALUES,
-    _check_ignore_rules,
+    BaseModuleTableView,
+    _get_item_port_identity,
     _inventory_item_key,
+    select_module_interface,
+    NO_DEVICE_IDENTITY,
+    DeviceIdentity,
+    _check_ignore_rules,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -377,81 +378,6 @@ class _ModuleComponentAdoptionUnavailable(Exception):
 def _get_sync_device_for_inventory(device, server_key):
     """Return the VC sync device used for module inventory cache keys."""
     return get_librenms_sync_device(device, server_key=server_key) or device
-
-
-def _get_item_port_identity(item):
-    """Extract stable port identity metadata from an inventory item."""
-    port_id = _coerce_positive_int(item.get("_librenms_port_id") or item.get("port_id"))
-    interface_names = []
-    for value in [
-        item.get("_librenms_ifname"),
-        item.get("_librenms_ifdescr"),
-        item.get("entPhysicalName"),
-        item.get("entPhysicalDescr"),
-    ]:
-        name = (value or "").strip()
-        if name and name not in interface_names:
-            interface_names.append(name)
-    return port_id, interface_names
-
-
-def _extract_interface_coordinates(label):
-    """Extract slash-delimited numeric interface coordinates from a label."""
-    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-    return BaseModuleTableView._extract_interface_numeric_coordinates(label)
-
-
-def _collect_item_interface_coordinates(item):
-    """Collect unique numeric interface coordinate tuples from inventory metadata."""
-    _, interface_names = _get_item_port_identity(item)
-    coordinates = []
-    for name in interface_names:
-        parts = _extract_interface_coordinates(name)
-        if parts and parts not in coordinates:
-            coordinates.append(parts)
-    return coordinates
-
-
-def _select_module_interface_by_coordinates(device, module_interfaces, item):
-    """Pick a unique best module interface using coordinate similarity scoring."""
-    if not module_interfaces:
-        return None
-
-    item_coordinates = _collect_item_interface_coordinates(item)
-    if not item_coordinates:
-        return None
-
-    vc_position = getattr(device, "vc_position", None)
-    scored = []
-
-    for interface in module_interfaces:
-        coords = _extract_interface_coordinates(getattr(interface, "name", "") or "")
-        if not coords:
-            continue
-
-        best_score = 0
-        for item_coords in item_coordinates:
-            score = 0
-            if coords and item_coords and coords[-1] == item_coords[-1]:
-                score += 4
-            if len(coords) >= 2 and len(item_coords) >= 2 and coords[-2] == item_coords[-2]:
-                score += 2
-            if isinstance(vc_position, int) and vc_position > 0 and coords and coords[0] == vc_position:
-                score += 1
-            if score > best_score:
-                best_score = score
-
-        if best_score > 0:
-            scored.append((best_score, getattr(interface, "pk", None), interface))
-
-    if not scored:
-        return None
-
-    scored.sort(key=lambda row: row[0], reverse=True)
-    if len(scored) > 1 and scored[0][0] == scored[1][0]:
-        return None
-    return scored[0][2]
 
 
 def _module_component_specs():
@@ -842,37 +768,20 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         }
 
     candidate = existing_owner
-    if candidate is None and interface_names:
-        by_name = {
-            interface.name: interface for interface in interfaces.filter(device=device, name__in=interface_names)
-        }
-        named = [by_name[name] for name in interface_names if name in by_name]
-        # A name never wins over a binding to a different port; try the next name.
-        candidate = next(
-            (match for match in named if name_match_may_be_port(match, server=server_key, port_id=port_id)), None
+    if candidate is None:
+        device_interfaces = interfaces.filter(device=device)
+        choice = select_module_interface(
+            device,
+            item,
+            server_key=server_key,
+            interfaces_by_name={
+                interface.name: interface for interface in device_interfaces.filter(name__in=interface_names)
+            },
+            module_interfaces=list(device_interfaces.filter(module_id=module_pk)) if module_pk else [],
         )
-        if candidate is None and named:
-            # Every named interface belongs to another port; the module fallback must not guess past them.
-            return {
-                "status": "conflict",
-                "reason": f"{named[0].name} is already bound to a different LibreNMS port; not overwriting",
-            }
-
-    if candidate is None and module_pk:
-        module_interfaces = interfaces.filter(device=device, module_id=module_pk)
-        if candidate is None:
-            module_interface_list = list(module_interfaces)
-            if module_interface_list:
-                coordinate_candidate = _select_module_interface_by_coordinates(device, module_interface_list, item)
-                if coordinate_candidate is not None:
-                    candidate = coordinate_candidate
-                elif len(module_interface_list) == 1:
-                    candidate = module_interface_list[0]
-                elif len(module_interface_list) > 1:
-                    return {
-                        "status": "skipped",
-                        "reason": f"multiple module interfaces found for port_id {port_id}; manual mapping required",
-                    }
+        if choice.status:
+            return {"status": choice.status, "reason": choice.reason}
+        candidate = choice.interface
 
     if candidate is None:
         return {
