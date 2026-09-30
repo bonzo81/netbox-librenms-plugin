@@ -15,7 +15,13 @@ from ..import_validation_helpers import (
     vm_host_placement_issue,
 )
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
-from ..server_mappings import assign_own, lock_librenms_id_assignment, persist_mapping
+from ..server_mappings import (
+    IDENTITY_BUSY_MESSAGE,
+    IdentityBusy,
+    assign_own,
+    lock_librenms_id_assignment,
+    persist_mapping,
+)
 from ..utils import exception_text_for
 from .bulk_import import _is_job_cancelled
 from .device_operations import (
@@ -331,7 +337,11 @@ def bulk_import_vms(
             log.info(f"Successfully imported VM {vm.name} (ID: {vm_id})")
 
         except Exception as vm_error:
-            detail = exception_text_for(vm_error, VirtualMachine, text_viewer)
+            # The import names a busy identity claim; every other lock conflict gets the try-again text.
+            if isinstance(vm_error, IdentityBusy):
+                detail = IDENTITY_BUSY_MESSAGE
+            else:
+                detail = exception_text_for(vm_error, VirtualMachine, text_viewer)
             log.error(f"Failed to import VM {vm_id}: {detail}", exc_info=True)
             result["failed"].append({"device_id": vm_id, "error": detail})
 
