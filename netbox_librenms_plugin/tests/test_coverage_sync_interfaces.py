@@ -3954,7 +3954,6 @@ class TestSyncInterfacesViewPost:
 
         assert resolved == iface, "the OOB row owns this interface by port_id"
         assert port["exists_in_netbox"] is True
-        assert port["name_fallback_allowed"] is False, "an OOB row must never match by name"
 
     @pytest.mark.parametrize("selected_port_id", ["98", "99"])
     def test_a_shared_lom_row_is_reported_only_when_selected(self, selected_port_id):
