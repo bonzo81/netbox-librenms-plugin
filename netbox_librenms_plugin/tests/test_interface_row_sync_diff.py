@@ -219,6 +219,14 @@ class TestTheVlanVerdict:
 
         assert self._verdict(_row(interface)) == MATCHES
 
+    def test_a_reported_trunk_with_no_vlans_matches_a_modeless_interface(self):
+        """The sync writes no mode for it, so the row must not read as out of sync."""
+        from netbox_librenms_plugin.interface_diff import MATCHES
+
+        _device, interface = _synced_interface("vlan-trunk-empty")
+
+        assert self._verdict(_row(interface, mode="tagged", untagged_vlan=None, tagged_vlans=[])) == MATCHES
+
     def test_a_reported_vlan_against_no_assignment_differs(self):
         from netbox_librenms_plugin.interface_diff import DIFFERS
 
