@@ -58,15 +58,26 @@ CURRENT_EXCEPTION = (
     sys.exc_info,
     sys.exception,
     sys._getframe,
+    sys._current_frames,
     traceback.format_exc,
     traceback.format_exception,
     traceback.format_exception_only,
     traceback.format_tb,
     traceback.print_exc,
     traceback.print_exception,
+    traceback.walk_stack,
+    traceback.walk_tb,
+    traceback.extract_stack,
+    traceback.extract_tb,
+    traceback.format_stack,
+    traceback.print_stack,
+    traceback.StackSummary,
+    traceback.TracebackException,
     inspect.currentframe,
     inspect.stack,
     inspect.trace,
+    inspect.getouterframes,
+    inspect.getinnerframes,
     locals,
     vars,
     eval,
@@ -75,6 +86,8 @@ CURRENT_EXCEPTION = (
 CURRENT_NAMES = frozenset(function.__name__ for function in CURRENT_EXCEPTION)
 # A function that imports a name from two places: the scan cannot know which import binds it.
 TWICE = object()
+# An error that another error chains: any handler can read it through these attributes.
+CHAIN = frozenset({"__cause__", "__context__", "exceptions"})
 LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
 # A call of one of these methods keeps its arguments in the object that it is called on.
 MUTATORS = frozenset({"add", "append", "appendleft", "extend", "extendleft", "insert", "setdefault", "update"})
@@ -213,12 +226,13 @@ def _identifier(node):
 
 def _callable(expression, local, namespace, imports, stores):
     """Return the object that a name chain names in the module, or None when a scope binds it or code can replace it."""
-    attributes, global_names = stores
-    if (
-        not _is_name_chain(expression)
-        or {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)} & local
-        or _identifier(expression) in (global_names if isinstance(expression, ast.Name) else attributes)
-    ):
+    _, global_names, owned = stores
+    if not _is_name_chain(expression):
+        return None
+    links = list(ast.walk(expression))
+    if {node.id for node in links if isinstance(node, ast.Name)} & (local | global_names) or {
+        (ast.unparse(node.value), node.attr) for node in links if isinstance(node, ast.Attribute)
+    } & owned:
         return None
     try:
         return eval(ast.unparse(expression), _namespace_with_imports(expression, namespace, imports))
@@ -231,7 +245,7 @@ def _current_exception_read(node, parents, candidates, namespace_for):
     if not (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) and _is_name_chain(node)):
         return None
     parent = parents.get(node)
-    if isinstance(parent, ast.Attribute) or _identifier(node) not in candidates:
+    if _identifier(node) not in candidates:
         return None
     try:
         found = eval(ast.unparse(node), namespace_for(node))
@@ -252,11 +266,11 @@ def _is_log_call(node, resolve):
     """Return whether *node* calls a log method of ``logging`` on a logger, with no override on its class or itself."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in LOG_METHODS):
         return False
-    logger = resolve(node.func.value)
-    methods = [
-        getattr(cls, node.func.attr) for cls in (logging.Logger, logging.LoggerAdapter) if isinstance(logger, cls)
-    ]
-    return bool(methods) and inspect.getattr_static(logger, node.func.attr, None) is methods[0]
+    method = resolve(node.func)
+    return any(
+        getattr(method, "__func__", None) is getattr(cls, node.func.attr) and isinstance(method.__self__, cls)
+        for cls in (logging.Logger, logging.LoggerAdapter)
+    )
 
 
 def _log_argument(node, parents, resolve):
@@ -293,6 +307,18 @@ def _call_of(read, parents):
         parent = parents[parent]
         return parent if isinstance(parent, ast.Call) else None
     return parent if isinstance(parent, ast.Call) and read in parent.args else None
+
+
+def _is_read_of(node, name):
+    return isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)
+
+
+def _scope_bindings(scope):
+    """Return the names that a function or lambda *scope* binds in its body."""
+    if isinstance(scope, ast.Lambda):
+        return set()
+    made, declared = _statement_bindings(scope.body)
+    return made | declared
 
 
 def _parents(tree):
@@ -441,11 +467,15 @@ def _definitions(tree):
 
 
 def _stores(tree):
-    """Return the attribute names that *tree* assigns, deletes or sets with a literal name, and the names it makes global."""
-    names, global_names = set(), set()
+    """
+    Return what *tree* can replace: the attribute names that it assigns, deletes or sets with a literal name, the
+    names that it makes global, and ``(owner, attribute)`` for each attribute that it assigns or deletes.
+    """
+    names, global_names, owned = set(), set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
             names.add(node.attr)
+            owned.add((ast.unparse(node.value), node.attr))
         elif isinstance(node, ast.Global):
             global_names.update(node.names)
         elif (
@@ -455,13 +485,13 @@ def _stores(tree):
             and isinstance(node.args[1], ast.Constant)
         ):
             names.add(node.args[1].value)
-    return names, global_names
+    return names, global_names, owned
 
 
 @functools.cache
 def _production_stores():
     stores = [_stores(ast.parse(path.read_text())) for path in _production_paths()]
-    return frozenset().union(*(names for names, _ in stores)), frozenset().union(*(names for _, names in stores))
+    return tuple(frozenset().union(*kind) for kind in zip(*stores, strict=True))
 
 
 def _subclasses(cls):
@@ -495,8 +525,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         self.trees = {self.file: tree}
         self.parents = _parents(tree)
         # An attribute that code stores, or a name that code makes global, can replace what the module defines.
-        attributes, global_names = _stores(tree)
-        self.stores = _production_stores()[0] | attributes, _production_stores()[1] | global_names
+        self.stores = tuple(known | found for known, found in zip(_production_stores(), _stores(tree), strict=True))
         self.candidates = CURRENT_NAMES | _aliases(tree)
         self.imports = []
         self.nodes = []
@@ -549,6 +578,8 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
                 continue
             if _can_catch_risky(classes):
                 self._scan_handler(handler)
+            else:
+                self._scan_chain_reads(handler)
         self.generic_visit(node)
 
     visit_TryStar = visit_Try
@@ -556,9 +587,35 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
     def _scope(self):
         return ".".join(node.name for node in self.nodes)
 
+    def _scan_chain_reads(self, handler):
+        """Record each read of the error that another error chains, in a handler that cannot catch a risky error."""
+        reads = [node for node in ast.walk(handler) if _is_read_of(node, handler.name)]
+        for node in sorted(reads, key=lambda read: (read.lineno, read.col_offset)):
+            if isinstance(parent := self.parents[node], ast.Attribute) and parent.attr in CHAIN:
+                self.reads.append((self.file, self._scope(), f".{parent.attr}"))
+
+    def _closure_reads(self, handler):
+        """Return the reads of the handler's name in functions that the enclosing function defines outside handlers."""
+        scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        function = next((node for node in _ancestors(handler, self.parents) if isinstance(node, scopes)), None)
+        handlers = [node for node in ast.walk(function or handler) if isinstance(node, ast.ExceptHandler)]
+        # A handler with the same name scans the functions that it defines.
+        inner = {node for each in handlers if each.name == handler.name for node in ast.walk(each)}
+        nested = (
+            [node for node in ast.walk(function) if isinstance(node, scopes) and node not in inner] if function else []
+        )
+        reads = {
+            read
+            for scope in nested[1:]
+            if handler.name not in _parameters(scope.args) | _scope_bindings(scope)
+            for read in ast.walk(scope)
+            if _is_read_of(read, handler.name)
+        }
+        return sorted(reads, key=lambda read: (read.lineno, read.col_offset))
+
     def _scan_handler(self, handler):
-        for node in ast.walk(handler):
-            if not (isinstance(node, ast.Name) and node.id == handler.name and isinstance(node.ctx, ast.Load)):
+        for node in [*ast.walk(handler), *self._closure_reads(handler)]:
+            if not _is_read_of(node, handler.name):
                 continue
             local, made, declared = _enclosing(node, self.parents)
             resolve = self._resolver(node, local)
@@ -1217,6 +1274,85 @@ def test_the_scan_does_not_trust_a_name_that_a_class_body_imports_or_that_code_s
     )
 
     assert _scan(source) == [("view", "failure: exception_text_for"), ("view", "formatters.exception_text_for")]
+
+
+def test_the_scan_reads_the_caught_error_in_a_closure_that_the_function_defines_before_the_handler():
+    source = textwrap.dedent(
+        """
+        def view():
+            def detail():
+                return str(exc)
+
+            try:
+                save()
+            except ValidationError as exc:
+                return detail()
+        """
+    )
+
+    assert _scan(source) == [("view", "str")]
+
+
+def test_any_handler_that_reads_the_cause_or_context_of_its_error_reads_a_chained_error():
+    source = textwrap.dedent(
+        """
+        def view():
+            try:
+                try:
+                    save()
+                except ValidationError as exc:
+                    raise ValueError("failed") from exc
+            except ValueError as failure:
+                return str(failure.__cause__), failure.__context__
+        """
+    )
+
+    assert _scan(source) == [("view", ".__cause__"), ("view", ".__context__")]
+
+
+def test_a_helper_that_walks_the_stack_is_a_read_in_each_caller():
+    source = textwrap.dedent(
+        """
+        def detail(error):
+            stack = traceback.StackSummary.extract(traceback.walk_stack(None), capture_locals=True)
+            return "".join(stack.format())
+
+        def view():
+            try:
+                save()
+            except ValidationError as exc:
+                return detail(exc)
+        """
+    )
+
+    assert _scan(source) == [
+        ("detail", ".extract"),
+        ("detail", "traceback.StackSummary.extract"),
+        ("view", "detail: .extract"),
+        ("view", "detail: traceback.StackSummary.extract"),
+    ]
+
+
+def test_the_scan_does_not_trust_a_logger_method_or_a_chain_that_the_function_replaces():
+    source = textwrap.dedent(
+        """
+        import logging
+        import types
+
+        log = logging.Logger("guard")
+        formatters = types.SimpleNamespace(active=types.SimpleNamespace(exception_text_for=exception_text_for))
+
+        def view():
+            log.error = str
+            formatters.active = types.SimpleNamespace(exception_text_for=str)
+            try:
+                save()
+            except ValidationError as exc:
+                return log.error(exc), formatters.active.exception_text_for(exc)
+        """
+    )
+
+    assert _scan(source) == [("view", "log.error"), ("view", "formatters.active.exception_text_for")]
 
 
 def test_the_scan_reads_each_method_that_a_call_on_self_can_reach():
