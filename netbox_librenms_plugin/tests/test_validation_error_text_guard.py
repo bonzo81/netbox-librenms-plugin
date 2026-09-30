@@ -46,8 +46,8 @@ from netbox_librenms_plugin.utils import exception_text_for, validation_error_de
 
 PACKAGE = Path(__file__).resolve().parents[1]
 
-# A handler that names one of these classes, a subclass or a base class can catch its text.
-RISKY = (ValidationError, DjangoDatabaseError, psycopg.Error, AbortRequest)
+# A handler that names one of these classes, a subclass or a base class can catch its text; a group can hold one.
+RISKY = (ValidationError, DjangoDatabaseError, psycopg.Error, AbortRequest, BaseExceptionGroup)
 # ``<model>.DoesNotExist`` on a local model variable: Django derives each one from these bases.
 MODEL_ERRORS = {"DoesNotExist": ObjectDoesNotExist, "MultipleObjectsReturned": MultipleObjectsReturned}
 RULE = "exception_text_for"
@@ -253,6 +253,8 @@ def _current_exception_read(node, parents, candidates, namespace_for):
         return None
     if not _is_one_of(found, CURRENT_EXCEPTION):
         return None
+    if found is vars and isinstance(parent, ast.Call) and parent.func is node and (parent.args or parent.keywords):
+        return None
     return parent if isinstance(parent, ast.Call) and parent.func is node else node
 
 
@@ -265,6 +267,9 @@ def _aliases(tree):
 def _is_log_call(node, resolve):
     """Return whether *node* calls a log method of ``logging`` on a logger, with no override on its class or itself."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in LOG_METHODS):
+        return False
+    # Only the module's own ``logger``: another logger can write where a page reads.
+    if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "logger"):
         return False
     method = resolve(node.func)
     return any(
@@ -593,6 +598,10 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         for node in sorted(reads, key=lambda read: (read.lineno, read.col_offset)):
             if isinstance(parent := self.parents[node], ast.Attribute) and parent.attr in CHAIN:
                 self.reads.append((self.file, self._scope(), f".{parent.attr}"))
+            elif (call := _call_of(node, self.parents)) is not None:
+                local = _enclosing(node, self.parents)[0]
+                sinks = self._follow(call, node, local, self._resolver(node, local), self._chain_sinks)
+                self.reads += [(self.file, self._scope(), each) for each in sinks or []]
 
     def _closure_reads(self, handler):
         """Return the reads of the handler's name in functions that the enclosing function defines outside handlers."""
@@ -622,13 +631,16 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
             if (sink := _sink(node, self.parents, True, resolve)) is None:
                 continue
             call = _call_of(node, self.parents)
-            if call is not None and (sinks := self._follow(call, node, local, resolve)) is not None:
+            if (
+                call is not None
+                and (sinks := self._follow(call, node, local, resolve, self._parameter_sinks)) is not None
+            ):
                 self.reads += [(self.file, self._scope(), each) for each in sinks]
                 continue
             self.reads.append((self.file, self._scope(), _store(node, self.parents, made, declared) or sink))
 
-    def _follow(self, call, read, local, resolve):
-        """Return ``<function>: <sink>`` for each unsafe read in each package function that *call* gives *read* to."""
+    def _follow(self, call, read, local, resolve, sinks_of):
+        """Return ``<function>: <sink>`` for each sink that *sinks_of* finds in each package function that *call* reaches."""
         if (
             isinstance(call.func, ast.Attribute)
             and isinstance(call.func.value, ast.Name)
@@ -643,9 +655,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
             parameter = definition and _parameter(definition, call, read, offset)
             if parameter is None:
                 return None
-            sinks += [
-                f"{function.__qualname__}: {sink}" for sink in self._parameter_sinks(function, definition, parameter)
-            ]
+            sinks += [f"{function.__qualname__}: {sink}" for sink in sinks_of(function, definition, parameter)]
         return sinks
 
     def _methods(self, read, receiver, name):
@@ -690,6 +700,16 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         if file not in self.trees:
             self.trees[file] = ast.parse(Path(file).read_text())
         return _definitions(self.trees[file]).get((function.__qualname__, function.__code__.co_firstlineno))
+
+    def _chain_sinks(self, function, definition, parameter):
+        """Return ``.<attribute>`` for each read of *parameter* in *definition* that reads a chained error."""
+        parents = _parents(definition)
+        reads = [node for statement in definition.body for node in ast.walk(statement) if _is_read_of(node, parameter)]
+        return [
+            f".{parents[read].attr}"
+            for read in reads
+            if isinstance(parents[read], ast.Attribute) and parents[read].attr in CHAIN
+        ]
 
     def _parameter_sinks(self, function, definition, parameter):
         """Return the sink of each unsafe read of *parameter*, or of the current exception, in *definition*."""
@@ -1308,6 +1328,54 @@ def test_any_handler_that_reads_the_cause_or_context_of_its_error_reads_a_chaine
     )
 
     assert _scan(source) == [("view", ".__cause__"), ("view", ".__context__")]
+
+
+def test_a_helper_that_reads_the_cause_of_an_error_from_any_handler_is_a_read():
+    source = textwrap.dedent(
+        """
+        def failure_detail(error):
+            return str(error.__cause__ or error)
+
+        def view():
+            try:
+                save()
+            except ValueError as failure:
+                return failure_detail(failure)
+        """
+    )
+
+    assert _scan(source) == [("view", "failure_detail: .__cause__")]
+
+
+def test_the_scan_reads_a_handler_for_an_exception_group_because_it_can_hold_a_risky_error():
+    source = (
+        "def view():\n    try:\n        save()\n    except ExceptionGroup as failures:\n        return repr(failures)\n"
+    )
+
+    assert _scan(source) == [("view", "repr")]
+
+
+def test_the_scan_trusts_only_the_module_logger_named_logger():
+    source = textwrap.dedent(
+        """
+        import logging
+
+        job_logger = logging.getLogger("guard_case.job")
+
+        def view():
+            try:
+                save()
+            except ValidationError as exc:
+                job_logger.error("failed: %s", exc)
+                logger.error("failed: %s", exc)
+        """
+    )
+
+    assert _scan(source) == [("view", "job_logger.error")]
+
+
+def test_vars_of_an_object_does_not_read_the_frame():
+    assert _scan("def view(row):\n    return vars(row), vars()\n") == [("view", "Tuple")]
 
 
 def test_a_helper_that_walks_the_stack_is_a_read_in_each_caller():
