@@ -25,7 +25,7 @@ from netbox_librenms_plugin.server_mappings import (
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings
 from netbox_librenms_plugin.sync_cache import SyncTab
-from netbox_librenms_plugin.transactions import run_transaction, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     find_by_librenms_id,
@@ -170,6 +170,8 @@ def _write_device_field(view, request, pk, server_key, field, value, action):
         messages.error(request, "Device no longer exists.")
         return None, _device_sync_redirect(request, pk, server_key)
     except (ValidationError, IntegrityError) as e:
+        if classify_conflict(e):
+            raise
         # The keys only choose the wording; the text comes from exception_text_for.
         # nosemgrep: caught-error-text  # noqa: ERA001
         failure = _write_failure_message(e, action, field, Device, request.user)
@@ -595,6 +597,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         platform.save()
                     platform_created = True
                 except ValidationError as e:
+                    if classify_conflict(e):
+                        raise
                     transaction.set_rollback(True)
                     logger.exception(
                         "ValidationError creating platform '%s' for device pk=%s: %s",
@@ -653,6 +657,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
                 )
             except ValidationError as e:
+                if classify_conflict(e):
+                    raise
                 transaction.set_rollback(True)
                 logger.exception("ValidationError validating device pk=%s: %s", pk, validation_error_detail(e))
                 failure = _write_failure_message(
@@ -1227,6 +1233,8 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.add_message(request, exc.level, str(exc))
             return self._sync_url(object_type, pk)
         except ValidationError as exc:
+            if classify_conflict(exc):
+                raise
             failure = _write_failure_message(
                 # The keys only choose the wording; the text comes from exception_text_for.
                 # nosemgrep: caught-error-text  # noqa: ERA001

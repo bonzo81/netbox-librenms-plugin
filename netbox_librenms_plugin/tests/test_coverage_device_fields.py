@@ -1333,6 +1333,61 @@ class TestCommonFieldUpdateFailures:
         device_type = ContentType.objects.get_for_model(Device)
         assert not ObjectChange.objects.filter(changed_object_type=device_type, changed_object_id=device.pk).exists()
 
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize(
+        ("view_name", "saved_model", "data"),
+        [
+            ("update_device_serial", "device", {}),
+            ("convert_legacy_librenms_id", "device", {"object_type": "device"}),
+            ("create_and_assign_platform", "device", {"platform_name": "Wrapped Existing Platform"}),
+            ("create_and_assign_platform", "platform", {"platform_name": "Wrapped New Platform"}),
+        ],
+        ids=["field-write", "legacy-convert", "platform-assign", "platform-create"],
+    )
+    def test_a_lock_conflict_wrapped_in_a_validation_error_gives_the_try_again_answer(
+        self, logged_in_client, librenms_server, view_name, saved_model, data
+    ):
+        """NetBox raises a ValidationError ``from None`` over its own lock conflict (ltree save); the middleware answers it."""
+        from dcim.models import Device, Platform
+        from django.contrib.auth import get_user_model
+        from django.core.exceptions import ValidationError
+        from django.db import OperationalError
+        from django.db.models.signals import pre_save
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row_nowait
+
+        device = make_device(f"wrapped-{view_name}-{saved_model}", serial="WRAPPED-SERIAL", librenms_cf=6574)
+        if view_name == "update_device_serial":
+            device.custom_field_data["librenms_id"] = {SERVER_KEY: 6574}
+            device.save()
+        Platform.objects.create(name="Wrapped Existing Platform", slug="wrapped-existing-platform")
+        live_serial = "NEW-SERIAL" if view_name == "update_device_serial" else "WRAPPED-SERIAL"
+        librenms_server.device_info_response(device_id=6574, hostname=device.name, serial=live_serial)
+        user_model = get_user_model()
+        user_pk = int(logged_in_client.session["_auth_user_id"])
+        sender = {"device": Device, "platform": Platform}[saved_model]
+
+        def save_meets_a_wrapped_conflict(**_kwargs):
+            try:
+                lock_row_nowait(user_model, user_pk)
+            except OperationalError:
+                raise ValidationError("The hierarchy was modified concurrently; please retry.") from None
+
+        pre_save.connect(save_meets_a_wrapped_conflict, sender=sender, weak=False)
+        try:
+            with second_connection() as other:
+                lock_row(other, user_model, user_pk)
+                response = _post(logged_in_client, view_name, device, data)
+        finally:
+            pre_save.disconnect(save_meets_a_wrapped_conflict, sender=sender)
+
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+        assert (device.serial, device.platform_id) == ("WRAPPED-SERIAL", None)
+        assert device.custom_field_data["librenms_id"] in (6574, {SERVER_KEY: 6574})
+        assert not Platform.objects.filter(name="Wrapped New Platform").exists()
+
 
 class TestDeviceFieldHelpers:
     @pytest.mark.parametrize(
