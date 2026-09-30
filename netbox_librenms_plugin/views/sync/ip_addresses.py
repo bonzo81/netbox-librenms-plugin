@@ -36,7 +36,6 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     index_ip_source_interfaces,
     index_ip_sync_rows,
-    ip_family,
     index_ip_port_records,
     ip_row_port_record,
     normalize_ip_sync_row_id,
@@ -697,9 +696,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             ValueError: NetBox refuses the owner; the text is safe for the user.
 
         """
-        # ip_family(), not ip_obj.family: NetBox 4.4's property raises AttributeError on the
-        # in-memory str address of a freshly created IPAddress, failing the whole IP sync row.
-        field = "primary_ip6" if ip_family(ip_obj) == 6 else "primary_ip4"
+        field = "primary_ip6" if ip_obj.family == 6 else "primary_ip4"
         changed = False
 
         def point_at_ip(owner):

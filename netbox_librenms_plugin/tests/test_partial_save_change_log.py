@@ -8,6 +8,7 @@ a real view through the test client, so NetBox's change logging runs as in produ
 import uuid
 from contextlib import contextmanager
 
+import netaddr
 import pytest
 from core.models import ObjectChange
 from dcim.models import Interface, InterfaceTemplate, Module
@@ -330,7 +331,9 @@ def test_a_primary_ip_set_on_its_own_records_the_previous_address():
 
     device = make_device("partial-save-primary-ip")
     interface = make_interface(device, "eth0")
-    address = IPAddress.objects.create(address="198.18.40.10/24", assigned_object=interface, status="active")
+    address = IPAddress.objects.create(
+        address=netaddr.IPNetwork("198.18.40.10/24"), assigned_object=interface, status="active"
+    )
     before = _stored_last_updated(device)
 
     with _change_logging("partial-save-primary-ip-user"):
