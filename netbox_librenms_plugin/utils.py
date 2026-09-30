@@ -41,7 +41,12 @@ logger = logging.getLogger(__name__)
 
 # Bounded at 19 digits, the width of a PostgreSQL bigint. Without the bound an oversized string is
 # rejected only by CPython's int_max_str_digits limit, which a host may raise or disable.
-_ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]{1,19}[ \t\r\n\f\v]*$")
+_ID_TEXT_SPACE = r"[ \t\r\n\f\v]*"
+_ID_TEXT_SIGN = r"\+?"
+_ID_TEXT_MAX_DIGITS = 19
+_ASCII_POSITIVE_INTEGER_RE = re.compile(
+    rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}[0-9]{{1,{_ID_TEXT_MAX_DIGITS}}}{_ID_TEXT_SPACE}$"
+)
 _MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_binding"
 
 
@@ -3264,6 +3269,14 @@ class AmbiguousLibreNMSIdError(LookupError):
     """
 
 
+def librenms_id_text_pattern(value: int) -> str | None:
+    """Return the SQL regex for the stored text forms of *value* that coerce_librenms_id() reads, or None."""
+    zeros = _ID_TEXT_MAX_DIGITS - len(str(value))
+    if zeros < 0:
+        return None
+    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}0{{0,{zeros}}}{value}{_ID_TEXT_SPACE}$"
+
+
 def build_librenms_id_qs(server_key, value):
     """
     Build ``(host_q, oob_q)`` Q objects matching every stored form of a librenms_id under server_key.
@@ -3329,15 +3342,13 @@ def build_librenms_id_qs(server_key, value):
         # The OOB controller's own device id — so a re-import recognises the merged device.
         oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
 
-    # Every reader accepts numeric strings with leading zeroes, an optional plus sign, and
-    # surrounding whitespace. Exact JSON comparisons cannot find those forms when the caller
-    # supplies the canonical integer. Match the text extracted from each supported JSON shape so
-    # indexed candidate lookups and full in-memory scans enforce the same normalized-ID contract.
-    numeric_pattern = rf"^[ \t\r\n\f\v]*\+?0*{normalized_value}[ \t\r\n\f\v]*$"
-    host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
-    host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
-    host_q |= Q(custom_field_data__librenms_id__regex=numeric_pattern)
-    oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
+    # Find the padded, signed and spaced text forms that coerce_librenms_id() also reads.
+    numeric_pattern = librenms_id_text_pattern(normalized_value)
+    if numeric_pattern is not None:
+        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
+        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
+        host_q |= Q(custom_field_data__librenms_id__regex=numeric_pattern)
+        oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
     return host_q, oob_q
 
 
