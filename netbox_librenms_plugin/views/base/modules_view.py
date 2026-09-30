@@ -411,7 +411,8 @@ def select_module_interface(device, item, *, server_key, interfaces_by_name, mod
     The modules table shows this choice and the bind writer binds it, so the two cannot disagree.
     A same-name interface wins when it may stand for the port. When every same-name interface is
     bound to another port, the choice is refused. Otherwise the item's coordinates pick one of
-    *module_interfaces*, and a module with exactly one interface gives that interface.
+    *module_interfaces*, or a module with exactly one interface gives that interface. That
+    interface must also be free to stand for the port.
 
     Args:
         device (Device): The device that owns the interfaces.
@@ -432,21 +433,30 @@ def select_module_interface(device, item, *, server_key, interfaces_by_name, mod
         if name_match_may_be_port(match, server=server_key, port_id=port_id):
             return ModuleInterfaceChoice(interface=match, source="name")
     if named:
-        return ModuleInterfaceChoice(
-            interface=named[0],
-            status="conflict",
-            reason=f"{named[0].name} is already bound to a different LibreNMS port; not overwriting",
-        )
+        return _bound_elsewhere(named[0])
     if not module_interfaces:
         return ModuleInterfaceChoice()
     by_coordinates = _select_module_interface_by_coordinates(device, module_interfaces, item)
     if by_coordinates is not None:
-        return ModuleInterfaceChoice(interface=by_coordinates, source="coordinates")
-    if len(module_interfaces) == 1:
-        return ModuleInterfaceChoice(interface=module_interfaces[0], source="lone_module_interface")
+        candidate, source = by_coordinates, "coordinates"
+    elif len(module_interfaces) == 1:
+        candidate, source = module_interfaces[0], "lone_module_interface"
+    else:
+        return ModuleInterfaceChoice(
+            status="skipped",
+            reason=f"multiple module interfaces found for port_id {port_id}; manual mapping required",
+        )
+    if not name_match_may_be_port(candidate, server=server_key, port_id=port_id):
+        return _bound_elsewhere(candidate)
+    return ModuleInterfaceChoice(interface=candidate, source=source)
+
+
+def _bound_elsewhere(interface):
+    """Return the refusal of *interface* because it is bound to a different LibreNMS port."""
     return ModuleInterfaceChoice(
-        status="skipped",
-        reason=f"multiple module interfaces found for port_id {port_id}; manual mapping required",
+        interface=interface,
+        status="conflict",
+        reason=f"{interface.name} is already bound to a different LibreNMS port; not overwriting",
     )
 
 

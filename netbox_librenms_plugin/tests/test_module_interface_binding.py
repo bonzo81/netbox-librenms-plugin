@@ -256,6 +256,28 @@ class TestModuleTableShowsTheWriterChoice:
         assert module.interfaces.get(name="Uplink").get_absolute_url() not in content
         assert "Update Interface" not in content
 
+    def test_a_module_interface_bound_to_another_port_shows_no_match(self, live_librenms):
+        """The writer refuses the lone interface when it holds another port, so the table shows no match."""
+        from dcim.models import Interface
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
+
+        device, module, row, cache_key = self._seed("bound", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        uplink = module.interfaces.get(name="Uplink")
+        uplink.custom_field_data["librenms_id"] = {"default": 8999}
+        uplink.save(update_fields=["custom_field_data"])
+        try:
+            content = _render_module_tab(device, make_superuser())
+        finally:
+            cache.delete(cache_key)
+
+        assert uplink.get_absolute_url() not in content
+        assert _bind_interface_librenms_id(device, row, module.pk, "default", Interface.objects.all()) == {
+            "status": "conflict",
+            "reason": "Uplink is already bound to a different LibreNMS port; not overwriting",
+        }
+
     def test_an_interface_the_user_may_not_view_is_not_shown(self, live_librenms):
         """The choice reads every interface, so the table must hide one outside the user's view scope."""
         from dcim.models import Device, Interface, Module
