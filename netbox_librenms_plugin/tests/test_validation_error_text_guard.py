@@ -67,10 +67,6 @@ CURRENT_EXCEPTION = (
     traceback.print_exception,
     traceback.walk_stack,
     traceback.walk_tb,
-    traceback.extract_stack,
-    traceback.extract_tb,
-    traceback.format_stack,
-    traceback.print_stack,
     traceback.StackSummary,
     traceback.TracebackException,
     inspect.currentframe,
@@ -300,9 +296,35 @@ def _sink(read, parents, bound, resolve):
         if bound and _is_one_of(callee, SAFE_CALLEES) and parent.args[0] is read:
             return None
         return ast.unparse(parent.func)
-    if isinstance(parent, ast.keyword) and isinstance(parents[parent], ast.Call):
-        return ast.unparse(parents[parent].func)
+    if isinstance(parent, ast.keyword) and isinstance(call := parents[parent], ast.Call):
+        callee = resolve(call.func)
+        if bound and _is_one_of(callee, SAFE_CALLEES) and parent.arg == _first_parameter(callee):
+            return None
+        return ast.unparse(call.func)
     return type(parent).__name__
+
+
+def _first_parameter(function):
+    code = getattr(function, "__code__", None)
+    return code.co_varnames[0] if code and code.co_argcount else None
+
+
+def _chained_attribute(read, parents, resolve):
+    """Return the chain attribute that *read* reads (``read.<attr>`` or ``getattr(read, "<attr>")``) unless it logs it."""
+    parent = parents[read]
+    if isinstance(parent, ast.Attribute):
+        attribute, place = parent.attr, parent
+    elif (
+        isinstance(parent, ast.Call)
+        and resolve(parent.func) is getattr
+        and len(parent.args) > 1
+        and parent.args[0] is read
+        and isinstance(parent.args[1], ast.Constant)
+    ):
+        attribute, place = parent.args[1].value, parent
+    else:
+        return None
+    return attribute if attribute in CHAIN and not _log_argument(place, parents, resolve) else None
 
 
 def _call_of(read, parents):
@@ -318,12 +340,12 @@ def _is_read_of(node, name):
     return isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)
 
 
-def _scope_bindings(scope):
-    """Return the names that a function or lambda *scope* binds in its body."""
+def _own_names(scope):
+    """Return the names that a function or lambda *scope* binds as its own: its parameters, less global and nonlocal."""
     if isinstance(scope, ast.Lambda):
-        return set()
+        return _parameters(scope.args)
     made, declared = _statement_bindings(scope.body)
-    return made | declared
+    return (_parameters(scope.args) | made) - declared
 
 
 def _parents(tree):
@@ -596,11 +618,12 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         """Record each read of the error that another error chains, in a handler that cannot catch a risky error."""
         reads = [node for node in ast.walk(handler) if _is_read_of(node, handler.name)]
         for node in sorted(reads, key=lambda read: (read.lineno, read.col_offset)):
-            if isinstance(parent := self.parents[node], ast.Attribute) and parent.attr in CHAIN:
-                self.reads.append((self.file, self._scope(), f".{parent.attr}"))
+            local = _enclosing(node, self.parents)[0]
+            resolve = self._resolver(node, local)
+            if attribute := _chained_attribute(node, self.parents, resolve):
+                self.reads.append((self.file, self._scope(), f".{attribute}"))
             elif (call := _call_of(node, self.parents)) is not None:
-                local = _enclosing(node, self.parents)[0]
-                sinks = self._follow(call, node, local, self._resolver(node, local), self._chain_sinks)
+                sinks = self._follow(call, node, local, resolve, self._chain_sinks)
                 self.reads += [(self.file, self._scope(), each) for each in sinks or []]
 
     def _closure_reads(self, handler):
@@ -616,7 +639,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         reads = {
             read
             for scope in nested[1:]
-            if handler.name not in _parameters(scope.args) | _scope_bindings(scope)
+            if handler.name not in _own_names(scope)
             for read in ast.walk(scope)
             if _is_read_of(read, handler.name)
         }
@@ -705,11 +728,13 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         """Return ``.<attribute>`` for each read of *parameter* in *definition* that reads a chained error."""
         parents = _parents(definition)
         reads = [node for statement in definition.body for node in ast.walk(statement) if _is_read_of(node, parameter)]
-        return [
-            f".{parents[read].attr}"
+        attributes = [
+            _chained_attribute(
+                read, parents, self._resolver(read, _enclosing(read, parents)[0], function.__globals__, parents)
+            )
             for read in reads
-            if isinstance(parents[read], ast.Attribute) and parents[read].attr in CHAIN
         ]
+        return [f".{attribute}" for attribute in attributes if attribute]
 
     def _parameter_sinks(self, function, definition, parameter):
         """Return the sink of each unsafe read of *parameter*, or of the current exception, in *definition*."""
@@ -848,6 +873,8 @@ def _scan(source):
         ("raise Refused('failed') from exc", []),
         ("raise exc", []),
         ("detail = exception_text_for(exc, Device, request.user)", []),
+        ("detail = exception_text_for(exc=exc, model=Device, user=request.user)", []),
+        ("detail = exception_text_for(Device, exc=exc.messages)", [".messages"]),
         ("if classify_conflict(exc): raise", []),
         ("detail = exception_text_for(exc.messages, Device, request.user)", [".messages"]),
         ("log.warning('failed: %s', exc)", ["log.warning"]),
@@ -881,6 +908,7 @@ def test_the_scan_names_each_read_that_can_reach_a_page(body, expected):
         ("logger.error('failed: %s', traceback.format_exc())", []),
         ("return exception_text_for(traceback.format_exc(), Device, request.user)", [RULE]),
         ("traceback.print_exc(file=buffer)", ["Expr"]),
+        ("stack = traceback.format_stack()", []),
     ],
 )
 def test_the_scan_names_each_read_of_a_database_error_that_can_reach_a_page(body, expected):
@@ -1376,6 +1404,41 @@ def test_the_scan_trusts_only_the_module_logger_named_logger():
 
 def test_vars_of_an_object_does_not_read_the_frame():
     assert _scan("def view(row):\n    return vars(row), vars()\n") == [("view", "Tuple")]
+
+
+def test_any_handler_reads_a_chained_error_through_getattr_but_may_log_it():
+    source = textwrap.dedent(
+        """
+        def view():
+            try:
+                save()
+            except ValueError as failure:
+                logger.warning("failed: %s", failure.__cause__)
+                return str(getattr(failure, "__context__", None))
+        """
+    )
+
+    assert _scan(source) == [("view", ".__context__")]
+
+
+def test_the_scan_reads_a_closure_that_declares_the_caught_error_nonlocal():
+    source = textwrap.dedent(
+        """
+        def view():
+            def take_detail():
+                nonlocal exc
+                text = str(exc)
+                exc = None
+                return text
+
+            try:
+                save()
+            except ValidationError as exc:
+                return take_detail()
+        """
+    )
+
+    assert _scan(source) == [("view", "str")]
 
 
 def test_a_helper_that_walks_the_stack_is_a_read_in_each_caller():
