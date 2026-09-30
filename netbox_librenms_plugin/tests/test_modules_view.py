@@ -5037,6 +5037,7 @@ class TestMatchedInterfaceLinking:
             "interfaces_by_pk": {iface.pk: iface},
             "port_holders": {42: ("dcim.interface", iface.pk)},
             "viewable_interface_ids": {iface.pk},
+            "changeable_interface_ids": {iface.pk},
             "server_key": "default",
         }
 

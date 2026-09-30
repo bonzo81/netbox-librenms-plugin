@@ -1456,6 +1456,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "viewable_interface_ids": frozenset(
                     self.restricted_queryset(Interface).filter(device=member).values_list("pk", flat=True)
                 ),
+                # The writer skips a choice outside the change scope, and then its template adoption too.
+                "changeable_interface_ids": frozenset(
+                    self.restricted_queryset(Interface, "change").filter(device=member).values_list("pk", flat=True)
+                ),
                 "server_key": server_key,
             }
         return member_contexts
@@ -1560,7 +1564,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             except (TypeError, ValueError):
                 current_port_id = None
 
-        if candidate_module_id not in {None, installed_module_id} or current_port_id not in {None, port_id}:
+        if (
+            candidate_module_id not in {None, installed_module_id}
+            or current_port_id not in {None, port_id}
+            or interface.pk not in target_context["changeable_interface_ids"]
+        ):
             # The writer refuses this bind, so it skips the template adoption too.
             row.pop("can_update_interface_binding", None)
             return
