@@ -166,6 +166,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return None
         return cached_data
 
+    @staticmethod
+    def _owner_action(request):
+        """Return the action the sync needs on the owner: ``change`` when it sets the Primary IP, else ``view``."""
+        return "change" if resolve_set_primary_ip(request) else "view"
+
     def get_object(self, object_type, pk, action="view"):
         """Return the Device or VirtualMachine instance for the given type and pk (object-scoped)."""
         if object_type == "device":
@@ -211,8 +216,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if error := self.require_all_permissions("POST"):
             return error
 
-        owner_action = "change" if resolve_set_primary_ip(request) else "view"
-        obj = self.get_object(object_type, pk, owner_action)
+        obj = self.get_object(object_type, pk, self._owner_action(request))
 
         # Rebind the cached API client to the POSTed server so live lookups (e.g. the
         # management-IP fetch for Set-Primary-IP) hit the same LibreNMS instance the cached
@@ -1017,7 +1021,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 request,
                 selected_ips,
                 cached_ips,
-                obj,
+                # Each attempt reads the owner again: a rolled-back attempt leaves its writes on the instance.
+                self.get_object(object_type, obj.pk, self._owner_action(request)),
                 object_type,
                 force_intents=force_intents,
                 cached_ports_by_id=cached_ports_by_id,

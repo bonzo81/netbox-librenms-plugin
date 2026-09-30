@@ -98,6 +98,45 @@ def test_lock_conflicts_on_both_attempts_give_the_try_again_answer_and_commit_no
 
 
 @transactional_db_with_all_apps()
+def test_the_retry_writes_again_the_librenms_id_that_the_first_attempt_discovered(
+    client, attempts, settings, librenms_server
+):
+    """
+    The management-IP lookup discovers the device's LibreNMS ID and saves it; the conflict rolls that back.
+
+    No selected row is the management address, so nothing else reads the device again: the retry
+    must still write the ID, or the sync reports success while the ID is missing.
+    """
+    from netbox_librenms_plugin.utils import get_librenms_device_id
+
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    device = make_device("ip-retry-discovery.example.net")
+    make_interface(device, "Ethernet1", iface_type="1000base-t")
+    second = make_interface(device, "Ethernet2", iface_type="1000base-t")
+    seed_ip_rows(device, ROWS)
+    librenms_server.register(
+        f"/api/v0/devices/{device.name}", {"status": "ok", "devices": [{"device_id": 4501, "hostname": device.name}]}
+    )
+    librenms_server.register(
+        "/api/v0/devices/4501", {"status": "ok", "devices": [{"device_id": 4501, "ip": "198.18.99.1"}]}
+    )
+    client.force_login(make_superuser("ip-retry-discovery-user"))
+
+    with second_connection() as other:
+        lock_row(other, Interface, second.pk)
+        attempts.before_retry = other.rollback
+        with lock_timeout(LOCK_TIMEOUT_MS):
+            response = post_ip_sync(
+                client, device, [address for address, _, _ in ROWS], extra={"set-primary-ip-toggle": "on"}
+            )
+
+    assert attempts.count == 2
+    assert [level for level, _text in messages_on(response.wsgi_request)] == ["success"]
+    device.refresh_from_db()
+    assert get_librenms_device_id(device, SERVER_KEY, auto_save=False) == 4501
+
+
+@transactional_db_with_all_apps()
 def test_a_lock_conflict_in_the_management_ip_lookup_is_raised_not_read_as_no_ip(settings, librenms_server):
     """The lookup's LibreNMS ID discovery writes the device; a lock conflict there must reach the runner."""
     api = bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)

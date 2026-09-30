@@ -589,13 +589,14 @@ def seed_ip_rows(device, rows):
     )
 
 
-def post_ip_sync(client, device, addresses):
-    """Post the IP sync of *device* for *addresses*, with the missing interfaces created."""
+def post_ip_sync(client, device, addresses, *, extra=None):
+    """Post the IP sync of *device* for *addresses*, with the missing interfaces created; *extra* adds fields."""
     data = {
         "server_key": SERVER_KEY,
         "create-missing-interfaces-toggle": "on",
         "select": [f"{address}/24" for address in addresses],
         **{f"vrf_{address}/24": "" for address in addresses},
+        **(extra or {}),
     }
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
