@@ -637,7 +637,7 @@ def test_a_stale_row_in_the_ip_tab_fails_with_the_fixed_text_and_the_other_rows_
 
     assert response.status_code == 302
     errors = [text for level, text in messages_on(response.wsgi_request) if level == "error"]
-    assert errors == [f"Failed to sync IP addresses: 198.18.20.10/24 ({CHANGED_TEXT.format('Ethernet1')})"]
+    assert errors == [f"Failed to sync IP addresses: 198.18.20.10/24 ({TRY_AGAIN_MESSAGE})"]
     stale.refresh_from_db()
     assert (stale.label, stale.description) == ("set by another operation", "")
     assert get_librenms_device_id(stale, SERVER_KEY, auto_save=False) is None
@@ -671,7 +671,7 @@ def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_fails_with_the_fixed_t
     assert commits.commits == 1
     assert response.status_code == 302
     assert messages_on(response.wsgi_request) == [
-        ("error", f"Failed to sync IP addresses: 198.18.22.10/24 ({CHANGED_TEXT.format('eth1')})")
+        ("error", f"Failed to sync IP addresses: 198.18.22.10/24 ({TRY_AGAIN_MESSAGE})")
     ]
     interface.refresh_from_db()
     assert (interface.name, interface.description) == ("private-link", "")

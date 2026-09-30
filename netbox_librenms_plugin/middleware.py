@@ -7,13 +7,12 @@ from django.contrib import messages
 from django.http import JsonResponse
 from utilities.api import is_api_request
 
-from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, CommittedFollowUpError, classify_conflict
 from netbox_librenms_plugin.views.mixins import _htmx_error_response, _safe_redirect_response
 
 logger = logging.getLogger(__name__)
 
 PLUGIN_PACKAGE = __name__.partition(".")[0]
-TRY_AGAIN_MESSAGE = "Another operation was changing the same NetBox objects. Refresh the page and try again."
 FOLLOW_UP_FAILED_MESSAGE = "Changes were saved, but follow-up work failed. Refresh and check the result."
 # The sync forms' script listens for this event to give back the form and its selection.
 REQUEST_FAILED_EVENT = "librenmsRequestFailed"

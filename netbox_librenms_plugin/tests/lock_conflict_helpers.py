@@ -43,6 +43,16 @@ def commit_row_change(other, model, pk, values):
     other.commit()
 
 
+def hold_port_claim(other, port_id, server_key):
+    """Claim LibreNMS port *port_id* (an int) on *other*, as another open transaction that binds the port does."""
+    from netbox_librenms_plugin.utils import advisory_lock_key, port_binding_lock_identity
+
+    with other.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(%s)", [advisory_lock_key(port_binding_lock_identity(port_id, server_key))]
+        )
+
+
 def lock_row_nowait(model, pk):
     """Lock one row on the test's connection with ``NOWAIT``: a row another session holds raises ``55P03``."""
     return model.objects.select_for_update(nowait=True).filter(pk=pk).first()

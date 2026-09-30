@@ -12,13 +12,16 @@ from utilities.exceptions import AbortRequest
 
 from netbox_librenms_plugin.tests.conftest import make_superuser, transactional_db_with_all_apps
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    hold_port_claim,
     lock_row,
     lock_row_nowait,
+    lock_timeout,
     second_connection,
     wrapped_database_error,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_request
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
 from netbox_librenms_plugin.transactions import (
+    TRY_AGAIN_MESSAGE,
     CommittedFollowUpError,
     ConcurrentRowChange,
     TransactionConflict,
@@ -26,6 +29,15 @@ from netbox_librenms_plugin.transactions import (
     database_error_sqlstate,
     run_transaction,
 )
+from netbox_librenms_plugin.utils import (
+    LibreNMSPortBindingBusy,
+    LibreNMSPortBindingConflict,
+    claim_librenms_port_binding,
+    exception_text_for,
+)
+
+# Long enough for a blocked statement to be a real lock wait, short enough for two attempts.
+LOCK_TIMEOUT_MS = 200
 
 
 def _context_sqlstates(exc):
@@ -161,6 +173,33 @@ def test_the_runner_s_own_conflict_types_are_conflicts():
     assert classify_conflict(ConcurrentRowChange("row changed")) is True
 
 
+def test_a_busy_port_claim_is_a_conflict_and_a_port_owned_by_another_interface_is_not():
+    assert isinstance(LibreNMSPortBindingBusy(), TransactionConflict)
+    assert classify_conflict(LibreNMSPortBindingBusy()) is True
+    assert classify_conflict(LibreNMSPortBindingConflict("The LibreNMS port ID is already assigned.")) is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("superuser", [False, True], ids=["user", "superuser"])
+def test_the_text_of_a_caught_conflict_is_the_try_again_answer(superuser):
+    """No viewer reads PostgreSQL's deadlock text, or NetBox's refusal of a tree save that met a deadlock."""
+    from dcim.models import Interface
+
+    user = make_superuser("conflict-text-su") if superuser else make_user_with_perms("conflict-text-user", [])
+    deadlock = wrapped_database_error("40P01")
+    try:
+        try:
+            raise deadlock
+        except OperationalError:
+            raise ValidationError("Another operation changed the tree.") from None
+    except ValidationError as exc:
+        tree_refusal = exc
+
+    assert exception_text_for(deadlock, Interface, user) == TRY_AGAIN_MESSAGE
+    assert exception_text_for(tree_refusal, Interface, user) == TRY_AGAIN_MESSAGE
+    assert exception_text_for(LibreNMSPortBindingBusy(), Interface, user) == TRY_AGAIN_MESSAGE
+
+
 def test_a_failure_after_a_commit_is_never_a_conflict():
     """A committed attempt must not be retried, whatever failed after it."""
     try:
@@ -264,6 +303,81 @@ def test_an_error_that_escapes_after_a_swallowed_conflict_propagates_unchanged()
 
     assert calls == [1]
     assert database_error_sqlstate(caught.value) == "23505"
+
+
+@pytest.mark.django_db
+def test_a_conflict_caught_without_a_savepoint_is_retried_even_when_a_query_follows():
+    """The caught conflict broke the attempt; the next query's TransactionManagementError is its consequence."""
+    from dcim.models import Site
+
+    locked_pk = _committed_row_pk()
+    calls = []
+
+    def work():
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            try:
+                ContentType.objects.get(pk=locked_pk).save()
+            except OperationalError:
+                pass
+        return _site(f"runner-broken-conflict-{len(calls)}").pk
+
+    with second_connection() as other:
+        lock_row(other, ContentType, locked_pk)
+        with lock_timeout(LOCK_TIMEOUT_MS):
+            committed_pk = run_transaction(work)
+
+    assert calls == [1, 2]
+    assert Site.objects.get(pk=committed_pk).name == "runner-broken-conflict-2"
+    assert not Site.objects.filter(name="runner-broken-conflict-1").exists()
+
+
+@pytest.mark.django_db
+def test_work_that_caught_a_database_error_without_a_savepoint_never_reports_success():
+    """The caught error left the attempt only a rollback, so the runner raises instead of returning."""
+    from dcim.models import Site
+
+    calls = []
+
+    def work():
+        calls.append(len(calls) + 1)
+        _site("runner-broken-first")
+        try:
+            _site("runner-broken-duplicate")
+            _site("runner-broken-duplicate")
+        except IntegrityError:
+            pass
+        return "reported success"
+
+    with pytest.raises(TransactionManagementError, match="without a savepoint") as caught:
+        run_transaction(work)
+
+    assert calls == [1]
+    assert classify_conflict(caught.value) is False
+    assert not Site.objects.filter(name__startswith="runner-broken").exists()
+
+
+@pytest.mark.django_db
+def test_a_busy_port_claim_that_work_swallowed_is_still_retried():
+    """A claim that another transaction holds records itself, so a broad handler cannot turn it into success."""
+    calls = []
+
+    with second_connection() as other:
+        hold_port_claim(other, 9401, "default")
+
+        def work():
+            calls.append(len(calls) + 1)
+            if len(calls) == 2:
+                other.rollback()
+            try:
+                claim_librenms_port_binding(9401, "default")
+            except Exception:
+                return "swallowed"
+            return "claimed"
+
+        result = run_transaction(work)
+
+    assert (result, calls) == ("claimed", [1, 2])
 
 
 @pytest.mark.django_db

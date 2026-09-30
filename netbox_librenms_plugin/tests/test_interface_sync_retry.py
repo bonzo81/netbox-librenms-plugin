@@ -37,6 +37,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     backend_pid,
+    hold_port_claim,
     lock_row,
     lock_row_nowait,
     lock_timeout,
@@ -128,6 +129,24 @@ def test_conflicts_on_both_attempts_give_one_try_again_answer_and_change_nothing
     assert attempts.count == 2
     assert_try_again_answer(response, device, htmx, TRY_AGAIN_MESSAGE)
     assert not Interface.objects.filter(device=device).exists()
+
+
+@transactional_db_with_all_apps()
+def test_a_busy_port_claim_on_the_first_attempt_is_retried_once(client, attempts, committed_outcomes):
+    """Another open transaction holds the claim on the port; the second attempt claims it after that transaction ends."""
+    device = make_device("sync-busy-port", librenms_cf={SERVER_KEY: {"id": 97}})
+    seed_ports(device, [sync_port(10, "eth10")])
+    client.force_login(make_superuser("sync-busy-port-user"))
+
+    with second_connection() as other:
+        hold_port_claim(other, 10, SERVER_KEY)
+        attempts.before_retry = other.rollback
+        response = post_interface_sync(client, device, [10], htmx=False)
+
+    assert attempts.count == 2
+    assert committed_outcomes == [_outcome(synced_count=1)]
+    assert Interface.objects.filter(device=device, name="eth10").exists()
+    assert messages_on(response.wsgi_request) == [("success", SYNCED)]
 
 
 @transactional_db_with_all_apps()

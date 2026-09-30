@@ -44,6 +44,12 @@ from netbox_librenms_plugin.server_mappings import (
     iter_server_mapping_entries,
     require_server_key,
 )
+from netbox_librenms_plugin.transactions import (
+    TRY_AGAIN_MESSAGE,
+    TransactionConflict,
+    classify_conflict,
+    recorded_conflict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -267,11 +273,30 @@ def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None =
 
 
 class LibreNMSPortBindingConflict(ValueError):
-    """A port cannot be claimed safely by this transaction."""
+    """Another NetBox interface holds the LibreNMS port, or more than one does."""
+
+
+class LibreNMSPortBindingBusy(TransactionConflict):
+    """Another open transaction holds the claim on this LibreNMS port; the claim does not wait."""
+
+    def __init__(self):
+        super().__init__("Another operation is binding this LibreNMS port. Refresh and try again.")
+
+
+def port_binding_lock_identity(port_id, server_key):
+    """Return the advisory lock identity of the claim on LibreNMS port *port_id* of *server_key*."""
+    return json.dumps(["librenms-port-binding", server_key, port_id], separators=(",", ":"))
 
 
 def claim_librenms_port_binding(port_id, server_key, *, using=None):
-    """Claim one cross-model port identity until commit, or refuse without waiting."""
+    """
+    Claim one cross-model port identity until commit, or refuse without waiting.
+
+    Raises:
+        LibreNMSPortBindingBusy: Another open transaction holds the claim. It is recorded for the
+            runner's attempt, so a handler that catches it cannot commit the attempt.
+
+    """
     from django.db import DEFAULT_DB_ALIAS, connections
 
     server_key = require_server_key(server_key)
@@ -281,12 +306,13 @@ def claim_librenms_port_binding(port_id, server_key, *, using=None):
     connection = connections[using or DEFAULT_DB_ALIAS]
     if not connection.in_atomic_block:
         raise RuntimeError("claim_librenms_port_binding() requires an open transaction")
-    identity = json.dumps(["librenms-port-binding", server_key, port_id], separators=(",", ":"))
     with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [advisory_lock_key(identity)])
+        cursor.execute(
+            "SELECT pg_try_advisory_xact_lock(%s)", [advisory_lock_key(port_binding_lock_identity(port_id, server_key))]
+        )
         acquired = cursor.fetchone()[0]
     if not acquired:
-        raise LibreNMSPortBindingConflict("Another operation is binding this LibreNMS port. Refresh and retry.")
+        raise recorded_conflict(LibreNMSPortBindingBusy())
 
 
 def is_list_of_dicts(value) -> bool:
@@ -4992,7 +5018,8 @@ def exception_text_for(exc: Exception, model, user) -> str:
     ``post_clean`` and ``pre_save`` receivers can add any text under any key. So only a superuser
     gets the message of a ValidationError. Every other viewer gets the concrete *model* fields
     that the error keys name, or the model. Identity conflicts and database constraints use
-    generic text because their details can identify objects outside the viewer's scope.
+    generic text because their details can identify objects outside the viewer's scope. A lock
+    conflict (``classify_conflict``) gets the "try again" text for every viewer.
 
     Args:
         exc (Exception): The caught error.
@@ -5000,9 +5027,12 @@ def exception_text_for(exc: Exception, model, user) -> str:
         user (User | None): The viewer.
 
     Returns:
-        str: Safe identity or constraint text, scoped validation text, or the other exception's text.
+        str: The "try again" text, safe identity or constraint text, scoped validation text, or
+            the other exception's text.
 
     """
+    if classify_conflict(exc):
+        return TRY_AGAIN_MESSAGE
     if isinstance(exc, AmbiguousLibreNMSIdError):
         return "Multiple records use this LibreNMS ID. Ask an administrator to correct the mappings."
     if isinstance(exc, IntegrityError):

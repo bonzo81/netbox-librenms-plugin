@@ -28,6 +28,8 @@ from utilities.exceptions import AbortRequest
 logger = logging.getLogger(__name__)
 
 CONFLICT_SQLSTATES = frozenset({"40P01", "55P03"})
+# The one text that a lock conflict shows: the middleware's answer and exception_text_for's text.
+TRY_AGAIN_MESSAGE = "Another operation was changing the same NetBox objects. Refresh the page and try again."
 _ATTEMPTS = 2
 # The recorder of the attempt that runs now, so a row-version check can record a conflict that the work swallows.
 _active_recorder = ContextVar("librenms_conflict_recorder", default=None)
@@ -38,7 +40,12 @@ _ROW_VERSION = "_librenms_row_version"
 
 
 class TransactionConflict(Exception):
-    """Both attempts of a transaction met a lock conflict; nothing of the work was committed."""
+    """
+    A lock conflict that a new attempt of the transaction can resolve.
+
+    The runner raises this class when both attempts met a conflict. A subclass is a conflict that
+    the work finds itself, for example a claim that another open transaction holds.
+    """
 
 
 class ConcurrentRowChange(Exception):
@@ -50,7 +57,7 @@ class CommittedFollowUpError(Exception):
 
 
 class _SwallowedConflict(Exception):
-    """The work returned normally, but it caught a lock conflict or a stale row version."""
+    """The work caught a lock conflict or a recorded conflict, and did not raise it."""
 
 
 def database_error_sqlstate(exc):
@@ -121,11 +128,16 @@ def run_transaction(work):
     Each attempt decides in this order:
 
     1. ``work`` raised: that exception decides alone (``classify_conflict``). A conflict starts the
-       next attempt; any other exception propagates unchanged.
-    2. ``work`` returned, but it caught a lock conflict of a statement or a stale row version
-       (``row_changed``), or the deferred constraint check met a lock conflict: the attempt rolls
-       back and the next attempt starts.
-    3. ``work`` returned with no conflict: the attempt commits, and its return value is returned.
+       next attempt; any other exception propagates unchanged. Rule 2 is the one exception.
+    2. ``work`` left the attempt marked for rollback: it caught a database error without a
+       savepoint of its own (or called ``set_rollback(True)``). The next statement then raises
+       ``TransactionManagementError``. When the attempt recorded a conflict, the next attempt
+       starts; otherwise the runner raises ``TransactionManagementError``, also when ``work``
+       returned normally.
+    3. ``work`` returned, but it caught a lock conflict of a statement or a recorded conflict
+       (``recorded_conflict``), or the deferred constraint check met a lock conflict: the attempt
+       rolls back and the next attempt starts.
+    4. ``work`` returned with no conflict: the attempt commits, and its return value is returned.
 
     ``work`` must build its own state on each call and must not publish anything (messages,
     counters) before the runner returns. NetBox events that an attempt queues are kept only when
@@ -141,7 +153,8 @@ def run_transaction(work):
         TransactionConflict: Both attempts met a lock conflict.
         CommittedFollowUpError: The attempt committed, and then a commit callback failed.
         RuntimeError: The runner was called inside an atomic block (Django's durable check).
-        TransactionManagementError: The connection is in manual transaction management.
+        TransactionManagementError: The connection is in manual transaction management, or
+            ``work`` left the attempt marked for rollback with no recorded conflict (rule 2).
 
     """
     connection = transaction.get_connection()
@@ -176,9 +189,20 @@ def _run_attempt(work, connection):
         with transaction.atomic(durable=True):
             transaction.on_commit(mark_committed)
             with connection.execute_wrapper(recorder):
-                result = work()
+                try:
+                    result = work()
+                except TransactionManagementError:
+                    # The work caught an error without a savepoint; a recorded conflict decides.
+                    if connection.needs_rollback and recorder.conflicts:
+                        raise _SwallowedConflict("; ".join(recorder.conflicts)) from None
+                    raise
                 if recorder.conflicts:
                     raise _SwallowedConflict("; ".join(recorder.conflicts))
+                if connection.needs_rollback:
+                    raise TransactionManagementError(
+                        "The work caught a database error without a savepoint of its own, or marked the "
+                        "attempt for rollback; nothing was committed."
+                    )
                 # Checks deferred foreign keys now, so their lock conflicts pass the recorder too.
                 connection.check_constraints()
         return result
@@ -231,8 +255,7 @@ def row_changed(name):
     """
     Return the conflict for interface *name*, changed by another operation after the read.
 
-    The conflict is also recorded for the attempt that runs now, so the runner retries the attempt
-    even when a broad handler in the work catches the exception. Outside the runner it is not recorded.
+    The conflict is also recorded for the attempt that runs now (``recorded_conflict``).
 
     Args:
         name (str): The interface name that the caller read. Never a name read after the caller's
@@ -242,7 +265,26 @@ def row_changed(name):
         ConcurrentRowChange: The exception for the caller to raise.
 
     """
-    conflict = ConcurrentRowChange(f"NetBox interface {name} was changed by another operation. Refresh and try again.")
+    return recorded_conflict(
+        ConcurrentRowChange(f"NetBox interface {name} was changed by another operation. Refresh and try again.")
+    )
+
+
+def recorded_conflict(conflict):
+    """
+    Record *conflict* for the attempt that runs now, and return it for the caller to raise.
+
+    The runner then retries the attempt even when a broad handler in the work catches the
+    exception. Outside the runner nothing is recorded. Use it for each conflict that the plugin
+    finds in Python and not in a statement error, which the runner records by itself.
+
+    Args:
+        conflict (TransactionConflict | ConcurrentRowChange): The conflict to raise.
+
+    Returns:
+        TransactionConflict | ConcurrentRowChange: *conflict*.
+
+    """
     if (recorder := _active_recorder.get()) is not None:
         recorder.conflicts.append(str(conflict))
     return conflict

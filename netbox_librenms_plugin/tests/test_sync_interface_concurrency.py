@@ -16,6 +16,8 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SYNCED, post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 
 # Window a competing thread must NOT get through while the row lock is held. A negative wait
@@ -936,7 +938,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
     from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_interface, make_superuser, make_vm
     from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _port, _sync
-    from netbox_librenms_plugin.utils import get_librenms_device_id
+    from netbox_librenms_plugin.utils import LibreNMSPortBindingBusy, get_librenms_device_id
     from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 
     server_key = configure_default_librenms_server(settings)
@@ -977,16 +979,16 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
                 viewable_queryset=winner_model.objects.all(),
                 addable_queryset=winner_model.objects.all(),
             )
-            response = executor.submit(competing_write).result(timeout=10)
             if loser_path == "module":
-                assert response["status"] == "conflict"
-                assert "retry" in response["reason"].lower()
+                with pytest.raises(LibreNMSPortBindingBusy):
+                    executor.submit(competing_write).result(timeout=10)
                 loser_interface.refresh_from_db()
                 assert get_librenms_device_id(loser_interface, server_key, auto_save=False) is None
             else:
                 from django.contrib.messages import get_messages
 
-                assert any("retry" in str(message).lower() for message in get_messages(response.wsgi_request))
+                response = executor.submit(competing_write).result(timeout=10)
+                assert [str(message) for message in get_messages(response.wsgi_request)] == [TRY_AGAIN_MESSAGE]
                 owner_filter = {"virtual_machine": loser} if winner_kind == "device" else {"device": loser}
                 assert not loser_model.objects.filter(**owner_filter).exists()
         held.refresh_from_db()
@@ -996,7 +998,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
 def test_port_claims_are_reentrant_isolated_by_server_and_released_on_rollback():
     """Real PostgreSQL claims canonicalize IDs and do not block opposite-order batches."""
     from django.db import close_old_connections, connections, transaction
-    from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, claim_librenms_port_binding
+    from netbox_librenms_plugin.utils import LibreNMSPortBindingBusy, claim_librenms_port_binding
 
     def compete():
         close_old_connections()
@@ -1004,7 +1006,7 @@ def test_port_claims_are_reentrant_isolated_by_server_and_released_on_rollback()
             with transaction.atomic():
                 claim_librenms_port_binding(9301, "other")
                 claim_librenms_port_binding(9302, "default")
-                with pytest.raises(LibreNMSPortBindingConflict, match="retry"):
+                with pytest.raises(LibreNMSPortBindingBusy):
                     claim_librenms_port_binding("009301", "default")
                 return True
         finally:
@@ -1077,10 +1079,15 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[owner.pk])
         data = {"expected_local_id": existing.pk, "row_id": row_id, "server_key": server_key}
 
+    page = reverse("dcim:device_librenms_sync", kwargs={"pk": owner.pk}) + (
+        f"?tab={'interfaces' if action == 'rebind' else 'cables'}"
+    )
+
     def compete():
         close_old_connections()
         try:
-            return client.post(url, data, follow=not htmx, HTTP_HX_REQUEST="true" if htmx else "false")
+            headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+            return client.post(url, data, HTTP_REFERER=f"http://testserver{page}", **headers)
         finally:
             connections.close_all()
 
@@ -1088,14 +1095,13 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         with transaction.atomic():
             claim_librenms_port_binding(port_id, server_key)
             response = executor.submit(compete).result(timeout=10)
-            assert response.status_code == 200
-            assert "Another operation is binding this LibreNMS port. Refresh and retry." in response.content.decode()
-            if not htmx:
-                assert len(response.redirect_chain) == 1
-                destination, status = response.redirect_chain[0]
-                assert status == 302
-                assert f"tab={'interfaces' if action == 'rebind' else 'cables'}" in destination
-                assert f"server_key={server_key}" in destination
+            # A busy claim is a lock conflict: the middleware gives its one "try again" answer.
+            if htmx:
+                assert response.status_code == 200
+                assert TRY_AGAIN_MESSAGE in response.content.decode()
+            else:
+                assert (response.status_code, response["Location"]) == (302, f"http://testserver{page}")
+                assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
     if action == "rebind":
         assert _binding(existing) == STALE_PORT
     else:
@@ -1152,7 +1158,7 @@ def test_run_in_threads_fails_a_hung_call_within_its_timeout():
 def test_opposite_order_port_claims_refuse_without_deadlock():
     from threading import Barrier
     from django.db import close_old_connections, connections, transaction
-    from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, claim_librenms_port_binding
+    from netbox_librenms_plugin.utils import LibreNMSPortBindingBusy, claim_librenms_port_binding
 
     first_claims_ready = Barrier(2)
     second_claims_done = Barrier(2)
@@ -1163,7 +1169,7 @@ def test_opposite_order_port_claims_refuse_without_deadlock():
             with transaction.atomic():
                 claim_librenms_port_binding(first, "default")
                 first_claims_ready.wait(timeout=5)
-                with pytest.raises(LibreNMSPortBindingConflict, match="retry"):
+                with pytest.raises(LibreNMSPortBindingBusy):
                     claim_librenms_port_binding(second, "default")
                 # Both transactions retain their first claim until both try the second.
                 second_claims_done.wait(timeout=5)

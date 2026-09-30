@@ -25,7 +25,6 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     AmbiguousLibreNMSIdError,
-    LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
     acquire_advisory_transaction_lock,
     find_interface_by_librenms_port_id,
@@ -783,6 +782,9 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     Returns:
         dict | None: The binding outcome, or ``None`` when the item has no port ID.
 
+    Raises:
+        LibreNMSPortBindingBusy: Another open transaction holds the claim on the port.
+
     """
     from dcim.models import Interface
 
@@ -790,10 +792,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     if not port_id:
         return None
 
-    try:
-        claim_librenms_port_binding(port_id, server_key)
-    except LibreNMSPortBindingConflict as conflict:
-        return {"status": "conflict", "reason": str(conflict)}
+    claim_librenms_port_binding(port_id, server_key)
     try:
         existing_owner = find_interface_by_librenms_port_id(port_id, server_key)
     except AmbiguousLibreNMSIdError:
