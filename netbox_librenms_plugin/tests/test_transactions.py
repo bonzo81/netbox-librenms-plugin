@@ -31,6 +31,7 @@ from netbox_librenms_plugin.transactions import (
     run_transaction,
 )
 from netbox_librenms_plugin.utils import (
+    DATABASE_ERROR_MESSAGE,
     LibreNMSPortBindingBusy,
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
@@ -199,6 +200,24 @@ def test_the_text_of_a_caught_conflict_is_the_try_again_answer(superuser):
     assert exception_text_for(deadlock, Interface, user) == TRY_AGAIN_MESSAGE
     assert exception_text_for(tree_refusal, Interface, user) == TRY_AGAIN_MESSAGE
     assert exception_text_for(LibreNMSPortBindingBusy(), Interface, user) == TRY_AGAIN_MESSAGE
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("superuser", [False, True], ids=["user", "superuser"])
+def test_the_text_of_a_caught_database_error_is_the_generic_answer(superuser):
+    """PostgreSQL's text can name rows and values; NetBox's AbortRequest can carry it as its own text."""
+    from dcim.models import Interface
+
+    user = make_superuser("db-error-text-su") if superuser else make_user_with_perms("db-error-text-user", [])
+    data_error = wrapped_database_error("22001")
+    try:
+        raise AbortRequest(str(data_error)) from data_error
+    except AbortRequest as exc:
+        wrapped = exc
+
+    assert exception_text_for(data_error, Interface, user) == DATABASE_ERROR_MESSAGE
+    assert exception_text_for(wrapped, Interface, user) == DATABASE_ERROR_MESSAGE
+    assert exception_text_for(AbortRequest("NetBox refuses the move."), Interface, user) == "NetBox refuses the move."
 
 
 def test_a_failure_after_a_commit_is_never_a_conflict():

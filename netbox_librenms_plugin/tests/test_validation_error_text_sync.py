@@ -44,6 +44,7 @@ def test_module_constraint_failure_keeps_database_details_in_the_log(caplog):
     from django.db import IntegrityError, transaction
 
     from netbox_librenms_plugin.tests.conftest import make_module_bay, make_module_type
+    from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE
     from netbox_librenms_plugin.views.sync.modules import _module_write_failure
 
     device = make_device("constraint-detail-owner")
@@ -59,7 +60,7 @@ def test_module_constraint_failure_keeps_database_details_in_the_log(caplog):
 
     text = _module_write_failure(caught.value, ModuleBay, None)
 
-    assert "constraint" in text.lower()
+    assert text == DATABASE_ERROR_MESSAGE
     assert "Private bay label" not in text
     assert "DETAIL" not in text
     assert "Private bay label" in caplog.text

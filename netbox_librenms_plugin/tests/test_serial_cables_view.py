@@ -1461,6 +1461,25 @@ class TestCableSyncLockConflicts:
         assert [level for level, _text in messages_on(response.wsgi_request)] == ["success"]
 
     @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("sqlstate", ["23505", "22001", "57014"], ids=["integrity", "data", "operational"])
+    def test_another_database_error_in_the_cable_create_shows_only_the_generic_text(self, client, attempts, sqlstate):
+        """PostgreSQL's text can name rows and values, so no database error reaches the page as raw text."""
+        from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE
+
+        acs, csp, cp, row_id, server_key = self._serial_row(f"create-db-error-{sqlstate}")
+
+        with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_cable"'), sqlstate) as failed:
+            response = self._post(client, acs, csp, cp, row_id, server_key)
+
+        csp.refresh_from_db()
+        assert failed, "precondition: the cable insert ran"
+        assert attempts.count == 1
+        assert csp.cable_id is None
+        errors = [text for level, text in messages_on(response.wsgi_request) if level == "error"]
+        assert f"Failed to create cable: {DATABASE_ERROR_MESSAGE}" in errors
+        assert not any("SQLSTATE" in text for text in errors)
+
+    @transactional_db_with_all_apps()
     def test_the_retry_creates_the_tag_again_when_the_first_attempt_created_it(self, client, attempts):
         """The conflicting attempt created the provenance tag and rolled it back; the retry must not reuse it."""
         from extras.models import Tag

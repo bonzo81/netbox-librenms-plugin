@@ -67,7 +67,7 @@ def database_error_sqlstate(exc):
     return getattr(exc.__cause__, "sqlstate", None)
 
 
-def _nearest_database_error(exc):
+def nearest_database_error(exc):
     """Return the nearest database error in the chain of *exc*: ``__cause__``, else ``__context__``."""
     seen = set()
     link = exc
@@ -102,7 +102,7 @@ def classify_conflict(exc):
     if isinstance(exc, DatabaseError):
         return database_error_sqlstate(exc) in CONFLICT_SQLSTATES
     if isinstance(exc, (AbortRequest, ValidationError)):
-        nearest = _nearest_database_error(exc)
+        nearest = nearest_database_error(exc)
         return nearest is not None and database_error_sqlstate(nearest) in CONFLICT_SQLSTATES
     return False
 

@@ -11,7 +11,7 @@ import netaddr
 from dcim.models import Device, Interface
 from django.core import signing
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
-from django.db import IntegrityError
+from django.db import DatabaseError, IntegrityError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -19,6 +19,7 @@ from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
+from utilities.exceptions import AbortRequest
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 from netbox_librenms_plugin.constants import (
@@ -48,6 +49,7 @@ from netbox_librenms_plugin.transactions import (
     TRY_AGAIN_MESSAGE,
     TransactionConflict,
     classify_conflict,
+    nearest_database_error,
     recorded_conflict,
 )
 
@@ -5010,6 +5012,10 @@ def hidden_refusal_text(model, fields) -> str:
     return f"NetBox refuses {subject} (only a superuser sees the message)"
 
 
+# The one text of a database error: PostgreSQL's own text can name rows and values outside the viewer's scope.
+DATABASE_ERROR_MESSAGE = "The database rejected the change. Refresh the data and try again."
+
+
 def exception_text_for(exc: Exception, model, user) -> str:
     """
     Return the text of a caught *exc* that *user* may read.
@@ -5017,9 +5023,10 @@ def exception_text_for(exc: Exception, model, user) -> str:
     NetBox's ``clean()`` messages can name related objects, and admin ``CUSTOM_VALIDATORS`` or
     ``post_clean`` and ``pre_save`` receivers can add any text under any key. So only a superuser
     gets the message of a ValidationError. Every other viewer gets the concrete *model* fields
-    that the error keys name, or the model. Identity conflicts and database constraints use
-    generic text because their details can identify objects outside the viewer's scope. A lock
-    conflict (``classify_conflict``) gets the "try again" text for every viewer.
+    that the error keys name, or the model. Identity conflicts and database errors use generic
+    text because their details can identify objects outside the viewer's scope. A database error
+    is a ``DatabaseError``, or an ``AbortRequest`` that NetBox raised from one. A lock conflict
+    (``classify_conflict``) gets the "try again" text for every viewer.
 
     Args:
         exc (Exception): The caught error.
@@ -5027,17 +5034,17 @@ def exception_text_for(exc: Exception, model, user) -> str:
         user (User | None): The viewer.
 
     Returns:
-        str: The "try again" text, safe identity or constraint text, scoped validation text, or
-            the other exception's text.
+        str: The "try again" text, safe identity or database error text, scoped validation text,
+            or the other exception's text.
 
     """
     if classify_conflict(exc):
         return TRY_AGAIN_MESSAGE
     if isinstance(exc, AmbiguousLibreNMSIdError):
         return "Multiple records use this LibreNMS ID. Ask an administrator to correct the mappings."
-    if isinstance(exc, IntegrityError):
-        logger.warning("Database constraint rejected %s: %s", model.__name__, exc)
-        return "A database constraint rejected the change. Refresh the data and try again."
+    if isinstance(exc, DatabaseError) or (isinstance(exc, AbortRequest) and nearest_database_error(exc) is not None):
+        logger.warning("The database rejected %s: %s", model.__name__, exc)
+        return DATABASE_ERROR_MESSAGE
     if not isinstance(exc, ValidationError):
         return str(exc)
     if is_active_superuser(user):
