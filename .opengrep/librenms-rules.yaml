@@ -255,6 +255,48 @@ rules:
       - metavariable-regex:
           metavariable: $METHOD
           regex: ^(get|head|options|post|put|patch|delete|request|Session|session)$
+  - id: ipaddress-address-needs-netaddr
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Give an ipam IPAddress its address as netaddr.IPNetwork(...), the type NetBox loads from
+      the database. On NetBox 4.4, IPAddress.family (read by Device.clean()) raises on an
+      in-memory str address. The attribute assignment check covers files that import IPAddress.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/**"]
+      exclude: ["**/tests/**", "**/migrations/**"]
+    pattern-either:
+      - patterns:
+          - pattern: ipam.models.IPAddress(..., address=$ADDRESS, ...)
+          - pattern-not: ipam.models.IPAddress(..., address=netaddr.IPNetwork(...), ...)
+      - patterns:
+          - pattern-either:
+              - pattern: ipam.models.IPAddress.objects.$CREATE(..., address=$ADDRESS, ...)
+              - pattern: ipam.models.IPAddress.objects.$QS(...).$CREATE(..., address=$ADDRESS, ...)
+          - pattern-not: ipam.models.IPAddress.objects.$CREATE(..., address=netaddr.IPNetwork(...), ...)
+          - pattern-not: ipam.models.IPAddress.objects.$QS(...).$CREATE(..., address=netaddr.IPNetwork(...), ...)
+          - metavariable-regex:
+              metavariable: $CREATE
+              regex: ^(create|get_or_create|update_or_create)$
+      - patterns:
+          - pattern: |
+              ipam.models.IPAddress.objects.$CREATE(..., $DEFAULTS={..., "address": $ADDRESS, ...}, ...)
+          - pattern-not: |
+              ipam.models.IPAddress.objects.$CREATE(..., $DEFAULTS={..., "address": netaddr.IPNetwork(...), ...}, ...)
+          - metavariable-regex:
+              metavariable: $CREATE
+              regex: ^(get_or_create|update_or_create)$
+          - metavariable-regex:
+              metavariable: $DEFAULTS
+              regex: ^(defaults|create_defaults)$
+      - patterns:
+          - pattern-inside: |
+              from ipam.models import IPAddress
+              ...
+          - pattern: $IP.address = $ADDRESS
+          - pattern-not: $IP.address = netaddr.IPNetwork(...)
   - id: url-numeric-pk-converter
     languages: [python]
     severity: ERROR
