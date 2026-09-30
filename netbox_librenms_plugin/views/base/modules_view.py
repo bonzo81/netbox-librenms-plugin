@@ -371,12 +371,13 @@ def _select_module_interface_by_coordinates(device, module_interfaces, item):
 
         best_score = 0
         for item_coords in item_coordinates:
-            score = 0
-            if coords and item_coords and coords[-1] == item_coords[-1]:
-                score += 4
+            # Each port of the module shares its module and member coordinates, so only the port number picks one.
+            if coords[-1] != item_coords[-1]:
+                continue
+            score = 4
             if len(coords) >= 2 and len(item_coords) >= 2 and coords[-2] == item_coords[-2]:
                 score += 2
-            if isinstance(vc_position, int) and vc_position > 0 and coords and coords[0] == vc_position:
+            if isinstance(vc_position, int) and vc_position > 0 and coords[0] == vc_position:
                 score += 1
             if score > best_score:
                 best_score = score

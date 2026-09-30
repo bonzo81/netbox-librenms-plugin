@@ -521,6 +521,35 @@ class TestInventoryIdentityHelpers:
             is None
         )
 
+    @pytest.mark.parametrize(
+        ("in_second_member", "label"),
+        [(False, "Ethernet1/17"), (True, "Ethernet3/5")],
+        ids=["module-coordinate-only", "vc-position-only"],
+    )
+    def test_a_coordinate_match_needs_the_port_number(self, in_second_member, label):
+        """The module and member coordinates are the same for each port of the module, so alone they pick no port."""
+        from dcim.models import Interface, Module
+
+        from netbox_librenms_plugin.views.base.modules_view import _select_module_interface_by_coordinates
+
+        device = make_device(f"coordinate-port-number-{in_second_member}")
+        if in_second_member:
+            make_virtual_chassis(
+                f"coordinate-port-number-vc-{in_second_member}", make_device("coordinate-first"), device
+            )
+            device.refresh_from_db()
+        prefix = device.vc_position or 1
+        bay = make_module_bay(device, "Port Number Bay")
+        module_type = make_module_type(f"PORT-NUMBER-CARD-{in_second_member}")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, status="active")
+        Interface.objects.create(device=device, module=module, name=f"Ethernet{prefix}/1", type="other")
+        Interface.objects.create(device=device, module=module, name="mgmt", type="other")
+
+        assert (
+            _select_module_interface_by_coordinates(device, list(module.interfaces.all()), {"_librenms_ifname": label})
+            is None
+        )
+
 
 class TestInterfaceBinding:
     """Bind inventory port identities to real NetBox interfaces without reassignment."""
