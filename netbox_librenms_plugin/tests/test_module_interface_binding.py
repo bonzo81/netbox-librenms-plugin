@@ -186,47 +186,53 @@ class TestModuleTableShowsTheWriterChoice:
         cache_key = seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=ADOPTION_LIBRENMS_ID)
         return device, module, row, cache_key
 
+    def _post_update(self, device, module, row, user, live_librenms):
+        """POST Update Interface for the seeded row and return the response and its request."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        request = make_request(
+            "post",
+            {
+                "module_id": str(module.pk),
+                "ent_index": str(ADOPTION_ENT_INDEX),
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "update_module_interface",
+                    {"module_id": module.pk},
+                    ADOPTION_ENT_INDEX,
+                    module_inventory_row_digest(row),
+                ),
+            },
+            user=user,
+            path="/modules/",
+        )
+        view = UpdateModuleInterfaceView()
+        view._librenms_api = live_librenms.api
+        return view_post(view, request, pk=device.pk), request
+
     @pytest.mark.parametrize(
         ("interface_names", "identity", "expected", "source"),
         [
             (["Ethernet1/17", "Ethernet1/18"], {"_librenms_ifname": "port 1/17"}, "Ethernet1/17", "coordinates"),
+            (["Ethernet2/17"], {"_librenms_ifname": "port 1/17"}, "Ethernet2/17", "coordinates"),
             (["Uplink"], {"_librenms_ifdescr": "Unmatched Label"}, "Uplink", "lone module interface"),
+            (["Uplink"], {"_librenms_ifname": "Te1/1/5"}, "Uplink", "lone module interface"),
         ],
-        ids=["coordinates", "lone-interface"],
+        ids=["coordinates", "lone-port-number-agrees", "lone-interface", "lone-interface-without-coordinates"],
     )
     def test_the_update_binds_the_interface_the_table_shows(
         self, live_librenms, interface_names, identity, expected, source
     ):
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
-
         device, module, row, cache_key = self._seed(source[:5], interface_names, identity)
         user = make_superuser()
         shown = module.interfaces.get(name=expected)
         try:
             content = _render_module_tab(device, user)
-            request = make_request(
-                "post",
-                {
-                    "module_id": str(module.pk),
-                    "ent_index": str(ADOPTION_ENT_INDEX),
-                    "server_key": "default",
-                    "inventory_binding": module_inventory_binding_token(
-                        device.pk,
-                        "default",
-                        "update_module_interface",
-                        {"module_id": module.pk},
-                        ADOPTION_ENT_INDEX,
-                        module_inventory_row_digest(row),
-                    ),
-                },
-                user=user,
-                path="/modules/",
-            )
-            view = UpdateModuleInterfaceView()
-            view._librenms_api = live_librenms.api
-            response = view_post(view, request, pk=device.pk)
+            response, _request = self._post_update(device, module, row, user, live_librenms)
         finally:
             cache.delete(cache_key)
 
@@ -240,11 +246,29 @@ class TestModuleTableShowsTheWriterChoice:
             interface.name for interface in module.interfaces.all() if read_mapping(interface).own_id("default") == 8811
         ] == [expected]
 
+    @pytest.mark.parametrize("lone_name", ["Te1/2/1", "Te1/1/7"], ids=["module-and-port-differ", "port-differs"])
+    def test_a_lone_interface_with_another_port_number_shows_no_match(self, live_librenms, lone_name):
+        """The item names port Te1/1/5, so a lone interface with another port number is not that port."""
+        from django.core.cache import cache
+
+        device, module, row, cache_key = self._seed("contra", [lone_name], {"_librenms_ifname": "Te1/1/5"})
+        lone = module.interfaces.get(name=lone_name)
+        user = make_superuser()
+        try:
+            content = _render_module_tab(device, user)
+            _response, request = self._post_update(device, module, row, user, live_librenms)
+        finally:
+            cache.delete(cache_key)
+
+        assert lone.get_absolute_url() not in content
+        assert "Update Interface" not in content
+        assert any("no matching interface found for port_id 8811" in text for text in message_texts(request))
+        lone.refresh_from_db()
+        assert read_mapping(lone).own_id("default") is None
+
     def test_a_local_oob_holder_is_shown_and_bound(self, live_librenms):
         """The writer binds the one interface that holds the port, an OOB holder included, so the table shows it."""
         from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device, module, row, cache_key = self._seed("oob", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
@@ -253,27 +277,7 @@ class TestModuleTableShowsTheWriterChoice:
         user = make_superuser()
         try:
             content = _render_module_tab(device, user)
-            request = make_request(
-                "post",
-                {
-                    "module_id": str(module.pk),
-                    "ent_index": str(ADOPTION_ENT_INDEX),
-                    "server_key": "default",
-                    "inventory_binding": module_inventory_binding_token(
-                        device.pk,
-                        "default",
-                        "update_module_interface",
-                        {"module_id": module.pk},
-                        ADOPTION_ENT_INDEX,
-                        module_inventory_row_digest(row),
-                    ),
-                },
-                user=user,
-                path="/modules/",
-            )
-            view = UpdateModuleInterfaceView()
-            view._librenms_api = live_librenms.api
-            view_post(view, request, pk=device.pk)
+            self._post_update(device, module, row, user, live_librenms)
         finally:
             cache.delete(cache_key)
 
