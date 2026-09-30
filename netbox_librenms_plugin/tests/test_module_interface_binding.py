@@ -362,6 +362,26 @@ class TestModuleTableShowsTheWriterChoice:
         assert local.get_absolute_url() not in content
         assert "Update Interface" not in content
 
+    def test_an_interface_the_user_may_not_change_offers_no_update(self, live_librenms):
+        """The writer skips a choice outside the change scope, so the table offers no Update Interface."""
+        from dcim.models import Device, Interface, Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        device, module, _row, cache_key = self._seed("nochange", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        user = make_user_with_perms(
+            "table-choice-nochange-user", [("view", Device), ("view", Module), ("view", Interface)]
+        )
+        user = grant(user, "change", Interface, constraints={"name": "Management1"})
+        try:
+            content = _render_module_tab(device, user)
+        finally:
+            cache.delete(cache_key)
+
+        assert module.interfaces.get(name="Uplink").get_absolute_url() in content
+        assert "Update Interface" not in content
+
     def test_an_interface_the_user_may_not_view_is_not_shown(self, live_librenms):
         """The choice reads every interface, so the table must hide one outside the user's view scope."""
         from dcim.models import Device, Interface, Module
