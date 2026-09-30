@@ -8,7 +8,7 @@ in a production module: ``except ValidationError``, a tuple that holds it, ``exc
 ``except BaseException``. A handler after one that catches ValidationError is skipped. A read of
 the caught error is safe when it is a direct argument of a ``logger`` call (the error itself, or
 ``validation_error_detail`` of it), the error that a ``raise`` statement raises or chains, or the
-first argument of ``exception_text_for``, ``isinstance`` or ``type``. Each other read needs an
+first argument of ``exception_text_for``, ``classify_conflict``, ``isinstance`` or ``type``. Each other read needs an
 allowlist entry with its reason.
 """
 
@@ -22,8 +22,8 @@ PACKAGE = Path(__file__).resolve().parents[1]
 # Each handler that can catch a ValidationError: the class, a tuple that holds it, or a base class.
 CAUGHT = frozenset({"ValidationError", "Exception", "BaseException"})
 RULE = "exception_text_for"
-# A read as the first argument of these calls is safe: the rule itself, or a check of the class.
-SAFE_CALLEES = frozenset({RULE, "isinstance", "type"})
+# A read as the first argument of these calls is safe: the rule itself, or a check that returns a bool.
+SAFE_CALLEES = frozenset({RULE, "classify_conflict", "isinstance", "type"})
 LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
 
 # (path, function, sink, reason): each entry waives the reads of one sink in one function.
@@ -45,12 +45,6 @@ ALLOWED = [
         "LibreNMSAPI.test_connection",
         "str",
         "The try body sends one HTTP request with requests and reads its JSON; it validates no model.",
-    ),
-    (
-        "transactions.py",
-        "run_transaction",
-        "classify_conflict",
-        "classify_conflict returns a bool (lock conflict or not); the text stays in the function.",
     ),
     (
         "views/settings_views.py",
@@ -238,6 +232,7 @@ def test_the_scan_reads_the_production_handlers():
         ("raise Refused('failed') from exc", []),
         ("raise exc", []),
         ("detail = exception_text_for(exc, Device, request.user)", []),
+        ("if classify_conflict(exc): raise", []),
         ("detail = exception_text_for(exc.messages, Device, request.user)", [".messages"]),
         ("log.warning('failed: %s', exc)", ["log.warning"]),
     ],
