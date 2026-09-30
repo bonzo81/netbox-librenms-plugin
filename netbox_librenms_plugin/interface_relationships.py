@@ -437,10 +437,13 @@ def enrich_port_relationships(
     def related_interface_matches(netbox_related, librenms_related):
         if netbox_related is None or librenms_related is None:
             return False
-        stored_id = normalize_librenms_port_id(read_mapping(netbox_related).own_id(server_key or "default"))
+        server = server_key or "default"
         target_id = normalize_librenms_port_id(librenms_related.get("port_id"))
+        if not name_match_may_be_port(netbox_related, server=server, port_id=target_id):
+            return False
+        stored_id = normalize_librenms_port_id(read_mapping(netbox_related).own_id(server))
         if stored_id is not None and target_id is not None:
-            return stored_id == target_id
+            return True
         return netbox_related.name in (
             librenms_related.get("ifName"),
             librenms_related.get("ifDescr"),
