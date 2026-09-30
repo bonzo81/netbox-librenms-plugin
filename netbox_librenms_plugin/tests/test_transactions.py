@@ -638,6 +638,42 @@ def test_a_busy_port_claim_that_work_swallowed_is_still_retried():
 
 
 @pytest.mark.django_db
+def test_a_busy_device_identity_claim_that_work_swallowed_is_still_retried():
+    """A held device identity claim records itself, so a broad handler cannot commit the attempt."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping
+    from netbox_librenms_plugin.tests.claim_race_helpers import device_claim_key
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device(f"runner-identity-{uuid4().hex[:8]}")
+    calls = []
+
+    def write(row, fields):
+        row.save()
+        return row
+
+    with second_connection() as other:
+        with other.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [device_claim_key("default", 9402)])
+
+        def work():
+            calls.append(len(calls) + 1)
+            if len(calls) == 2:
+                other.rollback()
+            row = Device.objects.select_for_update().get(pk=device.pk)
+            try:
+                persist_mapping(row, assign_own(row, "default", 9402), write=write)
+            except Exception:
+                return "swallowed"
+            return "claimed"
+
+        result = run_transaction(work)
+
+    assert (result, calls) == ("claimed", [1, 2])
+
+
+@pytest.mark.django_db
 def test_an_error_that_is_not_a_conflict_is_not_retried():
     calls = []
 

@@ -1341,7 +1341,7 @@ def merge_links(winner, donor, server: str, *, at: str | None = None) -> MergeCh
 
 
 def _claim_device_identity(server_key, librenms_id) -> None:
-    """Claim one device identity until commit, or raise IdentityBusy at once."""
+    """Claim one device identity until commit, or raise IdentityBusy at once and record it for the runner."""
     from netbox_librenms_plugin.utils import advisory_lock_key
 
     connection = connections[DEFAULT_DB_ALIAS]
@@ -1352,7 +1352,7 @@ def _claim_device_identity(server_key, librenms_id) -> None:
         cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [advisory_lock_key(identity)])
         acquired = cursor.fetchone()[0]
     if not acquired:
-        raise IdentityBusy()
+        raise recorded_conflict(IdentityBusy())
 
 
 def claim_librenms_port_binding(port_id, server_key, *, using=None):
