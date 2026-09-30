@@ -9,6 +9,7 @@ from django.views import View
 from extras.models import Tag
 
 from netbox_librenms_plugin.forms import (
+    CABLE_SYNC_TAG_TAKEN,
     CableSyncSettingsForm,
     CableSyncTagNameTaken,
     ImportSettingsForm,
@@ -130,9 +131,9 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
                     # not imply Tag change permission. Re-render with the input instead of a bare
                     # 403 page that discards it.
                     cable_sync_form.add_error(None, str(exc))
-                except CableSyncTagNameTaken as exc:
+                except CableSyncTagNameTaken:
                     # The tag name was taken between validation and the locked rename.
-                    cable_sync_form.add_error(None, exc)
+                    cable_sync_form.add_error("cable_sync_tag", CABLE_SYNC_TAG_TAKEN)
                 except ValidationError as exc:
                     # A Tag receiver of another plugin can refuse the tag write with any text.
                     cable_sync_form.add_error(None, exception_text_for(exc, Tag, request.user))
