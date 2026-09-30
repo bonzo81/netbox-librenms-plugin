@@ -18,7 +18,7 @@ from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
 )
-from netbox_librenms_plugin.server_mappings import held_port_ids, name_match_may_be_port, read_mapping
+from netbox_librenms_plugin.server_mappings import name_match_may_be_port, port_holders, read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
@@ -1454,8 +1454,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from dcim.models import Interface
 
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
-        # One lookup for every row: a port that any interface holds is never matched by name or module.
-        held = held_port_ids((_get_item_port_identity(item)[0] for item in index_map.values()), server=server_key)
+        # One lookup for every row: the writer binds a held port only to its one holder.
+        holders = port_holders((_get_item_port_identity(item)[0] for item in index_map.values()), server=server_key)
         member_contexts = {}
         context_members = vc_members if vc_members else [obj]
         for member in context_members:
@@ -1469,7 +1469,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
                 "interfaces_by_port_id": interfaces_by_port_id,
                 "interfaces_by_name": interfaces_by_name,
-                "held_port_ids": held,
+                "port_holders": holders,
                 # The match reads every interface, so the table shows only one the user may view.
                 "viewable_interface_ids": frozenset(
                     self.restricted_queryset(Interface).filter(device=member).values_list("pk", flat=True)
@@ -1527,14 +1527,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         source = None
         confidence = None
 
+        holders = target_context["port_holders"]
         if port_id is not None:
             interface = (target_context.get("interfaces_by_port_id") or {}).get(port_id)
             if interface is not None:
+                if holders.get(port_id, ("dcim.interface", interface.pk)) != ("dcim.interface", interface.pk):
+                    # The writer refuses a port that another interface holds too.
+                    return
                 source = "port_id"
                 confidence = "high"
 
         if interface is None:
-            if port_id in target_context["held_port_ids"]:
+            if port_id in holders:
                 # The writer binds only that holder, and it is not an interface of this member.
                 return
             interfaces_by_name = target_context.get("interfaces_by_name") or {}
