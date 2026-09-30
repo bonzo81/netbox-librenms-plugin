@@ -1812,6 +1812,46 @@ class TestCoercePositiveInt:
 
 
 @pytest.mark.django_db
+class TestLibreNMSIdQueryMatchesDecoder:
+    """The SQL identity predicate finds a stored text form only when coerce_librenms_id reads it."""
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            "42",
+            "+42",
+            " \t42\n",
+            "0042",
+            "0" * 17 + "42",  # 19 digits: the bigint width, still readable
+            "0" * 18 + "42",  # 20 digits: past the bound
+            "0" * 20 + "42",  # 22 digits
+        ],
+    )
+    @pytest.mark.parametrize("namespaced", [True, False])
+    def test_lookup_agrees_with_coerce(self, stored, namespaced):
+        """A query hit on a form the decoder rejects would name an owner nobody can read."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+
+        dev = make_device(f"id-form-{len(stored)}-{namespaced}")
+        dev.custom_field_data["librenms_id"] = {"default": stored} if namespaced else stored
+        dev.save()
+
+        found = find_by_librenms_id(Device, 42, "default")
+
+        assert (found == dev) == (coerce_librenms_id(stored) == 42)
+
+    def test_no_text_pattern_past_the_digit_bound(self):
+        """An ID wider than 19 digits has no text form that coerce_librenms_id reads."""
+        from netbox_librenms_plugin.utils import librenms_id_text_pattern
+
+        assert librenms_id_text_pattern(10**18) == r"^[ \t\r\n\f\v]*\+?0{0,0}1000000000000000000[ \t\r\n\f\v]*$"
+        assert librenms_id_text_pattern(10**19) is None
+
+
+@pytest.mark.django_db
 class TestGetVirtualChassisMemberNoneName:
     """A LibreNMS port row can lack the selected name field entirely (port.get(...) -> None)."""
 
