@@ -47,7 +47,7 @@ unchecked until that review.
 | `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for`, the module logger or a `raise`. |
 | `caught-error-text-shadow` | error | A binding of a name that `caught-error-text` trusts, a logging change, a risky error class under another name, or `except*`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
-| `ipaddress-address-needs-netaddr` | error | An ipam `IPAddress` gets an address that is not a `netaddr.IPNetwork(...)` call. |
+| `ipaddress-address-needs-netaddr` | error | An ipam `IPAddress` gets an address that is not a `netaddr.IPNetwork(...)` call, or a `**` expansion. |
 | `url-numeric-pk-converter` | error | A `path()` route uses `<str:pk>` or `<pk>`, including local string constants. |
 | `no-direct-htmx-request-header-read` | error | Code reads the `HX-Request` header (or `HTTP_HX_REQUEST`) instead of `request.htmx`. |
 | `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
@@ -90,11 +90,12 @@ The htmx header rule checks `.get()`, subscript and `in` reads whose key is the 
 at run time.
 
 The IPAddress rule checks the `address` keyword of the constructor and of `create`,
-`get_or_create` and `update_or_create` on `IPAddress.objects` (also after one queryset call), and
-`address` in `defaults` or `create_defaults`. Filters such as `filter(address=...)` are allowed. It
-checks `.address =` assignments only in files that import `IPAddress` from `ipam.models`, because
-the rule cannot infer the type of the assigned object. Values built elsewhere and passed in as a
-`netaddr.IPNetwork` variable are also reported; wrap the value at the call.
+`get_or_create` and `update_or_create` at the end of any `IPAddress.objects` queryset chain, and
+`address` in `defaults` or `create_defaults`. A `**` expansion into these calls hides the address,
+so the rule reports it outright. Filters such as `filter(address=...)` are allowed. The rule cannot
+infer the type of an assigned object, so it checks `.address =` and `setattr(..., "address", ...)`
+only in files that import `IPAddress` from `ipam.models` or import `ipam.models` itself. A value
+passed in as a `netaddr.IPNetwork` variable is also reported; wrap the value at the call.
 
 The URL rule checks `<str:pk>` and `<pk>` in literal routes and local string constants.
 It leaves `<str:id>` alone because external IDs can contain text. The `pk` name is a package

@@ -1,4 +1,5 @@
 import netaddr
+import ipam.models as ipam_models
 from ipam.models import VRF, IPAddress
 from netaddr import IPNetwork
 
@@ -61,3 +62,54 @@ def other_types(parsed):
     netaddr.IPAddress(str(parsed))
     # ok: ipaddress-address-needs-netaddr
     netaddr.IPAddress("10.0.0.1")
+
+
+def expanded_kwargs(values, parsed):
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress(**values)
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.create(**values)
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.get_or_create(vrf=None, **values)
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.filter(vrf=None).update_or_create(**values)
+    # ok: ipaddress-address-needs-netaddr
+    IPAddress.objects.filter(**values)
+    # A ** expansion hides the address, so it is reported even next to a netaddr address.
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.create(address=netaddr.IPNetwork(str(parsed)), **{"status": "active"})
+
+
+def long_chains(parsed):
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.filter(vrf=None).select_for_update().create(address=str(parsed))
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.using("default").filter(vrf=None).exclude(pk=1).get_or_create(address=str(parsed))
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.filter(vrf=None).update_or_create(pk=1, defaults={"address": str(parsed)})
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.filter(vrf=None).select_for_update().get_or_create(create_defaults={"address": str(parsed)})
+    # ok: ipaddress-address-needs-netaddr
+    IPAddress.objects.filter(vrf=None).select_for_update().create(address=netaddr.IPNetwork(str(parsed)))
+    # ok: ipaddress-address-needs-netaddr
+    IPAddress.objects.filter(vrf=None).update_or_create(pk=1, defaults={"address": IPNetwork(str(parsed))})
+    # ok: ipaddress-address-needs-netaddr
+    VRF.objects.filter(pk__in=IPAddress.objects.values("vrf")).create(name=str(parsed))
+
+
+def set_by_name(ip_obj, parsed):
+    # ruleid: ipaddress-address-needs-netaddr
+    setattr(ip_obj, "address", str(parsed))
+    # ok: ipaddress-address-needs-netaddr
+    setattr(ip_obj, "address", netaddr.IPNetwork(str(parsed)))
+    # ok: ipaddress-address-needs-netaddr
+    setattr(ip_obj, "status", "active")
+
+
+def module_import(parsed):
+    # ruleid: ipaddress-address-needs-netaddr
+    ipam_models.IPAddress.objects.filter(vrf=None).create(address=str(parsed))
+    # ruleid: ipaddress-address-needs-netaddr
+    ipam_models.IPAddress(address=str(parsed))
+    # ok: ipaddress-address-needs-netaddr
+    ipam_models.IPAddress.objects.create(address=netaddr.IPNetwork(str(parsed)))
