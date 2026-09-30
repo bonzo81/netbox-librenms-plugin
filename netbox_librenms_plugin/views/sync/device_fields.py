@@ -614,7 +614,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         )
                         messages.error(
                             request,
-                            f"Platform '{platform_name}' could not be created: {e}",
+                            f"Platform '{platform_name}' could not be created: "
+                            f"{exception_text_for(e, Platform, request.user)}",
                         )
                         return self._sync_redirect(
                             request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
@@ -660,7 +661,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 logger.exception("IntegrityError saving device pk=%s after platform assignment", pk)
                 messages.error(
                     request,
-                    f"Error saving device (pk={pk}): {e}",
+                    f"Error saving device (pk={pk}): {exception_text_for(e, Device, request.user)}",
                 )
                 return self._sync_redirect(
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
@@ -725,7 +726,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                                 f"'{existing.netbox_platform}', not '{platform}'."
                             )
                         else:
-                            mapping_error = str(e)
+                            mapping_error = exception_text_for(e, PlatformMapping, request.user)
                             logger.exception(
                                 "IntegrityError creating PlatformMapping '%s' -> '%s' with no existing row",
                                 librenms_os,
@@ -990,7 +991,10 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 except Exception as exc:
                     transaction.set_rollback(True)
                     logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
-                    messages.error(request, f"Unexpected error removing LibreNMS mapping: {exc}")
+                    messages.error(
+                        request,
+                        f"Unexpected error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
+                    )
                     return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:
@@ -1233,7 +1237,9 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             except Exception as exc:
                 transaction.set_rollback(True)
                 logger.exception("Failed saving converted librenms_id for %s/%s", object_type, pk)
-                messages.error(request, f"Failed to save converted librenms_id: {exc}")
+                messages.error(
+                    request, f"Failed to save converted librenms_id: {exception_text_for(exc, model, request.user)}"
+                )
                 return self._sync_url(object_type, pk)
 
         messages.success(

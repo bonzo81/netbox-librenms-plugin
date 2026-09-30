@@ -233,3 +233,55 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
             pre_save.disconnect(refuse, sender=Device)
 
         _assert_shown(response, hidden, superuser, "the custom_field_data field" if key else "the device")
+
+
+# case: (view name, POST data, the statement that fails)
+_DATABASE_ERROR_CASES = {
+    "legacy_conversion": ("convert_legacy_librenms_id", {"object_type": "device"}, 'UPDATE "dcim_device"'),
+    "mapping_removal": (
+        "remove_server_mapping",
+        {"object_type": "device", "server_key": "retired"},
+        'UPDATE "dcim_device"',
+    ),
+    "platform_create": ("create_and_assign_platform", {}, 'INSERT INTO "dcim_platform"'),
+    "platform_assignment": ("create_and_assign_platform", {}, 'UPDATE "dcim_device"'),
+    "platform_mapping": (
+        "create_and_assign_platform",
+        {"create_mapping": "on"},
+        'INSERT INTO "netbox_librenms_plugin_platformmapping"',
+    ),
+}
+
+
+@pytest.mark.django_db
+class TestADeviceFieldSyncHidesADatabaseError:
+    """PostgreSQL's text of a failed write can name key values, so no viewer reads it."""
+
+    @pytest.mark.parametrize("case", list(_DATABASE_ERROR_CASES))
+    def test_the_write_shows_the_generic_text(self, client, librenms_server, case):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+        from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE
+
+        view_name, data, statement = _DATABASE_ERROR_CASES[case]
+        tag = f"dbtext-{case.replace('_', '-')}"
+        if case == "legacy_conversion":
+            device = make_device(tag, serial="LEGACY-DB", librenms_cf="7109")
+            librenms_server.device_info_response(device_id=7109, hostname=device.name, serial="LEGACY-DB")
+        elif case == "mapping_removal":
+            device = make_device(tag, librenms_cf={SERVER_KEY: 7110, "retired": 7111})
+        else:
+            device = make_device(tag)
+            data = {**data, "platform_name": f"Platform {tag}", "librenms_os": f"os-{tag}"}
+            if case != "platform_create":
+                Platform.objects.create(name=f"Platform {tag}", slug=f"platform-{tag}")
+        client.force_login(make_superuser(f"{tag}-superuser"))
+
+        with failing_statement(lambda sql, params: sql.startswith(statement), "23505") as failed:
+            response = _post(client, view_name, device, data)
+
+        assert failed, f"precondition: the view ran {statement}"
+        texts = message_texts(response.wsgi_request)
+        assert any(text.endswith(DATABASE_ERROR_MESSAGE) for text in texts), texts
+        assert not any("SQLSTATE" in text for text in texts), texts
