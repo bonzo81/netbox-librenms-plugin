@@ -134,6 +134,7 @@ class TestNormalLinkContextResolution:
         context = _view()._build_normal_link_context(scenario.links, scenario.local_a, SERVER_KEY)
 
         assert set(context) == {
+            "server_key",
             "local_owner_by_link",
             "remote_device_by_link",
             "remote_owner_by_link",

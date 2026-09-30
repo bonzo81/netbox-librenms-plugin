@@ -526,6 +526,17 @@ class TestPortLookups:
         assert resolve_device_port(device, server="p", port_id=6, name_candidates=["eth0"]) == named
         assert resolve_device_port(device, server="p", port_id=None, name_candidates=["missing"]) is None
 
+    def test_a_name_never_wins_over_a_binding_to_another_port(self):
+        device = _dev()
+        stale = _bind(make_interface(device, "eth0"), {"p": 7})
+        elsewhere = _bind(make_interface(device, "eth1"), {"q": 7})
+        _bind(make_interface(device, "eth2"), 7)
+
+        assert resolve_device_port(device, server="p", port_id=6, name_candidates=["eth0"]) is None
+        assert resolve_device_port(device, server="p", port_id=None, name_candidates=["eth0"]) == stale
+        assert resolve_device_port(device, server="p", port_id=6, name_candidates=["eth1"]) == elsewhere
+        assert resolve_device_port(device, server="p", port_id=6, name_candidates=["eth2"]) is None
+
     def test_an_ambiguous_port_id_does_not_fall_through_to_a_name(self):
         device = _dev()
         _bind(make_interface(device, "a"), {"p": 5})

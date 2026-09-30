@@ -528,7 +528,21 @@ def resolve_device_port(device, *, server: str, port_id, name_candidates: Iterab
     if not names:
         return None
     matches = list(interfaces.filter(name__in=names).order_by("pk")[:2])
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) != 1 or not name_match_may_be_port(matches[0], server=server, port_id=port_id):
+        return None
+    return matches[0]
+
+
+def name_match_may_be_port(interface, *, server: str, port_id) -> bool:
+    """
+    Return whether a same-name *interface* may stand for LibreNMS *port_id* on *server*.
+
+    A row without a port ID has nothing to contradict. Otherwise the interface must be unbound on
+    the server or bound to that port, so a name never wins over a binding to a different port.
+    """
+    if coerce_librenms_id(port_id) is None:
+        return True
+    return is_server_key(server) and read_mapping(interface).allows_name_fallback(server, port_id)
 
 
 def mapped_device_servers(subject, *, active_server: str | None = None) -> tuple[str, ...]:
