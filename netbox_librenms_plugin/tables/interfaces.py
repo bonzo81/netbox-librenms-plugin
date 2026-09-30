@@ -31,7 +31,7 @@ from netbox_librenms_plugin.interface_diff import (
 )
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, rule_names
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     check_vlan_group_matches,
@@ -1127,31 +1127,8 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html('<span class="{}">{}</span>', self._field_css_class(record, "type"), display)
 
     def format_interface_data(self, port_data, device):
-        """Format single interface data using table rendering logic."""
-        # Add NetBox interface data
+        """Format one interface row whose netbox_interface the caller resolved by port_id."""
         interface_name = port_data.get(self.interface_name_field)
-
-        # OOB-controller rows live on a SEPARATE LibreNMS device, so they must never bind to a
-        # host interface BY NAME: a row-level re-render (the VC member dropdown via
-        # SingleInterfaceVerifyView) would flip an unmatched row to green "matched" against an
-        # unrelated host interface. A binding already resolved by the stable port_id is kept --
-        # an OOB port syncs onto this device, so it can legitimately own an interface here.
-        if port_data.get("_source") == OOB_INVENTORY_SOURCE:
-            port_data.setdefault("netbox_interface", None)
-        # Preserve a netbox_interface already resolved by the stable port_id (e.g. the single-
-        # interface verify view resolves by port_id first). Only fall back to the fragile name
-        # lookup when nothing has been resolved yet, so a display-name change or collision can't
-        # clobber the correct port-id match with the wrong (or no) name-matched interface.
-        elif not port_data.get("netbox_interface"):
-            candidate = device.interfaces.filter(name=interface_name).first()
-            port_data["netbox_interface"] = (
-                candidate
-                if candidate
-                and port_data.get("name_fallback_allowed", False)
-                and name_match_may_be_port(candidate, server=self.server_key, port_id=port_data.get("port_id"))
-                else None
-            )
-        port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
         # This row has just been re-resolved against a different member, so any verdict cached
         # from the previous render is stale.
         port_data.pop("_sync_state", None)

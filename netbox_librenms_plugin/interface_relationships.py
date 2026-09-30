@@ -583,7 +583,6 @@ def resolve_relationship_row(
             )
         port["netbox_interface"] = oob_interface
         port["exists_in_netbox"] = oob_interface is not None
-        port["name_fallback_allowed"] = False
         port["relationship_source_resolvable"] = False
         port["lag_target_resolvable"] = False
         port["parent_target_resolvable"] = False
@@ -605,7 +604,6 @@ def resolve_relationship_row(
         )
     port["netbox_interface"] = resolved_interface
     port["exists_in_netbox"] = resolved_interface is not None
-    port["name_fallback_allowed"] = name_fallback_allowed and resolved_interface is not None
 
     port["relationship_source_resolvable"] = _row_relationship_source_is_actionable(
         context,

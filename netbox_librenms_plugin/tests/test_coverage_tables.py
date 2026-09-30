@@ -1461,20 +1461,16 @@ class TestInterfaceRelationships:
 
 @pytest.mark.django_db
 class TestInterfaceFormatting:
-    def test_main_row_can_bind_by_name_but_oob_row_cannot(self):
+    def test_the_formatted_row_keeps_the_resolved_interface(self):
+        """The verify view resolves the interface by port_id first, so formatting must not change it."""
         device = make_device("format-interface")
         interface = make_interface(device, "Ethernet1")
-        table = _interface_table(device)
-        main = _port(name_fallback_allowed=True, _source="main")
-        oob = _port(port_id=43, name_fallback_allowed=True, _source="oob")
+        main = _port(netbox_interface=interface, exists_in_netbox=True, _source="main")
 
-        main_result = table.format_interface_data(main, device)
-        table.format_interface_data(oob, device)
+        main_result = _interface_table(device).format_interface_data(main, device)
 
         assert main["netbox_interface"] == interface
         assert main["exists_in_netbox"] is True
-        assert oob["netbox_interface"] is None
-        assert oob["exists_in_netbox"] is False
         assert set(main_result) == {
             "selection",
             "rule_state",
@@ -1496,17 +1492,6 @@ class TestInterfaceFormatting:
             "librenms_bridge_port_id",
             "librenms_bridge_name",
         }
-
-    def test_the_name_fallback_accepts_a_row_without_a_port_id(self):
-        """The table's name fallback reads name_match_may_be_port, which accepts a row without a port ID."""
-        device = make_device("format-no-port-id")
-        interface = make_interface(device, "Ethernet1")
-        record = _port(port_id=None, name_fallback_allowed=True, _source="main")
-
-        _interface_table(device).format_interface_data(record, device)
-
-        assert record["netbox_interface"] == interface
-        assert record["exists_in_netbox"] is True
 
     def test_matching_alias_is_cleared_in_the_real_formatted_result(self):
         device = make_device("format-alias")
