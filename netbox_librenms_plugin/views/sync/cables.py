@@ -29,6 +29,7 @@ from netbox_librenms_plugin.server_mappings import (
     MappingRole,
     find_port_owner,
     identity_q,
+    name_match_may_be_port,
     read_mapping,
     resolve_device_port,
 )
@@ -62,7 +63,12 @@ from netbox_librenms_plugin.utils import (
     render_cable_trace,
     set_librenms_device_id,
 )
-from netbox_librenms_plugin.views.base.cables_view import cable_row_ports, port_owner_id, port_record, remote_port_ref
+from netbox_librenms_plugin.views.base.cables_view import (
+    cable_row_ports,
+    port_owner_id,
+    port_record,
+    remote_port_ref,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -355,6 +361,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             ):
                 return {"status": "stale", "interface": display_name}
             local_term, remote_term = locked_terms
+            if not self._locked_ends_may_be_row_ports(local_term, remote_term, link_data):
+                return {"status": "stale", "interface": display_name}
             locked_cables = self._lock_current_cables(local_term, remote_term)
             visible_cable_ids = set(
                 self.restricted_queryset(Cable, "view").filter(pk__in=locked_cables).values_list("pk", flat=True)
@@ -467,6 +475,23 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         return (
             locked_local,
             locked_remote,
+        )
+
+    def _locked_ends_may_be_row_ports(self, local_term, remote_term, link_data):
+        """
+        Return whether each locked Interface end may still be the LibreNMS port its row names.
+
+        The ends were resolved before the lock, so a binding written since then is read here. A
+        manually picked remote is the user's choice, not a port match, so only the local end is checked.
+        """
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        ends = [(local_term, link_data.get("local_port_id"))]
+        if not link_data.get("manual_remote"):
+            ends.append((remote_term, remote_port_ref(link_data)))
+        return all(
+            name_match_may_be_port(term, server=server_key, port_id=port_id)
+            for term, port_id in ends
+            if isinstance(term, Interface)
         )
 
     @staticmethod
