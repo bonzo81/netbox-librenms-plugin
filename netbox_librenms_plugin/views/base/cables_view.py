@@ -29,6 +29,7 @@ from netbox_librenms_plugin.server_mappings import (
     MappingRole,
     find_port_owner,
     identity_q,
+    name_match_may_be_port,
     read_mapping,
     resolve_device_port,
 )
@@ -716,6 +717,7 @@ class BaseCableTableView(
                 interface_ids_by_device[(interface.device_id, interface_librenms_id)].append(interface)
         cable_ids = {interface.cable_id for interface in catalog_interfaces if interface.cable_id is not None}
         return {
+            "server_key": server_key,
             "interfaces_by_pk": interfaces_by_pk,
             "interfaces_by_name": interfaces_by_name,
             "interface_ids_by_device": interface_ids_by_device,
@@ -790,6 +792,8 @@ class BaseCableTableView(
         if len(matches) != 1:
             return None
         interface = next(iter(matches.values()))
+        if not name_match_may_be_port(interface, server=context["server_key"], port_id=port_id):
+            return None
         return interface if interface.pk in context["visible_interface_ids"] else None
 
     def get_ip_address(self, obj):

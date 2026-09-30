@@ -126,6 +126,70 @@ def _classify(local, remote):
     return classify_cable_action(local, remote)
 
 
+@pytest.mark.django_db
+class TestNameFallbackRespectsThePortBinding:
+    """A same-name local interface bound to a different LibreNMS port is not the row's port."""
+
+    @pytest.mark.parametrize(
+        ("binding_server", "attached"),
+        [(SERVER_KEY, False), ("other-server", True)],
+        ids=("bound-to-another-port", "bound-on-another-server"),
+    )
+    def test_the_sync_attaches_only_an_interface_that_may_be_the_port(
+        self, binding_server, attached, librenms_server, settings
+    ):
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import bind_librenms_server
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+        local_device = make_device(f"fallback-local-{attached}")
+        local = make_interface(local_device, "eth0")
+        set_librenms_device_id(local, 7, binding_server)
+        local.save()
+        remote_device = make_device(f"fallback-remote-{attached}")
+        remote = make_interface(remote_device, "Ethernet2")
+        row = {
+            "_source": "main",
+            "local_port_id": 6,
+            "local_port": "eth0",
+            "remote_device": remote_device.name,
+            "remote_port": remote.name,
+            "remote_port_id": 202,
+        }
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY)
+        cache.set(cache_key, {"links": [row], "snapshot_token": f"fallback-{attached}"}, timeout=300)
+        client = Client()
+        client.force_login(make_superuser(f"fallback-user-{attached}"))
+        persist_test_server_mapping(local_device, SERVER_KEY)
+
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local_device.pk]),
+            {"tab": "cables", "server_key": SERVER_KEY},
+        )
+        record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
+        assert (record.get("netbox_local_interface_id") == local.pk) is attached
+
+        # A stale page that still names eth0 must not get the cable either.
+        client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local_device.pk]),
+            {
+                "select": 6,
+                "server_key": SERVER_KEY,
+                "expected_local_id_6": local.pk,
+                "expected_local_device_id_6": local_device.pk,
+                "expected_remote_id_6": remote.pk,
+                "expected_remote_device_id_6": remote_device.pk,
+            },
+        )
+        local.refresh_from_db()
+        remote.refresh_from_db()
+        assert (local.cable_id is not None and local.cable_id == remote.cable_id) is attached
+
+
 # ---------------------------------------------------------------------------
 # classify_cable_action
 # ---------------------------------------------------------------------------
