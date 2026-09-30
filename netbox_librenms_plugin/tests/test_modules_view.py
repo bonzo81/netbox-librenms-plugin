@@ -4919,20 +4919,6 @@ class TestMatchedInterfaceLinking:
             interface.save(update_fields=["custom_field_data"])
         return interface
 
-    def test_build_interface_indexes_ignores_duplicate_port_ids(self):
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        view = self._view()
-        member = make_device("interface-index-port-id")
-        self._make_interface(member, "Te1/1/1", port_id=42)
-        self._make_interface(member, "Te1/1/2", port_id=42)
-        interface_c = self._make_interface(member, "Te1/1/3", port_id=43)
-
-        interface_map, _ = view._build_interface_indexes(member)
-
-        assert 42 not in interface_map
-        assert interface_map[43] == interface_c
-
     def test_netbox_forbids_two_interfaces_sharing_a_name_on_one_device(self):
         """
         Pin the constraint that makes the duplicate-name dedupe in _build_interface_indexes unreachable.
@@ -4961,9 +4947,10 @@ class TestMatchedInterfaceLinking:
         view.request = make_request("get", user=make_superuser())
         member = make_device("interface-member-context")
         interface = self._make_interface(member, "Te1/1/1", port_id=42)
-        context = view._build_member_contexts(member, vc_members=[], index_map={})
+        context = view._build_member_contexts(member, vc_members=[], items=[{"_librenms_port_id": 42}])
 
-        assert context[member.pk]["interfaces_by_port_id"] == {42: interface}
+        assert context[member.pk]["port_holders"] == {42: ("dcim.interface", interface.pk)}
+        assert context[member.pk]["interfaces_by_pk"] == {interface.pk: interface}
         assert context[member.pk]["interfaces_by_name"] == {"Te1/1/1": interface}
         assert context[member.pk]["viewable_interface_ids"] == {interface.pk}
 
@@ -4975,7 +4962,11 @@ class TestMatchedInterfaceLinking:
         item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
         device = make_device("interface-attach-port-id")
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
-        context = {"interfaces_by_port_id": {42: iface}, "port_holders": {}, "viewable_interface_ids": {iface.pk}}
+        context = {
+            "interfaces_by_pk": {iface.pk: iface},
+            "port_holders": {42: ("dcim.interface", iface.pk)},
+            "viewable_interface_ids": {iface.pk},
+        }
 
         BaseModuleTableView._attach_interface_match(row, item, context)
 
@@ -4993,7 +4984,7 @@ class TestMatchedInterfaceLinking:
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         row = {"_source": "oob", "name": "TenGigabitEthernet1/1/1", "librenms_port_id": None}
         item = {"_source": "oob", "entPhysicalName": "TenGigabitEthernet1/1/1"}
-        context = {"interfaces_by_port_id": {}, "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface}}
+        context = {"interfaces_by_pk": {}, "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface}}
 
         BaseModuleTableView._attach_interface_match(row, item, context)
 
@@ -5016,7 +5007,7 @@ class TestMatchedInterfaceLinking:
         device = make_device("interface-attach-name")
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         context = {
-            "interfaces_by_port_id": {},
+            "interfaces_by_pk": {iface.pk: iface},
             "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface},
             "port_holders": {},
             "viewable_interface_ids": {iface.pk},
@@ -5043,8 +5034,8 @@ class TestMatchedInterfaceLinking:
         item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
         context = {
-            "interfaces_by_port_id": {42: iface},
-            "port_holders": {},
+            "interfaces_by_pk": {iface.pk: iface},
+            "port_holders": {42: ("dcim.interface", iface.pk)},
             "viewable_interface_ids": {iface.pk},
             "server_key": "default",
         }
@@ -5059,7 +5050,7 @@ class TestMatchedInterfaceLinking:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         row = {"name": "Te1/1/1", "librenms_port_id": None}
-        context = {"interfaces_by_port_id": {42: object()}, "port_holders": {}}
+        context = {"interfaces_by_pk": {}, "port_holders": {}}
 
         BaseModuleTableView._attach_interface_match(row, {"entPhysicalName": "Te1/1/1"}, context)
 
@@ -5613,7 +5604,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             "all_bays": view._compute_all_bays(device_bays, module_scoped_bays),
             "module_scoped_bays": module_scoped_bays,
             "sibling_counts": {module_id: len(bays) for module_id, bays in module_scoped_bays.items()},
-            "interfaces_by_port_id": {},
+            "interfaces_by_pk": {},
             "interfaces_by_name": {},
             "port_holders": {},
             "server_key": "test-server",
@@ -6340,8 +6331,9 @@ class TestInterfacePortIdActiveServerScope:
         return LibreNMSAPI(server_key=configured_server_key())
 
     def test_reads_port_id_under_active_server_not_default_client(self):
-        """With _active_server_key set, the per-server port_id for THAT server is returned."""
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        """With _active_server_key set, the port holders are read for THAT server."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         device = make_device("mod-verify-scope")
@@ -6354,9 +6346,12 @@ class TestInterfacePortIdActiveServerScope:
         view = object.__new__(BaseModuleTableView)
         view._librenms_api = self._real_configured_api()
         view._active_server_key = "server2"
+        view.request = make_request("get", user=make_superuser())
+
+        contexts = view._build_member_contexts(device, [], [{"_librenms_port_id": 111}, {"_librenms_port_id": 222}])
 
         # Must resolve under the active server (222), not the default-bound client (111).
-        assert view._get_interface_port_id(iface) == 222
+        assert contexts[device.pk]["port_holders"] == {222: ("dcim.interface", iface.pk)}
 
     def test_get_stored_librenms_id_honors_explicit_server_key(self):
         """LibreNMSAPI.get_stored_librenms_id(obj, server_key=...) reads that server's dict entry."""

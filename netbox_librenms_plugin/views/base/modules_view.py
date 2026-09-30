@@ -509,25 +509,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """Normalize serial values for reliable cross-source comparison."""
         return _clean_librenms_value(value)
 
-    def _get_interface_port_id(self, interface):
-        """
-        Resolve an interface's stored LibreNMS port_id (no discovery), scoped to the active server.
-
-        The verify path (SingleModuleVerifyView) sets ``_active_server_key`` but leaves the API
-        bound to the default client, so read the interface's per-server port_id under the active
-        key, not ``self.librenms_api.server_key``. This matches the server that the row's
-        interface match (``_attach_interface_match``) resolves against.
-
-        Args:
-            interface (Interface): The NetBox interface to inspect.
-
-        Returns:
-            int | None: The normalized LibreNMS port ID, or None if no valid ID is stored.
-
-        """
-        server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
-        return normalize_librenms_port_id(self.librenms_api.get_stored_librenms_id(interface, server_key=server_key))
-
     def _count_adoptable_template_interfaces(self, module):
         """Count standalone interfaces that match an installed module's interface templates."""
         from dcim.models import Interface
@@ -1410,7 +1391,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if vc_members is None:
             vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
 
-        member_contexts = self._build_member_contexts(obj, vc_members, index_map)
+        items = [*top_items, *(child for children in children_by_parent.values() for child in children)]
+        member_contexts = self._build_member_contexts(obj, vc_members, items)
         ignore_contexts = ignore_contexts or {}
 
         table_data = []
@@ -1449,25 +1431,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         return table_data
 
-    def _build_member_contexts(self, obj, vc_members, index_map):
-        """Build per-member bay context data used for row resolution."""
+    def _build_member_contexts(self, obj, vc_members, items):
+        """Build per-member bay context data used for row resolution of the inventory *items*."""
         from dcim.models import Interface
 
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
         # One lookup for every row: the writer binds a held port only to its one holder.
-        holders = port_holders((_get_item_port_identity(item)[0] for item in index_map.values()), server=server_key)
+        holders = port_holders((_get_item_port_identity(item)[0] for item in items), server=server_key)
         member_contexts = {}
         context_members = vc_members if vc_members else [obj]
         for member in context_members:
             device_bays, module_scoped_bays = self._get_module_bays(member)
-            interfaces_by_port_id, interfaces_by_name = self._build_interface_indexes(member)
+            interfaces_by_pk, interfaces_by_name = self._build_interface_indexes(member)
             member_contexts[member.id] = {
                 "device": member,
                 "device_bays": device_bays,
                 "module_scoped_bays": module_scoped_bays,
                 "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
-                "interfaces_by_port_id": interfaces_by_port_id,
+                "interfaces_by_pk": interfaces_by_pk,
                 "interfaces_by_name": interfaces_by_name,
                 "port_holders": holders,
                 # The match reads every interface, so the table shows only one the user may view.
@@ -1479,24 +1461,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return member_contexts
 
     def _build_interface_indexes(self, member):
-        """Build unique interface indexes keyed by LibreNMS port_id and name."""
-        interfaces_by_port_id = {}
+        """Build the member's interface indexes keyed by primary key and by unique name."""
+        interfaces_by_pk = {}
         interfaces_by_name = {}
-        duplicate_port_ids = set()
         duplicate_names = set()
 
         interface_manager = getattr(member, "interfaces", None)
         if interface_manager is None or not hasattr(interface_manager, "all"):
-            return interfaces_by_port_id, interfaces_by_name
+            return interfaces_by_pk, interfaces_by_name
 
         for interface in interface_manager.all():
-            port_id = self._get_interface_port_id(interface)
-            if port_id is not None:
-                if port_id in interfaces_by_port_id:
-                    duplicate_port_ids.add(port_id)
-                else:
-                    interfaces_by_port_id[port_id] = interface
-
+            interfaces_by_pk[interface.pk] = interface
             name = (getattr(interface, "name", "") or "").strip()
             if name:
                 if name in interfaces_by_name:
@@ -1504,12 +1479,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 else:
                     interfaces_by_name[name] = interface
 
-        for port_id in duplicate_port_ids:
-            interfaces_by_port_id.pop(port_id, None)
         for name in duplicate_names:
             interfaces_by_name.pop(name, None)
 
-        return interfaces_by_port_id, interfaces_by_name
+        return interfaces_by_pk, interfaces_by_name
 
     @staticmethod
     def _attach_interface_match(row, item, target_context):  # noqa: C901
@@ -1528,23 +1501,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         confidence = None
 
         holders = target_context["port_holders"]
-        if port_id is not None:
-            interface = (target_context.get("interfaces_by_port_id") or {}).get(port_id)
-            if interface is not None:
-                if holders.get(port_id, ("dcim.interface", interface.pk)) != ("dcim.interface", interface.pk):
-                    # The writer refuses a port that another interface holds too.
-                    return
-                source = "port_id"
-                confidence = "high"
-
-        if interface is None:
-            if port_id in holders:
-                # The writer binds only that holder, and it is not an interface of this member.
+        if port_id in holders:
+            holder = holders[port_id]
+            if holder is not None and holder[0] == "dcim.interface":
+                interface = target_context["interfaces_by_pk"].get(holder[1])
+            if interface is None:
+                # The writer binds a held port only to its one holder, and no interface of this member is it.
                 return
-            interfaces_by_name = target_context.get("interfaces_by_name") or {}
-            # Device interface names are unique, so the name index holds every interface of the module.
+            source = "port_id"
+            confidence = "high"
+        else:
             module_interfaces = (
-                [match for match in interfaces_by_name.values() if match.module_id == installed_module_id]
+                [
+                    match
+                    for match in target_context["interfaces_by_pk"].values()
+                    if match.module_id == installed_module_id
+                ]
                 if port_id is not None and installed_module_id
                 else []
             )
@@ -1552,7 +1524,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 target_context.get("device"),
                 item,
                 server_key=target_context.get("server_key"),
-                interfaces_by_name=interfaces_by_name,
+                interfaces_by_name=target_context.get("interfaces_by_name") or {},
                 module_interfaces=module_interfaces,
             )
             if choice.status:

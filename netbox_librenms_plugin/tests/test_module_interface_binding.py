@@ -240,6 +240,49 @@ class TestModuleTableShowsTheWriterChoice:
             interface.name for interface in module.interfaces.all() if read_mapping(interface).own_id("default") == 8811
         ] == [expected]
 
+    def test_a_local_oob_holder_is_shown_and_bound(self, live_librenms):
+        """The writer binds the one interface that holds the port, an OOB holder included, so the table shows it."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device, module, row, cache_key = self._seed("oob", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        uplink = module.interfaces.get(name="Uplink")
+        uplink.custom_field_data["librenms_id"] = {"default": {"oob": {"id": 8811}}}
+        uplink.save(update_fields=["custom_field_data"])
+        user = make_superuser()
+        try:
+            content = _render_module_tab(device, user)
+            request = make_request(
+                "post",
+                {
+                    "module_id": str(module.pk),
+                    "ent_index": str(ADOPTION_ENT_INDEX),
+                    "server_key": "default",
+                    "inventory_binding": module_inventory_binding_token(
+                        device.pk,
+                        "default",
+                        "update_module_interface",
+                        {"module_id": module.pk},
+                        ADOPTION_ENT_INDEX,
+                        module_inventory_row_digest(row),
+                    ),
+                },
+                user=user,
+                path="/modules/",
+            )
+            view = UpdateModuleInterfaceView()
+            view._librenms_api = live_librenms.api
+            view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert (
+            f'<a href="{uplink.get_absolute_url()}" title="Matched by port id, confidence high">Uplink</a>' in content
+        )
+        uplink.refresh_from_db()
+        assert read_mapping(uplink).own_id("default") == 8811
+
     def test_a_port_held_by_another_device_shows_no_match(self, live_librenms):
         """The writer refuses a port that another device's interface holds, so the table shows no match."""
         from django.core.cache import cache
