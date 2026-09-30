@@ -467,6 +467,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             if target is None:
                 target = unique_netbox_by_name.get(identity["name"])
                 matched_by = "name"
+                # A name match must not cross into another routing domain.
+                if target is not None and identity["rd"] and target.rd and str(target.rd) != identity["rd"]:
+                    target = None
             if target is None:
                 continue
             suggestions[port_key] = {

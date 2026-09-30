@@ -314,6 +314,17 @@ class TestIpRowVrfSuggestions:
             "matched_by": "name",
         }
 
+    @pytest.mark.parametrize("netbox_rd, suggests", [("203.0.113.82:1", False), (None, True)])
+    def test_a_name_match_never_crosses_a_conflicting_rd(self, recording_server, netbox_rd, suggests):
+        """LibreNMS reports vrf-df874a with RD 203.0.113.82:61434; only an RD-less namesake may match."""
+        namesake = VRF.objects.create(name="vrf-df874a", rd=netbox_rd)
+        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+
+        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+
+        tagged = next(row for row in enriched if row["port_id"] == 23724)
+        assert tagged.get("suggested_vrf_id") == (namesake.pk if suggests else None)
+
     def test_untagged_port_neither_suggests_nor_fetches_vrfs(self, recording_server):
         """The common ifVrf=0 path has no VRF request or suggestion."""
         VRF.objects.create(name="Unrelated VRF", rd="203.0.113.82:61434")
