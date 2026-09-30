@@ -14,6 +14,7 @@ from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
+from utilities.exceptions import AbortRequest
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
@@ -268,7 +269,7 @@ def _module_write_failure(exc, model, user):
     Return the text of a failed module write that a page may show *user*.
 
     Args:
-        exc (ValidationError | IntegrityError): The error of the write.
+        exc (AbortRequest | ValidationError | IntegrityError): The error of the write.
         model (type[Model]): The model that NetBox validated.
         user (User | None): The viewer.
 
@@ -946,6 +947,16 @@ def _should_attempt_bind_for_result(result):
     return False
 
 
+def _record_install_result(result, installed, skipped, failed):
+    """Add one install result to the list of its status in the install summary."""
+    if result["status"] == "installed":
+        installed.append(result["name"])
+    elif result["status"] == "skipped":
+        skipped.append(f"{result['name']}: {result['reason']}")
+    else:
+        failed.append(f"{result['name']}: {result['reason']}")
+
+
 def _record_bind_outcome(bind_result, result, skipped):
     """Report one bind attempt in the install summary, returning whether it changed NetBox."""
     if not bind_result:
@@ -1117,7 +1128,9 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             pass
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
-        except (ValidationError, IntegrityError) as e:
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
             messages.error(request, f"Failed to install module: {_module_write_failure(e, Module, request.user)}")
 
         return _modules_action_response(request, page_device, server_key)
@@ -1308,12 +1321,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         user=request.user,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
-                    if result["status"] == "installed":
-                        installed.append(result["name"])
-                    elif result["status"] == "skipped":
-                        skipped.append(f"{result['name']}: {result['reason']}")
-                    else:
-                        failed.append(f"{result['name']}: {result['reason']}")
+                    _record_install_result(result, installed, skipped, failed)
 
                     if should_bind:
                         bind_result = _bind_interface_librenms_id(
@@ -1324,7 +1332,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
-        except (ValidationError, IntegrityError) as e:
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
             messages.error(request, f"Branch install failed: {_module_write_failure(e, Module, request.user)}")
             return
 
@@ -1644,7 +1654,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 "name": name,
                 "reason": f"a matching {exc.component_label} is not available for module adoption",
             }
-        except (ValidationError, IntegrityError) as e:
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
             return {"status": "failed", "name": name, "reason": _module_write_failure(e, Module, user)}
 
         if holder_of is not None:
@@ -2265,12 +2277,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         user=request.user,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
-                    if result["status"] == "installed":
-                        installed.append(result["name"])
-                    elif result["status"] == "skipped":
-                        skipped.append(f"{result['name']}: {result['reason']}")
-                    else:
-                        failed.append(f"{result['name']}: {result['reason']}")
+                    _record_install_result(result, installed, skipped, failed)
 
                     if should_bind:
                         bind_result = _bind_interface_librenms_id(
@@ -2281,7 +2288,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
-        except (ValidationError, IntegrityError) as e:
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
             messages.error(request, f"Install failed: {_module_write_failure(e, Module, request.user)}")
             return _modules_action_response(request, page_device, server_key)
 
@@ -2376,7 +2385,9 @@ class UpdateModuleSerialView(
                     _schedule_module_cache_mutation(request, page_device, server_key)
             else:
                 messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
-        except (ValidationError, IntegrityError) as e:
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
             messages.error(request, f"Failed to update serial: {_module_write_failure(e, Module, request.user)}")
 
         return _modules_action_response(request, page_device, server_key)
@@ -3215,7 +3226,9 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 f"Serial '{exc.serial}' is assigned to a module you cannot remove. "
                 "Ask an administrator to resolve the conflict.",
             )
-        except (ValidationError, IntegrityError) as e:
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
             messages.error(request, f"Replace failed: {_module_write_failure(e, Module, request.user)}")
 
         return _modules_action_response(request, page_device, server_key)
@@ -3347,7 +3360,9 @@ class MoveModuleView(
             messages.success(request, moved_msg)
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
-        except (ValidationError, IntegrityError) as e:
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
             messages.error(request, f"Move failed: {_module_write_failure(e, Module, request.user)}")
 
         return _modules_action_response(request, page_device, server_key)

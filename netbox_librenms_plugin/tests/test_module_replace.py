@@ -12,7 +12,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_module_bay,
     make_module_type,
+    make_superuser,
 )
+from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 from netbox_librenms_plugin.tests.view_test_helpers import (
     get as view_get,
     make_request,
@@ -26,6 +28,10 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 
 
 pytestmark = pytest.mark.django_db
+
+
+# NetBox's Module._save_existing() reads the module row with only() these fields and FOR UPDATE.
+_NETBOX_LOCKED_MODULE_READ = 'SELECT "dcim_module"."id", "dcim_module"."device_id", "dcim_module"."module_bay_id"'
 
 
 def _module(device, bay, module_type, serial):
@@ -519,6 +525,77 @@ class TestMoveModuleView:
         assert any(
             "Moved MOVE-TYPE from move-source/Source Bay to Target Bay" in text for text in message_texts(request)
         )
+
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    def test_a_move_that_netbox_refuses_under_its_locks_shows_netbox_s_text(self, client):
+        """NetBox checks the move again under its row locks in save(); a refusal there is an AbortRequest."""
+        from dcim.models import Interface, InterfaceTemplate
+        from django.db import connection
+        from django.urls import reverse
+
+        source_device, target_device = make_device("move-late-source"), make_device("move-late-target")
+        module_type = make_module_type("MOVE-LATE-TYPE")
+        InterfaceTemplate.objects.create(module_type=module_type, name="late0", type="other")
+        moving = _module(source_device, make_module_bay(source_device, "Source Bay"), module_type, "MOVE-LATE")
+        target_bay = make_module_bay(target_device, "Target Bay")
+        taken = []
+
+        def take_the_name(execute, sql, params, many, context):
+            # NetBox's locked read of the module in save() runs after the view's full_clean().
+            if not taken and sql.startswith(_NETBOX_LOCKED_MODULE_READ) and "FOR UPDATE" in sql:
+                taken.append(Interface.objects.create(device=target_device, name="late0", type="other"))
+            return execute(sql, params, many, context)
+
+        client.force_login(make_superuser("move-late-user"))
+        client.raise_request_exception = False
+        with connection.execute_wrapper(take_the_name):
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}),
+                {
+                    "conflict_module_id": str(moving.pk),
+                    "target_bay_id": str(target_bay.pk),
+                    "selected_device_id": str(target_device.pk),
+                },
+            )
+
+        assert taken, "precondition: NetBox read the module under its lock"
+        assert response.status_code == 302
+        texts = message_texts(response.wsgi_request)
+        assert len(texts) == 1 and texts[0].startswith("Move failed: Moving this module would conflict with"), texts
+        assert "late0" in texts[0]
+        moving.refresh_from_db()
+        assert moving.device == source_device
+
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    def test_a_deadlock_in_the_move_gets_the_middleware_s_try_again_answer(self, client):
+        """NetBox raises AbortRequest from its own 40P01; the handler passes it on as a lock conflict."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+        from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+
+        source_device, target_device = make_device("move-deadlock-source"), make_device("move-deadlock-target")
+        module_type = make_module_type("MOVE-DEADLOCK-TYPE")
+        moving = _module(source_device, make_module_bay(source_device, "Source Bay"), module_type, "MOVE-DEADLOCK")
+        target_bay = make_module_bay(target_device, "Target Bay")
+
+        client.force_login(make_superuser("move-deadlock-user"))
+        locked_read = lambda sql, params: sql.startswith(_NETBOX_LOCKED_MODULE_READ) and "FOR UPDATE" in sql  # noqa: E731
+        with failing_statement(locked_read, "40P01") as failed:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}),
+                {
+                    "conflict_module_id": str(moving.pk),
+                    "target_bay_id": str(target_bay.pk),
+                    "selected_device_id": str(target_device.pk),
+                },
+            )
+
+        assert failed, "precondition: NetBox read the module under its lock"
+        assert response.status_code == 302
+        assert message_texts(response.wsgi_request) == [TRY_AGAIN_MESSAGE]
+        moving.refresh_from_db()
+        assert moving.device == source_device
 
     def test_real_permission_gate_rejects_a_user_without_change_scope(self):
         from dcim.models import Device

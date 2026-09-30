@@ -43,10 +43,6 @@ WRITE_FUNCTIONS = frozenset({"update_existing_row"})
 NOT_A_MODEL = frozenset({"cache", "session"})
 
 _NOT_LTREE = "The model it saves is not an ltree model, so NetBox raises a lock conflict as an OperationalError."
-_MODULE = (
-    "A Module is not an ltree model. NetBox writes a module's bays with bulk_create and bulk_update, and "
-    "raises AbortRequest from a deadlock in a module move, so a lock conflict passes this handler."
-)
 _OWN_TRANSACTION = (
     "Each row is its own transaction, which rolled back before the handler runs; the other rows are "
     "independent, and exception_text_for gives a conflict the try-again text."
@@ -121,18 +117,6 @@ ALLOWED = [
             ("views/sync/migrate.py", "MoveInterfaceToWinnerView.post", "ValidationError"),
             ("views/sync/migrate.py", "MoveInterfaceToWinnerView.post", "IntegrityError, ValidationError"),
             ("views/sync/modules.py", "AddBayTemplateView._map_existing_bay", "IntegrityError, ValidationError"),
-        )
-    ),
-    *(
-        ("views/sync/modules.py", function, "IntegrityError, ValidationError", _MODULE)
-        for function in (
-            "InstallModuleView.post",
-            "InstallBranchView._install_branch",
-            "InstallBranchView._install_single",
-            "InstallSelectedView.post",
-            "UpdateModuleSerialView.post",
-            "ReplaceModuleView.post",
-            "MoveModuleView.post",
         )
     ),
 ]
