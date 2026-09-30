@@ -111,7 +111,6 @@ class TestTheCreateAffordance:
         [
             pytest.param({"name": "NetBox RD holder", "rd": RD_VRF[1]}, id="rd-match"),
             pytest.param({"name": RD_VRF[0]}, id="name-match"),
-            pytest.param({"name": RD_VRF[0], "rd": "65000:1"}, id="name-match-other-rd"),
         ],
     )
     def test_a_matching_vrf_is_suggested_instead(self, client, seeded, existing):
@@ -124,6 +123,18 @@ class TestTheCreateAffordance:
 
         assert not any(_offers_create(rows[row_id]) for row_id in RD_ROWS)
         assert all(_selected_vrf(rows[row_id], vrf) for row_id in RD_ROWS)
+
+    def test_a_namesake_in_another_routing_domain_is_neither_suggested_nor_duplicated(self, client, seeded):
+        """The name is taken, so no create; the RD conflicts, so no suggestion."""
+        from ipam.models import VRF
+
+        vrf = VRF.objects.create(name=RD_VRF[0], rd="65000:1")
+        owner = seeded("vrf-namesake-other-rd")
+
+        rows = _rows(_superuser_client(client), owner)
+
+        assert not any(_offers_create(rows[row_id]) for row_id in RD_ROWS)
+        assert not any(_selected_vrf(rows[row_id], vrf) for row_id in RD_ROWS)
 
     def test_a_name_two_vrfs_share_offers_nothing(self, client, seeded):
         from ipam.models import VRF
