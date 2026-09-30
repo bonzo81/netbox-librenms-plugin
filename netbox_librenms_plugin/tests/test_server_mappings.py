@@ -23,6 +23,7 @@ from netbox_librenms_plugin.server_mappings import (
     decode_stored_mapping,
     find_mapping,
     find_port_owner,
+    held_port_ids,
     identity_q,
     mapped_device_servers,
     name_match_may_be_port,
@@ -513,6 +514,21 @@ class TestPortLookups:
 
         assert find_port_owner(5, server="p") == vm_interface
         assert find_port_owner(6, server="p") is None
+
+    def test_held_port_ids_names_each_port_that_find_port_owner_finds_or_refuses(self):
+        from virtualization.models import VMInterface
+
+        _bind(make_interface(_dev(), "eth0"), {"p": 5})
+        _bind(
+            VMInterface.objects.create(virtual_machine=make_vm("held-port-vm"), name="eth0"),
+            {"p": {"id": 1, "oob": {"id": "6"}}},
+        )
+        _bind(make_interface(_dev(), "eth1"), {"p": 7})
+        _bind(make_interface(_dev(), "eth2"), {"p": 7})
+        _bind(make_interface(_dev(), "eth3"), {"q": 8})
+
+        assert held_port_ids([5, "6", 7, 8, 9, "abc"], server="p") == {5, 6, 7}
+        assert held_port_ids([5], server="") == frozenset()
 
     def test_a_port_held_on_both_models_is_ambiguous(self):
         from virtualization.models import VMInterface

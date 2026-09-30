@@ -492,6 +492,29 @@ def find_port_owner(port_id, *, server: str):
     return owners[0] if owners else None
 
 
+def held_port_ids(port_ids: Iterable, *, server: str) -> frozenset[int]:
+    """
+    Return the IDs among *port_ids* that an Interface or VMInterface holds on *server*.
+
+    This is the batch form of ``find_port_owner`` for a reader of many rows: an ID that
+    ``find_port_owner`` finds, or refuses as ambiguous, is in the result. One query runs for each model.
+    """
+    from dcim.models import Interface
+    from virtualization.models import VMInterface
+
+    requested = {port_id for value in port_ids if (port_id := coerce_librenms_id(value)) is not None}
+    if not requested or not is_server_key(server):
+        return frozenset()
+    held = set()
+    for model in (Interface, VMInterface):
+        holders = model.objects.filter(
+            identity_q(model, server=server, identities=sorted(requested), roles=(MappingRole.OWN, MappingRole.OOB))
+        )
+        for record in read_mappings(holders, fields=("pk",)):
+            held |= {record.mapping.own_id(server), record.mapping.oob_id(server)} & requested
+    return frozenset(held)
+
+
 def resolve_device_port(device, *, server: str, port_id, name_candidates: Iterable[str]):
     """Resolve one Interface of *device* by its own LibreNMS port ID first, then by name."""
     interfaces = device.interfaces.all()

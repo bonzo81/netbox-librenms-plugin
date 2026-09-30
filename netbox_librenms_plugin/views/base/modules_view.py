@@ -18,7 +18,7 @@ from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
 )
-from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
+from netbox_librenms_plugin.server_mappings import held_port_ids, name_match_may_be_port, read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
@@ -1400,7 +1400,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if vc_members is None:
             vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
 
-        member_contexts = self._build_member_contexts(obj, vc_members)
+        member_contexts = self._build_member_contexts(obj, vc_members, index_map)
         ignore_contexts = ignore_contexts or {}
 
         table_data = []
@@ -1439,44 +1439,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         return table_data
 
-    def _build_table_rows_for_member(
-        self,
-        member,
-        top_items,
-        index_map,
-        children_by_parent,
-        ignore_rules,
-        device_identity,
-        module_types,
-        manufacturer=None,
-    ):
-        """Build rows using a fixed target member for every inventory item."""
-        member_contexts = self._build_member_contexts(member, vc_members=[])
-        target_context = member_contexts.get(member.id)
-        if target_context is None:
-            return []
-
-        table_data = []
-        for item in top_items:
-            self._append_rows_for_item_context(
-                table_data,
-                item,
-                target_context,
-                index_map,
-                children_by_parent,
-                ignore_rules,
-                device_identity,
-                module_types,
-                manufacturer=manufacturer,
-                selected_device=member,
-                resolution_source="manual",
-                member_contexts=member_contexts,
-            )
-
-        return table_data
-
-    def _build_member_contexts(self, obj, vc_members):
+    def _build_member_contexts(self, obj, vc_members, index_map):
         """Build per-member bay context data used for row resolution."""
+        server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
+        # One lookup for every row: a port that any interface holds is never matched by name or module.
+        held = held_port_ids((_get_item_port_identity(item)[0] for item in index_map.values()), server=server_key)
         member_contexts = {}
         context_members = vc_members if vc_members else [obj]
         for member in context_members:
@@ -1490,7 +1457,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
                 "interfaces_by_port_id": interfaces_by_port_id,
                 "interfaces_by_name": interfaces_by_name,
-                "server_key": getattr(self, "_active_server_key", None) or self.librenms_api.server_key,
+                "held_port_ids": held,
+                "server_key": server_key,
             }
         return member_contexts
 
@@ -1550,6 +1518,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 confidence = "high"
 
         if interface is None:
+            if port_id in target_context["held_port_ids"]:
+                # The writer binds only that holder, and it is not an interface of this member.
+                return
             interfaces_by_name = target_context.get("interfaces_by_name") or {}
             # Device interface names are unique, so the name index holds every interface of the module.
             module_interfaces = (
