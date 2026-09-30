@@ -929,6 +929,38 @@ class TestInterfaceContextOOBRows:
         assert row["lag_sync_status"] == "missing_nb"
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, row))
 
+    def test_a_related_interface_with_a_malformed_binding_is_not_a_name_match(self):
+        """A malformed binding is never unbound, so a same-name LAG cannot stand for the LibreNMS LAG port."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("table-malformed-related-binding")
+        lag = make_interface(device, "Port-Channel1", iface_type="lag")
+        lag.custom_field_data["librenms_id"] = {"default": {"id": "junk"}}
+        lag.save(update_fields=["custom_field_data"])
+        source = make_interface(device, "Ethernet1")
+        set_librenms_device_id(source, 10, "default")
+        source.lag = lag
+        source.save()
+        snapshot = {
+            "ports": [
+                {"port_id": 10, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
+                {"port_id": 20, "ifName": "Port-Channel1", "ifType": "ieee8023adLag"},
+            ],
+            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
+        }
+        request = _make_request()
+        view = DeviceInterfaceTableView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        view.request = request
+
+        view.get_context_data(request, device, "ifName", "default", fresh_data=snapshot, sync_device=device)
+
+        assert snapshot["ports"][0]["lag_sync_status"] == "mismatch"
+
     def test_relationship_button_resolves_an_unbound_same_name_source(self):
         from types import SimpleNamespace
 
