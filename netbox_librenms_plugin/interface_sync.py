@@ -22,6 +22,7 @@ from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     find_port_owner,
+    name_match_may_be_port,
     read_mapping,
 )
 from netbox_librenms_plugin.utils import (
@@ -504,7 +505,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
     else:
         existing_by_name = model.objects.filter(**owner_filter, name=interface_name).first()
         if existing_by_name is not None:
-            if not read_mapping(existing_by_name).allows_name_fallback(server_key, port_id):
+            if not name_match_may_be_port(existing_by_name, server=server_key, port_id=port_id):
                 # Name the holding port only to a caller who may view the interface.
                 holder = (
                     normalize_librenms_port_id(read_mapping(existing_by_name).own_id(server_key))
@@ -522,7 +523,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         else:
             interface, created = model.objects.get_or_create(**owner_filter, name=interface_name)
             if not created:
-                if not read_mapping(interface).allows_name_fallback(server_key, port_id):
+                if not name_match_may_be_port(interface, server=server_key, port_id=port_id):
                     raise ValueError("The interface name became bound to another LibreNMS port.")
                 if not viewable_queryset.filter(pk=interface.pk).exists():
                     raise ValueError("The matching NetBox interface is outside your view scope.")

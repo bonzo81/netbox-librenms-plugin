@@ -5356,6 +5356,19 @@ class TestResolveInterfaceByPortId:
         assert err is None
         assert found == iface
 
+    def test_a_non_numeric_port_id_resolves_by_name_without_a_binding_error(self):
+        """A port ID that is not valid has nothing to contradict, so the name decides."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("pci-namehint-invalid-port")
+        iface = make_interface(device, "lag-1", iface_type="lag")
+
+        found, err = resolve_interface_by_port_id(device, "abc", "production", name_hint="lag-1")
+
+        assert err is None
+        assert found == iface
+        assert read_mapping(iface).own_id("production") is None
+
     def test_ambiguous_port_id_returns_error_not_first_match(self):
         """Two interfaces carrying the same stale librenms_id must fail as ambiguous, not silently bind lag/parent to whichever happens to be first."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface

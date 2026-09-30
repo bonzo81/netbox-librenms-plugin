@@ -49,6 +49,7 @@ from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     find_port_owner,
+    name_match_may_be_port,
     read_mapping,
     read_mappings,
 )
@@ -1911,7 +1912,7 @@ class SyncInterfacesView(
             if not self.restricted_queryset(Interface).filter(pk=interface.pk).exists():
                 return None
             raise _HostInterfaceNameConflict
-        if not created and port_id and not read_mapping(interface).allows_name_fallback(server_key, port_id):
+        if not created and not name_match_may_be_port(interface, server=server_key, port_id=port_id):
             return None
         if created:
             interface._librenms_sync_created = True
@@ -1930,7 +1931,7 @@ class SyncInterfacesView(
         if interface_name is None:
             return None
         interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
-        if not created and port_id and not read_mapping(interface).allows_name_fallback(server_key, port_id):
+        if not created and not name_match_may_be_port(interface, server=server_key, port_id=port_id):
             return None
         if created:
             interface._librenms_sync_created = True

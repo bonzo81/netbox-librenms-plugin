@@ -25,6 +25,7 @@ from netbox_librenms_plugin.server_mappings import (
     find_port_owner,
     identity_q,
     mapped_device_servers,
+    name_match_may_be_port,
     read_mapping,
     read_mappings,
     resolve_device_port,
@@ -135,7 +136,7 @@ class TestReadPurity:
             assert mapping.own_id("default") == 42
             assert mapping.oob_id("default") == 7
             assert mapping.migrated_to("retired").device_id == 3
-            assert mapping.allows_name_fallback("default", 42)
+            assert name_match_may_be_port(loaded, server="default", port_id=42)
 
         reloaded = Device.objects.get(pk=loaded.pk)
         assert reloaded.custom_field_data["librenms_id"] == stored
@@ -308,14 +309,20 @@ class TestMappingDecoding:
             (42, 42, True),
             (42, 7, False),
             ("abc", 42, False),
-            (None, "abc", False),
+            (None, "abc", True),
+            ({"default": 7}, None, True),
         ],
         ids=repr,
     )
     def test_name_fallback_needs_an_absent_or_matching_binding(self, stored, port_id, expected):
         interface = _bind(make_interface(_dev(), "eth0"), stored)
 
-        assert read_mapping(interface).allows_name_fallback("default", port_id) is expected
+        assert name_match_may_be_port(interface, server="default", port_id=port_id) is expected
+
+    def test_name_fallback_refuses_an_invalid_server_key(self):
+        interface = make_interface(_dev(), "eth0")
+
+        assert name_match_may_be_port(interface, server="", port_id=42) is False
 
     def test_the_raw_decoder_agrees_with_the_object_reader(self):
         stored = {"default": {"id": "42", "oob": {"type": "idrac"}}, "_preferred_server": 1}

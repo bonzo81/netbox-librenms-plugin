@@ -9,6 +9,7 @@ from netbox_librenms_plugin.server_mappings import (
     MappingRole,
     decode_stored_mapping,
     find_mapping,
+    name_match_may_be_port,
     read_mapping,
 )
 from netbox_librenms_plugin.tests.conftest import (
@@ -596,13 +597,15 @@ class TestInterfaceNameFallbackMatchesPort:
     def test_agrees_with_the_shared_identifier_reader(self, stored):
         interface = self._interface(stored)
         assert read_mapping(interface).own_id("default") == 42
-        assert read_mapping(interface).allows_name_fallback("default", 42) is True
-        assert read_mapping(interface).allows_name_fallback("default", 43) is False
+        assert name_match_may_be_port(interface, server="default", port_id=42) is True
+        assert name_match_may_be_port(interface, server="default", port_id=43) is False
 
     def test_unbound_and_other_server_entries_are_available(self):
-        assert read_mapping(self._interface(None)).allows_name_fallback("default", 42) is True
-        assert read_mapping(self._interface({"other": 42})).allows_name_fallback("default", 42) is True
-        assert read_mapping(self._interface({"default": {"no_id": 42}})).allows_name_fallback("default", 42) is False
+        assert name_match_may_be_port(self._interface(None), server="default", port_id=42) is True
+        assert name_match_may_be_port(self._interface({"other": 42}), server="default", port_id=42) is True
+        assert (
+            name_match_may_be_port(self._interface({"default": {"no_id": 42}}), server="default", port_id=42) is False
+        )
 
 
 @pytest.mark.django_db(transaction=True)
