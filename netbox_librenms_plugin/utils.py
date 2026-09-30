@@ -3282,8 +3282,8 @@ def build_librenms_id_qs(server_key, value):
     :func:`find_by_librenms_id` and ``cables_view._librenms_id_q``, so the two can't drift on
     which stored shapes resolve. Matches the namespaced scalar (``{server_key: 42}``), the
     dict-with-id form (``{server_key: {"id": 42}}``), the legacy bare int/str (pre multi-server),
-    and the OOB sub-key (``{server_key: {"oob": {"id": 42}}}``), across the value's int and string
-    representations (so ``"042"`` / ``" 42 "`` match JSON ``42``).
+    and the OOB sub-key (``{server_key: {"oob": {"id": 42}}}``). Each predicate matches the stored
+    text form by :func:`librenms_id_text_pattern`, so it finds exactly what coerce_librenms_id() reads.
 
     Fails closed on an invalid server key or value (bool / None / zero / negative / non-numeric
     string): it returns match-nothing predicates rather than building a lookup that could hit a
@@ -3309,42 +3309,19 @@ def build_librenms_id_qs(server_key, value):
     # (bool / None / zero / negative / non-numeric string like "abc") must never build a predicate
     # that could match a corrupt legacy row (e.g. ``custom_field_data__librenms_id="abc"``). Callers
     # still validate for their own reasons, but this makes the shared builder the last line of
-    # defence. coerce_librenms_id() only gates validity here — the variant list below keeps its full
-    # match breadth (incl. zero-padded string forms) for accepted values.
+    # defence.
     normalized_value = coerce_librenms_id(value)
     if normalized_value is None:
         match_none = Q(pk__in=[])
         return match_none, match_none
-    variants = [value, str(value)]
-    if isinstance(value, str):
-        try:
-            int_value = int(value.strip())
-        except ValueError:
-            int_value = None
-        if int_value is not None and int_value > 0:
-            variants += [str(int_value), int_value]
-    seen = []
-    for v in variants:
-        if v not in seen:
-            seen.append(v)
-
-    host_q = Q()
-    oob_q = Q()
-    for v in seen:
-        # Namespaced scalar, the dict-with-id form ({"id": .., "oob": {..}}), and the legacy bare
-        # integer/string (pre multi-server) all identify the HOST device.
-        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}": v})
-        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": v})
-        host_q |= Q(custom_field_data__librenms_id=v)
-        # The OOB controller's own device id — so a re-import recognises the merged device.
-        oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
-
-    # Find the padded, signed and spaced text forms that coerce_librenms_id() also reads.
+    # Text regex only: jsonb equality would also find a float 42.0 that the decoder rejects.
     numeric_pattern = librenms_id_text_pattern(normalized_value)
-    host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
-    host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
-    host_q |= Q(custom_field_data__librenms_id__regex=numeric_pattern)
-    oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
+    host_q = (
+        Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
+        | Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
+        | Q(custom_field_data__librenms_id__regex=numeric_pattern)
+    )
+    oob_q = Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
     return host_q, oob_q
 
 

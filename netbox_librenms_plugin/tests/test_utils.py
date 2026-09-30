@@ -1843,6 +1843,32 @@ class TestLibreNMSIdQueryMatchesDecoder:
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
+    @pytest.mark.parametrize("stored", [42, "42", 42.0, 42.5])
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            lambda v: {"default": v},
+            lambda v: {"default": {"id": v}},
+            lambda v: {"default": {"id": 7, "oob": {"id": v}}},
+            lambda v: v,
+        ],
+        ids=["scalar", "id", "oob", "legacy"],
+    )
+    def test_json_number_lookup_agrees_with_coerce(self, stored, shape):
+        """JSON 42.0 equals 42 in jsonb, but the decoder rejects a float, so no lookup may find it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+
+        dev = make_device(f"id-number-{stored!r}")
+        dev.custom_field_data["librenms_id"] = shape(stored)
+        dev.save()
+
+        found = find_by_librenms_id(Device, 42, "default")
+
+        assert (found == dev) == (coerce_librenms_id(stored) == 42)
+
     @pytest.mark.parametrize("wide", [10**19, str(10**19)])
     def test_id_past_the_digit_bound_is_neither_read_nor_found(self, wide):
         """An ID wider than 19 digits is invalid in both int and text form, so no lookup finds it."""
