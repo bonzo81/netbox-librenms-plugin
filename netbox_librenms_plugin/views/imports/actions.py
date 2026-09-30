@@ -692,9 +692,11 @@ def _save_device(device, update_fields: list[str], request=None) -> HttpResponse
         # and raises DataError. Convert it to a clean toast instead of a 500.
         logger.exception("Data error saving device pk=%s", getattr(device, "pk", None))
         return _err("Could not save: a field value is invalid (for example, too long).", 400)
-    except DatabaseError:
-        # Catch-all for any other backend-level failure during the UPDATE (lock timeout,
-        # connection drop, a backend that signals a 0-row forced UPDATE, etc.). Note: a
+    except DatabaseError as exc:
+        if classify_conflict(exc):
+            raise
+        # Catch-all for any other backend-level failure during the UPDATE (a lock conflict goes
+        # to the middleware; a connection drop, a backend that signals a 0-row forced UPDATE, etc.). Note: a
         # plain save(update_fields=...) against a concurrently-deleted row does NOT reliably
         # raise on Django 6.0 — it issues an UPDATE that affects 0 rows silently — so this is
         # a defensive backstop, not a guaranteed concurrent-delete signal. Several callers
@@ -3914,7 +3916,9 @@ class MergeNetBoxDevicesView(
                         lock_pks.update(vc.members.values_list("pk", flat=True))
                 lock_pks = sorted(lock_pks)
                 locked = list(Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk"))
-            except DatabaseError:
+            except DatabaseError as exc:
+                if classify_conflict(exc):
+                    raise
                 return _database_failure_response()
             if len(locked) != len(lock_pks):
                 return _htmx_error_response(
@@ -3928,7 +3932,9 @@ class MergeNetBoxDevicesView(
             try:
                 winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
                 donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
-            except DatabaseError:
+            except DatabaseError as exc:
+                if classify_conflict(exc):
+                    raise
                 return _database_failure_response()
             # Fail closed if a concurrent VC change added a member after we snapshotted lock_pks and
             # the resolved sync device wasn't among the locked rows — never write the link to an
@@ -3943,7 +3949,9 @@ class MergeNetBoxDevicesView(
             sync_pks = {winner_sync.pk, donor_sync.pk}
             try:
                 changeable_sync_pks = set(changeable.filter(pk__in=sync_pks).values_list("pk", flat=True))
-            except DatabaseError:
+            except DatabaseError as exc:
+                if classify_conflict(exc):
+                    raise
                 return _database_failure_response()
             if changeable_sync_pks != sync_pks:
                 return _htmx_error_response("Winner or donor device not found")
@@ -4022,7 +4030,9 @@ class MergeNetBoxDevicesView(
                 # back defensively before returning the fail-closed toast.
                 transaction.set_rollback(True)
                 return _htmx_error_response(f"Cannot merge: {exc}")
-            except DatabaseError:
+            except DatabaseError as exc:
+                if classify_conflict(exc):
+                    raise
                 return _database_failure_response()
 
             # Persist only the fields we actually touched. Calling ``full_clean()`` here (or calling

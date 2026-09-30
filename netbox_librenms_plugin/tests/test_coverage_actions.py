@@ -5727,6 +5727,32 @@ class TestPromoteToHostViewPost:
 
 
 @pytest.mark.django_db
+def test_a_lock_conflict_in_a_device_save_escapes_the_save_helper():
+    """Only the middleware answers a lock conflict; the helper keeps its 409 text for other database errors."""
+    from django.db import OperationalError, transaction
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+    from netbox_librenms_plugin.transactions import classify_conflict
+    from netbox_librenms_plugin.views.imports.actions import _save_device
+
+    device = make_device("save-helper-conflict")
+    device.name = "save-helper-conflict-renamed"
+
+    def update(sql, params):
+        return sql.startswith('UPDATE "dcim_device"')
+
+    with pytest.raises(OperationalError) as caught, transaction.atomic():
+        with failing_statement(update, "40P01"):
+            _save_device(device, update_fields=["name"])
+    with transaction.atomic(), failing_statement(update, "57014"):
+        response = _save_device(device, update_fields=["name"])
+        transaction.set_rollback(True)
+
+    assert classify_conflict(caught.value)
+    assert response.status_code == 409
+
+
+@pytest.mark.django_db
 class _MergeViewHarness:
     """Drive merge actions through real validation, permissions, HTTP, and ORM state."""
 
@@ -6039,6 +6065,27 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
     """Merge preparation failures must return a toast and leave the donor unmigrated."""
+
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_on_the_merge_locks_reaches_the_middleware(self):
+        """The merge rolls back and the conflict escapes, so the middleware gives its "try again" answer."""
+        from dcim.models import Device
+        from django.db import OperationalError
+
+        from netbox_librenms_plugin.transactions import classify_conflict
+
+        winner = make_device("merge-lock-winner", librenms_cf={self.server_key: {"id": 20}})
+        # A serial of its own, so the harness writes nothing while the donor row is locked.
+        donor = make_device("merge-lock-donor", serial="MERGE-LOCK-DONOR", librenms_cf={self.server_key: {"id": 10}})
+
+        with second_connection() as other:
+            lock_row(other, Device, donor.pk)
+            with lock_timeout(200), pytest.raises(OperationalError) as caught:
+                self._post_merge(winner, donor)
+
+        assert classify_conflict(caught.value)
+        donor.refresh_from_db()
+        assert donor.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
 
     def test_orphan_host_id_merge_fails_closed_and_leaves_donor_unmigrated(self):
         """A winner holding both host id + oob and a donor with a distinct host-id-only link fails closed."""
