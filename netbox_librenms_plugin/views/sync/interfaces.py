@@ -2208,6 +2208,8 @@ class DeleteNetBoxInterfacesView(
     """Delete interfaces that exist only in NetBox."""
 
     DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
+    # A fetch() caller parses JSON, so the lock-conflict middleware answers with a JSON error.
+    answers_json = True
 
     def get_required_permissions_for_object_type(self, object_type):
         """Return the required permissions based on object type."""
@@ -2220,7 +2222,7 @@ class DeleteNetBoxInterfacesView(
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
-    def post(self, request, object_type, object_id):  # noqa: C901
+    def post(self, request, object_type, object_id):
         """Delete selected NetBox-only interfaces not present in LibreNMS."""
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
@@ -2244,55 +2246,10 @@ class DeleteNetBoxInterfacesView(
 
         if not interface_ids:
             return JsonResponse({"error": "No interfaces selected for deletion"}, status=400)
+        if not all(interface_id.isdecimal() for interface_id in interface_ids):
+            return JsonResponse({"error": "Interface IDs must be integers"}, status=400)
 
-        deleted_count = 0
-        errors = []
-        interface_name = None
-
-        try:
-            with transaction.atomic():
-                for interface_id in interface_ids:
-                    interface_name = None
-                    try:
-                        with transaction.atomic():
-                            if object_type == "device":
-                                # Scoped by "delete": the ownership checks below prove where the
-                                # interface sits, not that the grant covers it.
-                                interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
-                                interface_name = interface.name
-                                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                                    valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
-                                    if interface.device_id not in valid_device_ids:
-                                        errors.append(
-                                            "Interface {} does not belong to this device or its virtual chassis".format(
-                                                interface.name
-                                            )
-                                        )
-                                        continue
-                                elif interface.device_id != obj.id:
-                                    errors.append(f"Interface {interface.name} does not belong to this device")
-                                    continue
-                            else:
-                                interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
-                                interface_name = interface.name
-                                if interface.virtual_machine_id != obj.id:
-                                    errors.append(f"Interface {interface.name} does not belong to this virtual machine")
-                                    continue
-
-                            interface.delete()
-                        deleted_count += 1
-
-                    except (Interface.DoesNotExist, VMInterface.DoesNotExist):
-                        errors.append(f"Interface with ID {interface_id} not found")
-                        continue
-                    except Exception:  # pragma: no cover - defensive
-                        logger.exception("Failed to delete interface %s", interface_name or interface_id)
-                        errors.append(f"Error deleting interface {interface_name or interface_id}. Check server logs.")
-                        continue
-
-        except Exception:  # pragma: no cover
-            logger.exception("DeleteNetBoxInterfacesView transaction failed")
-            return JsonResponse({"error": "Transaction failed. Please check server logs."}, status=500)
+        deleted_count, errors = run_transaction(partial(self._delete_attempt, obj, object_type, interface_ids))
 
         response_data = {
             "status": "success",
@@ -2313,6 +2270,42 @@ class DeleteNetBoxInterfacesView(
                 source_fragment_required=True,
             )
         return apply_request_cache_transition(request, JsonResponse(response_data))
+
+    def _delete_attempt(self, obj, object_type, interface_ids):
+        """
+        Delete the selected interfaces of *obj*; return the deleted count and the per-row errors.
+
+        ``run_transaction`` calls this once for each attempt, so each call builds its own count and errors.
+        """
+        deleted_count = 0
+        errors = []
+        for interface_id in interface_ids:
+            try:
+                if object_type == "device":
+                    # Scoped by "delete": the ownership checks below prove where the
+                    # interface sits, not that the grant covers it.
+                    interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
+                    if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                        valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
+                        if interface.device_id not in valid_device_ids:
+                            errors.append(
+                                f"Interface {interface.name} does not belong to this device or its virtual chassis"
+                            )
+                            continue
+                    elif interface.device_id != obj.id:
+                        errors.append(f"Interface {interface.name} does not belong to this device")
+                        continue
+                else:
+                    interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
+                    if interface.virtual_machine_id != obj.id:
+                        errors.append(f"Interface {interface.name} does not belong to this virtual machine")
+                        continue
+            except (Interface.DoesNotExist, VMInterface.DoesNotExist):
+                errors.append(f"Interface with ID {interface_id} not found")
+                continue
+            interface.delete()
+            deleted_count += 1
+        return deleted_count, errors
 
 
 def _lock_relationship_scope(obj, owner_queryset=None):

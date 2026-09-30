@@ -9,11 +9,13 @@ outcome the committed attempt returns to ``post()``, and a counter of relationsh
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from dcim.models import Device, Interface
 from django.contrib.contenttypes.models import ContentType
 from django.db import OperationalError, connection, transaction
+from django.urls import reverse
 
 from netbox_librenms_plugin.middleware import FOLLOW_UP_FAILED_MESSAGE, TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.tests.conftest import (
@@ -43,7 +45,11 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, messages_on
 from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView, _InterfaceSyncOutcome
+from netbox_librenms_plugin.views.sync.interfaces import (
+    DeleteNetBoxInterfacesView,
+    SyncInterfacesView,
+    _InterfaceSyncOutcome,
+)
 
 # Long enough for a blocked statement to be a real lock wait, short enough for two attempts.
 LOCK_TIMEOUT_MS = 200
@@ -381,6 +387,72 @@ def test_an_integrity_error_after_a_swallowed_conflict_reaches_the_sync_handler(
         )
     ]
     assert not Interface.objects.filter(device=device).exists()
+
+
+@pytest.fixture
+def delete_attempts(monkeypatch):
+    """Count delete attempts at the interface lookup, which each attempt of a one-row delete makes once."""
+    real_queryset = DeleteNetBoxInterfacesView.restricted_queryset
+    state = SimpleNamespace(count=0, before_retry=None)
+
+    def counting_queryset(self, model, action="view"):
+        if model is Interface and action == "delete":
+            state.count += 1
+            if state.count == 2 and state.before_retry is not None:
+                state.before_retry()
+        return real_queryset(self, model, action)
+
+    monkeypatch.setattr(DeleteNetBoxInterfacesView, "restricted_queryset", counting_queryset)
+    return state
+
+
+def _post_interface_delete(client, device, interface):
+    return client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+            kwargs={"object_type": "device", "object_id": device.pk},
+        ),
+        {"interface_ids": [str(interface.pk)]},
+    )
+
+
+@transactional_db_with_all_apps()
+def test_a_delete_lock_conflict_on_the_first_attempt_is_retried_once(client, delete_attempts):
+    device = make_device("delete-retry-once")
+    interface = make_interface(device, "eth10")
+    client.force_login(make_superuser("delete-retry-once-user"))
+
+    with second_connection() as other:
+        lock_row(other, Interface, interface.pk)
+        delete_attempts.before_retry = other.rollback
+        with lock_timeout(LOCK_TIMEOUT_MS):
+            response = _post_interface_delete(client, device, interface)
+
+    assert delete_attempts.count == 2
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "success",
+        "deleted_count": 1,
+        "message": "Successfully deleted 1 interface(s)",
+    }
+    assert not Interface.objects.filter(pk=interface.pk).exists()
+
+
+@transactional_db_with_all_apps()
+def test_delete_conflicts_on_both_attempts_give_a_json_try_again_answer_and_delete_nothing(client, delete_attempts):
+    device = make_device("delete-retry-exhausted")
+    interface = make_interface(device, "eth10")
+    client.force_login(make_superuser("delete-retry-exhausted-user"))
+
+    with second_connection() as other:
+        lock_row(other, Interface, interface.pk)
+        with lock_timeout(LOCK_TIMEOUT_MS):
+            response = _post_interface_delete(client, device, interface)
+
+    assert delete_attempts.count == 2
+    assert response.status_code == 409
+    assert response.json() == {"error": TRY_AGAIN_MESSAGE}
+    assert Interface.objects.filter(pk=interface.pk).exists()
 
 
 def test_only_the_steps_outside_the_transaction_add_messages():

@@ -337,6 +337,20 @@ class TestDeleteNetBoxInterfacesPost:
 
         assert response.status_code == 400
 
+    def test_non_integer_id_400_deletes_nothing(self):
+        """A malformed id is refused before the transaction; the valid id beside it stays."""
+        from dcim.models import Interface
+
+        dev = make_device("del-badid")
+        iface = make_interface(dev, "eth0")
+        req = make_request("post", {"interface_ids": [str(iface.pk), "abc"]})
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
+
+        assert response.status_code == 400
+        assert self._payload(response) == {"error": "Interface IDs must be integers"}
+        assert Interface.objects.filter(pk=iface.pk).exists()
+
     def test_device_successful_delete(self):
         from dcim.models import Interface
 

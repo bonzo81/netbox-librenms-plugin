@@ -170,81 +170,40 @@ class TestAssignInterfaceMac:
 
 
 @pytest.mark.django_db
-def test_interface_delete_does_not_expose_database_error_details(client):
-    """A failed delete does not roll back an earlier success or expose details."""
+def test_interface_delete_database_error_propagates_and_deletes_nothing(client):
+    """A database error that is not a lock conflict fails the request and rolls back an earlier delete."""
     from django.db import DatabaseError, connection
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
 
     device = make_device("interface-delete-error")
-    deleted_interface = make_interface(device, "Ethernet1")
+    first_interface = make_interface(device, "Ethernet1")
     failed_interface = make_interface(device, "Ethernet2")
     client.force_login(make_superuser("interface-delete-error-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
         kwargs={"object_type": "device", "object_id": device.pk},
     )
-    sensitive_detail = "private database constraint detail"
+    failed_deletes = 0
 
     def fail_interface_delete(execute, sql, params, many, context):
+        nonlocal failed_deletes
         if (
             sql.lstrip().upper().startswith("DELETE")
             and '"dcim_interface"' in sql
             and failed_interface.pk in (params or ())
         ):
-            raise DatabaseError(sensitive_detail)
+            failed_deletes += 1
+            raise DatabaseError("private database constraint detail")
         return execute(sql, params, many, context)
 
-    with connection.execute_wrapper(fail_interface_delete):
-        response = client.post(
-            url,
-            {"interface_ids": [str(deleted_interface.pk), str(failed_interface.pk)]},
-        )
+    with connection.execute_wrapper(fail_interface_delete), pytest.raises(DatabaseError):
+        client.post(url, {"interface_ids": [str(first_interface.pk), str(failed_interface.pk)]})
 
-    assert response.status_code == 200
-    assert sensitive_detail.encode() not in response.content
-    assert response.json()["deleted_count"] == 1
-    assert response.json()["errors"] == ["Error deleting interface Ethernet2. Check server logs."]
-    assert not type(deleted_interface).objects.filter(pk=deleted_interface.pk).exists()
+    assert failed_deletes == 1
+    assert type(first_interface).objects.filter(pk=first_interface.pk).exists()
     assert type(failed_interface).objects.filter(pk=failed_interface.pk).exists()
-
-
-@pytest.mark.django_db
-def test_interface_delete_counts_only_committed_savepoints(client):
-    """A savepoint release failure does not count or persist the deletion."""
-    from django.db import DatabaseError, connection
-    from django.urls import reverse
-
-    from netbox_librenms_plugin.tests.conftest import make_superuser
-
-    device = make_device("interface-delete-savepoint-error")
-    interface = make_interface(device, "Ethernet1")
-    client.force_login(make_superuser("interface-delete-savepoint-error-user"))
-    url = reverse(
-        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
-        kwargs={"object_type": "device", "object_id": device.pk},
-    )
-    delete_executed = False
-    release_failed = False
-
-    def fail_savepoint_release(execute, sql, params, many, context):
-        nonlocal delete_executed, release_failed
-        normalized_sql = sql.lstrip().upper()
-        if normalized_sql.startswith("DELETE") and '"DCIM_INTERFACE"' in normalized_sql:
-            delete_executed = True
-        if delete_executed and not release_failed and normalized_sql.startswith("RELEASE SAVEPOINT"):
-            release_failed = True
-            raise DatabaseError("private savepoint failure detail")
-        return execute(sql, params, many, context)
-
-    with connection.execute_wrapper(fail_savepoint_release):
-        response = client.post(url, {"interface_ids": [str(interface.pk)]})
-
-    assert response.status_code == 200
-    assert response.json()["deleted_count"] == 0
-    assert response.json()["errors"] == ["Error deleting interface Ethernet1. Check server logs."]
-    assert type(interface).objects.filter(pk=interface.pk).exists()
 
 
 @pytest.mark.django_db
