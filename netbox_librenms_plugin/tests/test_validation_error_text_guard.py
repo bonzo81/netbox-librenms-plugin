@@ -39,7 +39,16 @@ RULE = "exception_text_for"
 SAFE_CALLEES = frozenset({RULE, "classify_conflict", "database_error_sqlstate", "isinstance", "type"})
 # Calls that return the current exception or its text without a read of the bound name.
 CURRENT_EXCEPTION = frozenset(
-    {sys.exc_info, sys.exception, traceback.format_exc, traceback.format_exception, traceback.format_exception_only}
+    {
+        sys.exc_info,
+        sys.exception,
+        traceback.format_exc,
+        traceback.format_exception,
+        traceback.format_exception_only,
+        traceback.format_tb,
+        traceback.print_exc,
+        traceback.print_exception,
+    }
 )
 LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
 
@@ -154,8 +163,8 @@ def _log_argument(node, parents):
     return _is_log_call(parent)
 
 
-def _sink(read, parents):
-    """Return None for a safe read of the caught error, else the name of what reads it."""
+def _sink(read, parents, bound):
+    """Return None for a safe read of the caught error, else the name of what reads it; SAFE_CALLEES take only *bound*."""
     parent = parents[read]
     if isinstance(parent, ast.Raise) or _log_argument(read, parents):
         return None
@@ -165,7 +174,7 @@ def _sink(read, parents):
         callee = ast.unparse(parent.func)
         if callee == "validation_error_detail" and len(parent.args) == 1 and _log_argument(parent, parents):
             return None
-        if callee in SAFE_CALLEES and parent.args[0] is read:
+        if bound and callee in SAFE_CALLEES and parent.args[0] is read:
             return None
         return callee
     if isinstance(parent, ast.keyword) and isinstance(parents[parent], ast.Call):
@@ -238,7 +247,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
             bound = isinstance(node, ast.Name) and node.id == handler.name and isinstance(node.ctx, ast.Load)
             if not (bound or self._reads_current_exception(node)):
                 continue
-            if (sink := _sink(node, parents)) is not None:
+            if (sink := _sink(node, parents, bound)) is not None:
                 self.reads.append((".".join(self.scope), sink))
 
 
@@ -360,6 +369,8 @@ def test_the_scan_names_each_read_that_can_reach_a_page(body, expected):
         ("return str(sys.exc_info()[1])", ["Subscript"]),
         ("messages.error(request, sys.exception())", ["messages.error"]),
         ("logger.error('failed: %s', traceback.format_exc())", []),
+        ("return exception_text_for(traceback.format_exc(), Device, request.user)", [RULE]),
+        ("traceback.print_exc(file=buffer)", ["Expr"]),
     ],
 )
 def test_the_scan_names_each_read_of_a_database_error_that_can_reach_a_page(body, expected):
