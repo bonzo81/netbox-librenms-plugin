@@ -5133,11 +5133,12 @@ def select_interface_type_mapping(mappings, speed):
 
 def effective_vlan_mode(vlan_data):
     """Return the NetBox mode implied by the reported mode and VLAN assignment."""
-    if vlan_data.get("tagged_vlans") or vlan_data.get("mode") == "tagged":
+    if vlan_data.get("tagged_vlans"):
         return "tagged"
-    if vlan_data.get("untagged_vlan"):
-        return "access"
-    return None
+    # The reported mode is only authoritative for a port that also carries VLAN data.
+    if not vlan_data.get("untagged_vlan"):
+        return None
+    return "tagged" if vlan_data.get("mode") == "tagged" else "access"
 
 
 def _row_vlan_shape(port):

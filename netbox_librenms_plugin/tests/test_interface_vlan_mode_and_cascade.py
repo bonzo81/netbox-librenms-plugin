@@ -106,7 +106,7 @@ class TestReportedModeIsAuthoritative:
 
         mixin._update_interface_vlan_assignment(
             interface,
-            {"mode": "access", "untagged_vlan": None, "tagged_vlans": []},
+            {"mode": "tagged", "untagged_vlan": None, "tagged_vlans": []},
             None,
             maps,
         )

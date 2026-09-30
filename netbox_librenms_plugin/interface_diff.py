@@ -20,6 +20,7 @@ from netbox_librenms_plugin.utils import (
     check_vlan_group_matches,
     coerce_interface_mtu,
     convert_speed_to_kbps,
+    effective_vlan_mode,
     get_librenms_device_id,
     normalize_librenms_port_id,
 )
@@ -198,15 +199,6 @@ def _librenms_id_differs(port, interface, context):
     return stored is None or str(stored) != str(port_id)
 
 
-def _expected_vlan_mode(port, reported_tagged, reported_untagged):
-    """Return the 802.1Q mode a sync writes, following ifTrunk before the VLAN lists."""
-    if reported_tagged or port.get("mode") == "tagged":
-        return "tagged"
-    if reported_untagged:
-        return "access"
-    return None
-
-
 def _vlan_group_mismatch(vlan_type, vid, context):
     """Return whether the group selected for one VLAN differs from the group NetBox assigned."""
     selected_group_id = parse_vlan_group_id(context.group_map.get(vid, {}).get("group_id", ""))
@@ -228,7 +220,7 @@ def _vlans_differ(port, interface, context):
     reported_untagged = port.get("untagged_vlan")
     reported_tagged = list(port.get("tagged_vlans") or [])
 
-    if (interface.mode or None) != _expected_vlan_mode(port, reported_tagged, reported_untagged):
+    if (interface.mode or None) != effective_vlan_mode(port):
         return True
 
     # A VLAN that resolves to no NetBox group is left out of the write, so it is compared as
