@@ -492,27 +492,30 @@ def find_port_owner(port_id, *, server: str):
     return owners[0] if owners else None
 
 
-def held_port_ids(port_ids: Iterable, *, server: str) -> frozenset[int]:
+def port_holders(port_ids: Iterable, *, server: str) -> dict[int, tuple[str, int] | None]:
     """
-    Return the IDs among *port_ids* that an Interface or VMInterface holds on *server*.
+    Map each held ID among *port_ids* to its one holder on *server*, as ``(model label, pk)``.
 
-    This is the batch form of ``find_port_owner`` for a reader of many rows: an ID that
-    ``find_port_owner`` finds, or refuses as ambiguous, is in the result. One query runs for each model.
+    This is the batch form of ``find_port_owner`` for a reader of many rows. An ID that
+    ``find_port_owner`` finds maps to that holder. An ID that it refuses as ambiguous maps to None.
+    An ID that no interface holds is absent. One query runs for each model.
     """
     from dcim.models import Interface
     from virtualization.models import VMInterface
 
     requested = {port_id for value in port_ids if (port_id := coerce_librenms_id(value)) is not None}
     if not requested or not is_server_key(server):
-        return frozenset()
-    held = set()
+        return {}
+    holders = {}
     for model in (Interface, VMInterface):
-        holders = model.objects.filter(
+        rows = model.objects.filter(
             identity_q(model, server=server, identities=sorted(requested), roles=(MappingRole.OWN, MappingRole.OOB))
         )
-        for record in read_mappings(holders, fields=("pk",)):
-            held |= {record.mapping.own_id(server), record.mapping.oob_id(server)} & requested
-    return frozenset(held)
+        for record in read_mappings(rows, fields=("pk",)):
+            holder = (model._meta.label_lower, record.values["pk"])
+            for port_id in {record.mapping.own_id(server), record.mapping.oob_id(server)} & requested:
+                holders[port_id] = holder if holders.get(port_id, holder) == holder else None
+    return holders
 
 
 def resolve_device_port(device, *, server: str, port_id, name_candidates: Iterable[str]):

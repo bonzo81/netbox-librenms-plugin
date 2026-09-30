@@ -4975,7 +4975,7 @@ class TestMatchedInterfaceLinking:
         item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
         device = make_device("interface-attach-port-id")
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
-        context = {"interfaces_by_port_id": {42: iface}, "viewable_interface_ids": {iface.pk}}
+        context = {"interfaces_by_port_id": {42: iface}, "port_holders": {}, "viewable_interface_ids": {iface.pk}}
 
         BaseModuleTableView._attach_interface_match(row, item, context)
 
@@ -5018,7 +5018,7 @@ class TestMatchedInterfaceLinking:
         context = {
             "interfaces_by_port_id": {},
             "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface},
-            "held_port_ids": frozenset(),
+            "port_holders": {},
             "viewable_interface_ids": {iface.pk},
         }
 
@@ -5042,7 +5042,12 @@ class TestMatchedInterfaceLinking:
         }
         item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
-        context = {"interfaces_by_port_id": {42: iface}, "viewable_interface_ids": {iface.pk}, "server_key": "default"}
+        context = {
+            "interfaces_by_port_id": {42: iface},
+            "port_holders": {},
+            "viewable_interface_ids": {iface.pk},
+            "server_key": "default",
+        }
 
         BaseModuleTableView._attach_interface_match(row, item, context)
 
@@ -5054,7 +5059,7 @@ class TestMatchedInterfaceLinking:
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         row = {"name": "Te1/1/1", "librenms_port_id": None}
-        context = {"interfaces_by_port_id": {42: object()}, "held_port_ids": frozenset()}
+        context = {"interfaces_by_port_id": {42: object()}, "port_holders": {}}
 
         BaseModuleTableView._attach_interface_match(row, {"entPhysicalName": "Te1/1/1"}, context)
 
@@ -5610,7 +5615,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             "sibling_counts": {module_id: len(bays) for module_id, bays in module_scoped_bays.items()},
             "interfaces_by_port_id": {},
             "interfaces_by_name": {},
-            "held_port_ids": frozenset(),
+            "port_holders": {},
             "server_key": "test-server",
         }
 

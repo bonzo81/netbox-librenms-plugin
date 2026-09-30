@@ -278,6 +278,23 @@ class TestModuleTableShowsTheWriterChoice:
             "reason": "Uplink is already bound to a different LibreNMS port; not overwriting",
         }
 
+    def test_a_port_that_two_interfaces_hold_shows_no_match(self, live_librenms):
+        """The writer refuses a port held twice, so the table does not show the local holder as a match."""
+        from django.core.cache import cache
+
+        device, _module, _row, cache_key = self._seed("twice", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        local = make_interface(device, "Ethernet9")
+        for holder in (local, make_interface(make_device("table-choice-twice-other"), "Ethernet9")):
+            holder.custom_field_data["librenms_id"] = {"default": 8811}
+            holder.save(update_fields=["custom_field_data"])
+        try:
+            content = _render_module_tab(device, make_superuser())
+        finally:
+            cache.delete(cache_key)
+
+        assert local.get_absolute_url() not in content
+        assert "Update Interface" not in content
+
     def test_an_interface_the_user_may_not_view_is_not_shown(self, live_librenms):
         """The choice reads every interface, so the table must hide one outside the user's view scope."""
         from dcim.models import Device, Interface, Module
