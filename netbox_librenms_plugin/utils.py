@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import netaddr
+import psycopg
 from dcim.models import Device, Interface
 from django.core import signing
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
@@ -5025,8 +5026,8 @@ def exception_text_for(exc: Exception, model, user) -> str:
     gets the message of a ValidationError. Every other viewer gets the concrete *model* fields
     that the error keys name, or the model. Identity conflicts and database errors use generic
     text because their details can identify objects outside the viewer's scope. A database error
-    is a ``DatabaseError``, or an ``AbortRequest`` that NetBox raised from one. A lock conflict
-    (``classify_conflict``) gets the "try again" text for every viewer.
+    is a ``DatabaseError``, a psycopg ``Error``, or an ``AbortRequest`` that NetBox raised from one.
+    A lock conflict (``classify_conflict``) gets the "try again" text for every viewer.
 
     Args:
         exc (Exception): The caught error.
@@ -5042,7 +5043,9 @@ def exception_text_for(exc: Exception, model, user) -> str:
         return TRY_AGAIN_MESSAGE
     if isinstance(exc, AmbiguousLibreNMSIdError):
         return "Multiple records use this LibreNMS ID. Ask an administrator to correct the mappings."
-    if isinstance(exc, DatabaseError) or (isinstance(exc, AbortRequest) and nearest_database_error(exc) is not None):
+    if isinstance(exc, (DatabaseError, psycopg.Error)) or (
+        isinstance(exc, AbortRequest) and nearest_database_error(exc) is not None
+    ):
         logger.warning("The database rejected %s: %s", model.__name__, exc)
         return DATABASE_ERROR_MESSAGE
     if not isinstance(exc, ValidationError):

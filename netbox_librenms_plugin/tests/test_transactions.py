@@ -220,6 +220,19 @@ def test_the_text_of_a_caught_database_error_is_the_generic_answer(superuser):
     assert exception_text_for(AbortRequest("NetBox refuses the move."), Interface, user) == "NetBox refuses the move."
 
 
+@pytest.mark.django_db
+def test_the_text_of_a_driver_error_is_the_generic_answer():
+    """A psycopg error that no Django wrapper translated holds the same PostgreSQL text."""
+    import psycopg.errors
+    from dcim.models import Interface
+
+    raw = psycopg.errors.UniqueViolation('duplicate key value violates unique constraint "name"')
+
+    assert exception_text_for(raw, Interface, make_user_with_perms("driver-error-text-user", [])) == (
+        DATABASE_ERROR_MESSAGE
+    )
+
+
 def test_a_failure_after_a_commit_is_never_a_conflict():
     """A committed attempt must not be retried, whatever failed after it."""
     try:
