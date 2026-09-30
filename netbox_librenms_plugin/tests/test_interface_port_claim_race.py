@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     seed_ports,
     sync_port,
 )
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 PORT = 9301
 LIBRENMS_DEVICE_ID = 71
@@ -111,14 +112,13 @@ def _interface_sync(user_pk, device, name_field):
 
 
 def _module_bind(user_pk, device, module):
-    """Post the module "Update Interface" action for the cached inventory row."""
+    """Post the module "Update Interface" action for the cached inventory row, through the middleware."""
     from django.contrib.auth import get_user_model
-    from django.contrib.messages.storage.fallback import FallbackStorage
-    from django.test import RequestFactory
+    from django.test import Client
+    from django.urls import reverse
 
-    from netbox_librenms_plugin.tests.view_test_helpers import change_logging, messages_on, post
+    from netbox_librenms_plugin.tests.view_test_helpers import messages_on
     from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
-    from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
     token = module_inventory_binding_token(
         device.pk,
@@ -128,8 +128,10 @@ def _module_bind(user_pk, device, module):
         ENT_INDEX,
         module_inventory_row_digest(_INVENTORY_ITEM),
     )
-    request = RequestFactory().post(
-        f"/modules/{device.pk}/interface/",
+    client = Client()
+    client.force_login(get_user_model().objects.get(pk=user_pk))
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": device.pk}),
         data={
             "module_id": str(module.pk),
             "server_key": SERVER_KEY,
@@ -137,12 +139,7 @@ def _module_bind(user_pk, device, module):
             "inventory_binding": token,
         },
     )
-    request.user = get_user_model().objects.get(pk=user_pk)
-    request.session = {}
-    request._messages = FallbackStorage(request)
-    with change_logging(request):
-        post(UpdateModuleInterfaceView(), request, pk=device.pk)
-    return messages_on(request)
+    return messages_on(response.wsgi_request)
 
 
 def _on_own_connection(writer, *args, pids, role, paused=None, resume=None):
@@ -250,9 +247,6 @@ def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings,
     bind = (_module_bind, user_pk, device, module)
     first, second = (sync, bind) if first_writer == "interface_sync" else (bind, sync)
     winner, loser = (long, short) if first_writer == "interface_sync" else (short, long)
-    refusal = "Another operation is binding this LibreNMS port. Refresh and retry."
-    # The module action wraps the refusal in its association message; the interface sync shows it as is.
-    expected = f"Could not update interface association: {refusal}" if first_writer == "interface_sync" else refusal
     before = _persisted(loser)
     _winner_row, winner_changes = _persisted(winner)
 
@@ -260,7 +254,8 @@ def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings,
 
     assert second_finished_alone, "the second writer did not finish while the first writer held its claim"
     assert _port_holders() == [winner.pk]
-    assert second_messages == [("warning", expected)]
+    # A busy claim is a lock conflict: both writers answer with the middleware's one "try again" text.
+    assert second_messages == [("error", TRY_AGAIN_MESSAGE)]
     assert _persisted(loser) == before
     # A change record for the winner shows that both writers run with change logging on.
     assert _persisted(winner)[1] > winner_changes
