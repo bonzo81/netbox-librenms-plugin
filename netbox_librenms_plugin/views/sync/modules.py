@@ -22,6 +22,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import classify_conflict
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     AmbiguousLibreNMSIdError,
@@ -725,9 +726,12 @@ def _normalize_module_interface_names_for_vc_member(
                 conflict.save(update_fields=["module", "last_updated"])
                 result["adopted"] += 1
                 try:
-                    interface.delete()
+                    with transaction.atomic():
+                        interface.delete()
                     result["removed"] += 1
-                except Exception:
+                except Exception as exc:
+                    if classify_conflict(exc):
+                        raise
                     result["skipped"] += 1
             else:
                 result["skipped"] += 1
@@ -736,10 +740,13 @@ def _normalize_module_interface_names_for_vc_member(
         interface.snapshot()
         interface.name = desired_name
         try:
-            interface.full_clean()
-            interface.save(update_fields=["name", "_name", "last_updated"])
+            with transaction.atomic():
+                interface.full_clean()
+                interface.save(update_fields=["name", "_name", "last_updated"])
             result["renamed"] += 1
-        except Exception:
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
             result["skipped"] += 1
 
     return result
@@ -1060,22 +1067,24 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     changeable_interfaces,
                     deletable_interfaces,
                 )
-
-            bind_result = None
-            if bind_item and server_key:
-                try:
-                    bind_result = _bind_interface_librenms_id(
-                        target_device,
-                        bind_item,
-                        module.pk,
-                        server_key,
-                        changeable_interfaces,
-                    )
-                except Exception:
-                    bind_result = {
-                        "status": "failed",
-                        "reason": "unexpected error while binding interface to installed module",
-                    }
+                # In the install's transaction: a lock conflict in the bind rolls back the install too.
+                bind_result = None
+                if bind_item and server_key:
+                    try:
+                        bind_result = _bind_interface_librenms_id(
+                            target_device,
+                            bind_item,
+                            module.pk,
+                            server_key,
+                            changeable_interfaces,
+                        )
+                    except Exception as exc:
+                        if classify_conflict(exc):
+                            raise
+                        bind_result = {
+                            "status": "failed",
+                            "reason": "unexpected error while binding interface to installed module",
+                        }
 
             messages.success(
                 request, f"Installed {module_type.model} in {locked_bay.name} (serial: {serial or 'N/A'})."
@@ -2420,76 +2429,85 @@ class UpdateModuleInterfaceView(
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
         bind_result = None
-        # The missing-server guard above already returned, so a resolved primary is always bound.
-        try:
-            bind_result = _bind_interface_librenms_id(
-                target_device,
-                bind_item,
-                module.pk,
-                server_key,
-                changeable_interfaces,
-            )
-        except Exception:
-            logger.exception(
-                "Unexpected error binding interface to module (device %s, module %s)",
-                target_device.pk,
-                module.pk,
-            )
-            bind_result = {
-                "status": "failed",
-                "reason": "unexpected error while associating interface to installed module",
-            }
-        else:
-            # The port_id bind only associates the single LibreNMS-identified interface, but a
-            # module can also own template interfaces (e.g. breakout children like c2/1) that
-            # remain standalone and independently keep the row's "Update Interface" action on
-            # (see _count_adoptable_template_interfaces). Adopt those too when the bind found
-            # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
-            # makes the bind a no-op, the adoption is skipped, and the button never clears.
-            # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
-            if bind_result is None or bind_result.get("status") == "bound":
-                try:
-                    adopt_result = _adopt_existing_template_interfaces(
-                        target_device,
-                        module,
-                        changeable_interfaces,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Unexpected error adopting standalone template interfaces (device %s, module %s)",
-                        target_device.pk,
-                        module.pk,
-                    )
-                    # The adoption step is isolated so its failure can't clobber an
-                    # already-committed primary bind: that interface is bound regardless, and
-                    # reporting "failed" would make a retry look like a fresh conflict. Only the
-                    # bind-less path (nothing committed yet) downgrades to a hard failure.
-                    if bind_result is None:
-                        bind_result = {
-                            "status": "failed",
-                            "reason": "unexpected error while associating interface to installed module",
-                        }
-                    else:
-                        messages.warning(
-                            request,
-                            "Primary interface binding succeeded, but adopting standalone "
-                            "template interfaces failed; see server logs for details.",
+        adoption_failed = False
+        # One transaction: a lock conflict in the bind or the adoption rolls back both.
+        with transaction.atomic():
+            # The missing-server guard above already returned, so a resolved primary is always bound.
+            try:
+                bind_result = _bind_interface_librenms_id(
+                    target_device,
+                    bind_item,
+                    module.pk,
+                    server_key,
+                    changeable_interfaces,
+                )
+            except Exception as exc:
+                if classify_conflict(exc):
+                    raise
+                logger.exception(
+                    "Unexpected error binding interface to module (device %s, module %s)",
+                    target_device.pk,
+                    module.pk,
+                )
+                bind_result = {
+                    "status": "failed",
+                    "reason": "unexpected error while associating interface to installed module",
+                }
+            else:
+                # The port_id bind only associates the single LibreNMS-identified interface, but a
+                # module can also own template interfaces (e.g. breakout children like c2/1) that
+                # remain standalone and independently keep the row's "Update Interface" action on
+                # (see _count_adoptable_template_interfaces). Adopt those too when the bind found
+                # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
+                # makes the bind a no-op, the adoption is skipped, and the button never clears.
+                # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
+                if bind_result is None or bind_result.get("status") == "bound":
+                    try:
+                        with transaction.atomic():
+                            adopt_result = _adopt_existing_template_interfaces(
+                                target_device,
+                                module,
+                                changeable_interfaces,
+                            )
+                    except Exception as exc:
+                        if classify_conflict(exc):
+                            raise
+                        logger.exception(
+                            "Unexpected error adopting standalone template interfaces (device %s, module %s)",
+                            target_device.pk,
+                            module.pk,
                         )
-                else:
-                    if bind_result is None:
-                        bind_result = adopt_result
-                    elif adopt_result.get("status") == "bound":
-                        bind_result = {
-                            "status": "bound",
-                            "interface": bind_result.get("interface"),
-                            # Keep the primary bind's port_id so the merged result still
-                            # carries the bound interface's LibreNMS identity, not just the
-                            # adoption tally.
-                            "port_id": bind_result.get("port_id"),
-                            "changed": bind_result.get("changed", False),
-                            "adopted_count": (bind_result.get("adopted_count") or 0)
-                            + (adopt_result.get("adopted_count") or 0),
-                        }
+                        # The adoption's savepoint keeps the primary bind: that interface is bound
+                        # regardless, and reporting "failed" would make a retry look like a fresh
+                        # conflict. Only the bind-less path downgrades to a hard failure.
+                        if bind_result is None:
+                            bind_result = {
+                                "status": "failed",
+                                "reason": "unexpected error while associating interface to installed module",
+                            }
+                        else:
+                            adoption_failed = True
+                    else:
+                        if bind_result is None:
+                            bind_result = adopt_result
+                        elif adopt_result.get("status") == "bound":
+                            bind_result = {
+                                "status": "bound",
+                                "interface": bind_result.get("interface"),
+                                # Keep the primary bind's port_id so the merged result still
+                                # carries the bound interface's LibreNMS identity, not just the
+                                # adoption tally.
+                                "port_id": bind_result.get("port_id"),
+                                "changed": bind_result.get("changed", False),
+                                "adopted_count": (bind_result.get("adopted_count") or 0)
+                                + (adopt_result.get("adopted_count") or 0),
+                            }
+        if adoption_failed:
+            messages.warning(
+                request,
+                "Primary interface binding succeeded, but adopting standalone "
+                "template interfaces failed; see server logs for details.",
+            )
 
         if bind_result is None:
             messages.error(request, "No LibreNMS interface identity is available for this row.")
@@ -3133,21 +3151,23 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     changeable_interfaces,
                     deletable_interfaces,
                 )
-
-            if server_key:
-                try:
-                    bind_result = _bind_interface_librenms_id(
-                        target_device,
-                        librenms_item,
-                        new_module.pk,
-                        server_key,
-                        changeable_interfaces,
-                    )
-                except Exception:
-                    bind_result = {
-                        "status": "failed",
-                        "reason": "unexpected error while binding interface to replaced module",
-                    }
+                # In the replace's transaction: a lock conflict in the bind rolls back the replace too.
+                if server_key:
+                    try:
+                        bind_result = _bind_interface_librenms_id(
+                            target_device,
+                            librenms_item,
+                            new_module.pk,
+                            server_key,
+                            changeable_interfaces,
+                        )
+                    except Exception as exc:
+                        if classify_conflict(exc):
+                            raise
+                        bind_result = {
+                            "status": "failed",
+                            "reason": "unexpected error while binding interface to replaced module",
+                        }
 
             if conflict_removed_msg:
                 messages.info(request, conflict_removed_msg)
@@ -3866,6 +3886,8 @@ class AddBayTemplateView(
             if server_key:
                 _schedule_module_cache_mutation(request, device, server_key)
         except (ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
             detail = _module_write_failure(e, ModuleBayTemplate, request.user)
             messages.error(request, f"Failed to add bay template: {detail}")
 

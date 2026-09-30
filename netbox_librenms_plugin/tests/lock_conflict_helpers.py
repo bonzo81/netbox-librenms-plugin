@@ -106,6 +106,27 @@ def lock_timeout(milliseconds):
             cursor.execute("RESET lock_timeout")
 
 
+@contextmanager
+def failing_statement(matches, sqlstate):
+    """
+    Make the first statement on the test's connection that *matches* ``(sql, params)`` raise *sqlstate*.
+
+    Use it only where a real conflict cannot be arranged, for example on a row that the code under
+    test created in its own transaction. The error is the one Django's error wrapper makes of a
+    PostgreSQL error, so NetBox and Django handle it as they handle a real one.
+    """
+    failed = []
+
+    def fail(execute, sql, params, many, context):
+        if not failed and matches(sql, params):
+            failed.append(sql)
+            raise wrapped_database_error(sqlstate)
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(fail):
+        yield failed
+
+
 def wrapped_database_error(sqlstate):
     """Return the Django error that Django's own error wrapper makes of a psycopg error with *sqlstate*."""
     import psycopg.errors
