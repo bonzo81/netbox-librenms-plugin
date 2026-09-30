@@ -94,6 +94,23 @@ class TestInterfacePortBinding:
             "reason": "no matching interface found for port_id 8803",
         }
 
+    def test_a_name_bound_to_another_port_yields_to_the_next_name(self):
+        """Ethernet1/1 is bound to port 8999, so the port's ifDescr Uplink1 must take port 8804."""
+        device = make_device_with_module_bays("bind-name-rebound", ["Slot 1"])
+        taken = make_interface(device, "Ethernet1/1")
+        taken.custom_field_data["librenms_id"] = {"default": 8999}
+        taken.save(update_fields=["custom_field_data"])
+        module = _module_with_interfaces(device, "Slot 1", "BIND-REBOUND-CARD", ["Uplink1"])
+        item = {"_librenms_port_id": 8804, "_librenms_ifname": "Ethernet1/1", "_librenms_ifdescr": "Uplink1"}
+
+        result = self._bind(device, item, module.pk)
+
+        assert result["status"] == "bound"
+        assert result["interface"] == "Uplink1"
+        taken.refresh_from_db()
+        assert read_mapping(taken).own_id("default") == 8999
+        assert read_mapping(module.interfaces.get(name="Uplink1")).own_id("default") == 8804
+
 
 class TestRecordBindOutcome:
     """A failed bind is reported in the install summary without claiming a change."""

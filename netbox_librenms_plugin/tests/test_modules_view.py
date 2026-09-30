@@ -6463,6 +6463,64 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("ifname_binding", "ifdescr_binding", "expected"),
+    [
+        (None, None, "Ethernet1/1"),
+        ({"default": 8999}, None, "Uplink1"),
+        ({"default": 8999}, {"default": 8998}, None),
+        ({"secondary": 8999}, None, "Ethernet1/1"),
+    ],
+)
+def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifname_binding, ifdescr_binding, expected):
+    """The row's port 8001 has no bound interface, so the name candidates decide the match."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    device = make_device("module-name-match-binding")
+    interfaces = {}
+    for name, binding in (("Ethernet1/1", ifname_binding), ("Uplink1", ifdescr_binding)):
+        interfaces[name] = make_interface(device, name)
+        if binding is not None:
+            interfaces[name].custom_field_data["librenms_id"] = binding
+            interfaces[name].save(update_fields=["custom_field_data"])
+    item = {
+        "entPhysicalIndex": 82,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Line card",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalModelName": "NAME-MATCH-CARD",
+        "_librenms_port_id": 8001,
+        "_librenms_ifname": "Ethernet1/1",
+        "_librenms_ifdescr": "Uplink1",
+    }
+    payload = trusted_module_inventory_payload(device, [item], librenms_id=9303)
+    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9303", (True, {"device_id": 9303, "hostname": device.name}), 300)
+    client.force_login(make_superuser("module-name-match-binding-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    table = response.context["module_sync"]["table"]
+    (row,) = list(table.data)
+    table_html = table.as_html(response.wsgi_request)
+    assert row.get("matched_interface_name") == expected
+    for name, interface in interfaces.items():
+        assert (interface.get_absolute_url() in table_html) is (name == expected)
+
+
+@pytest.mark.django_db
 def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, settings):
     """VC rows must use the attributed member's manufacturer rules and device serial."""
     from dcim.models import Manufacturer, VirtualChassis

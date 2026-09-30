@@ -18,7 +18,7 @@ from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
 )
-from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
@@ -1440,10 +1440,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if interface is None:
             interfaces_by_name = target_context.get("interfaces_by_name") or {}
             for candidate in BaseModuleTableView._build_interface_match_candidates(row):
-                interface = interfaces_by_name.get(candidate)
-                if interface is not None:
-                    source = "name"
-                    confidence = "medium"
+                match = interfaces_by_name.get(candidate)
+                # A name never wins over a binding to a different port; try the next name.
+                if match is not None and name_match_may_be_port(
+                    match, server=target_context.get("server_key"), port_id=port_id
+                ):
+                    interface, source, confidence = match, "name", "medium"
                     break
 
         if interface is None:

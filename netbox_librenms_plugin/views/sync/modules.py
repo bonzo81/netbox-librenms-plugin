@@ -21,6 +21,7 @@ from netbox_librenms_plugin.interface_diff import type_change_refusal
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     find_port_owner,
+    name_match_may_be_port,
     read_mapping,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -842,12 +843,21 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
 
     candidate = existing_owner
     if candidate is None and interface_names:
-        candidate = interfaces.filter(device=device, name__in=interface_names).first()
+        by_name = {
+            interface.name: interface for interface in interfaces.filter(device=device, name__in=interface_names)
+        }
+        # A name never wins over a binding to a different port; try the next name.
+        candidate = next(
+            (
+                by_name[name]
+                for name in interface_names
+                if name in by_name and name_match_may_be_port(by_name[name], server=server_key, port_id=port_id)
+            ),
+            None,
+        )
 
     if candidate is None and module_pk:
         module_interfaces = interfaces.filter(device=device, module_id=module_pk)
-        if interface_names:
-            candidate = module_interfaces.filter(name__in=interface_names).first()
         if candidate is None:
             module_interface_list = list(module_interfaces)
             if module_interface_list:
