@@ -3255,6 +3255,21 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         return _modules_action_response(request, page_device, server_key)
 
 
+def _parse_move_ids(post):
+    """Return (module, target bay, optional occupant) IDs from a move form, or None when a required one is invalid."""
+    try:
+        conflict_module_id = int(post.get("conflict_module_id"))
+        target_bay_id = int(post.get("target_bay_id"))
+    except (TypeError, ValueError):
+        return None
+    raw_module_id = post.get("module_id")
+    try:
+        module_id = int(raw_module_id) if raw_module_id else None
+    except (TypeError, ValueError):
+        module_id = None
+    return conflict_module_id, target_bay_id, module_id
+
+
 class MoveModuleView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
@@ -3303,19 +3318,10 @@ class MoveModuleView(
             messages.error(request, MODULE_MOVE_REQUIRES_NETBOX_MESSAGE)
             return _modules_action_response(request, page_device, server_key)
 
-        try:
-            conflict_module_id = int(request.POST.get("conflict_module_id"))
-            target_bay_id = int(request.POST.get("target_bay_id"))
-        except (TypeError, ValueError):
+        if (move_ids := _parse_move_ids(request.POST)) is None:
             messages.error(request, "Missing or invalid conflict_module_id/target_bay_id.")
             return _modules_action_response(request, page_device, server_key)
-
-        # Optional: current occupant of target bay
-        raw_module_id = request.POST.get("module_id")
-        try:
-            module_id = int(raw_module_id) if raw_module_id else None
-        except (TypeError, ValueError):
-            module_id = None
+        conflict_module_id, target_bay_id, module_id = move_ids
 
         self.restrict_object_or_404(ModuleBay, pk=target_bay_id, device=target_device)
 
