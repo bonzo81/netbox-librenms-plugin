@@ -260,7 +260,7 @@ def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallba
             the validated Referer / fallback otherwise.
     """
     messages.add_message(request, level, message)
-    if request.headers.get("HX-Request"):
+    if request.htmx:
         response = HttpResponse(status=status, headers={"HX-Refresh": "true"})
     else:
         response = redirect(_safe_referer(request, fallback_url))
@@ -392,7 +392,7 @@ class _BaseMoveToWinnerView(
         Returns:
             HttpResponse: The OOB-toast response (HTMX) or a redirect (non-HTMX).
         """
-        if request.headers.get("HX-Request"):
+        if request.htmx:
             # Reuse the shared OOB-toast builder (same #django-messages container, toast classes and
             # HX-Reswap:none) so move-to-winner error toasts can't drift from the import flow's markup.
             return _htmx_error_response(msg)

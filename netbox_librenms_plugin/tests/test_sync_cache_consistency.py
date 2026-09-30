@@ -11,6 +11,7 @@ from django.core.cache import cache
 from django.db import transaction
 from django.http import HttpResponse
 from django.test import RequestFactory, override_settings
+from django_htmx.middleware import HtmxDetails
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
@@ -211,6 +212,7 @@ def test_configured_cache_timeout_clamps_positive_fractions(settings):
 def test_one_response_preserves_both_cache_mutation_results():
     """A response event must retain revisions and cleanup failures from both owners."""
     request = RequestFactory().post("/sync", HTTP_HX_REQUEST="true")
+    request.htmx = HtmxDetails(request)
     donor = CacheMutationTransition(
         transition_id="donor-transition",
         removed_tabs={("primary", SyncTab.IP_ADDRESSES)},
@@ -1486,6 +1488,7 @@ def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(s
     # the device is mapped to the active server, so seeding "ports" would clean nothing.
     _seed_snapshot("ip_addresses", device, server_key, {"snapshot": "pre-commit"})
     request = RequestFactory().post("/sync", HTTP_HX_REQUEST="true")
+    request.htmx = HtmxDetails(request)
     request.user = make_superuser("cache-deferred-response-user")
 
     with claim_sync_subjects(sync_subject_key(device)), transaction.atomic():

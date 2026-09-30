@@ -133,6 +133,29 @@ class TestLibreNMSPermissionMixin:
         assert response.status_code == 200
         assert response["HX-Redirect"] == "/objects/"
 
+    @pytest.mark.parametrize(("header", "htmx"), [("true", True), ("false", False)])
+    def test_a_denied_post_through_the_real_stack_is_htmx_only_for_a_true_header(self, client, header, htmx):
+        """htmx sends "HX-Request: true"; any other value is a plain request that needs a real redirect."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device(f"permission-hx-{header}")
+        client.force_login(_plugin_user(f"permission-hx-{header}-reader", write=False))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk]),
+            {"server_key": SERVER_KEY},
+            HTTP_REFERER="/objects/",
+            HTTP_HX_REQUEST=header,
+        )
+
+        if htmx:
+            assert (response.status_code, response["HX-Redirect"]) == (200, "/objects/")
+        else:
+            assert (response.status_code, response.url) == (302, "/objects/")
+            assert not response.has_header("HX-Redirect")
+
     def test_json_denial_uses_default_and_custom_messages(self):
         reader = _plugin_user("permission-json-reader", write=False)
         view = _permission_view(user=reader)

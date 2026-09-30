@@ -149,7 +149,7 @@ def _safe_redirect_response(request):
 
     """
     target = _get_safe_redirect_url(request)
-    is_htmx = bool(request.headers.get("HX-Request"))
+    is_htmx = bool(request.htmx)
 
     if url_has_allowed_host_and_scheme(
         target,

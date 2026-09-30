@@ -36,7 +36,7 @@ def _answer(request, message):
     """Return the one visible answer: a JSON error, an htmx toast that swaps nothing, or one message and a redirect."""
     if getattr(_resolved_view(request), "answers_json", False):
         return JsonResponse({"error": message}, status=409)
-    if request.headers.get("HX-Request") == "true":
+    if request.htmx:
         response = _htmx_error_response(message)
         response["HX-Trigger"] = json.dumps({REQUEST_FAILED_EVENT: None})
         return response

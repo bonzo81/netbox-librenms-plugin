@@ -13,6 +13,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.cache import cache as real_cache
 from django.test import RequestFactory
+from django_htmx.middleware import HtmxDetails
 
 
 def _make_device(name):
@@ -38,6 +39,7 @@ def _post_request(device_pk, vid, group_pk):
     request.user = get_user_model().objects.create_user(username="vlm-user", password="x", is_superuser=True)
     request.session = {}
     request._messages = FallbackStorage(request)
+    request.htmx = HtmxDetails(request)
     return request
 
 
@@ -100,6 +102,7 @@ class TestVlanSyncGroupMissing:
         request.user = get_user_model().objects.create_user(username="vlm-user2", password="x", is_superuser=True)
         request.session = {}
         request._messages = FallbackStorage(request)
+        request.htmx = HtmxDetails(request)
         view.request = request  # dispatch() normally wires this; we call post() directly
 
         cache_key = view.get_cache_key(device, "vlans", "default")

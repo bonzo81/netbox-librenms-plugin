@@ -128,7 +128,7 @@ def _modules_action_response(request, page_device, server_key=None):
 
     """
     sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": page_device.pk})
-    if request.headers.get("HX-Request") != "true":
+    if not request.htmx:
         return _modules_redirect_response(request, sync_url, server_key)
     # The action URL has no query, so the table's page and sort come from the page the post was sent from.
     render_request = copy.copy(request)

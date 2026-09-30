@@ -821,7 +821,7 @@ def _write_transition_to_response(request, response, transition):
     browser_navigation = bool(
         response.get("Location") or response.get("HX-Redirect") or response.get("HX-Refresh") == "true"
     )
-    if request.headers.get("HX-Request") == "true" and not browser_navigation:
+    if request.htmx and not browser_navigation:
         existing = response.get("HX-Trigger")
         try:
             trigger_payload = json.loads(existing) if existing else {}
@@ -847,7 +847,7 @@ def _write_transition_to_response(request, response, transition):
 
 def render_sync_cache_miss(request, refresh_label, *, retarget=None):
     """Return an empty HTMX tab fragment for a writer whose snapshot is unavailable."""
-    if request.headers.get("HX-Request") != "true":
+    if not request.htmx:
         return None
     response = render(
         request,

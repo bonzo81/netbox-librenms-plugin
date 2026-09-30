@@ -513,7 +513,7 @@ class SyncInterfacesView(
 
         """
         obj = self.object
-        if request.headers.get("HX-Request") != "true":
+        if not request.htmx:
             url_name = (
                 "dcim:device_librenms_sync"
                 if object_type == "device"

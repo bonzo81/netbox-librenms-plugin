@@ -649,7 +649,7 @@ def _save_device(device, update_fields: list[str], request=None) -> HttpResponse
     """
 
     def _err(msg: str, status: int) -> HttpResponse:
-        if request is not None and request.META.get("HTTP_HX_REQUEST"):
+        if request is not None and request.htmx:
             return _htmx_error_response(msg)
         return HttpResponse(escape(msg), status=status)
 
@@ -1320,7 +1320,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # would leak onto the next full page load. Queue them only for non-HTMX requests.
         # (4xx bodies below still surface on the HTMX path via the client's
         # htmx:responseError -> showErrorToast fallback.)
-        is_htmx = bool(request.headers.get("HX-Request"))
+        is_htmx = bool(request.htmx)
 
         # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
         # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
@@ -1459,7 +1459,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     ),
                 )
 
-                if request.headers.get("HX-Request"):
+                if request.htmx:
                     # For HTMX requests, redirect to clean import page (no filters)
                     # This matches the "Clear" button behavior
                     return HttpResponse(
@@ -1580,7 +1580,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             # Handle permission errors with a user-friendly message
             logger.warning(f"Permission denied during import: {exc}")
             messages.error(request, str(exc))
-            if request.headers.get("HX-Request"):
+            if request.htmx:
                 return HttpResponse(
                     "",
                     headers={"HX-Redirect": active_import_url},
@@ -1589,7 +1589,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
         except Exception:  # pragma: no cover - defensive guard
             logger.exception("Error during bulk import")
-            if request.headers.get("HX-Request"):
+            if request.htmx:
                 return HttpResponse("Import failed. Please check server logs.", status=500)
             messages.error(request, "Bulk import failed. Please check server logs.")
             return redirect(active_import_url)
@@ -1645,7 +1645,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 messages.warning(request, precheck_skip_msg)
             htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", precheck_skip_msg))
 
-        if request.headers.get("HX-Request"):
+        if request.htmx:
             # Return updated rows for all imported devices using HTMX OOB swaps
             # This updates only the affected rows instead of refreshing the entire table
             updated_rows_html = []

@@ -1258,10 +1258,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             HttpResponse: The partial render or full-page redirect response.
 
         """
-        # htmx always sends "HX-Request: true"; match the exact value (mirrors modules.py) so a
-        # non-htmx POST — or a test's mock request whose headers aren't a real dict — falls through
-        # to the redirect rather than the partial re-render.
-        if request.headers.get("HX-Request") != "true":
+        if not request.htmx:
             return redirect(redirect_url)
 
         # Delegate the table/partial machinery to the cable-table view. Imported locally to avoid

@@ -205,7 +205,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     def redirect_to_ip_tab(self, request, obj):
         """Reload the full sync page for HTMX requests, or redirect a normal request."""
         url = self.get_ip_tab_url(obj)
-        if request.headers.get("HX-Request") == "true":
+        if request.htmx:
             return HttpResponse("", headers={"HX-Redirect": url})
         return redirect(url)
 
@@ -313,7 +313,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "cancel_url": self.get_ip_tab_url(obj),
             }
-            if request.headers.get("HX-Request") != "true":
+            if not request.htmx:
                 conflict_context["full_page"] = True
                 response = render(
                     request,
