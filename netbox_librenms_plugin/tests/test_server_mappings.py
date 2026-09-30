@@ -422,6 +422,34 @@ class TestFindMapping:
         with django_assert_num_queries(0):
             assert _find(invalid) is None
 
+    @pytest.mark.parametrize(
+        ("identity", "found"),
+        [
+            (42, True),
+            ("42", True),
+            (" 42 ", True),
+            ("+042", True),
+            ("١٢", False),
+            ("4_2", False),
+            ("0" * 18 + "42", False),
+            (True, False),
+            (4.2, False),
+            ("0", False),
+            ("-1", False),
+        ],
+        ids=repr,
+    )
+    def test_the_lookup_accepts_only_the_ascii_id_rule(self, identity, found, django_assert_num_queries):
+        """find_mapping and find_port_owner accept exactly the identities coerce_librenms_id accepts."""
+        device = _dev({"default": 42})
+        _dev({"default": 12})
+        interface = _bind(make_interface(device, "eth0"), {"default": 42})
+        _bind(make_interface(device, "eth1"), {"default": 12})
+
+        with django_assert_num_queries(3 if found else 0):
+            assert _find(identity) == (device if found else None)
+            assert find_port_owner(identity, server="default") == (interface if found else None)
+
     def test_a_lookup_names_at_least_one_role(self):
         with pytest.raises(ValueError, match="role"):
             _find(42, roles=())
