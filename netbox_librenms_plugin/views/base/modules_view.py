@@ -352,6 +352,21 @@ def _collect_item_interface_coordinates(item):
     return coordinates
 
 
+def _same_port_number(interface_coordinates, item_coordinates):
+    """Return whether two coordinate lists name the same port of a module."""
+    # Each port of the module shares its module and member coordinates, so only the port number tells ports apart.
+    return interface_coordinates[-1] == item_coordinates[-1]
+
+
+def _coordinates_contradict(interface, item):
+    """Return whether the item's coordinates name a port number that *interface* does not have."""
+    item_coordinates = _collect_item_interface_coordinates(item)
+    coords = BaseModuleTableView._extract_interface_numeric_coordinates(getattr(interface, "name", "") or "")
+    if not item_coordinates or not coords:
+        return False
+    return not any(_same_port_number(coords, item_coords) for item_coords in item_coordinates)
+
+
 def _select_module_interface_by_coordinates(device, module_interfaces, item):
     """Pick a unique best module interface using coordinate similarity scoring."""
     if not module_interfaces:
@@ -371,8 +386,7 @@ def _select_module_interface_by_coordinates(device, module_interfaces, item):
 
         best_score = 0
         for item_coords in item_coordinates:
-            # Each port of the module shares its module and member coordinates, so only the port number picks one.
-            if coords[-1] != item_coords[-1]:
+            if not _same_port_number(coords, item_coords):
                 continue
             score = 4
             if len(coords) >= 2 and len(item_coords) >= 2 and coords[-2] == item_coords[-2]:
@@ -411,8 +425,8 @@ def select_module_interface(device, item, *, server_key, interfaces_by_name, mod
     The modules table shows this choice and the bind writer binds it, so the two cannot disagree.
     A same-name interface wins when it may stand for the port. When every same-name interface is
     bound to another port, the choice is refused. Otherwise the item's coordinates pick one of
-    *module_interfaces*, or a module with exactly one interface gives that interface. That
-    interface must also be free to stand for the port.
+    *module_interfaces*, or a module with exactly one interface gives that interface when their
+    coordinates do not contradict. That interface must also be free to stand for the port.
 
     Args:
         device (Device): The device that owns the interfaces.
@@ -440,6 +454,8 @@ def select_module_interface(device, item, *, server_key, interfaces_by_name, mod
     if by_coordinates is not None:
         candidate, source = by_coordinates, "coordinates"
     elif len(module_interfaces) == 1:
+        if _coordinates_contradict(module_interfaces[0], item):
+            return ModuleInterfaceChoice()
         candidate, source = module_interfaces[0], "lone_module_interface"
     else:
         return ModuleInterfaceChoice(
