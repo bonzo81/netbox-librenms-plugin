@@ -256,6 +256,24 @@ class TestModuleTableShowsTheWriterChoice:
         assert module.interfaces.get(name="Uplink").get_absolute_url() not in content
         assert "Update Interface" not in content
 
+    def test_an_interface_the_user_may_not_view_is_not_shown(self, live_librenms):
+        """The choice reads every interface, so the table must hide one outside the user's view scope."""
+        from dcim.models import Device, Interface, Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        device, module, _row, cache_key = self._seed("hidden", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        user = make_user_with_perms("table-choice-hidden-user", [("view", Device), ("view", Module)])
+        user = grant(user, "view", Interface, constraints={"name": "Management1"})
+        try:
+            content = _render_module_tab(device, user)
+        finally:
+            cache.delete(cache_key)
+
+        assert "TABLE-CHOICE-HIDDEN" in content
+        assert module.interfaces.get(name="Uplink").get_absolute_url() not in content
+
 
 class TestRecordBindOutcome:
     """A failed bind is reported in the install summary without claiming a change."""
