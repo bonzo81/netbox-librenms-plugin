@@ -517,10 +517,10 @@ def test_the_gate_decides_with_the_binding_and_platform_read_under_the_lock(clie
         assert link.cables() == set()
         assert any(f"LibreNMS port 500 (Gi0/1): ignored by interface rule {moved_rule.pk}" in text for text in texts)
     else:
+        # Gi0/1 is now bound to port 888, so it is no longer the row's port 500.
         assert link.cables() == set()
-        assert any(
-            "LibreNMS port 888: no LibreNMS port record is cached for it; refresh the data" in text for text in texts
-        )
+        assert any("The cable state or target changed after confirmation" in text for text in texts)
+        assert not any("refuse a port" in text for text in texts)
 
 
 @pytest.mark.django_db
