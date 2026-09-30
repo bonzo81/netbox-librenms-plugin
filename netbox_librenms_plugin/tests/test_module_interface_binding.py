@@ -321,6 +321,30 @@ class TestModuleTableShowsTheWriterChoice:
             "reason": "Uplink is already bound to a different LibreNMS port; not overwriting",
         }
 
+    @pytest.mark.parametrize("refusal", ["held-elsewhere", "other-module"])
+    def test_a_refused_port_bind_hides_the_template_adoption_action(self, live_librenms, refusal):
+        """The writer skips the adoption when the port bind is refused, so the table offers no Update Interface."""
+        from dcim.models import InterfaceTemplate
+        from django.core.cache import cache
+
+        device, module, _row, cache_key = self._seed(f"adopt-{refusal[:4]}", [], {"_librenms_ifname": "Ethernet1/1"})
+        InterfaceTemplate.objects.create(module_type=module.module_type, name="Uplink", type="other")
+        make_interface(device, "Uplink")
+        if refusal == "held-elsewhere":
+            holder = make_interface(make_device("table-choice-adopt-holder"), "Ethernet9")
+            holder.custom_field_data["librenms_id"] = {"default": 8811}
+            holder.save(update_fields=["custom_field_data"])
+        else:
+            make_module_bay(device, "Slot 2")
+            _module_with_interfaces(device, "Slot 2", "TABLE-CHOICE-OTHER", ["Ethernet1/1"])
+        try:
+            content = _render_module_tab(device, make_superuser())
+        finally:
+            cache.delete(cache_key)
+
+        assert module.module_type.model in content
+        assert "Update Interface" not in content
+
     def test_a_port_that_two_interfaces_hold_shows_no_match(self, live_librenms):
         """The writer refuses a port held twice, so the table does not show the local holder as a match."""
         from django.core.cache import cache
