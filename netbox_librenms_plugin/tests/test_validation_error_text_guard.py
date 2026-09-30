@@ -1,29 +1,45 @@
 """
-A user reads the text of a caught ValidationError only through the superuser rule.
+A user reads the text of a caught ValidationError or database error only through ``exception_text_for``.
 
 NetBox's ``clean()`` messages can name related objects, and admin ``CUSTOM_VALIDATORS`` or
-``post_clean`` and ``pre_save`` receivers can add any text under any key. ``exception_text_for``
-gives that text only to a superuser. This scan reads each handler that can catch a ValidationError
-in a production module: ``except ValidationError``, a tuple that holds it, ``except Exception`` and
-``except BaseException``. A handler after one that catches ValidationError is skipped. A read of
-the caught error is safe when it is a direct argument of a ``logger`` call (the error itself, or
+``post_clean`` and ``pre_save`` receivers can add any text under any key. PostgreSQL's error text
+can hold key values. ``exception_text_for`` gives validation text only to a superuser and gives a
+database error generic text. This scan reads each handler that can catch one of these errors in a
+production module: ``except`` a ValidationError, a Django or psycopg database error, an
+``AbortRequest``, ``Exception`` or ``BaseException``, alone or in a tuple. A read of the caught
+error is safe when it is a direct argument of a ``logger`` call (the error itself, or
 ``validation_error_detail`` of it), the error that a ``raise`` statement raises or chains, or the
-first argument of ``exception_text_for``, ``classify_conflict``, ``isinstance`` or ``type``. Each other read needs an
-allowlist entry with its reason.
+first argument of ``exception_text_for`` or of a check in ``SAFE_CALLEES``. Each other read needs
+an allowlist entry with its reason.
 """
 
 import ast
 import textwrap
 from pathlib import Path
 
+import psycopg
 import pytest
+from django.db.utils import Error as DjangoDatabaseError
+from utilities.exceptions import AbortRequest
 
 PACKAGE = Path(__file__).resolve().parents[1]
-# Each handler that can catch a ValidationError: the class, a tuple that holds it, or a base class.
-CAUGHT = frozenset({"ValidationError", "Exception", "BaseException"})
+
+
+def _family(*roots):
+    """Return the names of *roots* and of each of their subclasses."""
+    classes = list(roots)
+    for cls in classes:
+        classes.extend(sub for sub in cls.__subclasses__() if sub not in classes)
+    return {cls.__name__ for cls in classes}
+
+
+# Each handler that catches one of these names can get a ValidationError or a database error.
+CAUGHT = frozenset(
+    {"ValidationError", "Exception", "BaseException"} | _family(DjangoDatabaseError, psycopg.Error, AbortRequest)
+)
 RULE = "exception_text_for"
-# A read as the first argument of these calls is safe: the rule itself, or a check that returns a bool.
-SAFE_CALLEES = frozenset({RULE, "classify_conflict", "isinstance", "type"})
+# A read as the first argument of these calls is safe: the rule itself, or a check that returns no error text.
+SAFE_CALLEES = frozenset({RULE, "classify_conflict", "database_error_sqlstate", "isinstance", "type"})
 LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
 
 # (path, function, sink, reason): each entry waives the reads of one sink in one function.
@@ -121,7 +137,7 @@ def _sink(read, parents):
 
 
 class _CaughtErrorReadScan(ast.NodeVisitor):
-    """Collect each read of a caught error that can hold a ValidationError and is not safe."""
+    """Collect each read of a caught error that can hold a ValidationError or database error and is not safe."""
 
     def __init__(self, aliases):
         self.aliases = aliases
@@ -136,13 +152,9 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
     visit_ClassDef = visit_FunctionDef = visit_AsyncFunctionDef = _visit_scope
 
     def visit_Try(self, node):
-        validation_error_caught = False
         for handler in node.handlers:
-            caught = set() if handler.type is None else _caught_names(handler.type, self.aliases)
-            # A handler after one that catches ValidationError never gets a ValidationError.
-            if handler.name and caught & CAUGHT and not (validation_error_caught and "ValidationError" not in caught):
+            if handler.name and _caught_names(handler.type, self.aliases) & CAUGHT:
                 self._scan_handler(handler)
-            validation_error_caught = validation_error_caught or "ValidationError" in caught
         self.generic_visit(node)
 
     visit_TryStar = visit_Try
@@ -178,7 +190,7 @@ def _production_files():
             yield relative.as_posix(), path.read_text()
 
 
-def test_a_caught_validation_error_reaches_a_page_only_through_the_superuser_rule():
+def test_a_caught_error_reaches_a_page_only_through_exception_text_for():
     found = {
         (relative, function, sink)
         for relative, source in _production_files()
@@ -186,7 +198,7 @@ def test_a_caught_validation_error_reaches_a_page_only_through_the_superuser_rul
     }
     allowed = {entry[:3] for entry in ALLOWED}
 
-    assert found - allowed == set(), "a caught ValidationError's text can reach a page; use exception_text_for"
+    assert found - allowed == set(), "a caught error's text can reach a page; use exception_text_for"
     assert allowed - found == set(), "an allowlist entry matches no read; remove it"
 
 
@@ -238,16 +250,64 @@ def test_the_scan_names_each_read_that_can_reach_a_page(body, expected):
 
 
 @pytest.mark.parametrize(
-    "caught",
-    ["ValidationError", "forms.ValidationError", "(IntegrityError, ValidationError)", "Exception", "BaseException"],
+    "body, expected",
+    [
+        ("detail = repr(exc)", ["repr"]),
+        ("detail = exc.args[0]", [".args"]),
+        ("return exc", ["Return"]),
+        ("return HttpResponse(exc)", ["HttpResponse"]),
+        ("return JsonResponse({'error': str(exc)})", ["str"]),
+        ("return render(request, 'page.html', {'error': exc})", ["Dict"]),
+        ("messages.add_message(request, messages.ERROR, exc)", ["messages.add_message"]),
+        ("raise AbortRequest(f'failed: {exc}')", ["FormattedValue"]),
+        ("raise PermissionDenied(exc)", ["PermissionDenied"]),
+        ("raise ValidationError('failed') from exc", []),
+        ("if database_error_sqlstate(exc) in CONFLICT_SQLSTATES: raise", []),
+        ("detail = database_error_sqlstate(exc.__cause__)", [".__cause__"]),
+        ("messages.error(request, exception_text_for(exc, Device, request.user))", []),
+    ],
 )
-def test_the_scan_reads_each_handler_that_can_catch_a_validation_error(caught):
+def test_the_scan_names_each_read_of_a_database_error_that_can_reach_a_page(body, expected):
+    source = f"def view():\n    try:\n        save()\n    except DatabaseError as exc:\n        {body}\n"
+
+    assert [sink for _function, sink in caught_error_reads(source)] == expected
+
+
+@pytest.mark.parametrize(
+    "caught",
+    [
+        "ValidationError",
+        "forms.ValidationError",
+        "(IntegrityError, ValidationError)",
+        "Exception",
+        "BaseException",
+        "DatabaseError",
+        "IntegrityError",
+        "db.IntegrityError",
+        "OperationalError",
+        "ProtectedError",
+        "psycopg.Error",
+        "psycopg.errors.UniqueViolation",
+        "AbortRequest",
+        "(ValueError, DataError)",
+    ],
+)
+def test_the_scan_reads_each_handler_that_can_catch_a_validation_or_database_error(caught):
     source = f"def view():\n    try:\n        save()\n    except {caught} as exc:\n        detail = str(exc)\n"
 
     assert caught_error_reads(source) == [("view", "str")]
 
 
-def test_the_scan_skips_a_handler_that_cannot_catch_a_validation_error():
+@pytest.mark.parametrize(
+    "caught", ["ValueError", "requests.exceptions.RequestException", "(TypeError, KeyError)", "_WriteRefused"]
+)
+def test_the_scan_skips_a_handler_that_cannot_catch_a_validation_or_database_error(caught):
+    source = f"def view():\n    try:\n        save()\n    except {caught} as exc:\n        detail = str(exc)\n"
+
+    assert caught_error_reads(source) == []
+
+
+def test_the_scan_reads_each_handler_of_a_try_and_names_the_enclosing_function():
     source = textwrap.dedent(
         """
         class View:
@@ -258,32 +318,30 @@ def test_the_scan_skips_a_handler_that_cannot_catch_a_validation_error():
                     def later():
                         return str(exc)
                 except Exception as exc:
-                    detail = str(exc)
-                try:
-                    save()
-                except IntegrityError as exc:
-                    detail = str(exc)
-                except ValidationError:
-                    detail = "refused"
+                    detail = repr(exc)
                 except:
                     detail = "failed"
         """
     )
 
-    assert caught_error_reads(source) == [("View.post", "str")]
+    assert caught_error_reads(source) == [("View.post", "str"), ("View.post", "repr")]
 
 
-@pytest.mark.parametrize("caught", ["DjangoValidationError", "(ValueError, DjangoValidationError)"])
-def test_the_scan_resolves_imported_validation_error_aliases(caught):
+@pytest.mark.parametrize(
+    "caught", ["DjangoValidationError", "(ValueError, DjangoValidationError)", "DbIntegrityError", "PgUniqueViolation"]
+)
+def test_the_scan_resolves_imported_error_aliases(caught):
     source = (
         "from django.core.exceptions import ValidationError as DjangoValidationError\n"
+        "from django.db import IntegrityError as DbIntegrityError\n"
+        "from psycopg.errors import UniqueViolation as PgUniqueViolation\n"
         f"def view():\n    try:\n        save()\n    except {caught} as exc:\n        detail = str(exc)\n"
     )
 
     assert caught_error_reads(source) == [("view", "str")]
 
 
-def test_an_aliased_validation_handler_excludes_the_later_broad_handler():
+def test_a_broad_handler_after_a_validation_handler_is_read_because_it_can_catch_a_database_error():
     source = textwrap.dedent(
         """
         from django.core.exceptions import ValidationError as DjangoValidationError
@@ -298,4 +356,4 @@ def test_an_aliased_validation_handler_excludes_the_later_broad_handler():
         """
     )
 
-    assert caught_error_reads(source) == []
+    assert caught_error_reads(source) == [("view", "str")]
