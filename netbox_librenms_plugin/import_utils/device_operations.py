@@ -40,7 +40,9 @@ from .virtual_chassis import (
     update_vc_member_suggested_names,
 )
 from netbox_librenms_plugin.server_mappings import (
+    IDENTITY_BUSY_MESSAGE,
     AmbiguousLibreNMSIdError,
+    IdentityBusy,
     MappingRole,
     assign_own,
     find_mapping,
@@ -1939,11 +1941,13 @@ def import_single_device(  # noqa: C901
 
     except Exception as e:
         logger.exception(f"Error importing device {device_id}")
+        # The import names a busy identity claim; every other lock conflict gets the try-again text.
+        detail = IDENTITY_BUSY_MESSAGE if isinstance(e, IdentityBusy) else exception_text_for(e, Device, text_viewer)
         return {
             "success": False,
             "device": None,
             "message": "",
-            "error": exception_text_for(e, Device, text_viewer),
+            "error": detail,
             "synced": {},
         }
 
