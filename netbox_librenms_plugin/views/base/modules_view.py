@@ -1485,7 +1485,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return interfaces_by_pk, interfaces_by_name
 
     @staticmethod
-    def _attach_interface_match(row, item, target_context):  # noqa: C901
+    def _attach_interface_match(row, item, target_context):
         """Attach matched NetBox interface metadata to a table row when available."""
         # OOB controller inventory rows are merged into the same list, but only
         # the main device's interfaces are indexed in target_context. Matching an
@@ -1502,12 +1502,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         holders = target_context["port_holders"]
         if port_id in holders:
+            # The writer binds a held port only to its one holder, so no other interface may match.
             holder = holders[port_id]
             if holder is not None and holder[0] == "dcim.interface":
                 interface = target_context["interfaces_by_pk"].get(holder[1])
-            if interface is None:
-                # The writer binds a held port only to its one holder, and no interface of this member is it.
-                return
             source = "port_id"
             confidence = "high"
         else:
@@ -1527,12 +1525,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 interfaces_by_name=target_context.get("interfaces_by_name") or {},
                 module_interfaces=module_interfaces,
             )
-            if choice.status:
-                return
-            interface, source = choice.interface, choice.source
-            confidence = _CHOICE_CONFIDENCE.get(source)
+            if not choice.status:
+                interface, source = choice.interface, choice.source
+                confidence = _CHOICE_CONFIDENCE.get(source)
 
         if interface is None or interface.pk not in target_context["viewable_interface_ids"]:
+            if port_id is not None:
+                # The writer refuses this port's bind, and a refused bind also skips the template adoption.
+                row.pop("can_update_interface_binding", None)
             return
 
         row["matched_interface_name"] = getattr(interface, "name", None) or row.get("name") or "-"
@@ -1560,9 +1560,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             except (TypeError, ValueError):
                 current_port_id = None
 
-        if candidate_module_id not in {None, installed_module_id}:
-            return
-        if current_port_id not in {None, port_id}:
+        if candidate_module_id not in {None, installed_module_id} or current_port_id not in {None, port_id}:
+            # The writer refuses this bind, so it skips the template adoption too.
+            row.pop("can_update_interface_binding", None)
             return
         if candidate_module_id == installed_module_id and current_port_id == port_id:
             return
