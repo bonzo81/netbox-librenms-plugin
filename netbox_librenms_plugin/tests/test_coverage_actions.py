@@ -14,7 +14,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_superuser,
     make_vm,
+    transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -25,6 +27,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     message_texts as view_message_texts,
     post as post_view,
 )
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 
 @pytest.fixture(autouse=True)
@@ -4482,6 +4485,68 @@ class TestCreatePlatformAssignmentIndependence:
         assert response.status_code == 200
         assert b' id="htmx-modal-content"' in response.content
         assert b"hx-swap-oob" in response.content
+
+    def _client_post(self, client, device, platform_name):
+        """Post the modal form through the whole request stack, the lock-conflict middleware included."""
+        client.force_login(make_superuser("platform-lock-user"))
+        return client.post(
+            url_for("plugins:netbox_librenms_plugin:create_platform_from_import", kwargs={"device_id": 42}),
+            {
+                "server_key": self.server_key,
+                "platform_name": platform_name,
+                "manufacturer": str(device.device_type.manufacturer_id),
+                "device_pk": str(device.pk),
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_on_the_assignment_retries_and_assigns_the_platform(self, client):
+        """The conflict rolls back the platform with the assignment, so the second attempt creates it again."""
+        from dcim.models import Device, Platform
+        from django.db.models.signals import pre_save
+
+        target = self._mapped_device("platform-lock-retry-target")
+        attempts = []
+        with second_connection() as other:
+            lock_row(other, Device, target.pk)
+
+            def count_attempt(sender, instance, **kwargs):
+                attempts.append(instance.name)
+                if len(attempts) == 2:
+                    other.rollback()
+
+            pre_save.connect(count_attempt, sender=Platform, weak=False)
+            try:
+                with lock_timeout(200):
+                    response = self._client_post(client, target, "Retried OS")
+            finally:
+                pre_save.disconnect(count_attempt, sender=Platform)
+
+        assert attempts == ["Retried OS", "Retried OS"]
+        platform = Platform.objects.get(name="Retried OS")
+        target.refresh_from_db()
+        assert target.platform_id == platform.pk
+        assert b' id="htmx-modal-content"' in response.content
+
+    @transactional_db_with_all_apps()
+    def test_lock_conflicts_on_both_attempts_commit_no_platform_so_a_retry_works(self, client):
+        from dcim.models import Device, Platform
+
+        target = self._mapped_device("platform-lock-exhausted-target")
+        with second_connection() as other:
+            lock_row(other, Device, target.pk)
+            with lock_timeout(200):
+                response = self._client_post(client, target, "Busy OS")
+
+        assert response.status_code == 200
+        assert TRY_AGAIN_MESSAGE in response.content.decode()
+        assert not Platform.objects.filter(name="Busy OS").exists()
+
+        self._client_post(client, target, "Busy OS")
+
+        target.refresh_from_db()
+        assert target.platform_id == Platform.objects.get(name="Busy OS").pk
 
 
 @pytest.mark.django_db
