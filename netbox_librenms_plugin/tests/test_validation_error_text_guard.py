@@ -56,12 +56,6 @@ ALLOWED = [
         ".message_dict",
         "It re-raises the plugin's own regex message about the rule's own pattern; it names no object.",
     ),
-    (
-        "librenms_api.py",
-        "LibreNMSAPI.test_connection",
-        "str",
-        "The try body sends one HTTP request with requests and reads its JSON; it validates no model.",
-    ),
     *(
         ("views/sync/device_fields.py", function, "_write_failure_message", "It applies exception_text_for.")
         for function in (

@@ -398,8 +398,8 @@ class LibreNMSAPI:
                 "error": True,
                 "message": "Connection timeout - server may be slow or unreachable",
             }
-        except Exception as e:
-            return {"error": True, "message": f"Unexpected error: {str(e)}"}
+        except requests.exceptions.RequestException as e:
+            return {"error": True, "message": f"Unexpected error: {e}"}
 
     @classmethod
     def get_available_servers(cls):

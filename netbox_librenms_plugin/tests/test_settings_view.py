@@ -27,6 +27,26 @@ def test_the_connection_test_hides_a_database_error(client):
 
 
 @pytest.mark.django_db
+def test_the_connection_test_reports_an_answer_that_is_not_json(client, settings, librenms_server):
+    """The client's own request error handler, not a broad one, reports a body that is not JSON."""
+    from copy import deepcopy
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    librenms_server.register_raw("/api/v0/system", "<html>maintenance</html>", method="GET")
+    client.force_login(make_superuser("connection-not-json-user"))
+
+    response = client.post(reverse("plugins:netbox_librenms_plugin:test_connection"), {"selected_server": "default"})
+
+    body = response.content.decode()
+    assert "Connection failed:" in body
+    assert "Unexpected error: Expecting value" in body
+
+
+@pytest.mark.django_db
 class TestCableSyncSettingsTab:
     """End-to-end through the real view: render, persist, and validate the cable-sync form."""
 
