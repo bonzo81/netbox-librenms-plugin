@@ -1843,12 +1843,20 @@ class TestLibreNMSIdQueryMatchesDecoder:
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
-    def test_no_text_pattern_past_the_digit_bound(self):
-        """An ID wider than 19 digits has no text form that coerce_librenms_id reads."""
-        from netbox_librenms_plugin.utils import librenms_id_text_pattern
+    @pytest.mark.parametrize("wide", [10**19, str(10**19)])
+    def test_id_past_the_digit_bound_is_neither_read_nor_found(self, wide):
+        """An ID wider than 19 digits is invalid in both int and text form, so no lookup finds it."""
+        from dcim.models import Device
 
-        assert librenms_id_text_pattern(10**18) == r"^[ \t\r\n\f\v]*\+?0{0,0}1000000000000000000[ \t\r\n\f\v]*$"
-        assert librenms_id_text_pattern(10**19) is None
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+
+        dev = make_device("id-form-wide")
+        dev.custom_field_data["librenms_id"] = {"default": str(10**19)}
+        dev.save()
+
+        assert coerce_librenms_id(wide) is None
+        assert find_by_librenms_id(Device, wide, "default") is None
 
 
 @pytest.mark.django_db
