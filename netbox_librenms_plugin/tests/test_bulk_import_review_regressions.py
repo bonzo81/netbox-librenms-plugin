@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
     make_user_with_perms,
+    messages_on,
     post,
     queued_request,
 )
@@ -300,6 +301,12 @@ def test_unresolved_warning_does_not_claim_an_existing_row_imported(monkeypatch)
     assert "continue through normal import checks" in html
 
 
+CHASSIS_CONFLICT = (
+    "Imported device {}, but another operation was changing the same NetBox objects, "
+    "so its virtual chassis was not created."
+)
+
+
 def _importable_row(live_librenms, device_id, tag, *, members=None):
     """Serve one importable LibreNMS device; with *members* it is a stack. Returns its mappings and row."""
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import (
@@ -373,10 +380,46 @@ def test_a_lock_conflict_in_the_chassis_create_reports_the_imported_device(live_
     assert result["virtual_chassis_created"] == 0
     assert Device.objects.filter(name=row["hostname"], virtual_chassis__isnull=True).exists()
     assert not VirtualChassis.objects.filter(domain="librenms-default-96311").exists()
-    assert (
-        "Imported device 96311, but another operation was changing the same NetBox objects, "
-        "so its virtual chassis was not created."
-    ) in caplog.messages
+    assert CHASSIS_CONFLICT.format(96311) in caplog.messages
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
+def test_the_import_answer_names_a_chassis_that_a_lock_conflict_left_uncreated(client, live_librenms, htmx):
+    """The device is imported, so the answer says so; it must also say that the chassis is missing."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    device_id = 96341 if htmx else 96331
+    members = [_chassis(100, f"SN-ANSWER-A-{htmx}", position=1), _chassis(200, f"SN-ANSWER-B-{htmx}", position=2)]
+    prerequisites, row = _importable_row(live_librenms, device_id, f"stack-answer-{int(htmx)}", members=members)
+    client.force_login(make_superuser(f"stack-answer-{int(htmx)}-user"))
+    headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+
+    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01"):
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+            {
+                "server_key": "default",
+                "select": [str(device_id)],
+                f"role_{device_id}": str(prerequisites["device_role_id"]),
+            },
+            **headers,
+        )
+
+    assert Device.objects.filter(name=row["hostname"], virtual_chassis__isnull=True).exists()
+    warning = CHASSIS_CONFLICT.format(device_id)
+    if htmx:
+        assert response.status_code == 200
+        assert "Successfully imported 1 LibreNMS device" in response.content.decode()
+        assert warning in response.content.decode()
+    else:
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [
+            ("success", "Successfully imported 1 LibreNMS device"),
+            ("warning", warning),
+        ]
 
 
 @pytest.mark.django_db

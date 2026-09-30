@@ -469,7 +469,8 @@ def bulk_import_devices_shared(  # noqa: C901
                 'success': List[dict],  # Successfully imported devices
                 'failed': List[dict],   # Failed imports with errors
                 'skipped': List[dict],  # Skipped devices (already exist, etc.)
-                'virtual_chassis_created': int  # Number of VCs created
+                'virtual_chassis_created': int,  # Number of VCs created
+                'warnings': List[str],  # Imported devices whose follow-up work failed
             }
 
     Raises:
@@ -499,6 +500,7 @@ def bulk_import_devices_shared(  # noqa: C901
     success_list = []
     failed_list = []
     skipped_list = []
+    warnings_list = []
     vc_created_count = 0
     processed_vc_domains = set()  # Track VCs already created by domain
     _cancelled = False
@@ -693,11 +695,12 @@ def bulk_import_devices_shared(  # noqa: C901
                             else:
                                 detail = exception_text_for(vc_error, VirtualChassis, text_viewer)
                                 warn_msg = f"Failed to create VC for device {device_id}: {detail}"
+                            warnings_list.append(warn_msg)
                             if job and job.logger:
                                 job.logger.warning(warn_msg)
                             else:
                                 logger.warning(warn_msg)
-                            # Don't fail the import, just log the warning
+                            # Don't fail the import; the caller shows the warning beside the success.
 
             elif result.get("device"):  # Device exists
                 skipped_list.append({"device_id": device_id, "reason": result["error"]})
@@ -720,6 +723,7 @@ def bulk_import_devices_shared(  # noqa: C901
         "failed": failed_list,
         "skipped": skipped_list,
         "virtual_chassis_created": vc_created_count,
+        "warnings": warnings_list,
         "cancelled": _cancelled,
     }
 

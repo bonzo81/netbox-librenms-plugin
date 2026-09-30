@@ -467,6 +467,7 @@ class TestBulkImportPermissions:
             "failed": [],
             "skipped": [],
             "virtual_chassis_created": 0,
+            "warnings": [],
             "cancelled": False,
         }
 
