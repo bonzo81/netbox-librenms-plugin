@@ -47,11 +47,6 @@ _OWN_TRANSACTION = (
     "Each row is its own transaction, which rolled back before the handler runs; the other rows are "
     "independent, and exception_text_for gives a conflict the try-again text."
 )
-_ROLLED_BACK = (
-    "The row is locked before the save, and the save changes no key and no foreign key, so it waits for "
-    "no lock; the handler rolls the transaction back."
-)
-_MAPPING = "The atomic block rolled back before the handler runs, and its answer asks the user to try again."
 
 # (path, function, caught, reason): each entry waives the handlers that catch *caught* in one function
 # and in the functions defined inside it.
@@ -78,17 +73,6 @@ ALLOWED = [
     ("import_utils/bulk_import.py", "bulk_import_devices_shared", "Exception", _OWN_TRANSACTION),
     ("import_utils/device_operations.py", "import_single_device", "Exception", _OWN_TRANSACTION),
     ("import_utils/vm_operations.py", "bulk_import_vms", "Exception", _OWN_TRANSACTION),
-    ("views/sync/device_fields.py", "AssignVCSerialView.post", "Exception", _OWN_TRANSACTION),
-    ("views/imports/actions.py", "AddDeviceTypeMappingView.post", "Exception", _MAPPING),
-    ("views/imports/actions.py", "AddPlatformMappingView.post", "Exception", _MAPPING),
-    *(
-        ("views/sync/device_fields.py", function, "Exception", _ROLLED_BACK)
-        for function in (
-            "RemoveServerMappingView.post",
-            "SetPreferredServerView.post",
-            "ConvertLegacyLibreNMSIdView.post",
-        )
-    ),
     (
         "views/sync/device_fields.py",
         "CreateAndAssignPlatformView.post",
@@ -100,20 +84,21 @@ ALLOWED = [
         for path, function, caught in (
             ("views/imports/actions.py", "_save_device", "ValidationError"),
             ("views/imports/actions.py", "CreatePlatformFromImportView._create_platform_attempt", "ValidationError"),
+            ("views/imports/actions.py", "AddAsOOBView.post", "ValidationError"),
             ("views/imports/actions.py", "AddAsOOBView._resolve_oob_interface", "DataError, ValidationError"),
             ("views/settings_views.py", "LibreNMSSettingsView.post", "ValidationError"),
             ("views/sync/cables.py", "CableRemoteCreateView._create_remote_interface", "ValidationError"),
-            ("views/sync/device_fields.py", "UpdateDeviceNameView.post", "IntegrityError, ValidationError"),
-            ("views/sync/device_fields.py", "UpdateDeviceSerialView.post", "IntegrityError, ValidationError"),
-            ("views/sync/device_fields.py", "UpdateDeviceTypeView.post", "IntegrityError, ValidationError"),
-            ("views/sync/device_fields.py", "UpdateDevicePlatformView.post", "IntegrityError, ValidationError"),
-            ("views/sync/device_fields.py", "AssignVCSerialView.post", "IntegrityError, ValidationError"),
+            (
+                "views/sync/device_fields.py",
+                "AssignVCSerialView._assign_member_serial",
+                "IntegrityError, ValidationError",
+            ),
             ("views/sync/device_fields.py", "RemoveServerMappingView.post", "ValidationError"),
             ("views/sync/device_fields.py", "SetPreferredServerView.post", "ValidationError"),
-            ("views/sync/device_fields.py", "ConvertLegacyLibreNMSIdView.post", "ValidationError"),
             ("views/sync/interfaces.py", "SyncInterfacesView._apply_relationship_edge", "ValidationError"),
             ("views/sync/interfaces.py", "_BaseRelationshipSyncView._link_attempt", "ValidationError"),
             ("views/sync/ip_addresses.py", "CreateVRFFromIPRowView._create_vrf", "IntegrityError, ValidationError"),
+            ("views/sync/ip_addresses.py", "SyncIPAddressesView._set_primary_ip", "ValidationError"),
             ("views/sync/migrate.py", "MoveInterfaceToWinnerView.post", "ValidationError"),
             ("views/sync/migrate.py", "MoveInterfaceToWinnerView.post", "IntegrityError, ValidationError"),
             ("views/sync/modules.py", "AddBayTemplateView._map_existing_bay", "IntegrityError, ValidationError"),

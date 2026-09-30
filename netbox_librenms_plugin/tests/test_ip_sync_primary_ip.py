@@ -298,6 +298,30 @@ class TestPrimaryIPFromManagementAddress:
             for text in _messages(response, "warning")
         )
 
+    def test_a_lock_conflict_in_the_owner_write_retries_the_batch_and_sets_the_primary_ip(self, client, live_librenms):
+        """The owner save meets a 55P03 that its ValidationError handler lets pass, so the batch runs again."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+
+        device = make_device("ip-primary-busy", librenms_cf={SERVER_KEY: {"id": 4210}})
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        _set_librenms_id(interface, 9211)
+        _serve_device_info(live_librenms, 4210, {"ip": "198.18.44.10"})
+        row = _row("198.18.44.10", 9211, interface.name)
+        _seed(device, [row])
+        _login(client, "ip-primary-busy-user")
+
+        with failing_statement(lambda sql, _params: sql.startswith('UPDATE "dcim_device"'), "55P03") as failed:
+            response = client.post(_ip_url(device), _sync_payload([row]))
+
+        assert len(failed) == 1
+        assert response.status_code == 302
+        address = IPAddress.objects.get(address=row["ip_with_mask"])
+        device.refresh_from_db()
+        assert device.primary_ip4_id == address.pk
+        assert any(text.startswith("Set as Primary IP: 198.18.44.10/24") for text in _messages(response, "success"))
+
 
 @pytest.mark.django_db
 class TestIPRowResolution:
