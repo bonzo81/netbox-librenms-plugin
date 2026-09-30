@@ -18,6 +18,7 @@ from ..import_validation_helpers import (
     reset_device_role,
 )
 from ..librenms_api import LibreNMSAPI
+from ..transactions import classify_conflict
 from ..utils import (
     AmbiguousLibreNMSIdError,
     cached_row_matches,
@@ -683,8 +684,15 @@ def bulk_import_devices_shared(  # noqa: C901
                         except Exception as vc_error:
                             # Remove from set on failure so retry is possible
                             processed_vc_domains.discard(vc_domain)
-                            detail = exception_text_for(vc_error, VirtualChassis, text_viewer)
-                            warn_msg = f"Failed to create VC for device {device_id}: {detail}"
+                            if classify_conflict(vc_error):
+                                # The device committed in its own transaction; only the chassis is missing.
+                                warn_msg = (
+                                    f"Imported device {device_id}, but another operation was changing the same "
+                                    "NetBox objects, so its virtual chassis was not created."
+                                )
+                            else:
+                                detail = exception_text_for(vc_error, VirtualChassis, text_viewer)
+                                warn_msg = f"Failed to create VC for device {device_id}: {detail}"
                             if job and job.logger:
                                 job.logger.warning(warn_msg)
                             else:

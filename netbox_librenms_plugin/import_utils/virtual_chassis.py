@@ -445,18 +445,11 @@ def _safe_pos(value) -> int | None:
 
 
 def _sync_module_bay_counter(device: Device) -> None:
-    """Reconcile device module_bay_count with actual ModuleBay rows in the DB."""
-    try:
-        actual_count = device.modulebays.count()
-        if getattr(device, "module_bay_count", None) != actual_count:
-            Device.objects.filter(pk=device.pk).update(module_bay_count=actual_count)
-            device.module_bay_count = actual_count
-    except Exception as e:
-        logger.warning(
-            "Could not sync module_bay_count for device '%s': %s",
-            getattr(device, "name", "unknown"),
-            e,
-        )
+    """Reconcile device module_bay_count with actual ModuleBay rows in the DB; a failure fails the caller's transaction."""
+    actual_count = device.modulebays.count()
+    if getattr(device, "module_bay_count", None) != actual_count:
+        Device.objects.filter(pk=device.pk).update(module_bay_count=actual_count)
+        device.module_bay_count = actual_count
 
 
 def create_virtual_chassis_with_members(  # noqa: C901

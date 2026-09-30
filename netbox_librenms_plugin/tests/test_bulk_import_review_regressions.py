@@ -9,7 +9,14 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
-from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm, transactional_db_with_all_apps
+from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    failing_statement,
+    lock_row,
+    lock_timeout,
+    second_connection,
+)
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -291,6 +298,115 @@ def test_unresolved_warning_does_not_claim_an_existing_row_imported(monkeypatch)
     assert "Skipped 1 existing device" in html
     assert "remaining rows were imported" not in html
     assert "continue through normal import checks" in html
+
+
+def _importable_row(live_librenms, device_id, tag, *, members=None):
+    """Serve one importable LibreNMS device; with *members* it is a stack. Returns its mappings and row."""
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import (
+        _libre_device,
+        _prerequisites,
+        _register_stack,
+    )
+
+    prerequisites = _prerequisites(tag)
+    row = _libre_device(
+        device_id, f"{tag}-{device_id}", hardware=prerequisites["hardware"], location=prerequisites["location"]
+    )
+    if members is None:
+        live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+        live_librenms.server.vc_inventory_callable(device_id, [], {})
+    else:
+        _register_stack(live_librenms, device_id, row, members)
+    return prerequisites, row
+
+
+@transactional_db_with_all_apps()
+def test_a_lock_conflict_in_a_device_create_fails_only_that_row_with_the_try_again_text(live_librenms):
+    """The device's own transaction rolls back; its row never shows PostgreSQL's text."""
+    from dcim.models import Device, Site
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+    prerequisites, row = _importable_row(live_librenms, 96301, "import-conflict")
+
+    with second_connection() as other:
+        # The new device's site key check waits for this lock.
+        lock_row(other, Site, prerequisites["site_id"])
+        with lock_timeout(200):
+            result = bulk_import_devices_shared(
+                [96301],
+                server_key="default",
+                manual_mappings_per_device={96301: prerequisites},
+                libre_devices_cache={96301: row},
+                user=make_superuser("import-conflict-user"),
+            )
+
+    assert result["success"] == []
+    assert result["failed"] == [{"device_id": 96301, "error": TRY_AGAIN_MESSAGE}]
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+
+
+@pytest.mark.django_db
+def test_a_lock_conflict_in_the_chassis_create_reports_the_imported_device(live_librenms, caplog):
+    """The device committed in its own transaction, so the warning says it was imported and the chassis was not."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    members = [_chassis(100, "SN-CONFLICT-A", position=1), _chassis(200, "SN-CONFLICT-B", position=2)]
+    prerequisites, row = _importable_row(live_librenms, 96311, "stack-conflict", members=members)
+
+    with (
+        caplog.at_level("WARNING", logger="netbox_librenms_plugin.import_utils.bulk_import"),
+        failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01"),
+    ):
+        result = bulk_import_devices_shared(
+            [96311],
+            server_key="default",
+            manual_mappings_per_device={96311: prerequisites},
+            libre_devices_cache={96311: row},
+            user=make_superuser("stack-conflict-user"),
+        )
+
+    assert [entry["device_id"] for entry in result["success"]] == [96311]
+    assert result["virtual_chassis_created"] == 0
+    assert Device.objects.filter(name=row["hostname"], virtual_chassis__isnull=True).exists()
+    assert not VirtualChassis.objects.filter(domain="librenms-default-96311").exists()
+    assert (
+        "Imported device 96311, but another operation was changing the same NetBox objects, "
+        "so its virtual chassis was not created."
+    ) in caplog.messages
+
+
+@pytest.mark.django_db
+def test_a_failed_module_bay_count_write_fails_the_chassis_create():
+    """The count write is part of the chassis transaction: its error must fail the create, not break it silently."""
+    from dcim.models import VirtualChassis
+    from django.db import OperationalError
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.transactions import classify_conflict
+
+    master = make_device("bay-count-conflict-master", serial="MASTER-SERIAL")
+    master.module_bay_count = 5  # Differs from the real bay count, so the create writes the count.
+
+    with (
+        pytest.raises(OperationalError) as caught,
+        failing_statement(
+            lambda sql, params: sql.startswith('UPDATE "dcim_device" SET "module_bay_count"'), "40P01"
+        ) as failed,
+    ):
+        create_virtual_chassis_with_members(
+            master,
+            [{"serial": "MASTER-SERIAL", "position": 1}, {"serial": "MEMBER-SERIAL", "position": 2}],
+            {"device_id": 96321},
+            server_key="default",
+        )
+
+    assert failed, "precondition: the count write ran"
+    assert classify_conflict(caught.value)
+    assert not VirtualChassis.objects.filter(domain="librenms-default-96321").exists()
 
 
 @pytest.mark.django_db
