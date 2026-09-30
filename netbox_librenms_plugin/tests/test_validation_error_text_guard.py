@@ -10,15 +10,17 @@ tuple constants resolve to their classes. A handler can catch such an error when
 names is a ValidationError, a Django or psycopg database error or an ``AbortRequest``, or a base
 class of one. A read of the caught error is safe when it is a direct argument of a logger call (the
 error itself, or ``validation_error_detail`` of it), the error that a ``raise`` statement raises or
-chains, or the first argument of a function in ``SAFE_CALLEES``. The scan trusts a logger or a
-function only when the name resolves to that object and no scope around the read binds it.
+chains, or the first argument of a function in ``SAFE_CALLEES``. The scan trusts a logger method or
+a function only when the name resolves to that object, no scope around the read binds the name, and
+no code stores a new value under the name.
 
 When a handler gives the caught error to a function of the package, the scan reads that function
 in place of the call, one level deep: the parameter that takes the error has the same rules, and a
 call that gives it to a further package function is a read. The sink is ``<function>: <sink>`` in
 the handler's function, so each caller of a helper needs its own entry. A read that goes into an
-attribute, an item, or a name outside the function has the sink ``store <place>``. A call that
-returns the current exception, or a frame or namespace that holds it, is a read in any function.
+attribute, an item, or a name outside the function has the sink ``store <place>``. A reference to a
+function that returns the current exception, or a frame or namespace that holds it, is a read in
+any function, and a read of each caller that gives the error to that function.
 Each other read needs an allowlist entry with its reason.
 """
 
@@ -70,6 +72,7 @@ CURRENT_EXCEPTION = (
     eval,
     exec,
 )
+CURRENT_NAMES = frozenset(function.__name__ for function in CURRENT_EXCEPTION)
 # A function that imports a name from two places: the scan cannot know which import binds it.
 TWICE = object()
 LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
@@ -137,13 +140,15 @@ def _classes(caught):
     return [cls for item in caught for cls in _classes(item)] if isinstance(caught, tuple) else [caught]
 
 
-def _resolve(node, namespace):
-    """Return the classes that an ``except`` expression names in *namespace*; raise when one is unknown."""
+def _resolve(node, namespace, local):
+    """Return the classes that an ``except`` expression names in *namespace*; raise when one is unknown or *local*."""
     if isinstance(node, ast.Tuple):
-        return [cls for element in node.elts for cls in _resolve(element, namespace)]
+        return [cls for element in node.elts for cls in _resolve(element, namespace, local)]
     if isinstance(node, ast.Starred):
         node = node.value
     try:
+        if {name.id for name in ast.walk(node) if isinstance(name, ast.Name)} & local:
+            raise NameError("a scope around the clause binds the name")
         return _classes(eval(ast.unparse(node), namespace))
     except (NameError, AttributeError):
         if isinstance(node, ast.Attribute) and node.attr in MODEL_ERRORS:
@@ -155,10 +160,10 @@ def _can_catch_risky(classes):
     return any(issubclass(cls, risky) or issubclass(risky, cls) for cls in classes for risky in RISKY)
 
 
-def _own_imports(function):
-    """Return a one-name import statement for each name that *function* imports outside its nested scopes."""
+def _own_imports(scope):
+    """Return a one-name import statement for each name that a function or class *scope* imports outside nested scopes."""
     imports = {}
-    nodes = list(function.body)
+    nodes = list(scope.body)
     while nodes:
         node = nodes.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
@@ -202,17 +207,45 @@ def _is_one_of(value, objects):
     return any(value is known for known in objects)
 
 
-def _callable(expression, local, namespace, imports):
-    """Return the object that a name chain names in the module, or None when a scope around it binds the name."""
+def _identifier(node):
+    return node.id if isinstance(node, ast.Name) else node.attr
+
+
+def _callable(expression, local, namespace, imports, stores):
+    """Return the object that a name chain names in the module, or None when a scope binds it or code can replace it."""
+    attributes, global_names = stores
     if (
         not _is_name_chain(expression)
         or {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)} & local
+        or _identifier(expression) in (global_names if isinstance(expression, ast.Name) else attributes)
     ):
         return None
     try:
         return eval(ast.unparse(expression), _namespace_with_imports(expression, namespace, imports))
     except (NameError, AttributeError):
         return None
+
+
+def _current_exception_read(node, parents, candidates, namespace_for):
+    """Return the read that *node* makes when it names a function in CURRENT_EXCEPTION: its call, or the name itself."""
+    if not (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) and _is_name_chain(node)):
+        return None
+    parent = parents.get(node)
+    if isinstance(parent, ast.Attribute) or _identifier(node) not in candidates:
+        return None
+    try:
+        found = eval(ast.unparse(node), namespace_for(node))
+    except (NameError, AttributeError):
+        return None
+    if not _is_one_of(found, CURRENT_EXCEPTION):
+        return None
+    return parent if isinstance(parent, ast.Call) and parent.func is node else node
+
+
+def _aliases(tree):
+    """Return the names that the imports of *tree* bind with ``as``: an alias can name a function in CURRENT_EXCEPTION."""
+    imports = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))]
+    return {alias.asname for node in imports for alias in node.names if alias.asname}
 
 
 def _is_log_call(node, resolve):
@@ -326,7 +359,7 @@ def _enclosing(read, parents):
                 name.id for each in node.generators for name in ast.walk(each.target) if isinstance(name, ast.Name)
             }
         elif isinstance(node, ast.ClassDef) and not in_function:
-            local |= _statement_bindings(node.body)[0]
+            local |= _statement_bindings(node.body)[0] | set(_own_imports(node))
         node = parents.get(node)
     return local, made, declared
 
@@ -407,12 +440,14 @@ def _definitions(tree):
     return found
 
 
-def _stored_attributes(tree):
-    """Return the attribute names that *tree* assigns or deletes, or sets through ``setattr`` with a literal name."""
-    names = set()
+def _stores(tree):
+    """Return the attribute names that *tree* assigns, deletes or sets with a literal name, and the names it makes global."""
+    names, global_names = set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
             names.add(node.attr)
+        elif isinstance(node, ast.Global):
+            global_names.update(node.names)
         elif (
             isinstance(node, ast.Call)
             and ast.unparse(node.func) == "setattr"
@@ -420,12 +455,13 @@ def _stored_attributes(tree):
             and isinstance(node.args[1], ast.Constant)
         ):
             names.add(node.args[1].value)
-    return names
+    return names, global_names
 
 
 @functools.cache
-def _production_stored_attributes():
-    return frozenset().union(*(_stored_attributes(ast.parse(path.read_text())) for path in _production_paths()))
+def _production_stores():
+    stores = [_stores(ast.parse(path.read_text())) for path in _production_paths()]
+    return frozenset().union(*(names for names, _ in stores)), frozenset().union(*(names for _, names in stores))
 
 
 def _subclasses(cls):
@@ -458,8 +494,10 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         self.file = namespace["__file__"]
         self.trees = {self.file: tree}
         self.parents = _parents(tree)
-        # A name that code stores on an object can replace a method of an instance.
-        self.stored = _production_stored_attributes() | _stored_attributes(tree)
+        # An attribute that code stores, or a name that code makes global, can replace what the module defines.
+        attributes, global_names = _stores(tree)
+        self.stores = _production_stores()[0] | attributes, _production_stores()[1] | global_names
+        self.candidates = CURRENT_NAMES | _aliases(tree)
         self.imports = []
         self.nodes = []
         self.reads = []
@@ -479,28 +517,24 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         """Return the module namespace plus the imports of the enclosing functions that *expression* names."""
         return _namespace_with_imports(expression, self.namespace, self.imports)
 
-    def _resolver(self, read, local):
+    def _resolver(self, read, local, namespace=None, parents=None):
+        parents = parents or self.parents
+        imports = _import_stack(read, parents)
         return functools.partial(
-            _callable, local=local, namespace=self.namespace, imports=_import_stack(read, self.parents)
+            _callable, local=local, namespace=namespace or self.namespace, imports=imports, stores=self.stores
         )
-
-    def _reads_current_exception(self, node):
-        if not (isinstance(node, ast.Call) and _is_name_chain(node.func)):
-            return False
-        try:
-            return _is_one_of(eval(ast.unparse(node.func), self._namespace_for(node.func)), CURRENT_EXCEPTION)
-        except (NameError, AttributeError):
-            return False
 
     visit_ClassDef = _visit_scope
     visit_FunctionDef = visit_AsyncFunctionDef = _visit_function
 
-    def visit_Call(self, node):
-        if self._reads_current_exception(node):
-            local, made, declared = _enclosing(node, self.parents)
-            if (sink := _sink(node, self.parents, False, self._resolver(node, local))) is not None:
-                self.reads.append((self.file, self._scope(), _store(node, self.parents, made, declared) or sink))
+    def _visit_reference(self, node):
+        if (read := _current_exception_read(node, self.parents, self.candidates, self._namespace_for)) is not None:
+            local, made, declared = _enclosing(read, self.parents)
+            if (sink := _sink(read, self.parents, False, self._resolver(read, local))) is not None:
+                self.reads.append((self.file, self._scope(), _store(read, self.parents, made, declared) or sink))
         self.generic_visit(node)
+
+    visit_Name = visit_Attribute = _visit_reference
 
     def visit_Try(self, node):
         for handler in node.handlers:
@@ -508,7 +542,8 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
                 self._scan_handler(handler)
                 continue
             try:
-                classes = _resolve(handler.type, self._namespace_for(handler.type))
+                local = _enclosing(handler, self.parents)[0]
+                classes = _resolve(handler.type, self._namespace_for(handler.type), local)
             except (NameError, AttributeError):
                 self.reads.append((self.file, self._scope(), f"except {ast.unparse(handler.type)}: cannot resolve"))
                 continue
@@ -567,7 +602,7 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         rebound = receiver in set().union(*_statement_bindings(method.body), _own_imports(method))
         if not positional or positional[0].arg != receiver or kinds not in ([], ["classmethod"]) or rebound:
             return None
-        if name in self.stored:
+        if name in self.stores[0]:
             return None
         qualname = self._scope().rpartition(".")[0]
         try:
@@ -600,20 +635,32 @@ class _CaughtErrorReadScan(ast.NodeVisitor):
         return _definitions(self.trees[file]).get((function.__qualname__, function.__code__.co_firstlineno))
 
     def _parameter_sinks(self, function, definition, parameter):
-        """Return the sink of each unsafe read of *parameter* in *definition*; a further package call is one of them."""
+        """Return the sink of each unsafe read of *parameter*, or of the current exception, in *definition*."""
         key = (function.__code__, parameter)
         if key not in self.followed:
             parents = _parents(definition)
+            candidates = CURRENT_NAMES | _aliases(self.trees[function.__code__.co_filename])
+
+            def namespace_for(expression):
+                return _namespace_with_imports(expression, function.__globals__, _import_stack(expression, parents))
+
+            reads = [
+                (node, True)
+                for statement in definition.body
+                for node in ast.walk(statement)
+                if isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Load)
+            ]
+            reads += [
+                (read, False)
+                for node in ast.walk(definition)
+                if (read := _current_exception_read(node, parents, candidates, namespace_for)) is not None
+            ]
             sinks = []
-            for statement in definition.body:
-                for node in ast.walk(statement):
-                    if not (isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Load)):
-                        continue
-                    local, made, declared = _enclosing(node, parents)
-                    imports = _import_stack(node, parents)
-                    resolve = functools.partial(_callable, local=local, namespace=function.__globals__, imports=imports)
-                    if (sink := _sink(node, parents, True, resolve)) is not None:
-                        sinks.append(_store(node, parents, made, declared) or sink)
+            for read, bound in reads:
+                local, made, declared = _enclosing(read, parents)
+                resolve = self._resolver(read, local, function.__globals__, parents)
+                if (sink := _sink(read, parents, bound, resolve)) is not None:
+                    sinks.append(_store(read, parents, made, declared) or sink)
             self.followed[key] = sinks
         return self.followed[key]
 
@@ -996,6 +1043,23 @@ def test_an_except_clause_resolves_a_name_that_two_branches_import_from_one_plac
     assert _scan(source) == [("view", "str")]
 
 
+def test_an_except_clause_that_names_a_local_variable_cannot_resolve():
+    source = textwrap.dedent(
+        """
+        Caught = ValueError
+
+        def view():
+            Caught = ValidationError
+            try:
+                save()
+            except Caught as exc:
+                return str(exc)
+        """
+    )
+
+    assert _scan(source) == [("view", "except Caught: cannot resolve")]
+
+
 def test_the_scan_imports_only_the_names_that_an_except_clause_uses():
     source = textwrap.dedent(
         """
@@ -1113,7 +1177,46 @@ def test_the_scan_reads_the_current_exception_in_any_function():
         """
     )
 
-    assert _scan(source) == [("trace", "Return"), ("dump", "str")]
+    assert _scan(source) == [("trace", "Return"), ("dump", "str"), ("view", "trace: Return"), ("view", "dump: str")]
+
+
+@pytest.mark.parametrize(
+    "helper, sink",
+    [
+        ("def failure(error):\n    return traceback.format_exc()", "Return"),
+        ("def failure(error):\n    format_error = traceback.format_exc\n    return format_error()", "Assign"),
+        ("def failure(error, format_error=traceback.format_exc):\n    return format_error()", "arguments"),
+    ],
+)
+def test_a_helper_that_reads_the_current_exception_is_a_read_in_each_caller(helper, sink):
+    source = f"{helper}\n\ndef view():\n    try:\n        save()\n    except ValidationError as exc:\n        return failure(exc)\n"
+
+    assert _scan(source) == [("failure", sink), ("view", f"failure: {sink}")]
+
+
+def test_the_scan_does_not_trust_a_name_that_a_class_body_imports_or_that_code_stores():
+    source = textwrap.dedent(
+        """
+        import types
+
+        formatters = types.SimpleNamespace(exception_text_for=exception_text_for)
+
+        def failure(error):
+            class Output:
+                from builtins import str as exception_text_for
+                text = exception_text_for(error)
+            return Output.text
+
+        def view():
+            formatters.exception_text_for = str
+            try:
+                save()
+            except ValidationError as exc:
+                return failure(exc), formatters.exception_text_for(exc)
+        """
+    )
+
+    assert _scan(source) == [("view", "failure: exception_text_for"), ("view", "formatters.exception_text_for")]
 
 
 def test_the_scan_reads_each_method_that_a_call_on_self_can_reach():
