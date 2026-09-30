@@ -412,21 +412,6 @@ def identity_q(model, *, server: str, identities: Iterable, roles: Iterable[Mapp
     return predicate
 
 
-def _is_lookup_identity(identity) -> bool:
-    # Only int and str honour the int-only contract; a positive float would otherwise pass.
-    if isinstance(identity, bool) or not isinstance(identity, (int, str)):
-        return False
-    if isinstance(identity, int):
-        return identity > 0
-    cleaned = identity.strip()
-    if not cleaned:
-        return False
-    try:
-        return int(cleaned) > 0
-    except ValueError:
-        return False
-
-
 def _raise_ambiguous(model_name, identity, server_key, kind, matches):
     logger.warning(
         "Ambiguous librenms_id %r for %s on server %r: multiple %s matches (pk=%s, pk=%s) "
@@ -459,7 +444,8 @@ def find_mapping(queryset, *, server: str, identity, roles: Iterable[MappingRole
     model = queryset.model
     _space_of(model)
     roles = _require_roles(roles)
-    if not _is_lookup_identity(identity):
+    # The predicates apply the same rule; checking it first skips the query.
+    if coerce_librenms_id(identity) is None:
         return None
     own_q, oob_q = _identity_predicates(server, identity)
     own_q = own_q if MappingRole.OWN in roles else Q(pk__in=[])
