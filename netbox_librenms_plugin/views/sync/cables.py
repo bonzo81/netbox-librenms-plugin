@@ -29,6 +29,12 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import (
+    TRY_AGAIN_MESSAGE,
+    TransactionConflict,
+    classify_conflict,
+    run_transaction,
+)
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
@@ -281,6 +287,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     raise PermissionDenied("You may not add this cable.")
             return True
         except Exception as exc:
+            if classify_conflict(exc):
+                raise
             messages.error(request, f"Failed to create cable: {exception_text_for(exc, Cable, request.user)}")
             return False
 
@@ -1069,12 +1077,18 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             endpoints.update((local_key, remote_key))
         return True
 
+    def _sync_row_attempt(self, interface, cached_links, force, port_records):
+        """Run one attempt of one row; read the tag again, since a rolled-back attempt drops a tag it created."""
+        self._cable_provenance_tag_resolved = False
+        return self.process_single_interface(interface, cached_links, force=force, port_records=port_records)
+
     def process_interface_sync(self, selected_interfaces, cached_links, force=False):
         """
         Process cable sync for all selected interfaces and return results.
 
-        Each interface is processed in its own atomic block so individual
-        failures roll back only that cable without affecting others.
+        Each interface is processed in its own transaction (``run_transaction``), so a failure
+        rolls back only that cable, and a lock conflict runs the row once more. A row whose
+        attempts all met a conflict is reported under ``busy``.
 
         Force-protected replacements submitted without ``force`` are bucketed under ``conflict``
         and stashed in full. The state includes the re-submit row identity and the doomed cable's
@@ -1107,6 +1121,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "unsupported": [],
             "patch_path": [],
             "blocked_by_rule": [],
+            "busy": [],
         }
         self._pending_conflicts = []
 
@@ -1114,10 +1129,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             try:
                 # Live LibreNMS reads happen here, before the row's transaction takes any lock.
                 port_records = self._prefetch_cable_port_records(interface, cached_links)
-                with transaction.atomic():
-                    result = self.process_single_interface(
-                        interface, cached_links, force=force, port_records=port_records
-                    )
+                result = run_transaction(
+                    functools.partial(self._sync_row_attempt, interface, cached_links, force, port_records)
+                )
                 results[result["status"]].append(result.get("interface", ""))
                 if result["status"] == "conflict":
                     # Carry the row's RESOLVED sync device so the force re-submit re-targets the
@@ -1125,6 +1139,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     # (device_selection_<row_id>) would silently revert to the page device.
                     result["device_id"] = interface.get("device_id")
                     self._pending_conflicts.append(result)
+            except TransactionConflict:
+                # Nothing of the row was committed; the other rows are independent.
+                logger.warning("Cable sync row %s met a lock conflict on every attempt", interface.get("row_id", ""))
+                results["busy"].append(interface.get("row_id", ""))
             except PermissionDenied:
                 # A permission raised anywhere below (signals, custom validators) is a denial, not
                 # missing link data.
@@ -1296,6 +1314,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         ("missing_remote", "error", "Remote device or interface not found in NetBox for: {items}"),
         ("invalid", "error", "No LibreNMS link data found for interfaces: {items}"),
         ("failed", "error", "Failed to sync cables for interfaces: {items}"),
+        ("busy", "error", TRY_AGAIN_MESSAGE + " Not synced: {items}"),
         (
             "rejected_selection",
             "error",
