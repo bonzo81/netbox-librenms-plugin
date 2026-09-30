@@ -5013,7 +5013,7 @@ def hidden_refusal_text(model, fields) -> str:
 
 
 # The one text of a database error: PostgreSQL's own text can name rows and values outside the viewer's scope.
-DATABASE_ERROR_MESSAGE = "The database rejected the change. Refresh the data and try again."
+DATABASE_ERROR_MESSAGE = "The database refused the operation. Refresh the data and try again."
 
 
 def exception_text_for(exc: Exception, model, user) -> str:

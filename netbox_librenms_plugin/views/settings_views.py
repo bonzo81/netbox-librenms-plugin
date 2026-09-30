@@ -230,6 +230,6 @@ class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
             return HttpResponse(
                 f'<div class="alert alert-danger">'
                 f'<i class="ti ti-alert-circle me-2"></i>'
-                f"<strong>Connection failed:</strong><br>{escape(str(e))}"
+                f"<strong>Connection failed:</strong><br>{escape(exception_text_for(e, LibreNMSSettings, request.user))}"
                 f"</div>"
             )

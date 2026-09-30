@@ -46,12 +46,6 @@ ALLOWED = [
         "str",
         "The try body sends one HTTP request with requests and reads its JSON; it validates no model.",
     ),
-    (
-        "views/settings_views.py",
-        "TestLibreNMSConnectionView.post",
-        "str",
-        "LibreNMSAPI() reads the config and LibreNMSSettings; test_connection() sends one HTTP request.",
-    ),
     *(
         ("views/sync/device_fields.py", function, "_write_failure_message", "It applies exception_text_for.")
         for function in (

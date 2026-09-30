@@ -8,6 +8,25 @@ from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_de
 
 
 @pytest.mark.django_db
+def test_the_connection_test_hides_a_database_error(client):
+    """PostgreSQL's text can name rows and roles, so the connection answer shows the generic text."""
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+    from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE
+
+    client.force_login(make_superuser("connection-db-error-user"))
+    # A blank key makes the client read the selected server from LibreNMSSettings.
+    settings_read = 'FROM "netbox_librenms_plugin_librenmssettings"'
+
+    with failing_statement(lambda sql, params: settings_read in sql, "42501") as failed:
+        response = client.post(reverse("plugins:netbox_librenms_plugin:test_connection"), {"selected_server": " "})
+
+    assert failed, "precondition: the client read LibreNMSSettings"
+    body = response.content.decode()
+    assert DATABASE_ERROR_MESSAGE in body
+    assert "SQLSTATE" not in body
+
+
+@pytest.mark.django_db
 class TestCableSyncSettingsTab:
     """End-to-end through the real view: render, persist, and validate the cable-sync form."""
 
