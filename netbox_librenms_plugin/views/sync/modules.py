@@ -769,7 +769,8 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
 
     candidate = existing_owner
     if candidate is None:
-        device_interfaces = interfaces.filter(device=device)
+        # Choose from every interface, as the table does, then refuse a choice outside the caller's scope.
+        device_interfaces = Interface.objects.filter(device=device)
         choice = select_module_interface(
             device,
             item,
@@ -779,6 +780,11 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             },
             module_interfaces=list(device_interfaces.filter(module_id=module_pk)) if module_pk else [],
         )
+        if choice.interface is not None and not interfaces.filter(pk=choice.interface.pk).exists():
+            return {
+                "status": "skipped",
+                "reason": f"matching interface is not available for port_id {port_id}",
+            }
         if choice.status:
             return {"status": choice.status, "reason": choice.reason}
         candidate = choice.interface

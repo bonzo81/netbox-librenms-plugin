@@ -130,6 +130,26 @@ class TestInterfacePortBinding:
         assert read_mapping(taken).own_id("default") == 8999
         assert read_mapping(module.interfaces.get(name="Uplink")).own_id("default") is None
 
+    @pytest.mark.parametrize("stored", [None, {"default": 8999}], ids=["unbound", "bound-elsewhere"])
+    def test_a_named_interface_outside_the_change_scope_is_not_passed_over(self, stored):
+        """The table sees every interface, so the writer must choose from all of them and then check scope."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
+
+        device = make_device_with_module_bays(f"bind-name-out-of-scope-{bool(stored)}", ["Slot 1"])
+        named = make_interface(device, "Ethernet1/1")
+        if stored is not None:
+            named.custom_field_data["librenms_id"] = stored
+            named.save(update_fields=["custom_field_data"])
+        module = _module_with_interfaces(device, "Slot 1", "BIND-SCOPE-CARD", ["Uplink"])
+        item = {"_librenms_port_id": 8806, "_librenms_ifname": "Ethernet1/1"}
+
+        result = _bind_interface_librenms_id(device, item, module.pk, "default", Interface.objects.exclude(pk=named.pk))
+
+        assert result == {"status": "skipped", "reason": "matching interface is not available for port_id 8806"}
+        assert read_mapping(module.interfaces.get(name="Uplink")).own_id("default") is None
+
 
 def _render_module_tab(device, user):
     """Render the real module table from its seeded cache."""
