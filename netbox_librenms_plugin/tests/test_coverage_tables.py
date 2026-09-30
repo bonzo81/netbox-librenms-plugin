@@ -1497,8 +1497,8 @@ class TestInterfaceFormatting:
             "librenms_bridge_name",
         }
 
-    def test_a_row_without_a_port_id_matches_by_name_like_the_writer(self):
-        """The sync writes a row with no port ID onto its same-name interface, so the row shows that match."""
+    def test_the_name_fallback_accepts_a_row_without_a_port_id(self):
+        """The table's name fallback reads name_match_may_be_port, which accepts a row without a port ID."""
         device = make_device("format-no-port-id")
         interface = make_interface(device, "Ethernet1")
         record = _port(port_id=None, name_fallback_allowed=True, _source="main")
