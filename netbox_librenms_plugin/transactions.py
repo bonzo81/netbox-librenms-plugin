@@ -1,9 +1,10 @@
 """
 Run a unit of work as one outermost transaction, and run it once more after a lock conflict.
 
-PostgreSQL aborts a transaction with SQLSTATE ``40P01`` (deadlock detected) or ``55P03`` (lock not
-available). The plugin cannot prevent these: NetBox takes its own locks in orders the plugin does
-not control. ``run_transaction`` rolls the whole attempt back and runs it once more. A second
+PostgreSQL aborts a transaction with SQLSTATE ``40P01`` (deadlock detected), ``55P03`` (lock not
+available) or ``40001`` (serialization failure). The plugin cannot prevent these: NetBox takes its
+own locks in orders the plugin does not control, and PostgreSQL tells the client to retry a
+``40001``. ``run_transaction`` rolls the whole attempt back and runs it once more. A second
 conflict raises ``TransactionConflict``, which the HTTP adapter (``middleware.py``) shows as a
 "try again" answer. The runner needs no request, so a background job can use it too.
 
@@ -27,7 +28,7 @@ from utilities.exceptions import AbortRequest
 
 logger = logging.getLogger(__name__)
 
-CONFLICT_SQLSTATES = frozenset({"40P01", "55P03"})
+CONFLICT_SQLSTATES = frozenset({"40P01", "55P03", "40001"})
 # The one text that a lock conflict shows: the middleware's answer and exception_text_for's text.
 TRY_AGAIN_MESSAGE = "Another operation was changing the same NetBox objects. Refresh the page and try again."
 _ATTEMPTS = 2

@@ -12,6 +12,7 @@ from utilities.exceptions import AbortRequest
 
 from netbox_librenms_plugin.tests.conftest import make_superuser, transactional_db_with_all_apps
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    failing_statement,
     hold_port_claim,
     lock_row,
     lock_row_nowait,
@@ -87,8 +88,8 @@ def _queued_events():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("sqlstate", ["40P01", "55P03"])
-def test_a_deadlock_or_a_lock_timeout_is_a_conflict(sqlstate):
+@pytest.mark.parametrize("sqlstate", ["40P01", "55P03", "40001"])
+def test_a_deadlock_a_lock_timeout_or_a_serialization_failure_is_a_conflict(sqlstate):
     error = wrapped_database_error(sqlstate)
 
     assert isinstance(error, OperationalError)
@@ -237,6 +238,25 @@ def test_a_conflict_that_escapes_the_first_attempt_is_retried_once_and_its_rows_
     assert calls == [1, 2]
     assert not Site.objects.filter(name="runner-attempt-1").exists()
     assert Site.objects.filter(name="runner-attempt-2").exists()
+
+
+@pytest.mark.django_db
+def test_a_serialization_failure_on_the_first_attempt_is_retried():
+    """PostgreSQL asks the client to retry a 40001, so the runner runs the work once more."""
+    from dcim.models import Site
+
+    calls = []
+
+    def work():
+        calls.append(len(calls) + 1)
+        return _site(f"runner-serialization-{len(calls)}").pk
+
+    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_site"'), "40001") as failed:
+        committed_pk = run_transaction(work)
+
+    assert failed, "precondition: the first attempt met the serialization failure"
+    assert calls == [1, 2]
+    assert Site.objects.get(pk=committed_pk).name == "runner-serialization-2"
 
 
 @pytest.mark.django_db
