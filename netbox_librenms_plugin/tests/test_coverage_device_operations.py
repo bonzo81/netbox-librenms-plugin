@@ -1557,10 +1557,10 @@ class TestImportSingleDevice:
 
         assert result["success"] is False
         # The claim search is unrestricted and this path takes no user, so the owner stays unnamed.
-        assert "already assigned to another device" in result["error"]
+        assert result["error"] == "LibreNMS ID 5605 is already assigned to another NetBox object."
         assert owner.name not in result["error"]
 
-    def test_vm_assignment_conflict_is_identified_as_a_vm(self, librenms_api):
+    def test_vm_assignment_conflict_does_not_name_the_owner_model(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
         _api, _server = librenms_api
@@ -1577,7 +1577,8 @@ class TestImportSingleDevice:
         )
 
         assert result["success"] is False
-        assert "already assigned to another VM" in result["error"]
+        # The model type alone would tell the caller that a VM outside its scope exists.
+        assert result["error"] == "LibreNMS ID 5609 is already assigned to another NetBox object."
         assert owner.name not in result["error"]
 
     def test_empty_resolved_name_recomputes_from_sync_preferences(self, librenms_api):

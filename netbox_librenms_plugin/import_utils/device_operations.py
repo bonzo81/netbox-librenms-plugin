@@ -18,7 +18,7 @@ from ..import_validation_helpers import (
     clear_match_derived_action_fields,
 )
 from ..ip_addressing import parse_host_address
-from ..librenms_api import LibreNMSAPI
+from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..utils import (
     AmbiguousLibreNMSIdError,
     cached_row_matches,
@@ -1822,15 +1822,12 @@ def import_single_device(  # noqa: C901
         with transaction.atomic():
             _locked_owner, conflict = lock_librenms_id_assignment(device_id, api.server_key)
             if conflict is not None:
-                from virtualization.models import VirtualMachine
-
-                object_label = "VM" if isinstance(conflict, VirtualMachine) else "device"
                 return {
                     "success": False,
                     "device": None,
                     "message": "",
                     # Unrestricted claim search and no user here, so the owner stays unnamed.
-                    "error": (f"LibreNMS ID {device_id} is already assigned to another {object_label}"),
+                    "error": librenms_id_owned_message(device_id),
                     "synced": {},
                 }
 
