@@ -2197,6 +2197,12 @@ def ios_lag_patterns():
 class TestResolvePortRelationships:
     """Tests for LibreNMSAPI.resolve_port_relationships()."""
 
+    def test_the_relationship_docstring_names_every_result_key(self, local_librenms_api):
+        """Callers can find the complete result contract in the method documentation."""
+        result = local_librenms_api.resolve_port_relationships([], [], lag_patterns={})
+        for key in result:
+            assert key in local_librenms_api.resolve_port_relationships.__doc__
+
     def test_resolves_a_verbatim_live_port_stack_entry(self, mock_librenms_api):
         """Verify that a live port_stack row with high_port_id and low_port_id resolves correctly."""
         ports = [
