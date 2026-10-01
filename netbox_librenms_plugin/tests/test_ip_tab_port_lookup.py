@@ -152,6 +152,28 @@ class TestIpRowInterfaceNames:
         assert enriched[0]["ip_address"] == "198.18.9.9"
         assert enriched[0].get("interface_name") is None
 
+    def test_a_failed_port_read_is_not_retried_by_warm_renders(self, recording_server):
+        """A failed fresh ports read caches the rows as unnamed; warm renders reach cache and NetBox only."""
+        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        ports_path = f"/api/v0/devices/{load_recording('iosxe-subinterfaces')['device_id']}/ports"
+        server.register(ports_path, {"status": "error", "message": "ports unavailable"}, status=500, method="GET")
+        view.librenms_api.cache_timeout = 300
+        server.requests.clear()
+
+        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
+        assert any(request["path"] == ports_path for request in server.requests)
+        server.requests.clear()
+        warm = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
+        view.cache_only = True
+        cache_only = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
+
+        assert all(request["path"] != ports_path for request in server.requests)
+        for context in (warm, cache_only):
+            assert context is not None
+            assert [row.get("interface_name") for row in context["table"].data] == [
+                row.get("interface_name") for row in fresh["table"].data
+            ]
+
 
 @pytest.mark.django_db
 class TestIpRowVrfSuggestions:
