@@ -1212,11 +1212,8 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.add_message(request, exc.level, str(exc))
             return self._sync_url(object_type, pk)
         except IdentityOwned as exc:
-            messages.error(
-                request,
-                f"Another {type(exc.owner).__name__} already has librenms_id {librenms_id} "
-                f"for server '{server_key}'; cannot convert.",
-            )
+            # The owner comes from an unrestricted search, so the message names neither it nor its model.
+            messages.error(request, f"{exc} Cannot convert the legacy ID for server '{server_key}'.")
             return self._sync_url(object_type, pk)
         except AmbiguousLibreNMSIdError:
             messages.error(
