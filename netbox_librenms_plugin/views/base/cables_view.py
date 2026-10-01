@@ -2370,9 +2370,6 @@ class BaseCableTableView(
         port_key = coerce_librenms_id(link.get("remote_port_key"))
         if port_key is None:
             return
-        # An advertised port the neighbour's list does not hold is a second identity: create neither.
-        if remote_port_ref(link) != port_key:
-            return
         # A port another interface holds (another device, or a VM) would get a second owner.
         try:
             if find_port_owner(port_key, server=server_key) is not None:
