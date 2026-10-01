@@ -2009,6 +2009,60 @@ class TestTheRemotePortCellHasOneDefinition:
         assert remote_port_html("<b>x</b>", {}) == "&lt;b&gt;x&lt;/b&gt;"
 
 
+class TestTheFarEndPortHasOneRule:
+    """Every reader that decides a row's far-end LibreNMS port goes through ``remote_port_ref``."""
+
+    # Writers, the evidence rank, the create's record requirement, and the raw row identity.
+    ALLOWED_READERS = frozenset(
+        {
+            ("utils.py", "assign_cable_row_ids"),
+            ("views/base/cables_view.py", "<module>"),
+            ("views/base/cables_view.py", "remote_port_ref"),
+            ("views/base/cables_view.py", "_collect_cable_links"),
+            ("views/base/cables_view.py", "_attach_remote_port_aliases"),
+            ("views/base/cables_view.py", "_best_duplicate_row"),
+            ("views/base/cables_view.py", "_set_remote_create_affordance"),
+            ("views/base/cables_view.py", "cable_row_ports"),
+            ("views/sync/cables.py", "_remote_port_record"),
+            ("views/sync/cables.py", "_create_remote_interface"),
+        }
+    )
+
+    @staticmethod
+    def _readers():
+        """Return (module, outermost function) for each use of the two far-end port keys in the plugin."""
+        import ast
+        from pathlib import Path
+
+        import netbox_librenms_plugin
+
+        root = Path(netbox_librenms_plugin.__file__).parent
+        readers = set()
+
+        def visit(node, module, outer):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    visit(child, module, outer or child.name)
+                    continue
+                if isinstance(child, ast.Constant) and child.value in ("remote_port_key", "remote_port_id"):
+                    readers.add((module, outer or "<module>"))
+                visit(child, module, outer)
+
+        for path in sorted(root.rglob("*.py")):
+            relative = path.relative_to(root)
+            if relative.parts[0] in ("tests", "data_shapes"):
+                continue
+            visit(ast.parse(path.read_text()), relative.as_posix(), None)
+        return readers
+
+    def test_no_other_function_reads_the_far_end_port_keys(self):
+        """A drift guard: a second order of the two keys made the dedupe and the lookup disagree."""
+        readers = self._readers()
+
+        assert ("views/base/cables_view.py", "remote_port_ref") in readers
+        assert readers <= self.ALLOWED_READERS
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("hostname", ["missing-neighbour.example.test", ""])
 @pytest.mark.parametrize("cabled", [True, False])
