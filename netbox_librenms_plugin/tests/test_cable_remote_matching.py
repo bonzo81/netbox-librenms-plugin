@@ -863,6 +863,34 @@ class TestDuplicatesAreGoneFromTheRenderedRows:
         assert rows[0]["netbox_remote_interface_id"] == remote.pk
         assert rows[0]["also_reported_by"] == ["cdp"]
 
+    def test_two_protocols_grouped_by_the_port_record_resolve_one_interface(self):
+        """The dedupe key and the table lookup read one far-end port: the matched record."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        server_key = configured_server_key()
+        local_device = make_device("dedupe-ref-local")
+        make_interface(local_device, "eth0")
+        remote_device = make_device("dedupe-ref-remote")
+        map_device_to_librenms(remote_device, 9, server_key=server_key)
+        matched = make_interface(remote_device, "port-a")
+        set_librenms_device_id(matched, 500, server_key)
+        matched.save()
+        stale = make_interface(remote_device, "port-b")
+        set_librenms_device_id(stale, 501, server_key)
+        stale.save()
+
+        rows = _make_view().enrich_links_data(
+            [
+                _row(protocol="lldp", remote_device=remote_device.name, remote_port_id=501, remote_port_key=500),
+                _row(protocol="cdp", remote_device=remote_device.name, remote_port_id=None, remote_port_key=500),
+            ],
+            local_device,
+            server_key=server_key,
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["netbox_remote_interface_id"] == matched.pk
+
     def test_two_real_neighbour_ports_still_render_as_two_rows(self):
         """Positive control: enrichment must not collapse two genuine links."""
         server_key = configured_server_key()
@@ -1830,12 +1858,13 @@ def test_remote_port_identity_resolves_a_renamed_interface(client, advertised_id
     near = make_interface(local, "eth0")
     remote = make_device("port-identity-remote")
     map_device_to_librenms(remote, 9, server_key=key)
+    # The matched port record (key 500) names the far end; an advertised ID it overrides is stale.
     far = make_interface(remote, "renamed-interface")
-    set_librenms_device_id(far, advertised_id or 500, key)
+    set_librenms_device_id(far, 500, key)
     far.save()
     if advertised_id is not None:
         other = make_interface(remote, "other-interface")
-        set_librenms_device_id(other, 500, key)
+        set_librenms_device_id(other, advertised_id, key)
         other.save()
     if patch_path:
         _panel, front, rear = make_patch_panel("port-identity-panel")

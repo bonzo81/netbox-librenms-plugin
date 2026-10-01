@@ -199,10 +199,10 @@ def _remote_endpoint_identity(row):
     """
     Identify the far end a row names, or None when nothing proves which port it is.
 
-    The LibreNMS port the row matched is the strongest evidence and outranks the NetBox
-    interface: two protocols naming one port can resolve differently, because each resolves
-    through its own advertised name. ``remote_port_key`` is the port record the fetch matched,
-    which covers a row LibreNMS gave no ``remote_port_id`` for.
+    The LibreNMS port the row names (:func:`remote_port_ref`) is the strongest evidence and
+    outranks the NetBox interface: two protocols naming one port can resolve differently,
+    because each resolves through its own advertised name. The table lookup reads the same
+    port, so two rows grouped here resolve to one interface.
 
     Args:
         row (dict): An enriched cable row.
@@ -211,9 +211,7 @@ def _remote_endpoint_identity(row):
         tuple | None: The endpoint identity, or None when the row proves no particular port.
 
     """
-    port_key = coerce_librenms_id(row.get("remote_port_key"))
-    if port_key is None:
-        port_key = coerce_librenms_id(row.get("remote_port_id"))
+    port_key = remote_port_ref(row)
     if port_key is not None:
         return ("port", port_key)
     if interface_id := row.get("netbox_remote_interface_id"):
@@ -243,10 +241,23 @@ def _endpoint_group_key(row):
     return (row.get("_source"), neighbour, endpoint)
 
 
-def _remote_port_ref(link):
-    """Use the advertised port ID, or the identity resolved from its names."""
-    advertised = coerce_librenms_id(link.get("remote_port_id"))
-    return advertised if advertised is not None else coerce_librenms_id(link.get("remote_port_key"))
+def remote_port_ref(link):
+    """
+    Identify the far-end LibreNMS port of *link*: the matched port record, else the advertised ID.
+
+    ``remote_port_key`` is the only ID proven to be on the neighbour now: it comes from the
+    neighbour's current port list. An advertised ID that list does not hold is stale or names
+    another device's port, so it is used only when no record matched.
+
+    Args:
+        link (dict): A cable row.
+
+    Returns:
+        int | None: The far-end LibreNMS port ID, or None when the row names none.
+
+    """
+    port_key = coerce_librenms_id(link.get("remote_port_key"))
+    return port_key if port_key is not None else coerce_librenms_id(link.get("remote_port_id"))
 
 
 def _remote_port_name_candidates(row):
@@ -646,7 +657,7 @@ class BaseCableTableView(
             remote_owner = remote_owner_by_link.get(id(link))
             if remote_owner is not None:
                 candidate_specs[remote_owner.pk]["names"].update(_remote_port_name_candidates(link))
-                if (remote_id := _remote_port_ref(link)) is not None:
+                if (remote_id := remote_port_ref(link)) is not None:
                     candidate_specs[remote_owner.pk]["ids"].add(remote_id)
         return manual_ids, candidate_specs
 
@@ -721,7 +732,7 @@ class BaseCableTableView(
                 remote_interface = self._resolve_context_interface(
                     context,
                     remote_owner_by_link.get(id(link)),
-                    _remote_port_ref(link),
+                    remote_port_ref(link),
                     _remote_port_name_candidates(link),
                 )
             if self._link_ends_conflict(local_interface, remote_interface, context["visible_cable_ids"]):
@@ -1503,7 +1514,7 @@ class BaseCableTableView(
         if isinstance(remote_port, str) and remote_port:
             remote_name_candidates = _remote_port_name_candidates(link)
             netbox_remote_interface = None
-            librenms_remote_port_id = _remote_port_ref(link)
+            librenms_remote_port_id = remote_port_ref(link)
             if server_key is None:
                 server_key = self._render_server_key()
 
