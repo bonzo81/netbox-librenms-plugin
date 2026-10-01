@@ -174,6 +174,26 @@ class TestIpRowInterfaceNames:
                 row.get("interface_name") for row in fresh["table"].data
             ]
 
+    def test_an_empty_port_map_from_an_older_failed_read_is_repaired_once(self, recording_server):
+        """An entry cached with ``ports_by_id: {}`` backfills on one warm render, then stays off LibreNMS."""
+        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        ports_path = f"/api/v0/devices/{load_recording('iosxe-subinterfaces')['device_id']}/ports"
+        view.librenms_api.cache_timeout = 300
+        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
+        cache_key = view.get_cache_key(device, "ip_addresses", "test")
+        cache.set(cache_key, {**cache.get(cache_key), "ports_by_id": {}}, timeout=300)
+        server.requests.clear()
+
+        view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
+        assert sum(request["path"] == ports_path for request in server.requests) == 1
+        server.requests.clear()
+        warm = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
+
+        assert all(request["path"] != ports_path for request in server.requests)
+        assert [row.get("interface_name") for row in warm["table"].data] == [
+            row.get("interface_name") for row in fresh["table"].data
+        ]
+
 
 @pytest.mark.django_db
 class TestIpRowVrfSuggestions:
