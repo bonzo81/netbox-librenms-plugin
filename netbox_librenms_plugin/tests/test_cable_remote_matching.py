@@ -1158,7 +1158,13 @@ class TestCheckAndCreateTheRemoteEnd:
             "/api/v0/ports/500",
             {
                 "status": "ok",
-                "port": [port or {**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}],
+                "port": [
+                    {
+                        "device_id": 9,
+                        "deleted": 0,
+                        **(port or {**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}),
+                    }
+                ],
             },
         )
         row = _row(
@@ -1306,6 +1312,41 @@ class TestCheckAndCreateTheRemoteEnd:
         assert check.status_code == create.status_code == 409
         assert "LibreNMS returned no record for the remote port" in check.content.decode()
         assert not Interface.objects.filter(device=remote_device).exists()
+
+    @pytest.mark.parametrize(
+        "record_override",
+        [{"device_id": 77}, {"deleted": 1}, {"device_id": None}],
+        ids=["another-device", "deleted", "no-device-id"],
+    )
+    def test_a_port_record_that_is_not_live_on_the_neighbour_is_refused(
+        self, record_override, librenms_server, settings
+    ):
+        """A stale cached port key can name a deleted or renumbered port: neither step may bind to it."""
+        from dcim.models import Cable, Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "chk-stale-port", librenms_server, settings
+        )
+        port = {**_PORT_KEYS_UNSET, "device_id": 9, "deleted": 0, "port_id": 500, "ifName": "Gi0/1"}
+        port.update(ifType="ethernetCsmacd", **record_override)
+        if port["device_id"] is None:
+            del port["device_id"]
+        librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": [port]})
+        client = _logged_in(make_superuser("remote-create-chk-stale-port"))
+
+        data = {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key}
+        check = client.get(_remote_create_url(local_device), data)
+        create = client.post(_remote_create_url(local_device), data)
+
+        assert not Interface.objects.filter(device=remote_device).exists()
+        assert not Cable.objects.exists()
+        assert check.status_code == create.status_code == 409
+        assert (
+            f"The remote port no longer exists in LibreNMS on {remote_device.name}. "
+            "Refresh the cable data and try again." == check.content.decode() == create.content.decode()
+        )
 
     def test_the_check_creates_nothing(self, librenms_server, settings):
         """Step one is read-only."""

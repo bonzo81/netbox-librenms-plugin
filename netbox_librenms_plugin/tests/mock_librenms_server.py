@@ -714,7 +714,8 @@ class LibreNMSStubServer(MockLibreNMSServer):
             if port_id is not None:
                 self.register(
                     f"/api/v0/ports/{port_id}",
-                    {"status": "ok", "port": [port]},
+                    # A real /ports/{id} record carries its owner and deleted flag; the recordings omit both.
+                    {"status": "ok", "port": [{"device_id": device_id, "deleted": 0, **port}]},
                     method="GET",
                 )
 

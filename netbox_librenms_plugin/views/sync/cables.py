@@ -1587,6 +1587,13 @@ class CableRemoteCreateView(SyncCablesView):
             return None, HttpResponse(
                 "LibreNMS returned no record for the remote port. Refresh the cable data and try again.", status=409
             )
+        if not self._port_record_is_live_on_neighbour(port, row):
+            return None, HttpResponse(
+                f"The remote port no longer exists in LibreNMS on {remote_device.name}. "
+                "Refresh the cable data and try again.",
+                status=409,
+                content_type="text/plain",
+            )
         # The far end is an interface create, so the rules decide the port for the remote device.
         decision = interface_rules_for_request(request).check_interface_write(
             port, platform_id=remote_device.platform_id
@@ -1623,6 +1630,16 @@ class CableRemoteCreateView(SyncCablesView):
         if port_id is None:
             return None
         return self._fetch_port_record(port_id)
+
+    @staticmethod
+    def _port_record_is_live_on_neighbour(port, row):
+        """True only when *port* is a not-deleted port of the row's neighbour; a missing field refuses."""
+        neighbour_id = coerce_librenms_id(row.get("remote_device_id"))
+        return (
+            neighbour_id is not None
+            and coerce_librenms_id(port.get("device_id")) == neighbour_id
+            and port.get("deleted") in (None, 0, "0")
+        )
 
     @staticmethod
     def _proposed_interface_name(request, obj, row, port):
