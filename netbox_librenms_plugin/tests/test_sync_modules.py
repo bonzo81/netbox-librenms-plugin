@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    aborting_statement,
     failing_statement,
     hold_port_claim,
     lock_row,
@@ -753,6 +754,48 @@ class TestInstallAndUpdateViews:
         assert module.module_type == module_type
         assert module.serial == "VIEW-SERIAL"
         assert any("Installed VIEW-INSTALL-CARD" in text for text in message_texts(request))
+
+    def test_a_database_error_in_the_bind_keeps_the_install(self, live_librenms):
+        """The bind's own savepoint takes a real PostgreSQL error; the install still commits."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("view-install-bind-error", librenms_cf={"default": 68})
+        bay = make_module_bay(device, "Bind Error Bay")
+        module_type = make_module_type("BIND-ERROR-CARD")
+        interface = make_interface(device, "Ethernet68")
+        item = _inventory_item(
+            680, module_type.model, bay.name, _librenms_port_id=6680, _librenms_ifname=interface.name
+        )
+        request = _post_request(
+            {
+                "module_bay_id": bay.pk,
+                "module_type_id": module_type.pk,
+                "ent_index": 680,
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+                    680,
+                    module_inventory_row_digest(item),
+                ),
+            }
+        )
+        view = _view(InstallModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=68)
+
+        with aborting_statement(lambda sql, params: sql.startswith('UPDATE "dcim_interface"')) as failed:
+            response = view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert failed, "precondition: the bind wrote the interface"
+        assert response.status_code == 302
+        assert Module.objects.get(device=device, module_bay=bay).module_type == module_type
+        assert interface.module_id is None
+        assert any("interface binding was skipped: unexpected error" in text for text in message_texts(request))
 
     def test_single_install_refuses_a_reused_inventory_index(self, live_librenms):
         """A stale install form must not apply data from a replacement inventory row."""

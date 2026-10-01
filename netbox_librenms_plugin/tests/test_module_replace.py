@@ -233,7 +233,7 @@ class TestModuleMismatchPreviewView:
 
 
 class TestReplaceModuleView:
-    def _setup(self, tag, *, new_serial="NEW-SERIAL"):
+    def _setup(self, tag, *, new_serial="NEW-SERIAL", item_extra=None):
         from dcim.models import Module
 
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
@@ -248,6 +248,7 @@ class TestReplaceModuleView:
                 "entPhysicalIndex": 100,
                 "entPhysicalModelName": new_type.model,
                 "entPhysicalSerialNum": new_serial,
+                **(item_extra or {}),
             }
         ]
         request = make_request(
@@ -280,6 +281,29 @@ class TestReplaceModuleView:
 
         assert response.status_code == 302
         assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+
+    def test_a_database_error_in_the_bind_keeps_the_replacement(self):
+        """The bind's own savepoint takes a real PostgreSQL error; the replacement still commits."""
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
+
+        Module, device, _old_type, new_type, bay, installed, request, view, inventory = self._setup(
+            "bind-error", item_extra={"_librenms_port_id": 6690, "_librenms_ifname": "Ethernet69"}
+        )
+        interface = make_interface(device, "Ethernet69")
+        cache_key = _cache_inventory(view, device, inventory)
+        try:
+            with aborting_statement(lambda sql, params: sql.startswith('UPDATE "dcim_interface"')) as failed:
+                response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        interface.refresh_from_db()
+        assert failed, "precondition: the bind wrote the interface"
+        assert response.status_code == 302
+        assert not Module.objects.filter(pk=installed.pk).exists()
+        assert Module.objects.get(device=device, module_bay=bay).module_type == new_type
+        assert interface.module_id is None
+        assert any("interface binding was skipped: unexpected error" in text for text in message_texts(request))
 
     def test_a_rule_that_leaves_padding_still_stores_a_clean_serial(self):
         """A serial rule is operator-written, so it can drop a prefix and leave the space behind."""

@@ -127,6 +127,26 @@ def failing_statement(matches, sqlstate):
         yield failed
 
 
+@contextmanager
+def aborting_statement(matches):
+    """
+    Run ``SELECT 1/0`` in place of the first statement on the test's connection that *matches*.
+
+    PostgreSQL raises a real ``22012`` (not a lock conflict) and aborts the open transaction, so
+    only a savepoint lets the outer transaction continue.
+    """
+    failed = []
+
+    def fail(execute, sql, params, many, context):
+        if not failed and matches(sql, params):
+            failed.append(sql)
+            return execute("SELECT 1/0", None, many, context)
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(fail):
+        yield failed
+
+
 def wrapped_database_error(sqlstate):
     """Return the Django error that Django's own error wrapper makes of a psycopg error with *sqlstate*."""
     import psycopg.errors

@@ -773,6 +773,7 @@ def _format_vc_adjustment_summary(adjustments):
     return ", ".join(parts)
 
 
+# Its own savepoint: callers catch a non-conflict error and keep their transaction.
 @transaction.atomic
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):  # noqa: C901
     """
