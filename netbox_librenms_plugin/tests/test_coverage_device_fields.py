@@ -1251,7 +1251,10 @@ class TestConvertLegacyLibreNMSIdView:
 
         obj.refresh_from_db()
         assert obj.custom_field_data["librenms_id"] == librenms_id
-        assert any(f"already has librenms_id {librenms_id}" in text for text in _messages(response, "error"))
+        assert _messages(response, "error") == [
+            f"LibreNMS ID {librenms_id} is already assigned to another NetBox object. "
+            f"Cannot convert the legacy ID for server '{SERVER_KEY}'."
+        ]
         assert not _messages(response, "success")
         assert changes.count() == logged_before
 
