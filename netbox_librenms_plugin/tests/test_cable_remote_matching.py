@@ -148,6 +148,33 @@ class TestRemotePortAliasesAreFetched:
         map_device_to_librenms(device, librenms_id, server_key=server_key)
         return device, server_key
 
+    def test_an_explicit_refresh_reads_the_neighbours_recreated_port(self, librenms_server, settings):
+        """A fresh port ID must replace the record cached by the previous refresh."""
+        device, server_key = self._device_on_server("alias-refresh", 31, librenms_server, settings)
+        librenms_server.register("/api/v0/devices/31/ports", _ports_payload(_port(100, "eth0", "eth0")))
+        link = {
+            "id": 1,
+            "protocol": "lldp",
+            "local_port_id": 100,
+            "remote_port": "Gi0/1",
+            "remote_hostname": "peer.example.test",
+            "remote_port_id": 500,
+            "remote_device_id": 9,
+        }
+        librenms_server.register("/api/v0/devices/31/links", {"status": "ok", "links": [link]})
+        librenms_server.register("/api/v0/devices/9/ports", _ports_payload(_port(500, "Gi0/1", "Old name")))
+        first = _make_view().get_links_data(device, server_key=server_key)
+        assert first[0]["remote_port_key"] == 500
+
+        link["remote_port_id"] = 501
+        librenms_server.register("/api/v0/devices/31/links", {"status": "ok", "links": [link]})
+        librenms_server.register("/api/v0/devices/9/ports", _ports_payload(_port(501, "Gi0/1", "New name")))
+        refreshed = _make_view().get_links_data(device, server_key=server_key)
+
+        assert refreshed[0]["remote_port_key"] == 501
+        assert refreshed[0]["remote_port_aliases"] == ["New name"]
+        assert _requested_paths(librenms_server).count("/api/v0/devices/9/ports") == 2
+
     def test_the_other_name_field_lands_on_the_row(self, librenms_server, settings):
         """One /devices/<remote>/ports read turns 'Gi0/1' into a pair of candidate names."""
         device, server_key = self._device_on_server("alias-fetch-a", 11, librenms_server, settings)
@@ -410,8 +437,8 @@ class TestRemotePortAliasesAreFetched:
 
         assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
 
-    def test_an_empty_neighbour_port_list_is_cached(self, librenms_server, settings):
-        """A neighbour that really has no ports is a valid answer, not a glitch."""
+    def test_an_empty_neighbour_port_list_is_refreshed(self, librenms_server, settings):
+        """A neighbour can acquire its first port between two explicit refreshes."""
         device, server_key = self._device_on_server("alias-fetch-l", 22, librenms_server, settings)
         librenms_server.register(
             "/api/v0/devices/22/links",
@@ -436,7 +463,7 @@ class TestRemotePortAliasesAreFetched:
         _make_view().get_links_data(device, server_key=server_key)
         _make_view().get_links_data(device, server_key=server_key)
 
-        assert _requested_paths(librenms_server).count("/api/v0/devices/9/ports") == 1
+        assert _requested_paths(librenms_server).count("/api/v0/devices/9/ports") == 2
 
     def test_the_neighbour_reads_stop_at_the_time_budget(self, librenms_server, settings, monkeypatch):
         """A refresh must not sit through one timeout per neighbour on a well-connected device."""
@@ -484,8 +511,8 @@ class TestRemotePortAliasesAreFetched:
         assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
         assert not rows[1].get("remote_port_aliases")
 
-    def test_a_second_refresh_reads_the_neighbour_from_cache(self, librenms_server, settings):
-        """One switch is the neighbour of many devices; its names are cached per LibreNMS id."""
+    def test_a_second_refresh_reads_the_neighbour_again(self, librenms_server, settings):
+        """Each explicit refresh reads current names even when the previous read succeeded."""
         device, server_key = self._device_on_server("alias-fetch-f", 16, librenms_server, settings)
         librenms_server.register(
             "/api/v0/devices/16/links",
@@ -514,7 +541,7 @@ class TestRemotePortAliasesAreFetched:
         rows = _make_view().get_links_data(device, server_key=server_key)
 
         assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
-        assert _requested_paths(librenms_server).count("/api/v0/devices/9/ports") == 1
+        assert _requested_paths(librenms_server).count("/api/v0/devices/9/ports") == 2
 
     def test_a_failed_neighbour_read_is_not_cached(self, librenms_server, settings):
         """An outage must not silence the far end for the whole cache lifetime."""

@@ -663,15 +663,18 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             ):
                 cache.delete(cache_key)
                 return None
-            if getattr(self, "cache_only", False) and (
-                "mgmt_ip" not in cached_ip_data
-                or not isinstance(cached_ports_by_id, dict)
-                or any(
-                    _port_key(item["port_id"]) not in {_port_key(key) for key in cached_ports_by_id}
-                    for item in cached_ip_data["ip_addresses"]
+            if getattr(self, "cache_only", False):
+                cached_port_keys = (
+                    {_port_key(key) for key in cached_ports_by_id} if isinstance(cached_ports_by_id, dict) else set()
                 )
-            ):
-                return None
+                if (
+                    "mgmt_ip" not in cached_ip_data
+                    or not isinstance(cached_ports_by_id, dict)
+                    or not {_port_key(item["port_id"]) for item in cached_ip_data["ip_addresses"]}.issubset(
+                        cached_port_keys
+                    )
+                ):
+                    return None
             ip_data = cached_ip_data.get("ip_addresses", [])
             # Resolve the id for the whole warm path, not just the mgmt-IP branch below: a
             # pre-upgrade entry also lacks ports_by_id, and rebuilding that reads the device's
