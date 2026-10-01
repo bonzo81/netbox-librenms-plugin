@@ -2367,11 +2367,15 @@ class BaseCableTableView(
             return
         # The port record is what names and types the interface; a row without one would create
         # a bare "other" interface from a neighbour-advertised string, which is a guess.
-        if coerce_librenms_id(link.get("remote_port_key")) is None:
+        port_key = coerce_librenms_id(link.get("remote_port_key"))
+        if port_key is None:
+            return
+        # An advertised port the neighbour's list does not hold is a second identity: create neither.
+        if remote_port_ref(link) != port_key:
             return
         # A port another interface holds (another device, or a VM) would get a second owner.
         try:
-            if find_port_owner(link["remote_port_key"], server=server_key) is not None:
+            if find_port_owner(port_key, server=server_key) is not None:
                 return
         except AmbiguousLibreNMSIdError:
             return
