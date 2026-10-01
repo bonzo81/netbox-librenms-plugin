@@ -238,7 +238,19 @@ def _cable_scenario(librenms_server, settings, name, *, holder=None):
     map_device_to_librenms(remote_device, 9, server_key=server_key)
     librenms_server.register(
         "/api/v0/ports/500",
-        {"status": "ok", "port": [{**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}]},
+        {
+            "status": "ok",
+            "port": [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 500,
+                    "device_id": 9,
+                    "deleted": 0,
+                    "ifName": "Gi0/1",
+                    "ifType": "ethernetCsmacd",
+                }
+            ],
+        },
     )
     if holder is not None:
         _hold_cable_port(name, holder, server_key)
