@@ -357,11 +357,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             key = _port_key(port["port_id"])
             if key in wanted:
                 port_data_cache.setdefault(key, port)
-        if success and isinstance(ports, list):
-            # A successful device-port snapshot can omit a port named by an IP row. Record
-            # that absence so warm and cache-only renders do not re-fetch or reject this snapshot.
-            for key in wanted:
-                port_data_cache.setdefault(key, None)
+        # Record a port the read did not return, or a failed read, as absent: the rows render
+        # unnamed, and warm and cache-only renders do not re-fetch. A manual refresh retries.
+        for key in wanted:
+            port_data_cache.setdefault(key, None)
 
     def _load_vrf_identities(self, port_data_cache, ip_data):
         """
@@ -693,8 +692,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # Pre-populate the port map from cache so the cached render reads only
             # cache + NetBox and never re-hits LibreNMS (resilient when it's down).
             port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
-            # Pre-upgrade entries lack ports_by_id; remember so we can backfill below.
-            cached_had_ports_by_id = bool(cached_ip_data.get("ports_by_id"))
+            # Pre-upgrade entries lack the ports_by_id key; remember so we can backfill below.
+            cached_had_ports_by_id = "ports_by_id" in cached_ip_data
             cached_matches_interface_name_field = cached_interface_name_field == interface_name_field
 
         cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
