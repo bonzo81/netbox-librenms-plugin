@@ -109,6 +109,14 @@ Both scripts pass it. Taint has to cross into a module-private helper: three war
 `_detect_serial_match_role` named their matched device from inside a helper, invisible to any
 per-function analysis. Without the flag those sites are missed.
 
+## A timeout or a parse failure fails the scan
+
+The scan script passes `--strict` and `--timeout 60`. By default, a rule that runs longer than 5 s
+on a file, or a file that opengrep cannot parse, is a warning, and the scan passes without the
+findings of that file. With `--strict`, each such warning fails the scan, and the 60 s limit stops a
+stalled analysis. The scan still skips a file that the `.semgrepignore` rules or the size limit
+exclude.
+
 ## Running locally
 
 ```bash

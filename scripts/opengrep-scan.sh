@@ -7,6 +7,8 @@
 #
 # --taint-intrafile is required, not optional: taint must cross into a module-private helper, which
 # is where a per-function analysis loses the serial-match branch.
+# --strict: by default a rule that times out on a file, or a file that does not parse, is a warning,
+# and the scan passes without the findings of that file. --timeout 60 stops a stalled analysis.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,6 +35,8 @@ fi
 exec "$opengrep_bin" scan \
   --config "$repo_root/.opengrep/librenms-rules.yaml" \
   --taint-intrafile \
+  --timeout 60 \
+  --strict \
   --error \
   "${options[@]}" \
   -- "${targets[@]}"
