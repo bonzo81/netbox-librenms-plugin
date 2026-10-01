@@ -1685,8 +1685,7 @@ class TestCheckAndCreateTheRemoteEnd:
         """The created end is port 500. A binder that moves it to port 901 before the lock makes the row stale."""
         from dcim.models import Cable, Interface
 
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import make_superuser, seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
@@ -1696,7 +1695,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         def rebind_then_lock(view, local_term, remote_term, **kwargs):
             rebound = Interface.objects.get(pk=remote_term.pk)
-            set_librenms_device_id(rebound, 901, server_key)
+            seed_own_mapping(rebound, 901, server_key)
             rebound.save()
             return real_lock(view, local_term, remote_term, **kwargs)
 
