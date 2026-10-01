@@ -663,12 +663,34 @@ def _bind_paused_after(read, bind, concurrent):
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(run)
-        assert paused.wait(timeout=10)
         try:
+            for _ in range(100):
+                if paused.wait(timeout=0.1) or future.done():
+                    break
+            if not paused.is_set():
+                if future.done():
+                    raise AssertionError(f"bind finished before the paused read: {future.result()!r}")
+                raise AssertionError("bind never reached the paused read")
             concurrent()
         finally:
             resume.set()
         return future.result(timeout=30)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_bind_worker_that_finishes_before_the_read_reports_its_outcome(raises):
+    """The pause helper must surface an early result or the original worker exception."""
+
+    def bind():
+        if raises:
+            raise RuntimeError("bind refused before its read")
+        return {"status": "skipped"}
+
+    exception = RuntimeError if raises else AssertionError
+    message = "bind refused before its read" if raises else "bind finished before the paused read"
+    with pytest.raises(exception, match=message):
+        _bind_paused_after(lambda sql: False, bind, lambda: pytest.fail("no read was paused"))
 
 
 def _candidate_read_by_name(sql):
