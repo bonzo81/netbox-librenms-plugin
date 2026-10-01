@@ -1878,10 +1878,11 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
 
         dev = make_device("id-form-wide")
-        dev.custom_field_data["librenms_id"] = {"default": str(10**19)}
+        dev.custom_field_data["librenms_id"] = {"default": wide}
         dev.save()
+        dev.refresh_from_db()
 
-        assert coerce_librenms_id(wide) is None
+        assert coerce_librenms_id(dev.custom_field_data["librenms_id"]["default"]) is None
         assert find_by_librenms_id(Device, wide, "default") is None
 
 
