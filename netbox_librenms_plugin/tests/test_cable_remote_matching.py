@@ -1065,13 +1065,6 @@ class TestTheCreateAffordance:
 
         assert self._affordance(row, local_device) is None
 
-    def test_an_advertised_port_the_neighbour_does_not_list_gets_nothing(self):
-        """The row names port 500 by its record and port 777 by what was advertised, so it names no one port."""
-        _, local_device, _, _, row = _create_setup("create-two-ports")
-        row["remote_port_id"] = 777
-
-        assert self._affordance(row, local_device) is None
-
     def test_an_oob_row_gets_nothing(self):
         """OOB rows are context only and are never syncable in any state."""
         _, local_device, _, _, row = _create_setup("create-oob")
@@ -1617,9 +1610,11 @@ class TestCheckAndCreateTheRemoteEnd:
 
         assert list(Interface.objects.filter(device=remote_device).values_list("name", flat=True)) == ["Gi0/1"]
 
-    @pytest.mark.parametrize("advertised_id", [500, None], ids=["advertised", "matched-by-name"])
+    @pytest.mark.parametrize(
+        "advertised_id", [500, None, 777], ids=["advertised", "matched-by-name", "stale-advertised"]
+    )
     def test_the_created_interface_carries_the_librenms_port_id(self, librenms_server, settings, advertised_id):
-        """The row resolves by port id from now on, never by name luck."""
+        """The row resolves by port id from now on, never by name luck: the matched record's port."""
         from dcim.models import Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
@@ -1635,26 +1630,9 @@ class TestCheckAndCreateTheRemoteEnd:
 
         created = Interface.objects.get(device=remote_device, name="Gi0/1")
         assert read_mapping(created).own_id(server_key) == 500
-
-    def test_an_advertised_port_the_neighbour_does_not_list_is_not_created(self, librenms_server, settings):
-        """The row names port 500 by its record and port 777 by what was advertised, so the endpoint creates nothing."""
-        from dcim.models import Cable, Interface
-
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-
-        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
-            "mk-two-ports", librenms_server, settings, advertised_id=777
-        )
-
-        response = _logged_in(make_superuser("remote-create-mk-two-ports")).post(
-            _remote_create_url(local_device),
-            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
-        )
-
-        assert response.status_code == 404
-        assert response.content.decode() == "Cable row not found."
-        assert not Interface.objects.filter(device=remote_device).exists()
-        assert not Cable.objects.exists()
+        local_interface.refresh_from_db()
+        assert local_interface.cable is not None
+        assert created.cable_id == local_interface.cable_id
 
     def test_a_created_end_bound_to_another_port_before_the_lock_is_refused(
         self, librenms_server, settings, monkeypatch
