@@ -11,7 +11,7 @@ This package provides functions for:
 
 All imports below are intentional re-exports so that existing callers
 can continue using ``from netbox_librenms_plugin.import_utils import X``.
-The F401 suppressions prevent linters from flagging them as unused.
+The F401 per-file ignore in pyproject.toml prevents linters from flagging them as unused.
 """
 
 from .bulk_import import (

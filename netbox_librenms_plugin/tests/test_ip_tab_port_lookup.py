@@ -94,6 +94,39 @@ def _seed(live_librenms, port_count):
 class TestIpRowInterfaceNames:
     """The device ports payload already carries every name the IP rows need."""
 
+    def test_cache_coverage_normalization_grows_with_ports_and_rows(self, live_librenms, monkeypatch):
+        """A cached render must not normalize all port keys again for each IP row."""
+        from netbox_librenms_plugin.views.base import ip_addresses_view
+
+        device = make_device("ip-linear-cache", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        ports = _seed(live_librenms, 20)
+        view = _ip_view(live_librenms)
+        success, raw = view.get_ip_addresses(device)
+        assert success
+        cache.set(
+            view.get_cache_key(device, "ip_addresses", SERVER_KEY),
+            {
+                "ip_addresses": raw,
+                "mgmt_ip": "198.18.0.1",
+                "ports_by_id": {str(port["port_id"]): port for port in ports},
+                "interface_name_field": "ifName",
+            },
+            timeout=300,
+        )
+        original = ip_addresses_view._port_key
+        conversions = []
+
+        def record_conversion(value):
+            conversions.append(value)
+            return original(value)
+
+        monkeypatch.setattr(ip_addresses_view, "_port_key", record_conversion)
+        view.cache_only = True
+        context = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key=SERVER_KEY)
+
+        assert context is not None
+        assert len(conversions) <= 4 * (len(ports) + len(raw))
+
     def test_enrichment_does_not_fetch_each_port_individually(self, live_librenms):
         """One /devices/{id}/ports read replaces one /ports/{port_id} call per row."""
         device = make_device("ip-fanout", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})

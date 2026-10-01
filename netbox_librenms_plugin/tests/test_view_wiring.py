@@ -3107,3 +3107,15 @@ class TestRoutedSyncPagesScopeTheirObject:
 
         with pytest.raises(Http404):
             view.get_object(hidden.pk)
+
+
+def test_import_reexports_document_the_active_lint_policy():
+    """The package documents the lint configuration that keeps its public imports."""
+    import tomllib
+
+    from netbox_librenms_plugin import import_utils
+
+    config = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    assert "F401" in config["tool"]["ruff"]["lint"]["per-file-ignores"]["__init__.py"]
+    assert "per-file ignore" in import_utils.__doc__
+    assert callable(import_utils.bulk_import_devices)

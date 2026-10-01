@@ -22,7 +22,6 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     SERIAL_INVENTORY_SOURCE,
 )
-from netbox_librenms_plugin.librenms_api import configured_cache_timeout
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
@@ -946,59 +945,47 @@ class BaseCableTableView(
         """
         Index one neighbour's LibreNMS port names by port id and by every name field.
 
-        Only the name fields are kept and cached, keyed by LibreNMS server and device id the way
-        ``get_device_info`` already caches: one switch is the neighbour of many devices, and each
-        of their cable refreshes would otherwise re-read its whole port list. A failed or
-        malformed read is never cached, so an outage does not persist for the whole TTL.
+        Every explicit refresh reads the neighbour's current ports. The caller groups rows by
+        neighbour, so one refresh reads each neighbour once. A later refresh must see renamed
+        or re-created ports rather than reuse an earlier port list.
 
         Args:
             remote_device_id (int): The neighbour's LibreNMS device id.
             deadline (float): The ``time.monotonic()`` reading after which no further neighbour
-                is read. A cached neighbour is still served; only new reads stop.
+                is read. Rows for unread neighbours keep their advertised names.
 
         Returns:
             tuple[dict, dict]: ``(port_id, names)`` keyed by port id, and by each unambiguous
                 case-folded name.
 
         """
-        server_key = self.librenms_api.server_key
-        cache_key = f"librenms_port_names_{server_key}_{remote_device_id}"
-        records = cache.get(cache_key)
-        if not isinstance(records, list):
-            if time.monotonic() >= deadline:
-                # One slow or timing-out neighbour must not hold the whole refresh. The rows for
-                # the neighbours not read keep the advertised name only, which is what they had
-                # before aliases existed.
-                logger.warning(
-                    "Remote port name lookup budget spent; leaving LibreNMS device %s unread on this refresh.",
-                    remote_device_id,
-                )
-                return {}, {}
-            # VLAN associations say nothing about naming and make the payload much larger.
-            success, data = self.librenms_api.get_ports(remote_device_id, with_vlans=False)
-            ports = data.get("ports") if success and isinstance(data, dict) else None
-            if not isinstance(ports, list):
-                return {}, {}
-            records = []
-            complete = True
-            for port in ports:
-                # A malformed LibreNMS payload can carry non-dict rows; skip them rather than 500.
-                if not isinstance(port, dict) or coerce_librenms_id(port.get("port_id")) is None:
-                    complete = False
-                    continue
-                names = {
-                    field: port[field]
-                    for field in INTERFACE_NAME_FIELDS
-                    if isinstance(port.get(field), str) and port[field]
-                }
-                if not names:
-                    complete = False
-                    continue
-                records.append({"port_id": coerce_librenms_id(port.get("port_id")), **names})
-            if complete:
-                # A response that lost rows is a glitch, not an inventory. Caching it would keep
-                # the far end unresolved until the entry expires, through explicit refreshes.
-                cache.set(cache_key, records, timeout=configured_cache_timeout(server_key))
+        if time.monotonic() >= deadline:
+            # One slow or timing-out neighbour must not hold the whole refresh. The rows for
+            # the neighbours not read keep the advertised name only, which is what they had
+            # before aliases existed.
+            logger.warning(
+                "Remote port name lookup budget spent; leaving LibreNMS device %s unread on this refresh.",
+                remote_device_id,
+            )
+            return {}, {}
+        # VLAN associations say nothing about naming and make the payload much larger.
+        success, data = self.librenms_api.get_ports(remote_device_id, with_vlans=False)
+        ports = data.get("ports") if success and isinstance(data, dict) else None
+        if not isinstance(ports, list):
+            return {}, {}
+        records = []
+        for port in ports:
+            # A malformed LibreNMS payload can carry non-dict rows; skip them rather than 500.
+            if not isinstance(port, dict) or coerce_librenms_id(port.get("port_id")) is None:
+                continue
+            names = {
+                field: port[field]
+                for field in INTERFACE_NAME_FIELDS
+                if isinstance(port.get(field), str) and port[field]
+            }
+            if not names:
+                continue
+            records.append({"port_id": coerce_librenms_id(port.get("port_id")), **names})
 
         by_port_id = {}
         by_name = {}
