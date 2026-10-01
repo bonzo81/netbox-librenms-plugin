@@ -631,6 +631,24 @@ def test_an_ambiguous_port_is_cabled(client, link):
 
 
 @pytest.mark.django_db
+def test_a_stale_advertised_port_is_not_a_port_the_write_touches(client, link):
+    """The matched record 500 names the far end; the advertised 777 is not on the neighbour now."""
+    link.ignore(None, "^Xe0/7$")
+    link.server.register("/api/v0/ports/777", {"status": "ok", "port": [_port(777, "Xe0/7")]})
+    _seed(link.local_device, _row(link.local, link.remote_device, remote_port_id=777))
+
+    record, html = _render(client, link.local_device)
+    _sync(client, link.local_device, _sync_data(record))
+
+    assert record["netbox_remote_interface_id"] == link.remote.pk
+    assert "Not synced" not in html
+    assert "Sync Cable" in html
+    link.local.refresh_from_db()
+    assert link.local.cable is not None and link.local.cable.b_terminations == [link.remote]
+    assert "/api/v0/ports/777" not in [request["path"] for request in link.server.requests]
+
+
+@pytest.mark.django_db
 def test_the_far_end_create_is_not_offered_when_the_local_port_is_ignored(client, link):
     rule = link.ignore(link.local_platform, "^Te")
     link.remote.delete()

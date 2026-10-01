@@ -290,8 +290,8 @@ def cable_row_ports(row):
     """
     Return the LibreNMS ports a cable row names, with the records its snapshot cached for them.
 
-    A serial row names no LibreNMS port. The remote end is the port record the fetch matched,
-    and the advertised ``remote_port_id`` too when it differs.
+    A serial row names no LibreNMS port. The remote end is the one port the write touches
+    (:func:`remote_port_ref`); only the matched port record has a cached record.
 
     Args:
         row (dict): A cable row.
@@ -310,11 +310,9 @@ def cable_row_ports(row):
     ports = []
     if (local_id := coerce_librenms_id(row.get("local_port_id"))) is not None:
         ports.append(("local", local_id, cached("local_port_record")))
-    remote_key = coerce_librenms_id(row.get("remote_port_key"))
-    for port_id in dict.fromkeys(
-        port_id for port_id in (remote_key, coerce_librenms_id(row.get("remote_port_id"))) if port_id is not None
-    ):
-        ports.append(("remote", port_id, cached("remote_port_record") if port_id == remote_key else None))
+    if (remote_id := remote_port_ref(row)) is not None:
+        matched = remote_id == coerce_librenms_id(row.get("remote_port_key"))
+        ports.append(("remote", remote_id, cached("remote_port_record") if matched else None))
     return ports
 
 
