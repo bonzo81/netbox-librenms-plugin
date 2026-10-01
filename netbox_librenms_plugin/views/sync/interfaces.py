@@ -51,7 +51,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_transition_to_response,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import run_transaction
+from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
@@ -59,6 +59,7 @@ from netbox_librenms_plugin.utils import (
     build_migrated_context,
     coerce_model_pk,
     convert_speed_to_kbps,
+    exception_text_for,
     find_interface_by_librenms_port_id,
     get_interface_name_field,
     get_interface_port_identity_sets,
@@ -2249,7 +2250,19 @@ class DeleteNetBoxInterfacesView(
         if not all(interface_id.isdecimal() for interface_id in interface_ids):
             return JsonResponse({"error": "Interface IDs must be integers"}, status=400)
 
-        deleted_count, errors = run_transaction(partial(self._delete_attempt, obj, object_type, interface_ids))
+        try:
+            deleted_count, errors = run_transaction(partial(self._delete_attempt, obj, object_type, interface_ids))
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
+            if isinstance(exc, CommittedFollowUpError):
+                raise
+            logger.exception("Interface deletion for %s %s failed", object_type, obj.pk)
+            model = Interface if object_type == "device" else VMInterface
+            return JsonResponse(
+                {"error": f"No interfaces were deleted: {exception_text_for(exc, model, request.user)}"},
+                status=409,
+            )
 
         response_data = {
             "status": "success",

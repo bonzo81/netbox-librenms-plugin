@@ -353,8 +353,10 @@ class LibreNMSAPI:
 
             if response.status_code == 200:
                 data = response.json()
-                if data.get("status") == "ok" and data.get("system"):
-                    return data["system"][0] if data["system"] else None
+                if isinstance(data, dict) and data.get("status") == "ok":
+                    system = data.get("system")
+                    if isinstance(system, list) and system and isinstance(system[0], dict):
+                        return system[0]
 
             # Handle different HTTP status codes with user-friendly messages
             if response.status_code == 401:

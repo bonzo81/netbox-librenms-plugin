@@ -420,6 +420,29 @@ class TestLibreNMSAPIConnection:
 
     PATH = "/api/v0/system"
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            [],
+            "text",
+            None,
+            7,
+            {"status": "ok", "system": "text"},
+            {"status": "ok", "system": {"version": "24"}},
+            {"status": "ok", "system": ["text"]},
+            {"status": "ok", "system": []},
+        ],
+    )
+    def test_malformed_system_reply_returns_an_error(self, local_librenms_api, librenms_server, payload):
+        """A reachable HTTP server with the wrong JSON shape is not a working LibreNMS."""
+        librenms_server.register(self.PATH, payload, method="GET")
+
+        result = local_librenms_api.test_connection()
+
+        assert isinstance(result, dict)
+        assert result.get("error") is True
+        assert [(r["method"], r["path"]) for r in librenms_server.requests] == [("GET", self.PATH)]
+
     def test_connection_success(self, local_librenms_api, librenms_server):
         """Verify successful connection test."""
         librenms_server.register(

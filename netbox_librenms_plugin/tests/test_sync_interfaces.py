@@ -10,6 +10,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_vm,
+    transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface, post_interface_sync, seed_ports
 
@@ -170,8 +171,8 @@ class TestAssignInterfaceMac:
 
 
 @pytest.mark.django_db
-def test_interface_delete_database_error_propagates_and_deletes_nothing(client):
-    """A database error that is not a lock conflict fails the request and rolls back an earlier delete."""
+def test_interface_delete_database_error_returns_json_and_deletes_nothing(client):
+    """A non-conflict database error returns safe JSON and rolls back every deletion."""
     from django.db import DatabaseError, connection
     from django.urls import reverse
 
@@ -198,8 +199,12 @@ def test_interface_delete_database_error_propagates_and_deletes_nothing(client):
             raise DatabaseError("private database constraint detail")
         return execute(sql, params, many, context)
 
-    with connection.execute_wrapper(fail_interface_delete), pytest.raises(DatabaseError):
-        client.post(url, {"interface_ids": [str(first_interface.pk), str(failed_interface.pk)]})
+    with connection.execute_wrapper(fail_interface_delete):
+        response = client.post(url, {"interface_ids": [str(first_interface.pk), str(failed_interface.pk)]})
+
+    assert response.status_code == 409
+    assert "No interfaces were deleted" in response.json()["error"]
+    assert "private database constraint detail" not in response.json()["error"]
 
     assert failed_deletes == 1
     assert type(first_interface).objects.filter(pk=first_interface.pk).exists()
@@ -236,3 +241,38 @@ def test_interface_update_ignores_non_string_mac(mac):
     assert interface.description == "updated description"
     assert interface.primary_mac_address_id is None
     assert not MACAddress.objects.exists()
+
+
+@transactional_db_with_all_apps()
+def test_interface_delete_keeps_a_committed_follow_up_failure(client):
+    """A callback failure must not report that a committed deletion was rolled back."""
+    from django.db import transaction
+    from django.db.models.signals import post_delete
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.transactions import CommittedFollowUpError
+
+    device = make_device("interface-delete-committed")
+    interface = make_interface(device, "Ethernet1")
+    interface_pk = interface.pk
+    client.force_login(make_superuser("interface-delete-committed-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+
+    def fail_after_commit():
+        raise RuntimeError("follow-up failed")
+
+    def schedule_failure(sender, instance, **kwargs):
+        if instance.pk == interface_pk:
+            transaction.on_commit(fail_after_commit)
+
+    post_delete.connect(schedule_failure, sender=Interface)
+    try:
+        with pytest.raises(CommittedFollowUpError):
+            client.post(url, {"interface_ids": [str(interface_pk)]})
+    finally:
+        post_delete.disconnect(schedule_failure, sender=Interface)
+
+    assert not Interface.objects.filter(pk=interface_pk).exists()
