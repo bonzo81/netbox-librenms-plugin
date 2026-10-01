@@ -74,7 +74,9 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(device)
                     if lookup_error is not None:
+                        # Another object claims the discovered ID, so the status stays unknown.
                         lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
+                        continue
                     device_status_map[device.pk] = bool(librenms_id)
                 except Exception as exc:
                     if classify_conflict(exc):
@@ -134,7 +136,9 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(vm)
                     if lookup_error is not None:
+                        # Another object claims the discovered ID, so the status stays unknown.
                         lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
+                        continue
                     vm_status_map[vm.pk] = bool(librenms_id)
                 except Exception as exc:
                     if classify_conflict(exc):
