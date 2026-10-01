@@ -543,7 +543,7 @@ def test_combined_stack_ambiguity_and_object_collision_discloses_both():
     html = render_to_string(
         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
         {
-            "block_message": outcome.block_message,
+            "stack_block_message": outcome.stack_block_message,
             "collisions": outcome.collisions,
             "stack_ambiguities": outcome.stack_ambiguities,
         },
@@ -551,5 +551,6 @@ def test_combined_stack_ambiguity_and_object_collision_discloses_both():
 
     assert "serial-less stacks whose members are indistinguishable" in outcome.block_message
     assert "1 NetBox object collision(s)" in outcome.block_message
+    assert "serial-less stacks whose members are indistinguishable" in html
     assert "collision-a" in html
     assert "same NetBox object" in html
