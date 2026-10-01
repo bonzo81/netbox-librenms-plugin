@@ -18,7 +18,6 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import DatabaseError, DataError, IntegrityError, OperationalError
 from django.db import IntegrityError as DbIntegrityError
 from django.db.models import ProtectedError
-from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from psycopg.errors import UniqueViolation as PgUniqueViolation
 from requests.exceptions import RequestException
@@ -28,6 +27,15 @@ from netbox_librenms_plugin.transactions import classify_conflict, database_erro
 from netbox_librenms_plugin.utils import exception_text_for, validation_error_detail
 
 logger = logging.getLogger(__name__)
+
+
+# Local stand-ins, not django.http: CodeQL would report each positive case as a real exposure.
+class HttpResponse:
+    def __init__(self, content): ...
+
+
+class JsonResponse(HttpResponse):
+    pass
 
 
 # --- names each read that can reach a page (except ValidationError)
