@@ -1663,7 +1663,7 @@ class CableRemoteCreateView(SyncCablesView):
         """
         remote_device = context["remote_device"]
         name = context["proposed_name"]
-        port_key = context["row"].get("remote_port_key")
+        port_key = remote_port_ref(context["row"])
         claim_librenms_port_binding(port_key, context["server_key"])
         try:
             port_is_bound = find_port_owner(port_key, server=context["server_key"]) is not None
@@ -1678,7 +1678,6 @@ class CableRemoteCreateView(SyncCablesView):
             raise _RemoteCreateAborted(
                 f"{remote_device.name} already has an interface named {name}. Refresh the cable data and try again."
             )
-        port_key = coerce_librenms_id(context["row"].get("remote_port_key"))
         if port_key is not None:
             port_q = identity_q(
                 Interface,
@@ -1710,6 +1709,6 @@ class CableRemoteCreateView(SyncCablesView):
             raise _RemoteCreateAborted(f"You may not add interfaces to {remote_device.name}.")
         # The row resolves by LibreNMS port id from now on, never by name luck.
         interface.snapshot()
-        set_librenms_device_id(interface, context["row"].get("remote_port_key"), context["server_key"])
+        set_librenms_device_id(interface, port_key, context["server_key"])
         interface.save(update_fields=["custom_field_data", "last_updated"])
         return interface

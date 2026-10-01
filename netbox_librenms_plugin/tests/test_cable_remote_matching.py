@@ -1065,6 +1065,13 @@ class TestTheCreateAffordance:
 
         assert self._affordance(row, local_device) is None
 
+    def test_an_advertised_port_the_neighbour_does_not_list_gets_nothing(self):
+        """The row names port 500 by its record and port 777 by what was advertised, so it names no one port."""
+        _, local_device, _, _, row = _create_setup("create-two-ports")
+        row["remote_port_id"] = 777
+
+        assert self._affordance(row, local_device) is None
+
     def test_an_oob_row_gets_nothing(self):
         """OOB rows are context only and are never syncable in any state."""
         _, local_device, _, _, row = _create_setup("create-oob")
@@ -1140,7 +1147,9 @@ def _logged_in(user):
 class TestCheckAndCreateTheRemoteEnd:
     """GET reports what would be created; POST creates it and the cable, or neither."""
 
-    def _scenario(self, name, librenms_server, settings, *, port=None, advertised="Gi0/1", aliases=None):
+    def _scenario(
+        self, name, librenms_server, settings, *, port=None, advertised="Gi0/1", aliases=None, advertised_id=500
+    ):
         """A page device, a modelled neighbour with no matching port, and a seeded cable row."""
         from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
@@ -1164,6 +1173,7 @@ class TestCheckAndCreateTheRemoteEnd:
             remote_device=remote_device.name,
             remote_port=advertised,
             remote_port_aliases=aliases,
+            remote_port_id=advertised_id,
             remote_port_key=500,
         )
         row_id = _seed_cable_row(local_device, row, server_key)
@@ -1607,14 +1617,15 @@ class TestCheckAndCreateTheRemoteEnd:
 
         assert list(Interface.objects.filter(device=remote_device).values_list("name", flat=True)) == ["Gi0/1"]
 
-    def test_the_created_interface_carries_the_librenms_port_id(self, librenms_server, settings):
+    @pytest.mark.parametrize("advertised_id", [500, None], ids=["advertised", "matched-by-name"])
+    def test_the_created_interface_carries_the_librenms_port_id(self, librenms_server, settings, advertised_id):
         """The row resolves by port id from now on, never by name luck."""
         from dcim.models import Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
-            "mk-b", librenms_server, settings
+            "mk-b", librenms_server, settings, advertised_id=advertised_id
         )
 
         _logged_in(make_superuser("remote-create-mk-b")).post(
@@ -1624,6 +1635,57 @@ class TestCheckAndCreateTheRemoteEnd:
 
         created = Interface.objects.get(device=remote_device, name="Gi0/1")
         assert read_mapping(created).own_id(server_key) == 500
+
+    def test_an_advertised_port_the_neighbour_does_not_list_is_not_created(self, librenms_server, settings):
+        """The row names port 500 by its record and port 777 by what was advertised, so the endpoint creates nothing."""
+        from dcim.models import Cable, Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-two-ports", librenms_server, settings, advertised_id=777
+        )
+
+        response = _logged_in(make_superuser("remote-create-mk-two-ports")).post(
+            _remote_create_url(local_device),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+        )
+
+        assert response.status_code == 404
+        assert response.content.decode() == "Cable row not found."
+        assert not Interface.objects.filter(device=remote_device).exists()
+        assert not Cable.objects.exists()
+
+    def test_a_created_end_bound_to_another_port_before_the_lock_is_refused(
+        self, librenms_server, settings, monkeypatch
+    ):
+        """The created end is port 500. A binder that moves it to port 901 before the lock makes the row stale."""
+        from dcim.models import Cable, Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-rebound", librenms_server, settings
+        )
+        real_lock = SyncCablesView._lock_cable_terminations
+
+        def rebind_then_lock(view, local_term, remote_term, **kwargs):
+            rebound = Interface.objects.get(pk=remote_term.pk)
+            set_librenms_device_id(rebound, 901, server_key)
+            rebound.save()
+            return real_lock(view, local_term, remote_term, **kwargs)
+
+        monkeypatch.setattr(SyncCablesView, "_lock_cable_terminations", rebind_then_lock)
+        response = _logged_in(make_superuser("remote-create-mk-rebound")).post(
+            _remote_create_url(local_device),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+        )
+
+        assert "The cable row changed. Refresh the cable data and try again." in _messages(response)
+        assert not Interface.objects.filter(device=remote_device).exists()
+        assert not Cable.objects.exists()
 
     def test_a_hidden_renamed_remote_port_cannot_be_bound_twice(self, librenms_server, settings):
         from dcim.models import Cable, Device, Interface
