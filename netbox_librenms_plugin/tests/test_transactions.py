@@ -674,6 +674,77 @@ def test_a_busy_device_identity_claim_that_work_swallowed_is_still_retried():
 
 
 @pytest.mark.django_db
+def test_a_stale_mapping_that_work_swallowed_is_still_retried():
+    """A mapping that changed after the read records its conflict, so a broad handler cannot commit the attempt."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping, read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device(f"runner-stale-{uuid4().hex[:8]}")
+    calls = []
+
+    def write(row, fields):
+        row.save()
+        return row
+
+    def work():
+        calls.append(len(calls) + 1)
+        change = assign_own(Device.objects.get(pk=device.pk), "default", 9403)
+        if len(calls) == 1:
+            Device.objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": {"default": 9404}})
+        row = Device.objects.select_for_update().get(pk=device.pk)
+        try:
+            persist_mapping(row, change, write=write)
+        except Exception:
+            return "swallowed"
+        return "assigned"
+
+    result = run_transaction(work)
+
+    assert (result, calls) == ("assigned", [1, 2])
+    device.refresh_from_db()
+    assert read_mapping(device).own_id("default") == 9403
+
+
+@pytest.mark.django_db
+def test_a_stale_merge_side_that_work_swallowed_is_still_retried():
+    """A merge side that changed after the build records its conflict, so a broad handler cannot commit the attempt."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import merge_links, persist_mapping, persist_merge, read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    suffix = uuid4().hex[:8]
+    winner = make_device(f"runner-merge-winner-{suffix}", librenms_cf={"default": {"id": 9405}})
+    donor = make_device(f"runner-merge-donor-{suffix}", librenms_cf={"default": {"id": 9406}})
+    calls = []
+
+    def work():
+        calls.append(len(calls) + 1)
+        rows = [Device.objects.get(pk=winner.pk), Device.objects.get(pk=donor.pk)]
+        merge = merge_links(*rows, "default")
+        if len(calls) == 1:
+            Device.objects.filter(pk=donor.pk).update(custom_field_data={"librenms_id": {"default": {"id": 9407}}})
+
+        def save_both():
+            for row in rows:
+                persist_mapping(row, merge.change_for(row), write=lambda locked, fields: locked.save())
+
+        try:
+            persist_merge(merge, write=save_both)
+        except Exception:
+            return "swallowed"
+        return "merged"
+
+    result = run_transaction(work)
+
+    assert (result, calls) == ("merged", [1, 2])
+    winner.refresh_from_db()
+    assert read_mapping(winner).oob_id("default") == 9406
+
+
+@pytest.mark.django_db
 def test_an_error_that_is_not_a_conflict_is_not_retried():
     calls = []
 
