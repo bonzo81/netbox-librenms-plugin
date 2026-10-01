@@ -1503,13 +1503,38 @@ class TestCheckAndCreateTheRemoteEnd:
         make_interface(remote_device, "Gi0/1", iface_type="10gbase-x-sfpp")
         make_interface(remote_device, "GigabitEthernet0/1")
 
-        _logged_in(make_superuser("remote-create-mk-c")).post(
+        response = _logged_in(make_superuser("remote-create-mk-c")).post(
             _remote_create_url(local_device),
             {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+            follow=True,
         )
 
         assert Interface.objects.filter(device=remote_device).count() == 2
         assert Interface.objects.get(device=remote_device, name="Gi0/1").cable is None
+        assert any("already has an interface named Gi0/1" in text for text in _messages(response))
+
+    def test_a_name_held_outside_the_view_scope_is_refused(self, librenms_server, settings):
+        """A name the user may not see still refuses, with the same message as a visible one."""
+        from dcim.models import Cable, Device, Interface
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        server_key, local, near, remote, row_id = self._scenario("hidden-taken-name", librenms_server, settings)
+        hidden = make_interface(remote, "Gi0/1")
+        user = make_user_with_perms(
+            "hidden-taken-name",
+            [("view", Device), ("change", Interface), ("add", Interface), ("add", Cable), ("change", Cable)],
+        )
+        user = grant(user, "view", Interface, constraints={"pk": near.pk})
+
+        response = _logged_in(user).post(
+            _remote_create_url(local),
+            {"expected_local_id": near.pk, "row_id": row_id, "server_key": server_key},
+            follow=True,
+        )
+
+        assert list(Interface.objects.filter(device=remote).values_list("pk", flat=True)) == [hidden.pk]
+        assert not Cable.objects.exists()
+        assert any("already has an interface named Gi0/1" in text for text in _messages(response))
 
     def test_a_name_netbox_will_not_accept_is_refused(self, librenms_server, settings):
         """LibreNMS is not bound by NetBox's field limits; a bad name must not 500 the tab."""
