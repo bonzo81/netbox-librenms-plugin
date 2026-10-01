@@ -14,7 +14,7 @@ from ..import_validation_helpers import (
     apply_role_to_validation,
     vm_host_placement_issue,
 )
-from ..librenms_api import LibreNMSAPI
+from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..utils import exception_text_for, lock_librenms_id_assignment
 from .bulk_import import _is_job_cancelled
 from .device_operations import _determine_device_name, fetch_device_with_cache, validate_device_for_import
@@ -147,13 +147,10 @@ def create_vm_from_librenms(
     with transaction.atomic():
         _locked_owner, conflict = lock_librenms_id_assignment(librenms_device_id, server_key)
         if conflict is not None:
-            object_label = "VM" if isinstance(conflict, VirtualMachine) else "device"
             # The claim search is unrestricted and this helper takes no user, so it cannot check
             # who may see the owner. Naming it here would disclose an object outside the caller's
             # scope; the permission-checked callers name it through _visible_conflict_label().
-            raise ValueError(
-                f"VM cannot be imported: LibreNMS ID {librenms_device_id} is already assigned to another {object_label}"
-            )
+            raise ValueError(f"VM cannot be imported: {librenms_id_owned_message(librenms_device_id)}")
         vm = VirtualMachine(
             name=vm_name,
             site=site,

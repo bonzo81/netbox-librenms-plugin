@@ -225,13 +225,16 @@ class TestCreateVmFromLibrenms:
 
         owner = make_device("vm-import-device-owner", librenms_cf={SERVER_KEY: 6107})
 
-        with pytest.raises(ValueError, match="already assigned to another device") as excinfo:
+        with pytest.raises(ValueError) as excinfo:
             create_vm_from_librenms(
                 _payload(6107, hostname="conflicting-vm"),
                 _validation("device-conflict"),
             )
         # The claim search is unrestricted and this helper takes no user, so it must not name the
-        # owner: an importer without view rights would otherwise learn the object exists.
+        # owner or its model: an importer without view rights would otherwise learn the object exists.
+        assert str(excinfo.value) == (
+            "VM cannot be imported: LibreNMS ID 6107 is already assigned to another NetBox object."
+        )
         assert owner.name not in str(excinfo.value)
 
         assert not VirtualMachine.objects.filter(name="conflicting-vm").exists()
@@ -243,11 +246,14 @@ class TestCreateVmFromLibrenms:
         owner.custom_field_data["librenms_id"] = {SERVER_KEY: 6108}
         owner.save()
 
-        with pytest.raises(ValueError, match="already assigned to another VM") as excinfo:
+        with pytest.raises(ValueError) as excinfo:
             create_vm_from_librenms(
                 _payload(6108, hostname="second-conflicting-vm"),
                 _validation("vm-conflict"),
             )
+        assert str(excinfo.value) == (
+            "VM cannot be imported: LibreNMS ID 6108 is already assigned to another NetBox object."
+        )
         assert owner.name not in str(excinfo.value)
 
 
