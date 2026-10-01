@@ -1362,10 +1362,10 @@ class CableRemoteCreateView(SyncCablesView):
         adopt silently, so the action refuses and the user refreshes, which re-renders the row as
         an ordinary syncable one.
 
-        Locking mirrors ``_resolve_oob_interface``: the candidate is locked inside the caller's
-        view scope, so a caller cannot hold a row it may not see. The model-level ``add`` grant is
-        the view's declared POST permission and is not re-asked here: nothing can change it between
-        dispatch and this line. What the gate cannot answer is WHICH devices the grant reaches, so
+        No interface row is locked here. ``post()`` locks the remote Device row first, and the
+        ``dcim_interface_unique_device_name`` constraint refuses a concurrent insert. The
+        model-level ``add`` grant is the view's declared POST permission and is not re-asked here:
+        nothing can change it between dispatch and this line. What the gate cannot answer is WHICH devices the grant reaches, so
         the saved object is re-read through the user's own constraints below.
 
         Args:
@@ -1381,17 +1381,8 @@ class CableRemoteCreateView(SyncCablesView):
         """
         remote_device = context["remote_device"]
         name = context["proposed_name"]
-        taken = (
-            Interface.objects.restrict(request.user, "view")
-            # of=("self",): restrict() joins the permission tables, and a bare select_for_update()
-            # would try to lock those joined rows too.
-            .select_for_update(of=("self",))
-            .filter(device=remote_device, name=name)
-            .exists()
-        )
-        # `.exists()` on the plain manager reads no row data and takes no lock, so a name held
-        # outside the caller's scope refuses here instead of racing into an IntegrityError.
-        if taken or Interface.objects.filter(device=remote_device, name=name).exists():
+        # Unscoped on purpose: a name held outside the caller's view scope also refuses.
+        if Interface.objects.filter(device=remote_device, name=name).exists():
             raise _RemoteCreateAborted(
                 f"{remote_device.name} already has an interface named {name}. Refresh the cable data and try again."
             )
@@ -1406,8 +1397,7 @@ class CableRemoteCreateView(SyncCablesView):
             # transaction. Two simultaneous POSTs both find the name free, so the
             # dcim_interface_unique_device_name constraint is what actually settles it.
             with transaction.atomic():
-                # Skip the uniqueness check here: that constraint owns the race, and the scoped
-                # lock above already settled the visible case.
+                # Skip the uniqueness check: the existence check above and that constraint own it.
                 interface.full_clean(validate_unique=False)
                 interface.save()
         except IntegrityError as exc:
