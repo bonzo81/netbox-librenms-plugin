@@ -46,6 +46,11 @@ def _validate_api_url(url):
         raise ValueError("LibreNMS API URLs must not include a query or fragment.")
 
 
+def librenms_id_owned_message(librenms_id):
+    """Return the conflict text that names neither the owner nor its model."""
+    return f"LibreNMS ID {librenms_id} is already assigned to another NetBox object."
+
+
 class LibreNMSIDConflictError(ValueError):
     """A LibreNMS device ID is already assigned to another NetBox object."""
 
@@ -577,7 +582,7 @@ class LibreNMSAPI:
                 if conflict is not None:
                     object_label = "VM" if conflict._meta.model_name == "virtualmachine" else "device"
                     raise LibreNMSIDConflictError(
-                        f"LibreNMS ID {librenms_id} is already assigned to another {object_label}.",
+                        librenms_id_owned_message(librenms_id),
                         conflict=conflict,
                         named_message=(
                             f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
