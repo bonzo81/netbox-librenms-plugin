@@ -368,6 +368,8 @@ class ImportSettingsForm(NetBoxModelForm):
 CABLE_SYNC_TAG_TAKEN = "A different tag already uses this name."
 
 
+# caught-error-text lists this ValidationError subclass among its source classes.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
 class CableSyncTagNameTaken(ValidationError):
     """The form's own refusal: another tag holds the provenance tag name. The message names only the user's input."""
 

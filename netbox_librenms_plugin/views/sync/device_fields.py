@@ -107,7 +107,10 @@ def _write_failure_message(exc, action, written_field, model, user):
     # full_clean() validates the whole object, so the failure can sit on a field this write never
     # touched. Whether the write caused the failure is not knowable from the error keys alone:
     # a custom validator can add any key, so the wording states what failed, never when it broke.
+    # The keys only choose the wording; the text comes from exception_text_for.
+    # nosemgrep: caught-error-text  # noqa: ERA001
     keys = exc.error_dict if hasattr(exc, "error_dict") else ()
+    # nosemgrep: caught-error-text  # noqa: ERA001
     elsewhere = [key for key in keys if key not in (written_field, NON_FIELD_ERRORS)]
     if elsewhere and len(elsewhere) == len(keys):
         return f"Cannot {action}: another field fails validation. {detail.rstrip('.')}. Resolve that, then retry."
@@ -227,10 +230,16 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.name = old_name
-            messages.error(
-                request,
-                _write_failure_message(e, f"update device name to '{resolved_name}'", "name", Device, request.user),
+            failure = _write_failure_message(
+                # The keys only choose the wording; the text comes from exception_text_for.
+                # nosemgrep: caught-error-text  # noqa: ERA001
+                e,
+                f"update device name to '{resolved_name}'",
+                "name",
+                Device,
+                request.user,
             )
+            messages.error(request, failure)
             return _device_sync_redirect(request, pk, server_key)
 
         messages.success(request, f"Device name updated from '{old_name}' to '{resolved_name}'")
@@ -291,9 +300,10 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.serial = old_serial
-            messages.error(
-                request, _write_failure_message(e, f"update serial to '{serial}'", "serial", Device, request.user)
-            )
+            # The keys only choose the wording; the text comes from exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            failure = _write_failure_message(e, f"update serial to '{serial}'", "serial", Device, request.user)
+            messages.error(request, failure)
             return _device_sync_redirect(request, pk, server_key)
 
         if old_serial:
@@ -377,12 +387,16 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.device_type = old_device_type
-            messages.error(
-                request,
-                _write_failure_message(
-                    e, f"update device type to '{device_type}'", "device_type", Device, request.user
-                ),
+            failure = _write_failure_message(
+                # The keys only choose the wording; the text comes from exception_text_for.
+                # nosemgrep: caught-error-text  # noqa: ERA001
+                e,
+                f"update device type to '{device_type}'",
+                "device_type",
+                Device,
+                request.user,
             )
+            messages.error(request, failure)
             return _device_sync_redirect(request, pk, server_key)
 
         messages.success(
@@ -464,9 +478,10 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.platform = old_platform
-            messages.error(
-                request, _write_failure_message(e, f"update platform to '{platform}'", "platform", Device, request.user)
-            )
+            # The keys only choose the wording; the text comes from exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            failure = _write_failure_message(e, f"update platform to '{platform}'", "platform", Device, request.user)
+            messages.error(request, failure)
             return _device_sync_redirect(request, pk, server_key)
 
         if old_platform:
@@ -645,12 +660,16 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             except ValidationError as e:
                 transaction.set_rollback(True)
                 logger.exception("ValidationError validating device pk=%s: %s", pk, validation_error_detail(e))
-                messages.error(
-                    request,
-                    _write_failure_message(
-                        e, f"assign platform '{platform}' to device (pk={pk})", "platform", Device, request.user
-                    ),
+                failure = _write_failure_message(
+                    # The keys only choose the wording; the text comes from exception_text_for.
+                    # nosemgrep: caught-error-text  # noqa: ERA001
+                    e,
+                    f"assign platform '{platform}' to device (pk={pk})",
+                    "platform",
+                    Device,
+                    request.user,
                 )
+                messages.error(request, failure)
                 return self._sync_redirect(
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
                 )
@@ -846,9 +865,10 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                     member.save()
                 except (ValidationError, IntegrityError) as e:
                     member.serial = old_serial
-                    errors.append(
-                        _write_failure_message(e, f"set serial on {member.name}", "serial", Device, request.user)
-                    )
+                    # The keys only choose the wording; the text comes from exception_text_for.
+                    # nosemgrep: caught-error-text  # noqa: ERA001
+                    failure = _write_failure_message(e, f"set serial on {member.name}", "serial", Device, request.user)
+                    errors.append(failure)
                     counter += 1
                     continue
 
@@ -1229,10 +1249,16 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 locked.save()
             except ValidationError as exc:
                 transaction.set_rollback(True)
-                messages.error(
-                    request,
-                    _write_failure_message(exc, "save converted librenms_id", "custom_field_data", model, request.user),
+                failure = _write_failure_message(
+                    # The keys only choose the wording; the text comes from exception_text_for.
+                    # nosemgrep: caught-error-text  # noqa: ERA001
+                    exc,
+                    "save converted librenms_id",
+                    "custom_field_data",
+                    model,
+                    request.user,
                 )
+                messages.error(request, failure)
                 return self._sync_url(object_type, pk)
             except Exception as exc:
                 transaction.set_rollback(True)

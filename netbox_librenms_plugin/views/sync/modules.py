@@ -277,6 +277,8 @@ def _module_write_failure(exc, model, user):
         str: The duplicate interface name hint, else the text from ``exception_text_for``.
 
     """
+    # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+    # nosemgrep: caught-error-text  # noqa: ERA001
     if isinstance(exc, IntegrityError) and "dcim_interface_unique_device_name" in str(exc):
         return (
             "duplicate interface name — this module type's interface template "
@@ -1131,7 +1133,10 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
-            messages.error(request, f"Failed to install module: {_module_write_failure(e, Module, request.user)}")
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Failed to install module: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -1335,7 +1340,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
-            messages.error(request, f"Branch install failed: {_module_write_failure(e, Module, request.user)}")
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Branch install failed: {detail}")
             return
 
         _report_install_results(request, installed, skipped, failed)
@@ -1657,7 +1665,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
-            return {"status": "failed", "name": name, "reason": _module_write_failure(e, Module, user)}
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            reason = _module_write_failure(e, Module, user)
+            return {"status": "failed", "name": name, "reason": reason}
 
         if holder_of is not None:
             holder_of[module.pk] = locked_bay.module_id
@@ -2291,7 +2302,10 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
-            messages.error(request, f"Install failed: {_module_write_failure(e, Module, request.user)}")
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Install failed: {detail}")
             return _modules_action_response(request, page_device, server_key)
 
         if invalid_selection_seen:
@@ -2388,7 +2402,10 @@ class UpdateModuleSerialView(
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
-            messages.error(request, f"Failed to update serial: {_module_write_failure(e, Module, request.user)}")
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Failed to update serial: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -3229,7 +3246,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
-            messages.error(request, f"Replace failed: {_module_write_failure(e, Module, request.user)}")
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Replace failed: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -3363,7 +3383,10 @@ class MoveModuleView(
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
-            messages.error(request, f"Move failed: {_module_write_failure(e, Module, request.user)}")
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Move failed: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -3651,6 +3674,8 @@ class AddBayTemplateView(
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
+                # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+                # nosemgrep: caught-error-text  # noqa: ERA001
                 detail = _module_write_failure(exc, ModuleBayMapping, request.user)
                 messages.error(request, f"Failed to add bay mapping: {detail}")
             else:
@@ -3903,6 +3928,8 @@ class AddBayTemplateView(
         except (ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
             detail = _module_write_failure(e, ModuleBayTemplate, request.user)
             messages.error(request, f"Failed to add bay template: {detail}")
 

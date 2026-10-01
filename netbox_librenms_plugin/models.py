@@ -242,6 +242,8 @@ class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
             try:
                 validate_regex_field(self.name_pattern, "name_pattern")
             except ValidationError as exc:
+                # The message is the plugin's own text about the rule's regex; it names no object.
+                # nosemgrep: caught-error-text  # noqa: ERA001
                 errors.update(exc.message_dict)
         if self.action == self.ACTION_SET_TYPE and self.netbox_type is None:
             errors["netbox_type"] = "A Set type rule needs a NetBox type."
@@ -253,6 +255,8 @@ class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
             elif not self.librenms_type:
                 errors["librenms_speed"] = "A speed needs a LibreNMS type."
         if errors:
+            # The errors hold only the plugin's own messages about this rule.
+            # nosemgrep: caught-error-text  # noqa: ERA001
             raise ValidationError(errors)
 
     def get_absolute_url(self):

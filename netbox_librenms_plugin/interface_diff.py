@@ -167,6 +167,8 @@ def syncable_mac_address(mac_address):
     return mac_address
 
 
+# This is the refusal type that caught-error-text trusts in _first_refusal.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
 class TypeRefusal(NamedTuple):
     """Why a saved interface cannot take a type: the first message, and the Interface field it refuses."""
 
@@ -211,11 +213,17 @@ class PlannedType(NamedTuple):
     kept: KeptType | None
 
 
+# This is the refusal factory that caught-error-text trusts.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
 def _first_refusal(exc):
     """Return the first message of NetBox's *exc*, with the Interface field it refuses."""
     if not hasattr(exc, "error_dict"):
         return TypeRefusal(exc.messages[0], None)
+    # The message goes into a TypeRefusal, and TypeRefusal.text_for applies the superuser rule.
+    # nosemgrep: caught-error-text  # noqa: ERA001
     key, messages = next(iter(exc.message_dict.items()))
+    # The message goes into a TypeRefusal, and the key only selects a concrete Interface field.
+    # nosemgrep: caught-error-text  # noqa: ERA001
     return TypeRefusal(messages[0], refused_model_field(Interface, key))
 
 
@@ -240,12 +248,16 @@ def type_change_refusal(interface, new_type):
     try:
         candidate.clean_fields(exclude=[field.name for field in candidate._meta.fields if field.name != "type"])
     except ValidationError as exc:
+        # _first_refusal returns a TypeRefusal, and TypeRefusal.text_for applies the superuser rule.
+        # nosemgrep: caught-error-text  # noqa: ERA001
         return _first_refusal(exc)
     if new_type != InterfaceTypeChoices.TYPE_LAG and Interface.objects.filter(lag=interface).exists():
         return TypeRefusal("An interface with LAG members must keep type lag.", "type", plugin_rule=True)
     try:
         netbox_interface_clean(candidate)
     except ValidationError as exc:
+        # _first_refusal returns a TypeRefusal, and TypeRefusal.text_for applies the superuser rule.
+        # nosemgrep: caught-error-text  # noqa: ERA001
         return _first_refusal(exc)
     return None
 

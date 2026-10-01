@@ -1,7 +1,7 @@
 # opengrep ruleset
 
-Custom [opengrep](https://github.com/opengrep/opengrep) rules enforce this project's import-preview
-invariants and coding guidelines.
+Custom [opengrep](https://github.com/opengrep/opengrep) rules enforce this project's import-preview and
+caught-error text invariants, and its coding guidelines.
 
 ## Why opengrep
 
@@ -44,6 +44,8 @@ unchecked until that review.
 | --- | --- | --- |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
 | `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
+| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for`, the module logger or a `raise`. |
+| `caught-error-text-shadow` | error | A binding of a name that `caught-error-text` trusts, a logging change, a risky error class under another name, or `except*`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
 | `url-numeric-pk-converter` | error | A `path()` route uses `<str:pk>` or `<pk>`, including local string constants. |
 | `no-direct-htmx-request-header-read` | error | Code reads the `HX-Request` header (or `HTTP_HX_REQUEST`) instead of `request.htmx`. |
@@ -54,8 +56,10 @@ unchecked until that review.
 ## Scope
 
 `import-disclosure` and its sanitizer-shadow guard exclude tests and migrations. Canonical helper
-definitions carry explicit suppressions. All other local bindings of these names are blocked. The
-requests rule covers
+definitions carry explicit suppressions. All other local bindings of these names are blocked.
+`caught-error-text` and its shadow rule also exclude tests and migrations. The canonical
+definitions of the trusted names, and each reviewed read of a caught error, carry explicit
+suppressions. The requests rule covers
 `netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The htmx header rule
 excludes tests, because a test sends the header to build an htmx request. The two test-convention
 rules include only `netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
@@ -103,6 +107,46 @@ The disclosure rule accepts only manager calls through `.objects` and the exact 
 linkage rendering. It does not trust a helper name. Its companion rule rejects local definitions,
 assignments, and callable parameters that can obscure these taint flows.
 
+The caught-error rule denies by default. Its source is the name of a handler whose class can catch
+a ValidationError, a Django or psycopg database error or an `AbortRequest`, or is `Exception`,
+`BaseException` or an exception group. A class that the rule cannot name, such as `type(exc)`,
+also counts. A chained error (`__cause__`, `__context__`, a group's `exceptions`) and a call that
+returns the current exception (`sys.exc_info()`, `traceback.format_exc()`, `locals()` and others)
+are sources in any function. Each argument or receiver of a call, and each store, return, yield,
+loop or assert message, is a finding. The exceptions are the log methods of the module `logger`, a `raise`,
+and the trusted calls: `exception_text_for`, `classify_conflict`, `database_error_sqlstate`,
+`isinstance`, `hasattr`, `type`, `validation_error_detail`, and a `TypeRefusal` that the reviewed
+factory `_first_refusal` builds. A trusted call hides the arguments that it gets. A call of a
+helper is a finding at the call, and intrafile analysis also reports the reads inside a helper of
+the same file. Its limits:
+
+- The rule knows a risky class by name: its import path, also through an import alias, or its bare
+  name. It cannot follow a class in a variable, a tuple constant or an attribute of a variable,
+  such as `except model.WriteFailed`. The shadow rule reports an assignment of a risky class and a
+  subclass of one. The two rules keep the same class list: add a new subclass to both, with a
+  fixture case for each rule.
+- A reader of the current exception that code keeps as a function object, such as
+  `format_error = traceback.format_exc`, is not a source.
+- A slice drops taint in opengrep. The rule reads a slice of a caught name or of its attributes as
+  a source, but not a slice of another tainted value, such as an attribute of a chained error.
+- Opengrep 1.30.0 cannot parse `except*`. The shadow rule reports it, and `--strict` fails the
+  scan on the parse warning.
+- A read in a module logger call goes to the server log and is not a finding. The rule trusts the
+  deployment's logging configuration. The shadow rule reports logging changes in the package only.
+- The rule trusts the `TypeRefusal` that `_first_refusal` returns: it keeps the message, and only
+  `TypeRefusal.text_for` may show it. A read of its `message`, or a serialization of it, is outside
+  the rule. A call of `_first_refusal`, and a `TypeRefusal` built anywhere else from a caught error,
+  are findings.
+- The shadow rule does not see a binding by a computed name, such as `setattr(module, name, value)`.
+  It reads loop, `as`, `case` and walrus targets as text, so it can report a comment that looks
+  like one.
+- Taint analysis does not read a lambda default, a decorator or a `match` pattern. The shadow rule
+  reports a lambda default that calls a function anywhere, and a lambda default, a decorator or a
+  `match` statement in a `try` statement that has a named handler. Use `functools.partial` in place
+  of a lambda default.
+- The rule follows a closure or a lambda that the function defines before the handler only when
+  the `try` statement is at the top level of the function body.
+
 ## `--taint-intrafile` is required
 
 Both scripts pass it. Taint has to cross into a module-private helper: three warnings in
@@ -115,7 +159,8 @@ The scan script passes `--strict` and `--timeout 60`. By default, a rule that ru
 on a file, or a file that opengrep cannot parse, is a warning, and the scan passes without the
 findings of that file. With `--strict`, each such warning fails the scan, and the 60 s limit stops a
 stalled analysis. The scan still skips a file that the `.semgrepignore` rules or the size limit
-exclude.
+exclude. `caught-error-text` needs about 5 s on `views/sync/modules.py`. CodeRabbit's own opengrep
+run can time out on that file, so the pre-push hook is the gate.
 
 ## Running locally
 
@@ -142,8 +187,12 @@ The reverse shape, a caller-side `**{...}` unpacking, **is** reported. Both fixt
 
 ## Suppressing a true exception
 
-Add an inline `# nosemgrep: import-disclosure` on the offending line, with a short reason comment
-above it.
+Add `# nosemgrep: <rule-id>` on its own line directly above the first line of the finding, with a
+short reason comment above it. A finding in a multi-line call starts on the line of the argument,
+so put the comment directly above that argument. `# nosemgrep: caught-error-text` parses as Python,
+so ruff's ERA001 reads it as commented-out code: add `# noqa: ERA001` after the rule id.
+A suppression covers each finding of its rule on its line. Keep a reviewed call in a statement of
+its own, and build the message on the next line, where the rule still checks it.
 
 ## Adding a rule
 

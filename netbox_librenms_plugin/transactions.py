@@ -61,9 +61,13 @@ class _SwallowedConflict(Exception):
     """The work caught a lock conflict or a recorded conflict, and did not raise it."""
 
 
+# This is the SQLSTATE reader that caught-error-text trusts.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
 def database_error_sqlstate(exc):
     """Return the SQLSTATE that PostgreSQL gave for a Django database error, or None."""
     # Django raises its own error from the driver's error, which carries the SQLSTATE.
+    # Only the SQLSTATE code of the chained error leaves this function.
+    # nosemgrep: caught-error-text  # noqa: ERA001
     return getattr(exc.__cause__, "sqlstate", None)
 
 
@@ -71,14 +75,21 @@ def nearest_database_error(exc):
     """Return the nearest database error in the chain of *exc*: ``__cause__``, else ``__context__``."""
     seen = set()
     link = exc
+    # The walk keeps each chained error as an object for a SQLSTATE check; it reads no text.
+    # nosemgrep: caught-error-text  # noqa: ERA001
     while link is not None and id(link) not in seen:
+        # nosemgrep: caught-error-text  # noqa: ERA001
         seen.add(id(link))
+        # nosemgrep: caught-error-text  # noqa: ERA001
         link = link.__cause__ if link.__cause__ is not None else link.__context__
         if isinstance(link, DatabaseError):
+            # nosemgrep: caught-error-text  # noqa: ERA001
             return link
     return None
 
 
+# This is the conflict check that caught-error-text trusts.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
 def classify_conflict(exc):
     """
     Return True when *exc* is a lock conflict that a new attempt of the transaction can resolve.
@@ -102,6 +113,8 @@ def classify_conflict(exc):
     if isinstance(exc, DatabaseError):
         return database_error_sqlstate(exc) in CONFLICT_SQLSTATES
     if isinstance(exc, (AbortRequest, ValidationError)):
+        # The nearest database error is used only for its SQLSTATE.
+        # nosemgrep: caught-error-text  # noqa: ERA001
         nearest = nearest_database_error(exc)
         return nearest is not None and database_error_sqlstate(nearest) in CONFLICT_SQLSTATES
     return False
