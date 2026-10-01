@@ -1573,12 +1573,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return
 
         server_key = target_context.get("server_key")
-        current_port_id = None
-        if server_key:
-            try:
-                current_port_id = int(read_mapping(interface).own_id(server_key) or 0) or None
-            except (TypeError, ValueError):
-                current_port_id = None
+        current_port_id = read_mapping(interface).own_id(server_key) if server_key else None
 
         if (
             candidate_module_id not in {None, installed_module_id}

@@ -287,6 +287,29 @@ class TestModuleTableShowsTheWriterChoice:
         uplink.refresh_from_db()
         assert read_mapping(uplink).own_id("default") == 8811
 
+    @pytest.mark.parametrize(
+        "stored",
+        [{"default": 8811}, {"default": {"id": 8999, "oob": {"id": 8811}}}],
+        ids=["already-bound", "own-id-is-another-port"],
+    )
+    def test_a_holder_whose_own_id_is_set_offers_no_update(self, live_librenms, stored):
+        """The table reads the holder's own ID: the same port needs no bind, and another port refuses it."""
+        from django.core.cache import cache
+
+        device, module, _row, cache_key = self._seed("own", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        uplink = module.interfaces.get(name="Uplink")
+        uplink.custom_field_data["librenms_id"] = stored
+        uplink.save(update_fields=["custom_field_data"])
+        try:
+            content = _render_module_tab(device, make_superuser())
+        finally:
+            cache.delete(cache_key)
+
+        assert (
+            f'<a href="{uplink.get_absolute_url()}" title="Matched by port id, confidence high">Uplink</a>' in content
+        )
+        assert "Update Interface" not in content
+
     def test_a_port_held_by_another_device_shows_no_match(self, live_librenms):
         """The writer refuses a port that another device's interface holds, so the table shows no match."""
         from django.core.cache import cache
