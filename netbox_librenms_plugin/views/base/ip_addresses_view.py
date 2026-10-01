@@ -692,8 +692,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # Pre-populate the port map from cache so the cached render reads only
             # cache + NetBox and never re-hits LibreNMS (resilient when it's down).
             port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
-            # Pre-upgrade entries lack the ports_by_id key; remember so we can backfill below.
-            cached_had_ports_by_id = "ports_by_id" in cached_ip_data
+            # An entry without a port map (pre-upgrade, or {} from an older failed read) backfills below.
+            cached_had_ports_by_id = bool(cached_ip_data.get("ports_by_id"))
             cached_matches_interface_name_field = cached_interface_name_field == interface_name_field
 
         cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
