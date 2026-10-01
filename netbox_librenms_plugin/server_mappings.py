@@ -1521,7 +1521,9 @@ def persist_mapping(row, change: MappingChange, *, write: Callable):
     for claim in change._claims:
         _check_owner(claim, row)
     if read_mapping(row) != change.before:
-        raise MappingChanged("The LibreNMS mapping changed after it was read. Refresh and try again.")
+        raise recorded_conflict(
+            MappingChanged("The LibreNMS mapping changed after it was read. Refresh and try again.")
+        )
     return write(row, _put_on(row, change))
 
 
@@ -1550,7 +1552,9 @@ def persist_merge(change: MergeChange, *, write: Callable[[], object]):
         for side in (change.winner, change.donor):
             row = side._model.objects.select_for_update().get(pk=side._pk)
             if read_mapping(row) != side.before:
-                raise MappingChanged("The LibreNMS mapping changed after it was read. Refresh and try again.")
+                raise recorded_conflict(
+                    MappingChanged("The LibreNMS mapping changed after it was read. Refresh and try again.")
+                )
         progress = _MergeProgress(change)
         token = _active_merge.set(progress)
         try:
