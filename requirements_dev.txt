@@ -1,4 +1,4 @@
-Django>=5.2,<6.1
+Django>=6.1.1,<6.2
 packaging
 playwright>=1.63.0
 PyYAML
