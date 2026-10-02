@@ -59,7 +59,6 @@ from netbox_librenms_plugin.utils import (
     build_migrated_context,
     coerce_model_pk,
     convert_speed_to_kbps,
-    exception_text_for,
     find_interface_by_librenms_port_id,
     get_interface_name_field,
     get_interface_port_identity_sets,
@@ -2258,9 +2257,8 @@ class DeleteNetBoxInterfacesView(
             if isinstance(exc, CommittedFollowUpError):
                 raise
             logger.exception("Interface deletion for %s %s failed", object_type, obj.pk)
-            model = Interface if object_type == "device" else VMInterface
             return JsonResponse(
-                {"error": f"No interfaces were deleted: {exception_text_for(exc, model, request.user)}"},
+                {"error": "No interfaces were deleted. Refresh the data and try again."},
                 status=409,
             )
 

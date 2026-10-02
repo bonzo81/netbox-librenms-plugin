@@ -171,6 +171,37 @@ class TestAssignInterfaceMac:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("failure_type", [RuntimeError, ValueError, TypeError])
+def test_interface_delete_unexpected_error_keeps_private_details_out_of_json(client, failure_type):
+    from django.db import connection
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    device = make_device("interface-delete-private-error")
+    interface = make_interface(device, "Ethernet1")
+    client.force_login(make_superuser("interface-delete-private-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+
+    def fail_delete(execute, sql, params, many, context):
+        if sql.lstrip().upper().startswith("DELETE") and '"dcim_interface"' in sql:
+            raise failure_type("private validator path /internal/example.test")
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(fail_delete):
+        response = client.post(url, {"interface_ids": [str(interface.pk)]})
+
+    assert response.status_code == 409
+    assert "No interfaces were deleted" in response.json()["error"]
+    assert "private validator" not in response.json()["error"]
+    assert "/internal/" not in response.json()["error"]
+    assert type(interface).objects.filter(pk=interface.pk).exists()
+
+
+@pytest.mark.django_db
 def test_interface_delete_database_error_returns_json_and_deletes_nothing(client):
     """A non-conflict database error returns safe JSON and rolls back every deletion."""
     from django.db import DatabaseError, connection

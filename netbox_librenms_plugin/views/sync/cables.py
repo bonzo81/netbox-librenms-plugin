@@ -30,7 +30,9 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import (
+    FOLLOW_UP_FAILED_MESSAGE,
     TRY_AGAIN_MESSAGE,
+    CommittedFollowUpError,
     TransactionConflict,
     classify_conflict,
     run_transaction,
@@ -1108,6 +1110,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "valid": [],
             "invalid": [],
             "failed": [],
+            "saved_follow_up_failed": [],
             "duplicate": [],
             "missing_remote": [],
             "rejected_selection": [],
@@ -1143,6 +1146,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 # Nothing of the row was committed; the other rows are independent.
                 logger.warning("Cable sync row %s met a lock conflict on every attempt", interface.get("row_id", ""))
                 results["busy"].append(interface.get("row_id", ""))
+            except CommittedFollowUpError:
+                logger.exception("Follow-up work failed after saving cable row %s", interface.get("row_id", ""))
+                results["saved_follow_up_failed"].append(interface.get("row_id", ""))
             except PermissionDenied:
                 # A permission raised anywhere below (signals, custom validators) is a denial, not
                 # missing link data.
@@ -1223,7 +1229,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         ):
             results = self.process_interface_sync(selected_interfaces, cached_links, force=force)
             self.display_sync_results(request, results)
-            if results["valid"] or results.get("overwritten") or results.get("tagged"):
+            if (
+                results["valid"]
+                or results.get("overwritten")
+                or results.get("tagged")
+                or results.get("saved_follow_up_failed")
+            ):
                 schedule_request_cache_mutation(
                     request,
                     initial_device,
@@ -1311,6 +1322,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         ("missing_remote", "error", "Remote device or interface not found in NetBox for: {items}"),
         ("invalid", "error", "No LibreNMS link data found for interfaces: {items}"),
         ("failed", "error", "Failed to sync cables for interfaces: {items}"),
+        ("saved_follow_up_failed", "warning", FOLLOW_UP_FAILED_MESSAGE + " Interfaces: {items}"),
         ("busy", "error", TRY_AGAIN_MESSAGE + " Not synced: {items}"),
         (
             "rejected_selection",

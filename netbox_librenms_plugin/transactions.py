@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 CONFLICT_SQLSTATES = frozenset({"40P01", "55P03", "40001"})
 # The one text that a lock conflict shows: the middleware's answer and exception_text_for's text.
 TRY_AGAIN_MESSAGE = "Another operation was changing the same NetBox objects. Refresh the page and try again."
+FOLLOW_UP_FAILED_MESSAGE = "Changes were saved, but follow-up work failed. Refresh and check the result."
 _ATTEMPTS = 2
 # The recorder of the attempt that runs now, so a row-version check can record a conflict that the work swallows.
 _active_recorder = ContextVar("librenms_conflict_recorder", default=None)
