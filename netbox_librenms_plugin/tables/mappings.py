@@ -203,6 +203,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
     action = tables.Column(verbose_name="Action")
     pattern = tables.Column(verbose_name="Pattern", empty_values=())
     require_serial_match_parent = tables.BooleanColumn(verbose_name="Require Serial Match")
+    manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
     enabled = tables.BooleanColumn(verbose_name="Enabled")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
@@ -239,6 +240,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "action",
             "pattern",
             "require_serial_match_parent",
+            "manufacturer",
             "enabled",
             "description",
             "actions",
@@ -251,6 +253,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "action",
             "pattern",
             "require_serial_match_parent",
+            "manufacturer",
             "enabled",
             "actions",
         )

@@ -16,7 +16,6 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
-
 SERVER_KEY = "test-server"
 
 
@@ -1316,6 +1315,7 @@ class TestValidationWithRealLibreNMS:
 
     def test_chassis_inventory_recovers_an_unmatched_hardware_string(self, librenms_api):
         from dcim.models import DeviceType, Manufacturer
+
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
         api, server = librenms_api
@@ -1383,6 +1383,7 @@ class TestImportSingleDevice:
 
     def test_real_import_persists_normalized_identity_and_location(self, librenms_api):
         from dcim.models import Location
+
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
@@ -1427,6 +1428,7 @@ class TestImportSingleDevice:
 
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack
+
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
@@ -1555,10 +1557,10 @@ class TestImportSingleDevice:
 
         assert result["success"] is False
         # The claim search is unrestricted and this path takes no user, so the owner stays unnamed.
-        assert "already assigned to another device" in result["error"]
+        assert result["error"] == "LibreNMS ID 5605 is already assigned to another NetBox object."
         assert owner.name not in result["error"]
 
-    def test_vm_assignment_conflict_is_identified_as_a_vm(self, librenms_api):
+    def test_vm_assignment_conflict_does_not_name_the_owner_model(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
         _api, _server = librenms_api
@@ -1575,7 +1577,8 @@ class TestImportSingleDevice:
         )
 
         assert result["success"] is False
-        assert "already assigned to another VM" in result["error"]
+        # The model type alone would tell the caller that a VM outside its scope exists.
+        assert result["error"] == "LibreNMS ID 5609 is already assigned to another NetBox object."
         assert owner.name not in result["error"]
 
     def test_empty_resolved_name_recomputes_from_sync_preferences(self, librenms_api):
@@ -1711,6 +1714,7 @@ class TestImportSingleDevice:
     def test_rack_resolved_from_parsed_token_via_mapping(self, librenms_api):
         """Persist the mapped rack when the parsed token has no exact match."""
         from dcim.models import Rack
+
         from netbox_librenms_plugin.models import LocationMapping
 
         site, device_type, role = self._infrastructure("mapped-rack")
@@ -1728,6 +1732,7 @@ class TestImportSingleDevice:
     def test_ambiguous_rack_name_skips_automatic_assignment(self, librenms_api, caplog):
         """Leave the rack unset when duplicate names exist, even if an alias matches."""
         from dcim.models import Location, Rack
+
         from netbox_librenms_plugin.models import LocationMapping
 
         site, device_type, role = self._infrastructure("ambiguous-rack")
@@ -1783,6 +1788,7 @@ class TestImportSingleDevice:
     def test_tenant_resolved_from_parsed_token_via_mapping(self, librenms_api):
         """Persist the mapped tenant when the parsed token has no exact match."""
         from tenancy.models import Tenant
+
         from netbox_librenms_plugin.models import LocationMapping
 
         site, device_type, role = self._infrastructure("mapped-tenant")
@@ -1803,4 +1809,4 @@ def test_lazy_bulk_import_export_and_unknown_attributes():
 
     assert callable(operations.bulk_import_devices_shared)
     with pytest.raises(AttributeError):
-        getattr(operations, "unknown_device_operation")
+        _ = operations.unknown_device_operation

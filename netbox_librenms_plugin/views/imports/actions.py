@@ -9,7 +9,6 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.db import DatabaseError, DataError, IntegrityError, transaction
-
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
@@ -27,6 +26,20 @@ from netbox_librenms_plugin.identity_replacement import (
     load_identity_replacement_intent,
     sign_identity_replacement_intent,
 )
+from netbox_librenms_plugin.import_plan import (
+    ClusterPlacement,
+    DeviceTarget,
+    HostPlacement,
+    ImportRowIntent,
+    InvalidImportIntent,
+    MatchedSitePlacement,
+    VMPlacementMethod,
+    import_row_hx_include,
+    parse_import_row_intent,
+    parse_import_row_plan,
+    partition_import_plans,
+    serialize_import_plans,
+)
 from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
@@ -42,24 +55,11 @@ from netbox_librenms_plugin.import_utils import (
     scope_bulk_collisions,
     scope_validation_disclosure,
     scope_validation_disclosures,
-    visible_object_label,
     update_vc_member_suggested_names,
     validate_device_for_import,
+    visible_object_label,
 )
-from netbox_librenms_plugin.import_plan import (
-    ClusterPlacement,
-    DeviceTarget,
-    HostPlacement,
-    ImportRowIntent,
-    InvalidImportIntent,
-    MatchedSitePlacement,
-    VMPlacementMethod,
-    import_row_hx_include,
-    partition_import_plans,
-    parse_import_row_intent,
-    parse_import_row_plan,
-    serialize_import_plans,
-)
+from netbox_librenms_plugin.import_utils.bulk_import import ambiguous_stack_groups, stack_identity
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -1284,10 +1284,18 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         }
 
         collisions = scope_bulk_collisions(detect_bulk_collisions(devices), request.user)
+        stack_ambiguities = ambiguous_stack_groups(
+            (
+                entry["device_id"],
+                stack_identity(entry["validation"].get("virtual_chassis", {}), entry["device_id"]),
+            )
+            for entry in devices
+            if not entry["is_vm"]
+        )
         # After collision detection, which must key on the unrestricted matches to stop two rows
         # writing the same NetBox device.
         scope_validation_disclosures([entry.get("validation") for entry in devices], request.user)
-        if collisions:
+        if collisions or stack_ambiguities:
             # Render at 200 (not 4xx): this is an interstitial modal swapped
             # into #htmx-modal-content, exactly like the confirm step. A non-2xx
             # status makes HTMX skip the swap and route the body through
@@ -1296,7 +1304,13 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return render(
                 request,
                 "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                {"collisions": collisions},
+                {
+                    "collisions": collisions,
+                    "stack_ambiguities": stack_ambiguities,
+                    "stack_block_message": classify_bulk_precheck(
+                        collisions, [], stack_ambiguities, [entry["device_id"] for entry in devices], {}
+                    ).stack_block_message,
+                },
             )
 
         return render(
@@ -1331,7 +1345,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return False
         return request.POST.get("use_background_job") == "on"
 
-    def post(self, request):  # noqa: C901, PLR0912
+    def post(self, request):  # noqa: C901
         """Import selected devices from LibreNMS into NetBox."""
         # Check write permission before any import operation
         if error := self.require_write_permission():
@@ -1508,16 +1522,17 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         "No background worker was available.",
                     )
 
-        # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
-        # preview is advisory only — a re-submitted stale confirm form or a scripted POST reaches
-        # this view directly — so block a colliding batch here too. This runs on the SYNCHRONOUS
+        # Re-run the object-collision and stack-ambiguity checks before any synchronous import.
+        # The confirm preview is advisory. A stale confirm form or scripted POST reaches this view
+        # directly, so the import path must enforce the same blockers. This runs on the SYNCHRONOUS
         # path only: it sits after the background-job dispatch above, so a batch that enqueued a job
         # doesn't pay this validation cost synchronously (ImportDevicesJob re-runs the same check).
-        # A single selected device can never collide (collisions need two distinct LibreNMS ids on
-        # one NetBox object), so skip the extra validation pass for the common single-row case.
+        # Every non-empty batch runs it. A single row can never collide (collisions need two
+        # distinct LibreNMS ids on one NetBox object), but the scan also fails a row closed when
+        # its virtual-chassis inventory can't be read, and that check is per row.
         precheck_skip_msg = None
-        if len(parsed_ids) >= 2:
-            collisions, unresolved = detect_collisions_for_device_ids(
+        if parsed_ids:
+            collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
                 parsed_ids,
                 self.librenms_api,
                 libre_devices_cache=libre_devices_cache,
@@ -1528,16 +1543,26 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 vm_device_ids=vm_imports,
                 user=request.user,
             )
-            outcome = classify_bulk_precheck(collisions, unresolved, device_ids_to_import, vm_imports)
+            outcome = classify_bulk_precheck(
+                collisions,
+                unresolved,
+                stack_ambiguities,
+                device_ids_to_import,
+                vm_imports,
+            )
             if outcome.blocked:
-                # Genuine collision (two rows → one NetBox object): block the whole batch, exactly
-                # as the confirm modal does. Same shared wording ImportDevicesJob logs.
+                # Block the whole batch with the same message that ImportDevicesJob logs.
                 if is_htmx:
                     # 200, like the confirm step: HTMX skips the swap on non-2xx.
                     return render(
                         request,
                         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                        {"collisions": outcome.collisions, "oob": True},
+                        {
+                            "stack_block_message": outcome.stack_block_message,
+                            "collisions": outcome.collisions,
+                            "oob": True,
+                            "stack_ambiguities": outcome.stack_ambiguities,
+                        },
                     )
                 messages.error(request, outcome.block_message)
                 return redirect(active_import_url)
@@ -3416,8 +3441,8 @@ class AddAsOOBView(
                 requested interface is outside the caller's view scope.
 
         """
-        from django.core.exceptions import ValidationError
         from dcim.models import Interface
+        from django.core.exceptions import ValidationError
         from utilities.permissions import get_permission_for_model
 
         iface_id = (request.POST.get("oob_interface_id") or "").strip()
@@ -3824,6 +3849,7 @@ class MergeNetBoxDevicesView(
             return error
 
         from dcim.models import Device
+
         from netbox_librenms_plugin.utils import (
             mark_librenms_migrated,
             merge_librenms_links,
@@ -4149,6 +4175,7 @@ class AddPlatformMappingView(
             return error
 
         from dcim.models import Platform
+
         from netbox_librenms_plugin.models import PlatformMapping
 
         # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing

@@ -69,37 +69,37 @@ class TestIpAddressSyncContentTemplateMigratedMode:
 
     def test_migrated_mode_renders_move_button_targeting_the_ip_view(self):
         """A write-permitted migrated donor shows a Move button posting to ipaddress_move_to_winner for the IP's pk."""
-        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
+        from django.urls import reverse
+
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("ip-tmpl-winner")
         movable = [{"id": 4321, "address": "10.0.0.5/24", "interface_name": "eth0"}]
-        with patch_move_url_reverse("ipaddress_move_to_winner", resolve=True):
-            html = self._render(
-                migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
-                movable=movable,
-                winner=winner,
-                has_write=True,
-            )
-        assert "/fake/ipaddress_move_to_winner/4321/" in html
+        html = self._render(
+            migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
+            movable=movable,
+            winner=winner,
+            has_write=True,
+        )
+        assert reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", args=[4321]) in html
         assert "10.0.0.5/24" in html
         assert f"to {winner.name}" in html  # the card header names the winner
 
     def test_move_button_hidden_for_read_only_users(self):
         """The Move action is a mutating POST; a read-only user sees muted 'read-only' text, not a live button."""
-        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
+        from django.urls import reverse
+
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("ip-tmpl-winner-ro")
         movable = [{"id": 77, "address": "10.0.0.9/24", "interface_name": "eth1"}]
-        with patch_move_url_reverse("ipaddress_move_to_winner", resolve=True):
-            html = self._render(
-                migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
-                movable=movable,
-                winner=winner,
-                has_write=False,
-            )
-        assert "/fake/ipaddress_move_to_winner/77/" not in html
+        html = self._render(
+            migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
+            movable=movable,
+            winner=winner,
+            has_write=False,
+        )
+        assert reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", args=[77]) not in html
         assert "read-only" in html
 
     def test_missing_winner_is_explained_above_the_move_table(self):
@@ -124,19 +124,24 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         route yields an empty move_url and the read-only fallback instead of a bare {% url %} that
         would NoReverseMatch and 500 the whole IP tab.
         """
-        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
+        from django.template.loader import render_to_string
+
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("ip-tmpl-winner-degrade")
-        movable = [{"id": 88, "address": "10.0.0.11/24", "interface_name": "eth2"}]
-
-        with patch_move_url_reverse("ipaddress_move_to_winner", resolve=False):
-            html = self._render(
-                migrated={"server_key": "default", "device_id": winner.pk, "at": "now"},
-                movable=movable,
-                winner=winner,
-                has_write=True,
-            )
+        html = render_to_string(
+            "netbox_librenms_plugin/inc/_migrate_move_button.html",
+            {
+                "move_url_name": "plugins:netbox_librenms_plugin:missing_ipaddress_move_to_winner",
+                "obj_id": 88,
+                "obj_label": "10.0.0.11/24",
+                "entity_word": "IP",
+                "obj_interface_name": "eth2",
+                "winner": winner,
+                "server_key": "default",
+                "has_write_permission": True,
+            },
+        )
         assert "Move IP '" not in html  # route unresolved → move_url empty → no live button
         assert "read-only" in html
 

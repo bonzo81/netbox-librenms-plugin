@@ -297,9 +297,9 @@ class ImportSettingsForm(NetBoxModelForm):
             # This should be caught by check above, but just in case
             raise forms.ValidationError(
                 f"Invalid placeholder in pattern: {e}. Valid options are: {{position}}, {{serial}}"
-            )
+            ) from e
         except (ValueError, IndexError) as e:
-            raise forms.ValidationError(f"Invalid pattern syntax: {str(e)}")
+            raise forms.ValidationError(f"Invalid pattern syntax: {str(e)}") from e
 
         return pattern
 
@@ -865,7 +865,16 @@ class InventoryIgnoreRuleForm(NetBoxModelForm):
         """Meta options for InventoryIgnoreRuleForm."""
 
         model = InventoryIgnoreRule
-        fields = ["name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled", "description"]
+        fields = [
+            "name",
+            "match_type",
+            "pattern",
+            "action",
+            "require_serial_match_parent",
+            "manufacturer",
+            "enabled",
+            "description",
+        ]
 
 
 class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
@@ -879,17 +888,37 @@ class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
         choices=InventoryIgnoreRule.ACTION_CHOICES,
         help_text="Action: skip (remove from table) or transparent (hide row, promote children)",
     )
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Optional manufacturer name (must already exist in NetBox)",
+    )
 
     class Meta:
         """Meta options for InventoryIgnoreRuleImportForm."""
 
         model = InventoryIgnoreRule
-        fields = ["name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled", "description"]
+        fields = [
+            "name",
+            "match_type",
+            "pattern",
+            "action",
+            "require_serial_match_parent",
+            "manufacturer",
+            "enabled",
+            "description",
+        ]
 
 
 class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
     """Form for filtering inventory ignore rules."""
 
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
     match_type = forms.ChoiceField(
         required=False,
         choices=[("", "---------")] + InventoryIgnoreRule.MATCH_TYPE_CHOICES,
@@ -1066,15 +1095,16 @@ class CaseInsensitiveCSVModelChoiceField(CSVModelChoiceField):
         try:
             return self.queryset.get(**{f"{self.to_field_name}__iexact": value})
         except self.queryset.model.DoesNotExist:
+            # A missing row is the expected outcome of this lookup, not an error worth chaining.
             raise forms.ValidationError(
                 self.error_messages["invalid_choice"],
                 code="invalid_choice",
                 params={"value": value},
-            )
+            ) from None
         except MultipleObjectsReturned:
             raise forms.ValidationError(
                 f'"{value}" is not a unique value for this field; specify parent_site to disambiguate.'
-            )
+            ) from None
 
 
 class LocationMappingImportForm(NetBoxModelImportForm):

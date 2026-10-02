@@ -12,8 +12,6 @@ interface name, so a match can only come from the librenms_id custom-field looku
 assertions fail — a genuine red→green guard.
 """
 
-from unittest.mock import MagicMock
-
 import pytest
 
 
@@ -21,8 +19,9 @@ def _make_view():
     from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
     view = object.__new__(BaseCableTableView)
-    view._librenms_api = MagicMock()
-    view._librenms_api.server_key = "default"
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+    view.setup(make_request("get"))
     return view
 
 
@@ -47,14 +46,17 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
             device=device,
             name="ge-0/0/77",
             type="1000base-t",
-            custom_field_data={"librenms_id": {"default": 20}},
         )
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        set_librenms_device_id(iface, 20, "default")
+        iface.save(update_fields=["custom_field_data"])
 
         view = _make_view()
         # Reported port name deliberately != iface.name; match must come from remote_port_id.
         link = {"remote_port": "reported-different-name", "remote_port_id": 20}
 
-        result = view.enrich_remote_port(link, device)
+        result = view.enrich_remote_port(link, device, server_key="default")
 
         assert result["netbox_remote_interface_id"] == iface.pk
         assert result["remote_port_name"] == "ge-0/0/77"
@@ -74,7 +76,7 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
         view = _make_view()
         link = {"remote_port": "reported-different-name", "remote_port_id": 999}
 
-        result = view.enrich_remote_port(link, device)
+        result = view.enrich_remote_port(link, device, server_key="default")
 
         assert "netbox_remote_interface_id" not in result
 
@@ -92,14 +94,17 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
             device=member,
             name="xe-1/0/5",
             type="10gbase-x-sfpp",
-            custom_field_data={"librenms_id": {"default": 21}},
         )
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        set_librenms_device_id(iface, 21, "default")
+        iface.save(update_fields=["custom_field_data"])
 
         view = _make_view()
         # "Gi1/0/99" → slot 1 (member_pos), but != iface.name "xe-1/0/5".
         link = {"remote_port": "Gi1/0/99", "remote_port_id": 21}
 
-        result = view.enrich_remote_port(link, member)
+        result = view.enrich_remote_port(link, member, server_key="default")
 
         assert result["netbox_remote_interface_id"] == iface.pk
         assert result["remote_port_name"] == "xe-1/0/5"

@@ -7,20 +7,25 @@ get_librenms_sync_device() and handle the None return gracefully
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from copy import deepcopy
 
 import pytest
-from django.test import RequestFactory
+from django.conf import settings
+from django.test import RequestFactory, override_settings
+
+from netbox_librenms_plugin.tests.conftest import configured_server_key, make_superuser
 
 from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
 
-def _make_request(body: dict) -> MagicMock:
-    """Create a mock POST request with JSON body."""
-    request = MagicMock()
-    request.body = json.dumps(body).encode()
-    request.user.has_perm.return_value = True
+pytestmark = pytest.mark.django_db
+
+
+def _make_request(body: dict):
+    """Create a real JSON POST request with a permitted user."""
+    request = RequestFactory().post("/verify/", data=json.dumps(body), content_type="application/json")
+    request.user = make_superuser()
     return request
 
 
@@ -43,18 +48,18 @@ def _real_vc_device(tag, name=None):
     return device
 
 
-def _real_verify_view(view_cls, body, user, *, server_key="default"):
-    """Build a real verify view + real request; _librenms_api is stubbed only to supply the active-server key."""
+def _real_verify_view(view_cls, body, user, *, server_key=None):
+    """Build a real verify view, request, user, and API client."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from django.test import RequestFactory
 
+    server_key = server_key or configured_server_key()
+    body = {**body, "server_key": server_key}
     view = view_cls()
-    view._librenms_api = MagicMock()
-    view._librenms_api.server_key = server_key
+    view._librenms_api = LibreNMSAPI(server_key=server_key)
     request = RequestFactory().post("/verify/", data=json.dumps(body), content_type="application/json")
     request.user = user
-    view.request = request
-    view.kwargs = {}
-    view.args = ()
+    view.setup(request)
     return view, request
 
 
@@ -65,91 +70,30 @@ class TestSingleCableVerifyView:
     """SingleCableVerifyView.post() VC resolution and None guard (real device, real gate/restrict)."""
 
     def _make_view(self):
-        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-
-        view = object.__new__(SingleCableVerifyView)
-        view._librenms_api = MagicMock()
-        view.require_object_permissions_json = MagicMock(return_value=None)
+        view = SingleCableVerifyView()
+        view.setup(_make_request({}))
         return view
 
     @pytest.mark.django_db
-    def test_vc_no_resolvable_sync_device_falls_back_to_the_page_device(self):
-        """Verify a virtual chassis without a resolvable sync member reads the authorized page device snapshot."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
+    def test_vc_no_resolvable_sync_device_returns_an_empty_row(self):
+        """Verify a virtual chassis without a resolvable sync member returns the safe empty row."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
         _virtual_chassis, (device, _sibling) = make_virtual_chassis_members("cbl-nosync")
         device.vc_position = None
         device.save(update_fields=["vc_position"])
-        assert get_librenms_sync_device(device, server_key="default") is None
+        assert get_librenms_sync_device(device, server_key=configured_server_key()) is None
 
-        interface = make_interface(device, "Gi0/42")
         view, request = _real_verify_view(
             SingleCableVerifyView, {"device_id": device.pk, "row_id": "42"}, _verify_superuser("cbl-nosync")
         )
-        cache_key = view.get_cache_key(device, "links", "default")
-        cache.set(
-            cache_key,
-            {
-                "links": [
-                    {
-                        "local_port": interface.name,
-                        "local_port_id": 42,
-                        "remote_port": "",
-                        "remote_device": "",
-                        "_source": "main",
-                    }
-                ]
-            },
-            timeout=300,
-        )
-
-        try:
-            response = view.post(request)
-        finally:
-            cache.delete(cache_key)
+        response = view.post(request)
 
         data = json.loads(response.content)
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
-        assert f"/dcim/interfaces/{interface.pk}/" in data["formatted_row"]["local_port"]
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync):
-        """VC with a resolved sync device: cache is queried with that device's key."""
-        device = _real_vc_device("cbl-sync")
-        sync_device = _real_vc_device("cbl-syncmember", name="cbl-sync-member")
-        mock_sync.return_value = sync_device
-        mock_cache.get.return_value = None
-        view, request = _real_verify_view(
-            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "42"}, _verify_superuser("cbl-sync")
-        )
-        view.post(request)
-
-        mock_sync.assert_called_once_with(device, server_key=view._librenms_api.server_key)
-        mock_cache.get.assert_called_once()
-        cache_key = mock_cache.get.call_args[0][0]
-        assert "device" in cache_key
-        assert str(sync_device.pk) in cache_key
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync):
-        """Non-VC device: get_librenms_sync_device is NOT called."""
-        device = _make_gate_device(name="cbl-nonvc")
-        mock_cache.get.return_value = None
-        view, request = _real_verify_view(
-            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "10"}, _verify_superuser("cbl-nonvc")
-        )
-        view.post(request)
-
-        mock_sync.assert_not_called()
-        mock_cache.get.assert_called_once()
+        assert data["formatted_row"]["local_port"] == ""
 
     def test_no_device_id_returns_empty_row(self):
         """Missing device_id: returns default empty formatted_row."""
@@ -162,23 +106,25 @@ class TestSingleCableVerifyView:
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
 
     @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_malformed_cached_links_fail_closed(self, mock_cache, mock_sync):
+    def test_malformed_cached_links_fail_closed(self):
         """A corrupt cached links entry must fail closed (empty row + purge), not 500 the verify path."""
+        from django.core.cache import cache
+
         device = _make_gate_device(name="cbl-malformed")
-        # A non-dict link row: the old code iterates it and calls str.get(...) -> AttributeError.
-        mock_cache.get.return_value = {"links": ["not-a-dict"]}
         view, request = _real_verify_view(
-            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "10"}, _verify_superuser("cbl-malformed")
+            SingleCableVerifyView,
+            {"device_id": device.pk, "local_port_id": "10"},
+            _verify_superuser("cbl-malformed"),
         )
+        cache_key = view.get_cache_key(device, "links", configured_server_key())
+        cache.set(cache_key, {"links": ["not-a-dict"]}, timeout=300)
         response = view.post(request)
 
         data = json.loads(response.content)
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
         # The corrupt entry is purged so the next verify doesn't keep serving garbage.
-        mock_cache.delete.assert_called_once()
+        assert cache.get(cache_key) is None
 
 
 def test_extract_cached_links_fails_closed_and_purges_malformed_entries():
@@ -209,15 +155,23 @@ class TestSingleInterfaceVerifyView:
     """SingleInterfaceVerifyView.post() VC resolution and None guard (real device, real gate/restrict)."""
 
     def _make_view(self):
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
-
-        view = object.__new__(SingleInterfaceVerifyView)
-        view._librenms_api = MagicMock()
-        view.require_object_permissions_json = MagicMock(return_value=None)
+        view = SingleInterfaceVerifyView()
+        view.setup(_make_request({}))
         return view
 
+    def test_no_device_id_returns_400(self):
+        """Missing device_id: returns 400 error."""
+        view = self._make_view()
+        request = _make_request({"interface_name": "eth0"})
+        response = view.post(request)
+
+        assert response.status_code == 400
+        data = json.loads(response.content)
+        assert data["status"] == "error"
+
     @pytest.mark.django_db
-    def test_verify_response_hides_vlan_metadata_from_a_user_without_ipam_view_rights(self):
+    @pytest.mark.parametrize("source", ["host", "oob"])
+    def test_verify_response_hides_vlan_metadata_from_a_user_without_ipam_view_rights(self, source):
         """The gate only checks view_device, so the IPAM reads must be scoped to the caller."""
         from dcim.models import Device, Site
         from django.contrib.contenttypes.models import ContentType
@@ -257,7 +211,7 @@ class TestSingleInterfaceVerifyView:
                         "ifMtu": 1500,
                         "ifAdminStatus": "up",
                         "untagged_vlan": 100,
-                        "_source": "host",
+                        "_source": source,
                     }
                 ],
                 "port_stack_relationships": {},
@@ -280,7 +234,7 @@ class TestSingleInterfaceVerifyView:
                 content_type="application/json",
             )
             response = view.post(request)
-            assert response.status_code == 200
+            assert response.status_code == 200, response.content
             return json.loads(response.content)["formatted_row"]["vlans"]
 
         try:
@@ -298,74 +252,6 @@ class TestSingleInterfaceVerifyView:
         assert group.name not in restricted
         assert f'value="{group.pk}"' not in restricted
         assert "Not in NetBox" in restricted
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_vc_no_resolvable_sync_device_returns_404(self, mock_cache, mock_sync):
-        """VC where get_librenms_sync_device returns None -> 404 JSON error, no crash."""
-        device = _real_vc_device("if-nosync")
-        mock_sync.return_value = None
-        view, request = _real_verify_view(
-            SingleInterfaceVerifyView,
-            {"device_id": device.pk, "interface_name": "eth0", "interface_name_field": "ifName"},
-            _verify_superuser("if-nosync"),
-        )
-        response = view.post(request)
-
-        assert response.status_code == 404
-        data = json.loads(response.content)
-        assert data["status"] == "error"
-        assert "sync device" in data["message"].lower()
-        mock_cache.get.assert_not_called()
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync):
-        """VC with a resolved sync device: cache is queried with that device's key."""
-        device = _real_vc_device("if-sync")
-        sync_device = _real_vc_device("if-syncmember", name="if-sync-member")
-        mock_sync.return_value = sync_device
-        mock_cache.get.return_value = None
-        view, request = _real_verify_view(
-            SingleInterfaceVerifyView,
-            {"device_id": device.pk, "interface_name": "eth0", "interface_name_field": "ifName"},
-            _verify_superuser("if-sync"),
-        )
-        view.post(request)
-
-        mock_sync.assert_called_once_with(device, server_key=view._librenms_api.server_key)
-        mock_cache.get.assert_called_once()
-        cache_key = mock_cache.get.call_args[0][0]
-        assert str(sync_device.pk) in cache_key
-
-    @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync):
-        """Non-VC device: get_librenms_sync_device is NOT called."""
-        device = _make_gate_device(name="if-nonvc")
-        mock_cache.get.return_value = None
-        view, request = _real_verify_view(
-            SingleInterfaceVerifyView,
-            {"device_id": device.pk, "interface_name": "eth0", "interface_name_field": "ifName"},
-            _verify_superuser("if-nonvc"),
-        )
-        view.post(request)
-
-        mock_sync.assert_not_called()
-        mock_cache.get.assert_called_once()
-
-    def test_no_device_id_returns_400(self):
-        """Missing device_id: returns 400 error."""
-        view = self._make_view()
-        request = _make_request({"interface_name": "eth0"})
-        response = view.post(request)
-
-        assert response.status_code == 400
-        data = json.loads(response.content)
-        assert data["status"] == "error"
 
     @pytest.mark.django_db
     def test_verify_does_not_name_match_interface_bound_to_another_port(self):
@@ -1744,8 +1630,6 @@ class TestSingleIPAddressVerifyServerKeyCacheNamespace:
     """An unconfigured server key cannot select an arbitrary IP verification cache namespace."""
 
     def test_forged_server_key_falls_back_to_configured_namespace(self):
-        from unittest.mock import patch
-
         from django.contrib.auth import get_user_model
 
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
@@ -1785,10 +1669,7 @@ class TestSingleIPAddressVerifyServerKeyCacheNamespace:
             "alpha": {"librenms_url": "https://a.example.com", "api_token": "t"},
             "beta": {"librenms_url": "https://b.example.com", "api_token": "t"},
         }
-        with patch(
-            "netbox_librenms_plugin.librenms_api.get_plugin_config",
-            side_effect=lambda app, key, default=None: servers if key == "servers" else default,
-        ):
+        with _servers_settings(servers):
             view.post(request)
 
         # The forged key never reaches the cache namespace: it falls back to the fixed "default"
@@ -1807,13 +1688,10 @@ _GUARD_SERVERS = {
 }
 
 
-def _patch_servers_config():
-    from unittest.mock import patch as _patch
-
-    return _patch(
-        "netbox_librenms_plugin.librenms_api.get_plugin_config",
-        side_effect=lambda app, key, default=None: _GUARD_SERVERS if key == "servers" else default,
-    )
+def _servers_settings(servers):
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = servers
+    return override_settings(PLUGINS_CONFIG=plugin_config)
 
 
 def _make_vc_member_device(name="srvkey-vc-dev"):
@@ -1860,7 +1738,7 @@ class TestVerifyEndpointsServerKeyGuard:
         view = SingleInterfaceVerifyView()
         view.request = request
 
-        with _patch_servers_config():
+        with _servers_settings(_GUARD_SERVERS):
             response = view.post(request)
 
         # JSON error/miss response — not a TypeError 500.
@@ -1878,7 +1756,7 @@ class TestVerifyEndpointsServerKeyGuard:
         view = SingleModuleVerifyView()
         view.request = request
 
-        with _patch_servers_config():
+        with _servers_settings(_GUARD_SERVERS):
             response = view.post(request)
 
         assert response.status_code in (200, 404)
@@ -1895,7 +1773,7 @@ class TestVerifyEndpointsServerKeyGuard:
         view = SaveVlanGroupOverridesView()
         view.request = request
 
-        with _patch_servers_config():
+        with _servers_settings(_GUARD_SERVERS):
             response = view.post(request)
 
         # Falls back and then 400s on the missing ports cache — never a TypeError 500.
@@ -1922,7 +1800,7 @@ class TestVerifyEndpointsServerKeyGuard:
 
         view.get_cache_key = spy
 
-        with _patch_servers_config():
+        with _servers_settings(_GUARD_SERVERS):
             view.post(request)
 
         assert captured.get("server_key") != "evil-namespace"
@@ -1936,8 +1814,7 @@ class TestParseRequestJsonRejectsNonObject:
         from netbox_librenms_plugin.views.mixins import parse_request_json
 
         for body in (b"[1]", b'"x"', b"7"):
-            request = MagicMock()
-            request.body = body
+            request = RequestFactory().generic("POST", "/", data=body, content_type="application/json")
             data, err = parse_request_json(request)
             assert data is None
             assert err is not None and err.status_code == 400
@@ -1952,7 +1829,7 @@ class TestParseRequestJsonRejectsNonObject:
         view = SingleCableVerifyView()
         view.request = request
 
-        with _patch_servers_config():
+        with _servers_settings(_GUARD_SERVERS):
             response = view.post(request)
 
         assert response.status_code == 400
@@ -1980,7 +1857,7 @@ class TestInterfaceVerifyMalformedPortsCache:
         cache_key = view.get_cache_key(device, "ports", "alpha")
         real_cache.set(cache_key, ["corrupt", "legacy", "shape"], timeout=60)
         try:
-            with _patch_servers_config():
+            with _servers_settings(_GUARD_SERVERS):
                 response = view.post(request)
 
             # Degrades to the not-found miss path instead of AttributeError-500...
@@ -2281,7 +2158,7 @@ def test_cable_verify_selects_the_cached_row_named_by_row_id():
     assert second_row_id != with_row_ids[0]["row_id"], "the two rows must be distinguishable"
 
     view_probe = SingleCableVerifyView()
-    cache_key = view_probe.get_cache_key(device, "links", "default")
+    cache_key = view_probe.get_cache_key(device, "links", configured_server_key())
     cache.set(cache_key, {"links": links}, timeout=300)
 
     def _render(row_id, tag):

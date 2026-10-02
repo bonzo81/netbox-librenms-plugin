@@ -6,6 +6,7 @@ from dcim.models import Device, Interface
 from django.db.models import Q
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
     build_librenms_id_qs,
     get_librenms_device_id,
@@ -247,7 +248,7 @@ def build_relationship_maps(cached_data):
         ports = []
     ports_by_id = {}
     for port in ports:
-        if port.get("_source") == "oob":
+        if port.get("_source") == OOB_INVENTORY_SOURCE:
             continue
         port_id = normalize_librenms_port_id(port.get("port_id"))
         if port_id is not None:
@@ -409,15 +410,29 @@ def resolve_relationship_row(
     port_id = normalize_librenms_port_id(port.get("port_id"))
     if port_id is not None:
         port["port_id"] = port_id
-    if port.get("_source") == "oob":
-        port["netbox_interface"] = None
-        port["exists_in_netbox"] = False
+    if port.get("_source") == OOB_INVENTORY_SOURCE:
+        # An OOB port syncs onto this device, so it can own an interface here: resolve that by
+        # the stable port_id. Never pass a name hint — an OOB "eth0" would otherwise bind to the
+        # host's unrelated "eth0". Relationship topology stays host-only: LAG/parent/bridge edges
+        # describe the host's LibreNMS device, not the controller's.
+        oob_interface = None
+        if port_id is not None:
+            oob_interface, _ = resolve_interface_by_port_id(
+                context.obj,
+                str(port_id),
+                context.server_key,
+                name_hint="",
+                expected_owner=interface_owner_for_object(owner),
+                index=context.display_index,
+            )
+        port["netbox_interface"] = oob_interface
+        port["exists_in_netbox"] = oob_interface is not None
         port["name_fallback_allowed"] = False
         port["relationship_source_resolvable"] = False
         port["lag_target_resolvable"] = False
         port["parent_target_resolvable"] = False
         port["bridge_target_resolvable"] = False
-        return None
+        return oob_interface
 
     name_fallback_allowed = port_id in unambiguous_name_port_ids
     name_hint = (port.get(interface_name_field) or "") if name_fallback_allowed else ""

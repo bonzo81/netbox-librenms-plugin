@@ -7,7 +7,6 @@ from django.db import transaction
 from django.utils import timezone
 from virtualization.models import Cluster
 
-from ..librenms_api import LibreNMSAPI
 from ..import_plan import VMPlacementMethod
 from ..import_validation_helpers import (
     apply_cluster_to_validation,
@@ -15,6 +14,7 @@ from ..import_validation_helpers import (
     apply_role_to_validation,
     vm_host_placement_issue,
 )
+from ..librenms_api import LibreNMSAPI
 from ..utils import lock_librenms_id_assignment
 from .bulk_import import _is_job_cancelled
 from .device_operations import _determine_device_name, fetch_device_with_cache, validate_device_for_import

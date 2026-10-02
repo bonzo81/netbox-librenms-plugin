@@ -6,6 +6,7 @@ device retrieval, and device validation functions.
 """
 
 from copy import deepcopy
+
 import pytest
 
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
@@ -1398,6 +1399,7 @@ class TestEmptyVirtualChassisData:
         assert result["is_stack"] is False
         assert result["member_count"] == 0
         assert result["members"] == []
+        assert result["detection_failed"] is False
         assert result["detection_error"] is None
 
     def test_returns_new_dict_each_call(self):

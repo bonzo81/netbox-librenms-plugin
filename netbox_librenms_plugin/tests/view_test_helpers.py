@@ -204,14 +204,13 @@ def assert_locked_before_update(captured, table):
 
 
 def make_view(view_class, request=None, *, librenms_api=None, **attrs):
-    """Instantiate and bind a real view while substituting only its external LibreNMS client."""
-    from unittest.mock import MagicMock
+    """Instantiate and bind a real view with the configured LibreNMS client."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
     view = view_class()
     if librenms_api is not False:
         if librenms_api is None:
-            librenms_api = MagicMock()
-            librenms_api.server_key = "default"
+            librenms_api = LibreNMSAPI()
         view._librenms_api = librenms_api
     view.setup(request if request is not None else make_request())
     for name, value in attrs.items():

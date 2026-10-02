@@ -543,6 +543,7 @@ class TestDeviceImportTable:
             ({}, "—"),
             ({"is_stack": True, "member_count": 1}, "—"),
             ({"is_stack": True, "member_count": 2, "detection_error": "timeout"}, "Error"),
+            ({"is_stack": False, "detection_failed": True, "detection_error": "timeout"}, "Error"),
             ({"is_stack": True, "member_count": 3}, "Stack, 3"),
         ],
     )
@@ -886,6 +887,10 @@ class TestInterfaceTableFields:
         interface.save()
         mac = MACAddress.objects.create(mac_address="AA:BB:CC:DD:EE:FF")
         interface.mac_addresses.add(mac)
+        # The sync also makes the MAC it writes the primary one, so an interface that is really
+        # in sync has it set; without it the row differs and renders amber.
+        interface.primary_mac_address = mac
+        interface.save()
         InterfaceTypeMapping.objects.create(
             librenms_type="ethernetCsmacd",
             librenms_speed=1_000_000,
@@ -924,16 +929,19 @@ class TestInterfaceTableFields:
         ):
             assert "text-warning" in str(rendered)
 
-    @pytest.mark.parametrize("value", ["up", "UP", True])
+    @pytest.mark.parametrize("value", ["up", "UP", True, None])
     def test_enabled_values_normalize_to_enabled(self, value):
-        html = str(_interface_table().render_enabled(value, {"exists_in_netbox": False}))
+        """An absent ifAdminStatus reads as enabled: that is the value a sync writes."""
+        record = {"exists_in_netbox": False, "ifAdminStatus": value}
+        html = str(_interface_table().render_enabled(value, record))
 
         assert "Enabled" in html
         assert "text-danger" in html
 
-    @pytest.mark.parametrize("value", ["down", False, None])
+    @pytest.mark.parametrize("value", ["down", False])
     def test_disabled_values_normalize_to_disabled(self, value):
-        html = str(_interface_table().render_enabled(value, {"exists_in_netbox": False}))
+        record = {"exists_in_netbox": False, "ifAdminStatus": value}
+        html = str(_interface_table().render_enabled(value, record))
 
         assert "Disabled" in html
 
@@ -958,18 +966,71 @@ class TestInterfaceTableFields:
         assert "<img" not in rendered
         assert "&lt;img" in rendered
 
-    def test_oob_and_shared_lom_badges_are_rendered_after_the_name(self):
+    def test_oob_and_shared_lom_markers_render_in_the_relationships_column(self):
+        """Both markers describe where the row came from, so they belong with the other pills.
+
+        Rendering them beside the interface name crowded the column with a second, unrelated
+        visual language (solid fills next to plain text).
+        """
+        table = _interface_table()
+        record = _port(ifName="mgmt0", exists_in_netbox=False, _source="oob", _dedup_conflict=True)
+
+        name_html = str(table.render_name("mgmt0", record))
+        relationships_html = str(table.render_parent(None, record))
+
+        assert "mgmt0" in name_html
+        assert "badge" not in name_html, "the name column carries the name, not row markers"
+        assert "From OOB controller" in relationships_html
+        assert "Shared LOM" in relationships_html
+
+    def test_a_name_collision_row_is_reported_in_the_relationships_column(self):
+        """A collided OOB row is skipped on sync, so the column has to say why."""
+        device = make_device("collision-pill-device")
+        table = _interface_table(device)
+        html = str(
+            table.render_parent(
+                None,
+                _port(
+                    ifName="eth0",
+                    port_id=9301,
+                    exists_in_netbox=False,
+                    _source="oob",
+                    host_name_collision=True,
+                    selected_object_id=device.pk,
+                    selected_object_type="device",
+                ),
+            )
+        )
+
+        assert "Name conflict" in html
+        assert "the OOB port is not synced" in html
+        assert "<button" not in html, "the pill reports the skip; it does not offer an action"
+
+    def test_a_host_row_never_shows_a_name_collision(self):
+        """The host owns the name, so it is never the row that has to move."""
+        table = _interface_table(make_device("collision-pill-host"))
+        html = str(table.render_parent(None, _port(ifName="eth0", port_id=9303, exists_in_netbox=False)))
+
+        assert "Name conflict" not in html
+
+    def test_the_row_marker_pills_match_the_relationship_pill_styling(self):
+        """The markers sit in the same stack as LAG/Parent, so they read as one column.
+
+        Tabler's light (-lt) variants carry their own readable text colour in both themes; a
+        solid fill next to them is what made the column look unfinished.
+        """
         table = _interface_table()
         html = str(
-            table.render_name(
-                "mgmt0",
+            table.render_parent(
+                None,
                 _port(ifName="mgmt0", exists_in_netbox=False, _source="oob", _dedup_conflict=True),
             )
         )
 
-        assert "mgmt0" in html
-        assert "From OOB controller" in html
-        assert "Shared LOM" in html
+        assert "bg-purple-lt" in html, "the OOB pill keeps the purple the rest of the plugin uses"
+        assert "bg-warning-lt" in html
+        assert "bg-purple text-white" not in html, "the solid name-column fill must not follow it over"
+        assert html.count('<div class="text-nowrap lh-sm">') == 2, "each marker stacks like a relationship pill"
 
     def test_real_librenms_id_states(self):
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -978,15 +1039,19 @@ class TestInterfaceTableFields:
         interface = make_interface(device, "Ethernet1")
         table = _interface_table(device)
 
-        missing = str(table.render_librenms_id(42, {"exists_in_netbox": True, "netbox_interface": interface}))
+        def _row(iface):
+            # port_id is the column accessor, so the rendered value and the row carry the same id.
+            return {"port_id": 42, "exists_in_netbox": True, "netbox_interface": iface}
+
+        missing = str(table.render_librenms_id(42, _row(interface)))
         set_librenms_device_id(interface, 99, "default")
         interface.save()
         interface = type(interface).objects.get(pk=interface.pk)
-        mismatch = str(table.render_librenms_id(42, {"exists_in_netbox": True, "netbox_interface": interface}))
+        mismatch = str(table.render_librenms_id(42, _row(interface)))
         interface.custom_field_data["librenms_id"] = {"default": 42}
         interface.save()
         interface = type(interface).objects.get(pk=interface.pk)
-        matched = str(table.render_librenms_id(42, {"exists_in_netbox": True, "netbox_interface": interface}))
+        matched = str(table.render_librenms_id(42, _row(interface)))
 
         assert "No librenms_id" in missing
         assert "Existing LibreNMS ID: 99" in mismatch
@@ -1349,6 +1414,7 @@ class TestInterfaceFormatting:
             "vlans",
             "librenms_id",
             "parent",
+            "actions",
             "librenms_lag_port_id",
             "librenms_lag_name",
             "librenms_parent_port_id",
@@ -1525,9 +1591,11 @@ class TestSharedOobBadges:
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
+        # The interface table marks the row in its relationships column; modules and cables
+        # still mark it beside the name. The wording is what has to stay shared.
         interface_html = str(
-            _interface_table().render_name(
-                "mgmt0",
+            _interface_table().render_parent(
+                None,
                 _port(ifName="mgmt0", exists_in_netbox=False, _source="oob"),
             )
         )
@@ -1541,14 +1609,31 @@ class TestSharedOobBadges:
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
-        interface_html = str(
-            _interface_table().render_name(
-                "Ethernet1",
-                _port(exists_in_netbox=False, _source="main"),
-            )
-        )
+        table = _interface_table()
+        host_row = _port(exists_in_netbox=False, _source="main")
+        interface_html = str(table.render_name("Ethernet1", host_row)) + str(table.render_parent(None, host_row))
         module_html = str(object.__new__(LibreNMSModuleTable).render_name("PSU 1", {"depth": 0}))
         cable_html = str(object.__new__(LibreNMSCableTable).render_local_port("Gi0/1", {"_source": "main"}))
 
         for html in (interface_html, module_html, cable_html):
             assert "From OOB controller" not in html
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("failure", [{"detection_failed": True}, {"detection_error": "Inventory unavailable"}])
+def test_import_summary_displays_stack_detection_failures(failure):
+    from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+
+    record = _import_record(virtual_chassis={"is_stack": False, "member_count": 0, **failure})
+    table = DeviceImportTable(data=[record], user=make_superuser())
+    assert "Stack Error" in str(table.render_netbox_object(None, record))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("refusal", ["host_name_collision", "_dedup_conflict"])
+def test_oob_rows_that_cannot_sync_have_no_row_sync_action(refusal):
+    table = _interface_table(make_device("oob-row-action"))
+    row = _port(_source="oob", exists_in_netbox=False, **{refusal: True})
+    assert table.render_actions(None, row) == ""
+    row["_source"] = "main"
+    assert 'name="sync_one"' in str(table.render_actions(None, row))

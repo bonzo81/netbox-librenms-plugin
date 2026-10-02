@@ -15,6 +15,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -23,7 +24,6 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     acquire_advisory_transaction_lock,
-    coerce_positive_int as _coerce_positive_int,
     find_by_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
@@ -39,8 +39,12 @@ from netbox_librenms_plugin.utils import (
     normalize_serial,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
+    validation_error_detail,
 )
-from netbox_librenms_plugin.views.base.modules_view import _PLACEHOLDER_VALUES
+from netbox_librenms_plugin.utils import (
+    coerce_positive_int as _coerce_positive_int,
+)
+from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _PLACEHOLDER_VALUES, _inventory_item_key
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -58,10 +62,15 @@ NO_LIBRENMS_SERVER_MESSAGE = (
     "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
 )
 
-# OOB-controller rows are merged into the cached snapshot for display only. Every entry point that
-# can act on an inventory row rejects them here, so the marker and the reason are declared once.
-OOB_INVENTORY_SOURCE = "oob"
+# OOB-controller rows are merged into the cached snapshot for display only, and every entry point
+# that can act on an inventory row rejects them. The marker itself is shared with the readers in
+# constants.py; only the wording of the refusal belongs to this module.
 OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
+
+
+def _module_error_detail(error):
+    """Render validation messages as text and preserve database conflict details."""
+    return validation_error_detail(error) if isinstance(error, ValidationError) else str(error)
 
 
 def _modules_redirect_response(request, sync_url, server_key=None):
@@ -189,6 +198,13 @@ def _lock_page_device_serials(page_device):
     incremental-acquisition ordering problem cannot arise.
     """
     acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
+
+
+def _module_holder_map(device):
+    """Read module ancestry from all modules on a device, independent of bay permissions."""
+    from dcim.models import Module
+
+    return dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
 
 
 def _module_already_on_device(device, serial, *, exclude_pk=None):
@@ -891,6 +907,10 @@ def _record_bind_outcome(bind_result, result, skipped):
     return _module_bind_result_changed(bind_result)
 
 
+class _ModuleInstallRefused(Exception):
+    """Leave the install transaction before rendering a reported refusal."""
+
+
 class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
 
@@ -972,10 +992,10 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 )
                 if not locked_bay:
                     messages.error(request, "Module bay no longer exists.")
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleInstallRefused
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleInstallRefused
                 if _module_already_on_device(target_device, serial):
                     # The bay is deliberately not named: the conflicting module may be outside
                     # this operator's scope, and its existence is what blocks the install.
@@ -983,7 +1003,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         request,
                         f"Serial '{serial}' is already installed on this device. Nothing was installed.",
                     )
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleInstallRefused
                 module = Module(
                     device=target_device,
                     module_bay=locked_bay,
@@ -1042,10 +1062,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
             _schedule_module_cache_mutation(request, page_device, server_key)
+        except _ModuleInstallRefused:
+            pass
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to install module: {e}")
+            messages.error(request, f"Failed to install module: {_module_error_detail(e)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -1071,17 +1093,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
-        module_bays = self.restricted_queryset(ModuleBay)
-        changeable_components = _restricted_module_component_querysets(self)
-        changeable_interfaces = changeable_components[Interface]
-        deletable_interfaces = self.restricted_queryset(Interface, "delete")
         parent_index = request.POST.get("parent_index")
         server_key = self.resolve_posted_server_key_or_none(request.POST)
         if server_key is None:
@@ -1098,11 +1109,35 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, "Invalid parent inventory index.")
             return _modules_action_response(request, page_device, server_key)
 
-        # Get cached inventory data
+        self._install_branch(request, page_device, server_key, parent_index)
+        page_device.refresh_from_db()
+        return _modules_action_response(request, page_device, server_key)
+
+    @transaction.atomic
+    def _install_branch(self, request, page_device, server_key, parent_index):
+        """Plan and write under the page lock, then commit before response rendering."""
+        from dcim.models import Device, Interface, ModuleBay, ModuleType
+
+        module_bays = self.restricted_queryset(ModuleBay)
+        changeable_components = _restricted_module_component_querysets(self)
+        changeable_interfaces = changeable_components[Interface]
+        deletable_interfaces = self.restricted_queryset(Interface, "delete")
+        _lock_page_device_serials(page_device)
+        # The advisory lock does not refresh model instances loaded before its wait.
+        page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
+        target_device, invalid_selected_device = _resolve_target_device_with_validation(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if invalid_selected_device:
+            messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
+            return
+
+        # Read and authenticate the snapshot through the current inventory owner.
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
         if cached_data is None:
-            return _modules_cache_missing_response(request, page_device, server_key)
+            messages.error(request, "No cached inventory data. Please refresh modules first.")
+            return
         if not module_inventory_binding_matches(
             request.POST.get("inventory_binding"),
             target_device.pk,
@@ -1116,21 +1151,43 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 request,
                 "Inventory action is stale or does not match this snapshot. Refresh Modules and try again.",
             )
-            return _modules_action_response(request, page_device, server_key)
+            return
 
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
-        ignore_rules = get_enabled_ignore_rules()
-        device_serial = (getattr(target_device, "serial", None) or "").strip()
-
-        # Build index map and collect the branch to install
         index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
-        branch_items = self._collect_branch(parent_index, cached_data, ignore_rules, device_serial, index_map)
+        vc_members = (
+            list(page_device.virtual_chassis.members.select_related("device_type__manufacturer"))
+            if page_device.virtual_chassis_id
+            else []
+        )
+        default_context, ignore_contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+            page_device, cached_data, index_map, vc_members, get_enabled_ignore_rules
+        )
+        root = index_map.get(parent_index)
+        if root is not None and ignore_contexts[_inventory_item_key(root)]["selected_device"].pk != target_device.pk:
+            messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
+            return
+        branch_items = self._collect_branch(
+            parent_index,
+            cached_data,
+            default_context["ignore_rules"],
+            default_context["device_serial"],
+            index_map,
+            ignore_contexts=ignore_contexts,
+        )
+        destination_ids = {ignore_contexts[_inventory_item_key(item)]["selected_device"].pk for item in branch_items}
+        permitted_ids = set(
+            self.restricted_queryset(Device).filter(pk__in=destination_ids).values_list("pk", flat=True)
+        )
+        if destination_ids != permitted_ids:
+            messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
+            return
 
         if not branch_items:
             messages.warning(request, "No installable items found in this branch.")
-            return _modules_action_response(request, page_device, server_key)
+            return
 
         # Load module types (with mappings)
         module_types = get_module_types_indexed()
@@ -1140,12 +1197,19 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Filter by device manufacturer so vendor-scoped mappings only apply to
         # matching vendors and mismatched ones are skipped.
         from netbox_librenms_plugin.utils import load_bay_mappings
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         exact_mappings, regex_mappings = load_bay_mappings()
-        mfr_id = getattr(getattr(target_device, "device_type", None), "manufacturer_id", None)
-        exact_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(exact_mappings, mfr_id)
-        regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(regex_mappings, mfr_id)
+        member_index_maps = {
+            device_id: {
+                idx: item
+                for idx, item in index_map.items()
+                if ignore_contexts[_inventory_item_key(item)]["selected_device"].pk == device_id
+            }
+            for device_id in destination_ids
+        }
+        manufacturer_contexts = self._build_manufacturer_contexts(
+            branch_items, ignore_contexts, exact_mappings, regex_mappings
+        )
 
         # Preload module_bay normalization rules once so _match_bay considers the
         # same normalized candidate names as the table/UI matcher. The serial scope is
@@ -1153,7 +1217,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
-        norm_rules_serial = preload_normalization_rules("serial", target_device.device_type.manufacturer)
+        for context in manufacturer_contexts.values():
+            context["serial_rules"] = preload_normalization_rules("serial", context["manufacturer"])
 
         # Install top-down: each install may create new child bays
         installed = []
@@ -1163,23 +1228,30 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         try:
             with transaction.atomic():
-                _lock_page_device_serials(page_device)
+                holder_of_by_device = {}
                 for item in branch_items:
+                    target_device = ignore_contexts[_inventory_item_key(item)]["selected_device"]
+                    if target_device.pk not in holder_of_by_device:
+                        holder_of_by_device[target_device.pk] = _module_holder_map(target_device)
+                    holder_of = holder_of_by_device[target_device.pk]
+                    mfr_id = target_device.device_type.manufacturer_id
+                    policy = manufacturer_contexts[mfr_id]
                     result = self._install_single(
                         target_device,
                         item,
-                        index_map,
+                        member_index_maps[target_device.pk],
                         module_types,
-                        exact_mappings=exact_mappings,
-                        regex_mappings=regex_mappings,
+                        exact_mappings=policy["exact_mappings"],
+                        regex_mappings=policy["regex_mappings"],
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
-                        norm_rules_serial=norm_rules_serial,
+                        norm_rules_serial=policy["serial_rules"],
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
                         changeable_components=changeable_components,
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
+                        holder_of=holder_of,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -1199,15 +1271,34 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Branch install failed: {e}")
-            return _modules_action_response(request, page_device, server_key)
+            messages.error(request, f"Branch install failed: {_module_error_detail(e)}")
+            return
 
         _report_install_results(request, installed, skipped, failed)
         if installed or bound_any:
             _schedule_module_cache_mutation(request, page_device, server_key)
-        return _modules_action_response(request, page_device, server_key)
 
-    def _collect_branch(self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None):
+    @staticmethod
+    def _build_manufacturer_contexts(branch_items, ignore_contexts, exact_mappings, regex_mappings):
+        """Share one bay-mapping policy for each destination manufacturer."""
+        manufacturer_contexts = {}
+        for item in branch_items:
+            manufacturer = ignore_contexts[_inventory_item_key(item)]["manufacturer"]
+            if manufacturer.pk not in manufacturer_contexts:
+                manufacturer_contexts[manufacturer.pk] = {
+                    "exact_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
+                        exact_mappings, manufacturer.pk
+                    ),
+                    "regex_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
+                        regex_mappings, manufacturer.pk
+                    ),
+                    "manufacturer": manufacturer,
+                }
+        return manufacturer_contexts
+
+    def _collect_branch(
+        self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None, *, ignore_contexts=None
+    ):
         """
         Collect all items in a branch depth-first, parent first.
 
@@ -1221,6 +1312,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             ignore_rules (list[dict] | None): The optional inventory ignore rules.
             device_serial (str): The device serial used to evaluate ignore rules.
             index_map (dict | None): The inventory items keyed by index.
+            ignore_contexts (dict | None): The owner and ignore policy for each inventory item.
 
         Returns:
             list[dict]: The collected items in parent-first install order.
@@ -1229,11 +1321,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         items = []
         parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
         if parent:
-            if ignore_rules:
+            item_rules, item_serial = BaseModuleTableView._ignore_policy_for_item(
+                parent, ignore_contexts, ignore_rules, device_serial
+            )
+            if item_rules:
                 from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
                 ancestor = index_map.get(parent.get("entPhysicalContainedIn")) if index_map else None
-                action = _check_ignore_rules(parent, ancestor, ignore_rules, index_map, device_serial)
+                action = _check_ignore_rules(parent, ancestor, item_rules, index_map, item_serial)
                 if action == "skip":
                     return []
                 if action == "transparent":
@@ -1245,6 +1340,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         ignore_rules=ignore_rules,
                         device_serial=device_serial,
                         index_map=index_map,
+                        ignore_contexts=ignore_contexts,
                     )
                     return items
             model = (parent.get("entPhysicalModelName") or "").strip()
@@ -1258,11 +1354,21 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 ignore_rules=ignore_rules,
                 device_serial=device_serial,
                 index_map=index_map,
+                ignore_contexts=ignore_contexts,
             )
         return items
 
     def _collect_children(
-        self, parent_idx, inventory_data, items, visited=None, ignore_rules=None, device_serial="", index_map=None
+        self,
+        parent_idx,
+        inventory_data,
+        items,
+        visited=None,
+        ignore_rules=None,
+        device_serial="",
+        index_map=None,
+        *,
+        ignore_contexts=None,
     ):
         """
         Recursively collect children with models, depth-first.
@@ -1279,6 +1385,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             ignore_rules (list[dict] | None): The optional inventory ignore rules.
             device_serial (str): The device serial used to evaluate ignore rules.
             index_map (dict | None): The inventory items keyed by index.
+            ignore_contexts (dict | None): The owner and ignore policy for each inventory item.
 
         """
         if visited is None:
@@ -1291,25 +1398,43 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             if child_idx in visited:
                 continue
             visited.add(child_idx)
-            # Apply ignore rules when provided
-            if ignore_rules:
+            item_rules, item_serial = BaseModuleTableView._ignore_policy_for_item(
+                child, ignore_contexts, ignore_rules, device_serial
+            )
+            if item_rules:
                 from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
                 parent_item = index_map.get(child.get("entPhysicalContainedIn")) if index_map else None
-                action = _check_ignore_rules(child, parent_item, ignore_rules, index_map, device_serial)
+                action = _check_ignore_rules(child, parent_item, item_rules, index_map, item_serial)
                 if action == "skip":
                     continue
                 if action == "transparent":
                     # Don't install this item but still collect its children
                     self._collect_children(
-                        child_idx, inventory_data, items, visited, ignore_rules, device_serial, index_map
+                        child_idx,
+                        inventory_data,
+                        items,
+                        visited,
+                        ignore_rules,
+                        device_serial,
+                        index_map,
+                        ignore_contexts=ignore_contexts,
                     )
                     continue
             model = (child.get("entPhysicalModelName") or "").strip()
             if model:
                 items.append(child)
             # Always recurse to find deeper items (containers may lack models)
-            self._collect_children(child_idx, inventory_data, items, visited, ignore_rules, device_serial, index_map)
+            self._collect_children(
+                child_idx,
+                inventory_data,
+                items,
+                visited,
+                ignore_rules,
+                device_serial,
+                index_map,
+                ignore_contexts=ignore_contexts,
+            )
 
     @staticmethod
     def _install_single(
@@ -1328,6 +1453,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         manufacturer_id=None,
         norm_rules_bay=None,
         norm_rules_serial=None,
+        holder_of=None,
     ):
         """
         Try to install a single inventory item.
@@ -1350,6 +1476,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             manufacturer_id (int | None): The optional device manufacturer ID.
             norm_rules_bay (dict | None): The optional module bay normalization rules.
             norm_rules_serial (dict | None): The optional serial normalization rules.
+            holder_of (dict | None): Mutable module ancestry reused during a bulk install.
 
         Returns:
             dict: The install status and its result details.
@@ -1357,7 +1484,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         """
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import resolve_module_type
+        from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
         # The serial-scope rules strip vendor markers such as Juniper's "S/N ", and the
@@ -1380,7 +1507,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Match module type (direct, then normalization fallback)
         manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
-        matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
+        matched_type = resolve_module_type(
+            model_name,
+            module_types,
+            manufacturer=manufacturer,
+            fallback_names=module_type_lookup_candidates(item),
+        )
         if not matched_type:
             return {"status": "skipped", "name": name, "reason": "no matching type"}
         if matched_type.pk not in allowed_module_type_ids:
@@ -1395,23 +1527,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
             exact_mappings, regex_mappings = load_bay_mappings()
 
-        # Determine if this item belongs under an installed module
-        # by tracing its LibreNMS parent hierarchy to an installed item
-        parent_module_id = InstallBranchView._find_parent_module_id(
-            item, index_map, bays, exact_mappings, regex_mappings
-        )
-
-        bay_dict = InstallBranchView._candidate_bays_for_item(bays, parent_module_id)
-
-        # Match module bay using preloaded mapping data
-        matched_bay = InstallBranchView._match_bay(
+        matched_bay = InstallBranchView._resolve_bay_for_item(
+            device,
             item,
             index_map,
-            bay_dict,
+            bays,
             exact_mappings,
             regex_mappings,
-            manufacturer_id=manufacturer_id,
-            norm_rules_bay=norm_rules_bay,
+            manufacturer_id,
+            norm_rules_bay,
+            holder_of=holder_of,
         )
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
@@ -1459,7 +1584,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 "reason": f"a matching {exc.component_label} is not available for module adoption",
             }
         except (ValidationError, IntegrityError) as e:
-            error_msg = str(e)
+            error_msg = _module_error_detail(e)
             if "dcim_interface_unique_device_name" in error_msg:
                 error_msg = (
                     "duplicate interface name — this module type's interface template "
@@ -1467,6 +1592,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     "An interface naming plugin with a rewrite rule for this module type can fix this."
                 )
             return {"status": "failed", "name": name, "reason": error_msg}
+
+        if holder_of is not None:
+            holder_of[module.pk] = locked_bay.module_id
 
         name = f"{matched_type.model} → {matched_bay.name}"
         if adopted_components:
@@ -1482,6 +1610,203 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             "adopted_components": adopted_components,
             "vc_adjustments": vc_adjustments,
         }
+
+    @staticmethod
+    def _resolve_bay_for_item(
+        device,
+        item,
+        index_map,
+        bays,
+        exact_mappings,
+        regex_mappings,
+        manufacturer_id,
+        norm_rules_bay,
+        *,
+        holder_of=None,
+    ):
+        """
+        Return the module bay to install *item* into, or None when nothing matches.
+
+        An installed parent module narrows the candidate names so duplicate bay names resolve to
+        the right module. It must not shrink the search to nothing: the parent only resolves once
+        it is installed, so an item whose NetBox bay sits outside that module (a device-level bay)
+        installed on a first pass and then skipped as "no matching bay" on the next, which is what
+        a second branch install, or installing the rows one at a time first, produces.
+
+        The fallback widens to the device-level bays and to the resolved parent's own subtree.
+        A bay owned by a module OUTSIDE that subtree is never offered: it may be unambiguous, but
+        unambiguous is not the same as correctly owned, so installing into it is a wrong-bay write.
+
+        Args:
+            device (Device): The device being installed onto.
+            item (dict): The LibreNMS inventory item to place.
+            index_map (dict): The inventory items keyed by index.
+            bays: The device's module bays, with ``installed_module`` selected.
+            exact_mappings (list): The exact module bay mappings.
+            regex_mappings (list): The regular expression module bay mappings.
+            manufacturer_id (int | None): The device manufacturer ID.
+            norm_rules_bay (dict | None): The module bay normalization rules.
+            holder_of (dict | None): Preloaded module ancestry for a bulk install.
+
+        Returns:
+            ModuleBay | None: The bay to install into.
+
+        """
+
+        def match_against(candidate_bays):
+            return InstallBranchView._match_bay(
+                item,
+                index_map,
+                candidate_bays,
+                exact_mappings,
+                regex_mappings,
+                manufacturer_id=manufacturer_id,
+                norm_rules_bay=norm_rules_bay,
+            )
+
+        # Trace the item's LibreNMS parent hierarchy to an installed module, if any.
+        parent_module_id = InstallBranchView._find_parent_module_id(
+            item, index_map, bays, exact_mappings, regex_mappings
+        )
+        matched = match_against(InstallBranchView._candidate_bays_for_item(bays, parent_module_id))
+        if not matched and parent_module_id:
+            matched = match_against(
+                InstallBranchView._fallback_bays_for_resolved_parent(
+                    device, bays, parent_module_id, holder_of=holder_of
+                )
+            )
+        return matched
+
+    @staticmethod
+    def _fallback_bays_for_resolved_parent(device, bays, parent_module_id, *, holder_of=None):
+        """
+        Return the bays a row may fall back to once its resolved parent narrowed the search away.
+
+        Two different questions decide membership, and _bay_is_owned_within_subtree and
+        _bay_holds_resolved_parent name them: where a NEW module may go, and whether this row IS
+        the module already there. They feed ONE candidate set on purpose. _match_bay resolves a
+        candidate name through exact mappings, then regex, then direct names, then position, each
+        as a pass over the whole set, and the positional pass rejects a position held by two bays.
+        Answering the two questions as separate searches would put every method of one ahead of
+        every method of the other, and would let a positional tie that this set rejects resolve
+        inside the smaller one. So they are merged here and searched together.
+
+        The resolved parent bounds the result. Three kinds of bay qualify, and nothing else.
+
+        Bays outside every module, for the row whose NetBox bay is device-level.
+
+        Bays owned by the parent or by a module below it. LibreNMS can omit an intermediate
+        module, so a row can trace to an ancestor while its bay belongs to a descendant: a Nokia
+        connector reports as ``2/x1/1/c2`` under the XIOM when the MDA is missing, and its bay
+        ``1/c2`` belongs to that MDA. See _nest_synthetic_transceivers.
+
+        The bay the parent itself occupies, which is owned by the parent's own holder and so sits
+        outside the subtree. The row can BE that module, because LibreNMS reports a container and
+        the module inside it as two rows. The resulting "bay already occupied" carries the module
+        pk, and that is the only way a SKIPPED row reaches _should_attempt_bind_for_result and
+        binds its LibreNMS port to an interface. An installed row carries its own module pk.
+
+        A bay owned by a module outside the subtree, a sibling above all, stays out.
+
+        A device-level bay wins a name collision, and a name owned by two modules in the subtree
+        is dropped rather than guessed. Both match _candidate_bays_for_item.
+
+        Args:
+            device (Device): The device being installed onto, used to read the module ancestry.
+            bays: The candidate module bays, with ``installed_module`` selected.
+            parent_module_id (int): The installed parent module the narrowed pass used.
+            holder_of (dict | None): Preloaded ancestry, updated as modules are installed.
+
+        Returns:
+            dict: A ``name -> bay`` mapping to match the inventory item against.
+
+        """
+        # Ancestry comes from every module on the device, never from *bays*: that queryset is
+        # permission-restricted, so a bay the user cannot change would cut the chain and hide a
+        # descendant bay they can. Only the candidates below stay restricted.
+        if holder_of is None:
+            holder_of = _module_holder_map(device)
+
+        fallback = {bay.name: bay for bay in bays if not bay.module_id}
+        scoped: dict = {}
+        for bay in bays:
+            if bay.name in fallback:
+                continue
+            if InstallBranchView._bay_holds_resolved_parent(
+                bay, parent_module_id
+            ) or InstallBranchView._bay_is_owned_within_subtree(bay, parent_module_id, holder_of):
+                scoped.setdefault(bay.name, []).append(bay)
+
+        for name, candidates in scoped.items():
+            if len(candidates) == 1:
+                fallback[name] = candidates[0]
+            else:
+                logger.info(
+                    "Bulk install: dropping ambiguous bay name %r — %d modules under the resolved "
+                    "parent define it; the row skips as 'no matching bay' instead of installing "
+                    "into an arbitrary one.",
+                    name,
+                    len(candidates),
+                )
+        return fallback
+
+    @staticmethod
+    def _bay_is_owned_within_subtree(bay, parent_module_id, holder_of):
+        """
+        Report whether *bay* belongs to the resolved parent or to a module below it.
+
+        This is the INSTALL question: may a new module go here. Ownership is strict, because a
+        bay owned by a module outside the subtree, a sibling above all, is not this row's to
+        take. It may be unambiguous, but unambiguous is not the same as correctly owned.
+
+        The subtree reaches all the way down, not one level. LibreNMS can omit an intermediate
+        module, so a row traces to an ancestor while its bay belongs to a descendant. A Nokia
+        connector reports as ``2/x1/1/c2`` and nests under the XIOM when the MDA is missing, and
+        the bay ``1/c2`` belongs to that MDA. See _nest_synthetic_transceivers.
+
+        Args:
+            bay (ModuleBay): The bay to judge.
+            parent_module_id (int): The installed parent module the narrowed pass used.
+            holder_of (dict): Module pk -> pk of the module whose bay holds it, device-wide.
+
+        Returns:
+            bool: True when the bay sits in the parent's subtree.
+
+        """
+        module_id = bay.module_id
+        seen = set()
+        while module_id is not None and module_id not in seen:
+            if module_id == parent_module_id:
+                return True
+            seen.add(module_id)
+            module_id = holder_of.get(module_id)
+        return False
+
+    @staticmethod
+    def _bay_holds_resolved_parent(bay, parent_module_id):
+        """
+        Report whether *bay* is the one the resolved parent already occupies.
+
+        This is the IDENTITY question, and it is a different one: not where a new module goes,
+        but whether this row IS the module that is already there. LibreNMS reports a container
+        and the module inside it as two rows, so a row can resolve its own module as its parent.
+        Matching this bay makes _install_single report "bay already occupied" carrying the module
+        pk, which is the only way a SKIPPED row reaches _should_attempt_bind_for_result and binds
+        its LibreNMS port to an interface. An installed row carries its own module pk instead.
+
+        The bay belongs to the parent's own holder, so the subtree test cannot reach it, and it
+        can be nested: a converter inside a line card occupies a module-scoped bay.
+
+        Args:
+            bay (ModuleBay): The bay to judge.
+            parent_module_id (int): The installed parent module the narrowed pass used.
+
+        Returns:
+            bool: True when the parent module is installed in this bay.
+
+        """
+        installed = getattr(bay, "installed_module", None)
+        return installed is not None and installed.pk == parent_module_id
 
     @staticmethod
     def _find_parent_module_id(item, index_map, device_bays, exact_mappings, regex_mappings):  # noqa: C901
@@ -1781,13 +2106,23 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.warning(request, "None of the selected indices matched cached inventory.")
             return _modules_action_response(request, page_device, server_key)
 
-        # Load ignore rules once; they're evaluated per-row inside the install
-        # loop using the *resolved* target device serial, since VC rows may
-        # switch to a different member via device_selection_<ent_index>.
+        # Ignore rules are evaluated per-row inside the install loop against the *resolved* target
+        # device, since VC rows may switch to a different member via device_selection_<ent_index>.
+        # The rules are manufacturer-scoped and VC members can carry different device types, so
+        # resolve them per target and cache by manufacturer rather than loading the page device's
+        # set once for every row.
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
         from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
-        ignore_rules = get_enabled_ignore_rules()
+        ignore_rules_by_manufacturer = {}
+
+        def _ignore_rules_for(device):
+            """Return the enabled ignore rules that apply to *device*, loading each vendor once."""
+            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+            key = getattr(manufacturer, "pk", None)
+            if key not in ignore_rules_by_manufacturer:
+                ignore_rules_by_manufacturer[key] = get_enabled_ignore_rules(manufacturer)
+            return ignore_rules_by_manufacturer[key]
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
         # Manufacturer-scoping happens per-iteration since target_device may
@@ -1817,23 +2152,31 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 if ("serial", manufacturer.pk) not in norm_rules_serial:
                     norm_rules_serial.update(preload_normalization_rules("serial", manufacturer))
 
+        resolved_items = []
+        invalid_selection_seen = False
+        devices = self.restricted_queryset(Device)
+        for item in items:
+            ent_index = item.get("entPhysicalIndex")
+            target_device, invalid_selected_device = _resolve_target_device_with_validation(
+                page_device,
+                request.POST.get(f"device_selection_{ent_index}"),
+                devices,
+            )
+            invalid_selection_seen |= invalid_selected_device
+            resolved_items.append((item, target_device, _ignore_rules_for(target_device)))
+
+        holder_of_by_device = {}
         installed, skipped, failed = [], [], []
         bound_any = False
-
-        invalid_selection_seen = False
         try:
             with transaction.atomic():
                 _lock_page_device_serials(page_device)
-                for item in items:
-                    ent_index = item.get("entPhysicalIndex")
-                    selected_device_id = request.POST.get(f"device_selection_{ent_index}")
-                    target_device, invalid_selected_device = _resolve_target_device_with_validation(
-                        page_device,
-                        selected_device_id,
-                        self.restricted_queryset(Device),
-                    )
-                    if invalid_selected_device:
-                        invalid_selection_seen = True
+                target_ids = {device.pk for _, device, _ in resolved_items}
+                current_serials = dict(Device.objects.filter(pk__in=target_ids).values_list("pk", "serial"))
+                if current_serials.keys() != target_ids:
+                    raise ValidationError("A selected device is no longer available. Refresh Modules and try again.")
+                for item, target_device, ignore_rules in resolved_items:
+                    target_device.serial = current_serials[target_device.pk]
                     if ignore_rules:
                         target_serial = (getattr(target_device, "serial", None) or "").strip()
                         rule_action = _check_ignore_rules(
@@ -1847,6 +2190,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             skipped.append(f"{item.get('entPhysicalName', '?')}: matched ignore rule")
                             continue
                     mfr_id = getattr(getattr(target_device, "device_type", None), "manufacturer_id", None)
+                    if target_device.pk not in holder_of_by_device:
+                        holder_of_by_device[target_device.pk] = _module_holder_map(target_device)
+                    holder_of = holder_of_by_device[target_device.pk]
                     exact_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(all_exact, mfr_id)
                     regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(all_regex, mfr_id)
                     result = InstallBranchView._install_single(
@@ -1864,6 +2210,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         changeable_components=changeable_components,
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
+                        holder_of=holder_of,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -1883,7 +2230,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Install failed: {e}")
+            messages.error(request, f"Install failed: {_module_error_detail(e)}")
             return _modules_action_response(request, page_device, server_key)
 
         if invalid_selection_seen:
@@ -1977,7 +2324,7 @@ class UpdateModuleSerialView(
             else:
                 messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to update serial: {e}")
+            messages.error(request, f"Failed to update serial: {_module_error_detail(e)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -2176,7 +2523,7 @@ class ModuleMismatchPreviewView(
         inventory_digest = module_inventory_row_digest(librenms_item)
         action_target = {"module_id": installed_module.pk}
 
-        from netbox_librenms_plugin.utils import resolve_module_type
+        from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         librenms_model = normalize_serial(librenms_item.get("entPhysicalModelName")) or "-"
@@ -2191,7 +2538,10 @@ class ModuleMismatchPreviewView(
         # Detect type mismatch
         module_types = get_module_types_indexed()
         matched_type = resolve_module_type(
-            librenms_model if librenms_model != "-" else "", module_types, manufacturer=manufacturer
+            librenms_model if librenms_model != "-" else "",
+            module_types,
+            manufacturer=manufacturer,
+            fallback_names=module_type_lookup_candidates(librenms_item),
         )
 
         type_mismatch = matched_type is not None and installed_module.module_type_id != matched_type.pk
@@ -2387,7 +2737,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         if refusal:
             return refusal
 
-        from netbox_librenms_plugin.utils import resolve_module_type
+        from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
@@ -2398,7 +2748,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             serial = ""
 
         module_types = get_module_types_indexed()
-        matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
+        matched_type = resolve_module_type(
+            model_name,
+            module_types,
+            manufacturer=manufacturer,
+            fallback_names=module_type_lookup_candidates(librenms_item),
+        )
 
         if not matched_type:
             messages.error(request, f"No matching module type found for '{model_name}'.")
@@ -2557,7 +2912,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 "Ask an administrator to resolve the conflict.",
             )
         except (ValidationError, IntegrityError) as e:
-            error_msg = str(e)
+            error_msg = _module_error_detail(e)
             if "dcim_interface_unique_device_name" in error_msg:
                 error_msg = (
                     "duplicate interface name — this module type's interface template "
@@ -2696,7 +3051,7 @@ class MoveModuleView(
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Move failed: {e}")
+            messages.error(request, f"Move failed: {_module_error_detail(e)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -2984,7 +3339,7 @@ class AddBayTemplateView(
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
-                messages.error(request, f"Failed to add bay mapping: {exc}")
+                messages.error(request, f"Failed to add bay mapping: {_module_error_detail(exc)}")
             else:
                 messages.success(request, f"Added bay mapping for '{librenms_name}' to '{name}'.")
                 if server_key:
@@ -3233,6 +3588,6 @@ class AddBayTemplateView(
             if server_key:
                 _schedule_module_cache_mutation(request, device, server_key)
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to add bay template: {e}")
+            messages.error(request, f"Failed to add bay template: {_module_error_detail(e)}")
 
         return _modules_action_response(request, device, server_key)

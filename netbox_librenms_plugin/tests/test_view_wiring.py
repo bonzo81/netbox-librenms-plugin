@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from netbox_librenms_plugin.tests.conftest import configured_server_key
 from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
 
@@ -198,6 +199,108 @@ class TestMappingBulkImportViewsAreRegistered:
 
         missing = [name for name, view in views if "bulk_import" not in registered_names(view.queryset.model)]
         assert not missing, f"bulk-import views missing @register_model_view: {missing}"
+
+
+class TestSourceMarkerConvention:
+    """
+    The row-source marker is written and compared through one constant, never a bare string.
+
+    Every reader gates read-only OOB rows on this value, so a typo at one site silently turns a
+    display-only row into an actionable one. constants.OOB_INVENTORY_SOURCE is the single spelling.
+    """
+
+    def _is_source_access(self, node):
+        """Return whether *node* reads or writes the ``_source`` key of a row."""
+        import ast
+
+        if isinstance(node, ast.Call):
+            func = node.func
+            return (
+                isinstance(func, ast.Attribute)
+                and func.attr == "get"
+                and bool(node.args)
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "_source"
+            )
+        return (
+            isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "_source"
+        )
+
+    def _bare_marker_lines(self, tree):
+        import ast
+
+        hits = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Compare):
+                # Either operand may hold the access: `row["_source"] == "serial"` and
+                # `"serial" == row["_source"]` spell the marker inline just the same.
+                operands = [node.left, *node.comparators]
+                for first, second in zip(operands, operands[1:], strict=False):
+                    if any(
+                        self._is_source_access(access)
+                        and isinstance(literal, ast.Constant)
+                        and isinstance(literal.value, str)
+                        for access, literal in ((first, second), (second, first))
+                    ):
+                        hits.append(node.lineno)
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                if isinstance(node.value.value, str) and any(self._is_source_access(t) for t in node.targets):
+                    hits.append(node.lineno)
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values, strict=True):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == "_source"
+                        and isinstance(value, ast.Constant)
+                        and isinstance(value.value, str)
+                    ):
+                        hits.append(value.lineno)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                # get("_source", "main") and setdefault("_source", "main") write the marker too.
+                if (
+                    node.func.attr in ("get", "setdefault")
+                    and len(node.args) == 2
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "_source"
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)
+                ):
+                    hits.append(node.lineno)
+        return hits
+
+    def test_the_scan_reads_both_sides_of_a_comparison(self):
+        """A reversed comparison spells the marker just as inline as the usual order."""
+        import ast
+
+        usual = self._bare_marker_lines(ast.parse('if row["_source"] == "serial":\n    pass\n'))
+        reversed_order = self._bare_marker_lines(ast.parse('if "serial" == row["_source"]:\n    pass\n'))
+        via_get = self._bare_marker_lines(ast.parse('if "serial" == row.get("_source"):\n    pass\n'))
+
+        assert usual == [1], usual
+        assert reversed_order == [1], "a reversed comparison slipped past the scan"
+        assert via_get == [1], "a reversed .get() comparison slipped past the scan"
+
+    def test_the_scan_ignores_a_comparison_against_a_constant(self):
+        """Comparing against the named constant is the point, so it must not be reported."""
+        import ast
+
+        assert self._bare_marker_lines(ast.parse('if row["_source"] == SERIAL_INVENTORY_SOURCE:\n    pass\n')) == []
+        assert self._bare_marker_lines(ast.parse('if SERIAL_INVENTORY_SOURCE == row["_source"]:\n    pass\n')) == []
+
+    def test_no_production_module_spells_the_source_marker_inline(self):
+        import ast
+        from pathlib import Path
+
+        package = Path(__file__).resolve().parent.parent
+        offenders = {}
+        for source_file in sorted(package.rglob("*.py")):
+            if "tests" in source_file.parts or "migrations" in source_file.parts:
+                continue
+            lines = self._bare_marker_lines(ast.parse(source_file.read_text(encoding="utf-8")))
+            if lines:
+                offenders[str(source_file.relative_to(package))] = lines
+
+        assert offenders == {}, f"use constants.OOB_INVENTORY_SOURCE instead: {offenders}"
 
 
 class TestCacheMixinWiring:
@@ -430,6 +533,17 @@ class TestRequiredObjectPermissionsWiring:
         assert NetBoxObjectPermissionMixin in SingleIPAddressVerifyView.__mro__
         assert ("view", Device) in SingleIPAddressVerifyView.required_object_permissions.get("POST", [])
 
+    def test_capture_data_shape_has_required_object_permissions(self):
+        # GET-gated (not POST): the capture view reads a device's LibreNMS data, so it must carry
+        # the permission mixins and require view-Device. A dropped mixin would 500 or silently
+        # stop enforcing the gate — TestCaptureDataShapePermissionGate verifies the live has_perm.
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
+
+        self._assert_has_mixins(CaptureDataShapeView)
+        assert CaptureDataShapeView.required_object_permissions.get("GET") == [("view", Device)]
+
 
 class TestViewPropertyLazyInit:
     """The LibreNMS API starts as None, and its property descriptor exists on the class."""
@@ -485,7 +599,7 @@ class TestTemplateSyntax:
     )
     def test_template_compiles(self, template_path):
         """Each template must parse without TemplateSyntaxError."""
-        source = template_path.read_text()
+        source = template_path.read_text(encoding="utf-8")
         # Compile the template — raises TemplateSyntaxError on bad tags
         self._engine.from_string(source)
 
@@ -497,7 +611,7 @@ class TestHtmxSwapConvention:
 
     def test_only_the_recorded_exception_swaps_outerhtml(self):
         """A second outerHTML swap has to be argued in the guideline, not added quietly."""
-        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap="outerHTML"' in path.read_text()]
+        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap="outerHTML"' in path.read_text(encoding="utf-8")]
 
         assert swapping == [self.EXCEPTION], (
             "frontend.instructions.md records one outerHTML swap; update it before adding another"
@@ -505,7 +619,7 @@ class TestHtmxSwapConvention:
 
     def test_out_of_band_swaps_preserve_their_target_elements(self):
         """Out-of-band updates must keep stable targets for later refreshes."""
-        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap-oob="outerHTML"' in path.read_text()]
+        swapping = [path for path in _TEMPLATE_FILES if 'hx-swap-oob="outerHTML"' in path.read_text(encoding="utf-8")]
 
         assert swapping == []
 
@@ -662,18 +776,17 @@ class TestSingleCableVerifyServerKey:
 
     @staticmethod
     def _view_and_request(device, body, *, api_server_key):
-        """Real view + real superuser request; _librenms_api is stubbed only to supply the active-server key."""
+        """Real view, configured API client, and superuser request."""
         import json
-        from unittest.mock import MagicMock
 
         from django.contrib.auth import get_user_model
         from django.test import RequestFactory
 
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
         view = SingleCableVerifyView()
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = api_server_key  # config boundary: the active-server fallback
+        view._librenms_api = LibreNMSAPI(server_key=api_server_key)
         request = RequestFactory().post("/verify-cable/", data=json.dumps(body), content_type="application/json")
         request.user = get_user_model().objects.create_superuser(username=f"sk-{device.pk}", email="", password="x")
         view.request = request
@@ -682,62 +795,86 @@ class TestSingleCableVerifyServerKey:
         return view, request
 
     @pytest.mark.django_db
-    def test_server_key_used_for_cache_lookup(self):
-        """The POSTed server_key is threaded into get_librenms_sync_device and the (real) cache key."""
-        from unittest.mock import patch
+    def test_server_key_used_for_cache_lookup(self, configure_librenms):
+        """The POSTed server key selects the real VC member cache entry for that server."""
+        from dcim.models import Interface
+        from django.core.cache import cache
 
+        configure_librenms(
+            {"production": {"librenms_url": "https://production.example.com", "api_token": "test-token"}}
+        )
         device = self._vc_device("used")
+        Interface.objects.create(device=device, name="eth0", type="1000base-t")
         view, request = self._view_and_request(
             device,
-            {"device_id": device.pk, "local_port_id": "42", "server_key": "production"},
-            api_server_key="default-server",
+            {"device_id": device.pk, "row_id": "42", "server_key": "production"},
+            api_server_key="production",
         )
+        key = view.get_cache_key(device, "links", "production")
+        cache.set(key, {"links": [{"local_port": "eth0", "local_port_id": 42, "remote_device": ""}]})
+        try:
+            row = json.loads(view.post(request).content)["formatted_row"]
+        finally:
+            cache.delete(key)
 
-        with (
-            # The posted key is honoured only when it names a configured server; post() checks the
-            # LibreNMSAPI.get_available_servers() CLASSMETHOD (not the instance).
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"production": "Production"},
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=device
-            ) as mock_sync_device,
-            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
-        ):
-            mock_cache.get.return_value = None  # no cached data -> early return once the key is built
-            view.post(request)
-
-            # get_librenms_sync_device gets the posted server_key (device compares by pk via Model.__eq__)
-            mock_sync_device.assert_called_once_with(device, server_key="production")
-            # the real cache key also carries the posted server_key (not the active default)
-            cache_key_arg = mock_cache.get.call_args[0][0]
-            assert "production" in cache_key_arg
+        assert "eth0" in row["local_port"]
 
     @pytest.mark.django_db
-    def test_fallback_to_api_server_key(self):
-        """With no server_key in the POST body, post() falls back to the active-server key."""
-        from unittest.mock import patch
+    def test_fallback_to_api_server_key(self, configure_librenms):
+        """With no posted server key, the active server's real VC cache entry is selected."""
+        from dcim.models import Interface
+        from django.core.cache import cache
 
-        device = self._vc_device("fallback")
-        view, request = self._view_and_request(
-            device, {"device_id": device.pk, "local_port_id": "42"}, api_server_key="fallback-server"
+        configure_librenms(
+            {"fallback-server": {"librenms_url": "https://fallback.example.com", "api_token": "test-token"}}
         )
+        device = self._vc_device("fallback")
+        Interface.objects.create(device=device, name="eth0", type="1000base-t")
+        view, request = self._view_and_request(
+            device, {"device_id": device.pk, "row_id": "42"}, api_server_key="fallback-server"
+        )
+        key = view.get_cache_key(device, "links", "fallback-server")
+        cache.set(key, {"links": [{"local_port": "eth0", "local_port_id": 42, "remote_device": ""}]})
+        try:
+            row = json.loads(view.post(request).content)["formatted_row"]
+        finally:
+            cache.delete(key)
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                side_effect=lambda dev, **kw: dev,
-            ) as mock_sync_device,
-            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
-        ):
-            mock_cache.get.return_value = None
-            view.post(request)
+        assert "eth0" in row["local_port"]
 
-            mock_sync_device.assert_called_once()
-            assert mock_sync_device.call_args[1]["server_key"] == "fallback-server"
-            cache_key_arg = mock_cache.get.call_args[0][0]
-            assert "fallback-server" in cache_key_arg
+
+@pytest.mark.django_db
+class TestCaptureDataShapePermissionGate:
+    """The capture view's object-permission gate is enforced via the live user.has_perm, not just wiring."""
+
+    def _view_for_user(self, user):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
+
+        view = CaptureDataShapeView()
+        request = RequestFactory().get("/")
+        request.user = user
+        view.request = request
+        return view
+
+    def test_user_without_view_device_is_denied(self):
+        """A user lacking dcim.view_device fails the GET gate (real has_perm, not a mock)."""
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create(username="cap-noperm", is_active=True)
+        has_all, missing = self._view_for_user(user).check_object_permissions("GET")
+        assert has_all is False
+        assert "dcim.view_device" in missing
+
+    def test_user_with_view_device_is_permitted(self):
+        """A superuser (has dcim.view_device) passes the GET gate."""
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create(username="cap-super", is_active=True, is_superuser=True)
+        has_all, missing = self._view_for_user(user).check_object_permissions("GET")
+        assert has_all is True
+        assert missing == []
 
 
 class TestGatedViewsResolveThroughRestrictedQuerysets:
@@ -1423,6 +1560,7 @@ class TestViewTestHelpers:
             _message_level("add_message")
 
 
+@pytest.mark.django_db
 class TestModuleWriteViewPermissionDeclarations:
     @pytest.mark.parametrize(
         ("view_name", "expected"),
@@ -1442,17 +1580,17 @@ class TestModuleWriteViewPermissionDeclarations:
     )
     def test_write_gate_declares_each_restricted_read(self, view_name, expected):
         """Each dynamic gate must declare every model read before the first lookup."""
-        from types import SimpleNamespace
-        from unittest.mock import MagicMock
+        from django.contrib.auth import get_user_model
 
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.sync import modules
 
         view = getattr(modules, view_name)()
-        denied = object()
-        view.require_all_permissions = MagicMock(return_value=denied)
-        request = SimpleNamespace(POST={})
+        user = get_user_model().objects.create_user(username=f"denied-{view_name}-{expected[1]}")
+        request = make_request("post", user=user)
 
-        assert view.post(request, pk=1) is denied
+        response = bind_and_call(view, request, "post", pk=1)
+        assert response.status_code in {302, 403}
         assert any(
             action == expected[0] and model.__name__ == expected[1]
             for action, model in view.required_object_permissions["POST"]
@@ -1463,17 +1601,17 @@ class TestModuleWriteViewPermissionDeclarations:
         [("get", "device_type", "DeviceType"), ("post", "module_type", "ModuleType")],
     )
     def test_add_bay_template_gate_declares_device_and_dynamic_target_reads(self, method, target_kind, target_model):
-        from types import SimpleNamespace
-        from unittest.mock import MagicMock
+        from django.contrib.auth import get_user_model
 
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
         view = AddBayTemplateView()
-        denied = object()
-        view.require_all_permissions = MagicMock(return_value=denied)
-        request = SimpleNamespace(GET={"target_kind": target_kind}, POST={"target_kind": target_kind})
+        user = get_user_model().objects.create_user(username=f"denied-bay-{method}-{target_kind}")
+        request = make_request(method, {"target_kind": target_kind}, user=user)
 
-        assert getattr(view, method)(request, pk=1) is denied
+        response = bind_and_call(view, request, method, pk=1)
+        assert response.status_code in {302, 403}
         declared = {(action, model.__name__) for action, model in view.required_object_permissions[method.upper()]}
         assert ("view", "Device") in declared
         assert ("view", target_model) in declared
@@ -1637,8 +1775,7 @@ class TestInstallRefusesADuplicateSerial:
     """
     A serial already installed on the target device must not be installed a second time.
 
-    The rendered row is advisory: it comes from a cache and a scripted POST never reads it. The
-    refusal therefore lives on the write path, not in the table.
+    The refusal must remain on the write path after the posted action is matched to its cached row.
     """
 
     @staticmethod
@@ -1660,11 +1797,7 @@ class TestInstallRefusesADuplicateSerial:
 
     @staticmethod
     def _post_install(device, module_type, empty_bay, serial, user=None):
-        """
-        Drive a real InstallModuleView POST for a cached row carrying `serial`.
-
-        The action resolves the serial from the exact cached inventory row bound to the form.
-        """
+        """Drive a real InstallModuleView POST for a cached row carrying `serial`."""
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
@@ -1772,8 +1905,8 @@ class TestInstallRefusesADuplicateSerial:
         """InstallSelectedView builds its work list from the cache, so the row's flags cannot guard it."""
         from types import SimpleNamespace
 
-        from django.core.cache import cache
         from dcim.models import Module
+        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -1918,7 +2051,7 @@ class TestIdentityIsNotGatedOnBayMapping:
         return str(table.render_module_bay(record.get("module_bay", "-"), record))
 
     def test_an_unmatched_bay_reports_where_the_module_actually_is(self):
-        """ "No matching bay" alone hides the fact that NetBox already holds the part."""
+        """Report where NetBox holds a part when no bay matches."""
         prefix = "identity-render"
         inventory = [
             {
@@ -2244,8 +2377,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_move_refuses_a_conflict_module_outside_the_grant(self):
         """MoveModuleView reassigns the conflict module's bay/device, and its pk comes from the POST — a secondary lookup the primary scoping does not cover."""
-        from dcim.models import Device, Module, ModuleBay, ModuleType
-        from dcim.models import Manufacturer
+        from dcim.models import Device, Manufacturer, Module, ModuleBay, ModuleType
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.modules import MoveModuleView
@@ -2392,13 +2524,16 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             ],
         )
         view = ReplaceModuleView()
-        view._librenms_api = MagicMock(server_key="default")
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
         request = self._request(
             user,
-            {"module_id": str(target.pk), "ent_index": "100"},
+            {"server_key": server_key, "module_id": str(target.pk), "ent_index": "100"},
         )
         view.setup(request)
-        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         cache.set(
             cache_key,
             trusted_module_inventory_payload(
@@ -2410,6 +2545,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
                         "entPhysicalSerialNum": "NEW-TARGET",
                     }
                 ],
+                server_key=server_key,
             ),
         )
         try:
@@ -2461,7 +2597,10 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             ],
         )
         view = ReplaceModuleView()
-        view._librenms_api = MagicMock(server_key="default")
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
         inventory_item = {
             "entPhysicalIndex": 100,
             "entPhysicalModelName": module_type.model,
@@ -2470,11 +2609,12 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         request = self._request(
             user,
             {
+                "server_key": server_key,
                 "module_id": str(target.pk),
                 "ent_index": "100",
                 "inventory_binding": module_inventory_binding_token(
                     device.pk,
-                    "default",
+                    server_key,
                     "replace_module",
                     {"module_id": target.pk},
                     100,
@@ -2483,12 +2623,13 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             },
         )
         view.setup(request)
-        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         cache.set(
             cache_key,
             trusted_module_inventory_payload(
                 device,
                 [inventory_item],
+                server_key=server_key,
             ),
         )
         try:
@@ -2534,14 +2675,17 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             ],
         )
         view = ModuleMismatchPreviewView()
-        view._librenms_api = MagicMock(server_key="default")
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
         request = self._request(
             user,
-            {"module_id": str(target.pk), "ent_index": "100"},
+            {"server_key": server_key, "module_id": str(target.pk), "ent_index": "100"},
             method="get",
         )
         view.setup(request)
-        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         cache.set(
             cache_key,
             trusted_module_inventory_payload(
@@ -2553,6 +2697,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
                         "entPhysicalSerialNum": hidden.serial,
                     }
                 ],
+                server_key=server_key,
             ),
         )
         try:
@@ -2777,9 +2922,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_vc_serial_assign_refuses_a_member_outside_the_grant(self):
         """AssignVCSerialView overwrites the member's serial and takes its pk from the POST, guarded only by same-VC membership."""
-        from dcim.models import Device
-
-        from dcim.models import VirtualChassis
+        from dcim.models import Device, VirtualChassis
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.device_fields import AssignVCSerialView
@@ -2964,3 +3107,15 @@ class TestRoutedSyncPagesScopeTheirObject:
 
         with pytest.raises(Http404):
             view.get_object(hidden.pk)
+
+
+def test_import_reexports_document_the_active_lint_policy():
+    """The package documents the lint configuration that keeps its public imports."""
+    import tomllib
+
+    from netbox_librenms_plugin import import_utils
+
+    config = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    assert "F401" in config["tool"]["ruff"]["lint"]["per-file-ignores"]["__init__.py"]
+    assert "per-file ignore" in import_utils.__doc__
+    assert callable(import_utils.bulk_import_devices)

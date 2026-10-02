@@ -36,8 +36,7 @@ _configuration.PLUGINS = ["netbox_librenms_plugin"]
 _configuration.PLUGINS_CONFIG = {"netbox_librenms_plugin": _plugin_config}
 os.environ["NETBOX_CONFIGURATION"] = _configuration.__name__
 
-from netbox.settings import *  # noqa: E402, F403
-
+from netbox.settings import *  # noqa: E402
 
 TEST_DB_NAME_PREFIX = "test_"
 
@@ -45,4 +44,4 @@ _test_database_name = _required_environment("TEST_DB_NAME")
 if not _test_database_name.startswith(TEST_DB_NAME_PREFIX):
     raise ValueError(f"TEST_DB_NAME must start with '{TEST_DB_NAME_PREFIX}'.")
 
-DATABASES["default"].setdefault("TEST", {})["NAME"] = _test_database_name  # noqa: F405
+DATABASES["default"].setdefault("TEST", {})["NAME"] = _test_database_name

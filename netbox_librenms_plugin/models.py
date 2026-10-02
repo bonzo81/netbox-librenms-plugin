@@ -146,22 +146,22 @@ class LibreNMSSettings(models.Model):
         help_text="Cable description; the acting server key is appended, e.g. 'Synced from LibreNMS (production)'",
     )
 
-    def save(self, *args, **kwargs):
-        self.pk = 1
-        super().save(*args, **kwargs)
-
     class Meta:
         """Meta options for LibreNMSSettings."""
 
         verbose_name = "LibreNMS Settings"
         verbose_name_plural = "LibreNMS Settings"
 
+    def __str__(self):
+        return f"LibreNMS Settings - Server: {self.selected_server}"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
     def get_absolute_url(self):
         """Return the URL for the settings page."""
         return reverse("plugins:netbox_librenms_plugin:settings")
-
-    def __str__(self):
-        return f"LibreNMS Settings - Server: {self.selected_server}"
 
 
 class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
@@ -435,7 +435,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
             try:
                 _validate_replacement_template(pattern, self.netbox_bay_name)
             except (re.error, IndexError) as e:
-                raise ValidationError({"netbox_bay_name": f"Invalid replacement: {e}"})
+                raise ValidationError({"netbox_bay_name": f"Invalid replacement: {e}"}) from e
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
@@ -559,7 +559,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         try:
             _validate_replacement_template(compiled, self.replacement)
         except (re.error, IndexError) as e:
-            raise ValidationError({"replacement": f"Invalid replacement template: {e}"})
+            raise ValidationError({"replacement": f"Invalid replacement template: {e}"}) from e
 
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""
@@ -672,6 +672,15 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         "number matches an ancestor entity's serial number.  Recommended to "
         "prevent false positives.  Ignored for serial_matches_device rules.",
     )
+    manufacturer = models.ForeignKey(
+        Manufacturer,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="inventory_ignore_rules",
+        help_text="Optional: only apply this rule to devices from this manufacturer. "
+        "Leave blank for vendor-agnostic rules.",
+    )
     enabled = models.BooleanField(
         default=True,
         db_index=True,
@@ -777,6 +786,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             "pattern": self.pattern,
             "action": self.action,
             "require_serial_match_parent": self.require_serial_match_parent,
+            "manufacturer": self.manufacturer.name if self.manufacturer_id else "",
             "enabled": self.enabled,
             "description": self.description,
         }

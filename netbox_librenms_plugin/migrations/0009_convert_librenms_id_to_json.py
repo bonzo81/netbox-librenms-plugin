@@ -66,7 +66,6 @@ def _revert_librenms_id_to_integer(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("extras", "0001_initial"),
         ("netbox_librenms_plugin", "0008_librenmssettings_import_defaults"),
     ]
 

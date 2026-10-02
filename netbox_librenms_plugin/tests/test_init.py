@@ -1,220 +1,124 @@
-"""Tests for netbox_librenms_plugin.__init__ module.
+"""Integration tests for the plugin's post-migrate custom-field bootstrap."""
 
-Covers the _ensure_librenms_id_custom_field post_migrate signal handler.
-"""
+import logging
 
-from unittest.mock import MagicMock, patch
+import pytest
 
 
-# =============================================================================
-# TestEnsureLibreNMSIdCustomField - 6 tests
-# =============================================================================
+pytestmark = pytest.mark.django_db
+
+
+def _required_content_type_ids():
+    from dcim.models import Device, Interface
+    from django.contrib.contenttypes.models import ContentType
+    from virtualization.models import VirtualMachine, VMInterface
+
+    return {ContentType.objects.get_for_model(model).pk for model in (Device, VirtualMachine, Interface, VMInterface)}
 
 
 class TestEnsureLibreNMSIdCustomField:
-    """Test _ensure_librenms_id_custom_field signal handler."""
+    """Exercise the signal handler against the real NetBox schema."""
 
     def setup_method(self):
-        """Reset per-alias execution tracking before each test."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
         _ensure_librenms_id_custom_field._executed_aliases = set()
 
-    def _setup_cf_mock(self, MockCustomField, mock_cf, created):
-        """Wire MockCustomField so that objects.using(alias).get_or_create(...) returns (mock_cf, created)."""
-        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, created)
+    def test_creates_the_field_with_all_required_object_types(self, caplog):
+        from extras.models import CustomField
 
-    def _setup_ct_mock(self, MockContentType, mock_ct):
-        """Wire MockContentType so that objects.db_manager(alias).get_for_model(...) returns mock_ct."""
-        MockContentType.objects.db_manager.return_value.get_for_model.return_value = mock_ct
-
-    @patch("dcim.models.Interface", new_callable=MagicMock)
-    @patch("dcim.models.Device", new_callable=MagicMock)
-    @patch("virtualization.models.VMInterface", new_callable=MagicMock)
-    @patch("virtualization.models.VirtualMachine", new_callable=MagicMock)
-    @patch("django.contrib.contenttypes.models.ContentType")
-    @patch("extras.models.CustomField")
-    def test_creates_custom_field_when_missing(
-        self, MockCustomField, MockContentType, mock_vm, mock_vmif, mock_device, mock_iface
-    ):
-        """Custom field is created with correct defaults when it does not exist."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        mock_cf = MagicMock()
-        mock_cf.object_types.values_list.return_value = []
-        self._setup_cf_mock(MockCustomField, mock_cf, True)
+        CustomField.objects.filter(name="librenms_id").delete()
 
-        mock_ct = MagicMock()
-        mock_ct.pk = 1
-        self._setup_ct_mock(MockContentType, mock_ct)
-
-        with patch("logging.getLogger") as mock_get_logger:
+        with caplog.at_level(logging.INFO, logger="netbox_librenms_plugin"):
             _ensure_librenms_id_custom_field(sender=None)
 
-        MockCustomField.objects.using.return_value.get_or_create.assert_called_once_with(
-            name="librenms_id",
-            defaults={
-                "type": "json",
-                "label": "LibreNMS ID",
-                "description": "LibreNMS Device ID for synchronization (auto-created by plugin)",
-                "required": False,
-                "ui_visible": "if-set",
-                "ui_editable": "yes",
-                "is_cloneable": False,
-            },
-        )
-        MockCustomField.objects.using.assert_called_with("default")
-        MockContentType.objects.db_manager.assert_called_with("default")
+        custom_field = CustomField.objects.get(name="librenms_id")
+        assert custom_field.type == "json"
+        assert custom_field.label == "LibreNMS ID"
+        assert custom_field.description == "LibreNMS Device ID for synchronization (auto-created by plugin)"
+        assert custom_field.required is False
+        assert custom_field.ui_visible == "if-set"
+        assert custom_field.ui_editable == "yes"
+        assert custom_field.is_cloneable is False
+        assert set(custom_field.object_types.values_list("pk", flat=True)) == _required_content_type_ids()
+        assert "Auto-created 'librenms_id' custom field" in caplog.text
 
-        # Should have added content types for all 4 models
-        assert mock_cf.object_types.add.call_count == 4
+    def test_second_call_for_the_same_alias_is_a_no_op(self):
+        from extras.models import CustomField
 
-        # Should log when created
-        mock_get_logger.assert_called_with("netbox_librenms_plugin")
-
-    def test_skips_when_already_executed(self):
-        """Handler is a no-op on second invocation for the same DB alias."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
+        custom_field = CustomField.objects.get(name="librenms_id")
         _ensure_librenms_id_custom_field._executed_aliases = {"default"}
-
-        with patch("extras.models.CustomField") as MockCustomField:
-            _ensure_librenms_id_custom_field(sender=None)
-            MockCustomField.objects.using.assert_not_called()
-
-    @patch("dcim.models.Interface", new_callable=MagicMock)
-    @patch("dcim.models.Device", new_callable=MagicMock)
-    @patch("virtualization.models.VMInterface", new_callable=MagicMock)
-    @patch("virtualization.models.VirtualMachine", new_callable=MagicMock)
-    @patch("django.contrib.contenttypes.models.ContentType")
-    @patch("extras.models.CustomField")
-    def test_existing_field_not_recreated(
-        self, MockCustomField, MockContentType, mock_vm, mock_vmif, mock_device, mock_iface
-    ):
-        """When custom field already exists, it is not recreated but types are checked."""
-        from netbox_librenms_plugin import _ensure_librenms_id_custom_field
-
-        mock_cf = MagicMock()
-        mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        self._setup_cf_mock(MockCustomField, mock_cf, False)
-
-        mock_ct = MagicMock()
-        mock_ct.pk = 1
-        self._setup_ct_mock(MockContentType, mock_ct)
+        custom_field.label = "Unchanged by skipped handler"
+        custom_field.save(update_fields=["label"])
 
         _ensure_librenms_id_custom_field(sender=None)
 
-        # All pks already present, no types should be added
-        mock_cf.object_types.add.assert_not_called()
-        MockCustomField.objects.using.assert_called_with("default")
-        MockContentType.objects.db_manager.assert_called_with("default")
+        custom_field.refresh_from_db()
+        assert custom_field.label == "Unchanged by skipped handler"
 
-    @patch("dcim.models.Interface", new_callable=MagicMock)
-    @patch("dcim.models.Device", new_callable=MagicMock)
-    @patch("virtualization.models.VMInterface", new_callable=MagicMock)
-    @patch("virtualization.models.VirtualMachine", new_callable=MagicMock)
-    @patch("django.contrib.contenttypes.models.ContentType")
-    @patch("extras.models.CustomField")
-    def test_adds_missing_content_types(
-        self, MockCustomField, MockContentType, mock_vm, mock_vmif, mock_device, mock_iface
-    ):
-        """When some content types are missing, only those are added."""
+    def test_existing_field_keeps_its_identity(self):
+        from extras.models import CustomField
+
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        mock_cf = MagicMock()
-        mock_cf.object_types.values_list.return_value = [1, 2]
-        self._setup_cf_mock(MockCustomField, mock_cf, False)
-
-        ct_existing = MagicMock()
-        ct_existing.pk = 1
-        ct_new = MagicMock()
-        ct_new.pk = 99
-        MockContentType.objects.db_manager.return_value.get_for_model.side_effect = [
-            ct_existing,
-            ct_existing,
-            ct_new,
-            ct_new,
-        ]
+        custom_field = CustomField.objects.get(name="librenms_id")
+        original_pk = custom_field.pk
 
         _ensure_librenms_id_custom_field(sender=None)
 
-        assert mock_cf.object_types.add.call_count == 2
-        mock_cf.object_types.add.assert_any_call(ct_new)
+        assert CustomField.objects.get(name="librenms_id").pk == original_pk
 
-    @patch("extras.models.CustomField")
-    def test_exception_does_not_propagate(self, MockCustomField):
-        """Exceptions during custom field creation are caught and logged."""
+    def test_adds_only_missing_required_object_types(self):
+        from dcim.models import Device
+        from django.contrib.contenttypes.models import ContentType
+        from extras.models import CustomField
+
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        MockCustomField.objects.using.return_value.get_or_create.side_effect = Exception("DB not ready")
+        custom_field = CustomField.objects.get(name="librenms_id")
+        device_type = ContentType.objects.get_for_model(Device)
+        custom_field.object_types.remove(device_type)
+        assert device_type.pk not in set(custom_field.object_types.values_list("pk", flat=True))
 
-        with patch("logging.getLogger") as mock_get_logger:
-            # Should not raise
+        _ensure_librenms_id_custom_field(sender=None)
+
+        assert set(custom_field.object_types.values_list("pk", flat=True)) == _required_content_type_ids()
+
+    def test_database_failure_is_logged_and_can_be_retried(self, caplog):
+        from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+        with caplog.at_level(logging.ERROR, logger="netbox_librenms_plugin"):
+            _ensure_librenms_id_custom_field(sender=None, using="missing-database-alias")
+
+        assert "Failed to auto-create 'librenms_id' custom field" in caplog.text
+        assert "missing-database-alias" not in _ensure_librenms_id_custom_field._executed_aliases
+
+    def test_existing_json_field_does_not_emit_creation_or_migration_log(self, caplog):
+        from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+        with caplog.at_level(logging.INFO, logger="netbox_librenms_plugin"):
             _ensure_librenms_id_custom_field(sender=None)
 
-            # Verify the exception was logged
-            logger_instance = mock_get_logger.return_value
-            logger_instance.exception.assert_called_once()
-            call_args = logger_instance.exception.call_args
-            assert "librenms_id" in call_args[0][0]
+        assert "Auto-created" not in caplog.text
+        assert "Migrated" not in caplog.text
 
-    @patch("dcim.models.Interface", new_callable=MagicMock)
-    @patch("dcim.models.Device", new_callable=MagicMock)
-    @patch("virtualization.models.VMInterface", new_callable=MagicMock)
-    @patch("virtualization.models.VirtualMachine", new_callable=MagicMock)
-    @patch("django.contrib.contenttypes.models.ContentType")
-    @patch("extras.models.CustomField")
-    def test_no_log_when_field_already_exists(
-        self, MockCustomField, MockContentType, mock_vm, mock_vmif, mock_device, mock_iface
-    ):
-        """No log message when the custom field already existed."""
+    def test_integer_field_is_migrated_to_json(self, caplog):
+        from extras.models import CustomField
+
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        mock_cf = MagicMock()
-        mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        self._setup_cf_mock(MockCustomField, mock_cf, False)
+        custom_field = CustomField.objects.get(name="librenms_id")
+        custom_field.type = "integer"
+        custom_field.save(update_fields=["type"])
 
-        mock_ct = MagicMock()
-        mock_ct.pk = 1
-        self._setup_ct_mock(MockContentType, mock_ct)
+        with caplog.at_level(logging.INFO, logger="netbox_librenms_plugin"):
+            _ensure_librenms_id_custom_field(sender=None, using="default")
 
-        with patch("logging.getLogger") as mock_get_logger:
-            _ensure_librenms_id_custom_field(sender=None)
-            # When the field already exists (created=False), the info log should
-            # not be emitted.  We verify via the logger instance rather than
-            # asserting getLogger was never called, which is fragile.
-            logger_instance = mock_get_logger.return_value
-            logger_instance.info.assert_not_called()
-
-    @patch("dcim.models.Interface", new_callable=MagicMock)
-    @patch("dcim.models.Device", new_callable=MagicMock)
-    @patch("virtualization.models.VMInterface", new_callable=MagicMock)
-    @patch("virtualization.models.VirtualMachine", new_callable=MagicMock)
-    @patch("django.contrib.contenttypes.models.ContentType")
-    @patch("extras.models.CustomField")
-    def test_integer_field_migrated_to_json(
-        self, MockCustomField, MockContentType, mock_vm, mock_vmif, mock_device, mock_iface
-    ):
-        """When existing field has type='integer', it is migrated to 'json' and saved on the given alias."""
-        from netbox_librenms_plugin import _ensure_librenms_id_custom_field
-
-        db_alias = "other"
-
-        mock_cf = MagicMock()
-        mock_cf.type = "integer"
-        mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        self._setup_cf_mock(MockCustomField, mock_cf, False)
-
-        mock_ct = MagicMock()
-        mock_ct.pk = 1
-        self._setup_ct_mock(MockContentType, mock_ct)
-
-        _ensure_librenms_id_custom_field(sender=None, using=db_alias)
-
-        assert mock_cf.type == "json"
-        # Alias must flow through both the CustomField lookup and the ContentType lookup,
-        # exercising the per-alias guard path (_executed_aliases).
-        MockCustomField.objects.using.assert_called_with(db_alias)
-        MockContentType.objects.db_manager.assert_called_with(db_alias)
-        mock_cf.save.assert_called_once_with(using=db_alias, update_fields=["type"])
-        assert db_alias in _ensure_librenms_id_custom_field._executed_aliases
+        custom_field.refresh_from_db()
+        assert custom_field.type == "json"
+        assert "Migrated 'librenms_id' custom field type from integer to json" in caplog.text
+        assert "default" in _ensure_librenms_id_custom_field._executed_aliases

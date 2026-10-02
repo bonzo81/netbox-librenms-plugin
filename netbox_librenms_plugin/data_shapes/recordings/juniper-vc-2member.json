@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "name": "juniper-vc-2member",
+  "description": "Juniper EX Virtual Chassis, 2 members under a chassis-class root, 0-based positions.",
+  "meta": {
+    "os": "os-990f10",
+    "vendor": "juniper",
+    "topology": "virtual-chassis"
+  },
+  "device_id": 1001,
+  "lag_patterns": {
+    "os-990f10": "^ae\\d+$"
+  },
+  "responses": {
+    "GET /api/v0/devices/1001": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 1001,
+          "hostname": "switch-juniper-1",
+          "sysName": "switch-juniper-1-sys",
+          "hardware": "MODEL-d40007",
+          "os": "os-990f10",
+          "serial": "SN-aa11bb",
+          "ip": "192.0.2.11",
+          "version": "fw-52119b"
+        }
+      ]
+    },
+    "GET /api/v0/inventory/1001?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 10,
+          "entPhysicalClass": "chassis",
+          "entPhysicalName": "entity-275655",
+          "entPhysicalDescr": "entity-74648f",
+          "entPhysicalSerialNum": "",
+          "entPhysicalModelName": "",
+          "entPhysicalContainedIn": 0
+        }
+      ]
+    },
+    "GET /api/v0/inventory/1001?entPhysicalClass=chassis&entPhysicalContainedIn=10": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 100,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-aa11bb",
+          "entPhysicalModelName": "EX4300-48T",
+          "entPhysicalName": "entity-6c5d81",
+          "entPhysicalDescr": "entity-d40007",
+          "entPhysicalParentRelPos": 0,
+          "entPhysicalContainedIn": 10
+        },
+        {
+          "entPhysicalIndex": 200,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-cc22dd",
+          "entPhysicalModelName": "EX4300-48T",
+          "entPhysicalName": "entity-dea8b1",
+          "entPhysicalDescr": "entity-d40007",
+          "entPhysicalParentRelPos": 1,
+          "entPhysicalContainedIn": 10
+        }
+      ]
+    }
+  },
+  "expected": {
+    "virtual_chassis": {
+      "is_stack": true,
+      "member_count": 2,
+      "member_serials": [
+        "SN-aa11bb",
+        "SN-cc22dd"
+      ]
+    }
+  }
+}

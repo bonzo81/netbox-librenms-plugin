@@ -249,11 +249,7 @@ class SingleInterfaceVerifyView(
             # A supplied stable port_id is authoritative: match only by it. If it misses, do not
             # fall back to a display name that another host or OOB row can reuse.
             port_data = next(
-                (
-                    p
-                    for p in ports
-                    if normalize_librenms_port_id(p.get("port_id")) == posted_port_id and p.get("_source") != "oob"
-                ),
+                (p for p in ports if normalize_librenms_port_id(p.get("port_id")) == posted_port_id),
                 None,
             )
 
@@ -394,6 +390,7 @@ class SingleModuleVerifyView(
             module_table_view.request,
             selected_device,
             server_key=server_key,
+            pin_rows_to_object=True,
         )
         table = context.get("table")
         if table is None:

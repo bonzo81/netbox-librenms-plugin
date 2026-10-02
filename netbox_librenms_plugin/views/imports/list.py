@@ -9,12 +9,11 @@ from netbox.views import generic
 from utilities.rqworker import get_workers_for_queue
 
 from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.import_utils import (
     get_active_cached_searches_for_servers,
     process_device_filters,
 )
-from netbox_librenms_plugin.librenms_api import LibreNMSUnreachable
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSUnreachable
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.server_selection import (
     build_configured_server_options,
@@ -190,7 +189,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         return validated_devices
 
-    def get(self, request, *args, **kwargs):  # noqa: C901, D401
+    def get(self, request, *args, **kwargs):  # noqa: C901
         """Render the import table backed by LibreNMS data."""
         libre_filter_fields = (
             "librenms_location",
@@ -452,7 +451,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         }
         return render(request, self.template_name, context)
 
-    def get_queryset(self, request):  # noqa: D401 - inherited doc
+    def get_queryset(self, request):
         """Load import data into _import_data and return an empty Device queryset."""
         import_data = self._get_import_queryset()
         self._import_data = import_data

@@ -5,9 +5,8 @@ from typing import List
 
 from django.core.cache import cache
 
-from .cache import get_import_search_cache_key
-
 from ..librenms_api import LibreNMSAPI, LibreNMSUnreachable
+from .cache import get_import_search_cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +66,7 @@ def get_device_count_for_filters(
     return len(devices)
 
 
-def get_librenms_devices_for_import(
+def get_librenms_devices_for_import(  # noqa: C901
     api: LibreNMSAPI = None,
     filters: dict = None,
     server_key: str = None,

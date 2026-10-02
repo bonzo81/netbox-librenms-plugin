@@ -53,7 +53,7 @@ def _pytest_plugins_lines(source):
     ids=["plain", "annotated"],
 )
 def test_the_plugin_scan_sees_both_assignment_forms(source):
-    """pytest honours the annotated form too, and the scan below only knew the plain one."""
+    """Pytest honours the annotated form too, and the scan below only knew the plain one."""
     assert _pytest_plugins_lines(source) == [1]
 
 
@@ -69,8 +69,30 @@ def test_location_mapping_bulk_import_url_resolves():
     assert match.func.view_class.model_form is LocationMappingImportForm
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("certificate_count", [0, 1, 2])
+def test_devcontainer_setup_counts_pem_certificates(tmp_path, certificate_count):
+    """A PEM marker must reach grep as a pattern, not as a command option."""
+    bundle = tmp_path / "ca-bundle.crt"
+    bundle.write_text("-----BEGIN CERTIFICATE-----\ntest-certificate\n-----END CERTIFICATE-----\n" * certificate_count)
+    setup = (REPOSITORY_ROOT / ".devcontainer/scripts/setup.sh").read_text()
+    count_command = next(line.strip() for line in setup.splitlines() if line.strip().startswith("cert_count="))
+
+    result = subprocess.run(
+        ["bash", "-c", count_command + '\nprintf "%s" "$cert_count"'],
+        env={**os.environ, "CA_BUNDLE_SRC": str(bundle)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(certificate_count)
+
+
 def test_no_test_module_registers_a_session_wide_plugin():
-    """``pytest_plugins`` in a test module registers that plugin for the whole session.
+    """
+    ``pytest_plugins`` in a test module registers that plugin for the whole session.
 
     Any autouse fixture it carries then applies to every test file collected after it. A
     helper's config mock reached the virtual-chassis tests that way and pinned
@@ -85,9 +107,20 @@ def test_no_test_module_registers_a_session_wide_plugin():
 
     assert offenders == [], (
         "pytest_plugins registers a plugin session-wide. Bind the fixture into the module "
-        "instead, e.g. `mock_librenms_config = test_librenms_api_helpers.mock_librenms_config`. "
+        "instead, or put shared fixtures in conftest.py. "
         f"Found: {', '.join(offenders)}"
     )
+
+
+def test_module_actions_e2e_creates_a_test_owned_device():
+    """The E2E setup must not mutate or clean up a pre-existing device."""
+    source = (REPOSITORY_ROOT / "tests/e2e/test_module_actions_in_place.py").read_text()
+
+    assert "RUN_ID = uuid4().hex" in source
+    assert 'DEVICE_NAME = f"e2e-modules-stub-{RUN_ID}"' in source
+    assert "device = Device.objects.create(" in source
+    assert "device, was_created = Device.objects.get_or_create(" not in source
+    assert 'created["device"] = [device.pk, True]' in source
 
 
 # Import root -> the distribution name that provides it.
@@ -445,6 +478,24 @@ def test_a_detected_flush_restores_the_custom_field_with_the_seeded_rows():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("field,value", [("enabled", False), ("description", "Changed seed description")])
+def test_changed_ignore_rule_defaults_trigger_seed_restoration(field, value):
+    """The probe must detect changes to every declared ignore-rule default."""
+    import importlib
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
+        assert InventoryIgnoreRule.objects.filter(**defaults).update(**{field: value}) == 1
+
+    assert restore_seeded_state(force=False) is True
+
+    for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
+        assert InventoryIgnoreRule.objects.filter(**defaults).count() == 1
+
+
+@pytest.mark.django_db
 def test_intact_seeds_are_left_alone_when_no_flush_is_detected():
     """A probe that finds the seeds intact must not rewrite them."""
     assert restore_seeded_state(force=False) is False
@@ -481,7 +532,8 @@ def test_a_changed_seed_value_is_restored_even_though_its_lookup_key_survived():
 
 
 def test_a_direct_transactional_db_request_still_starts_with_the_seeds(transactional_db):
-    """A test may ask for ``transactional_db`` by name instead of marking ``transaction=True``.
+    """
+    A test may ask for ``transactional_db`` by name instead of marking ``transaction=True``.
 
     The autouse restore then has to treat it as transactional. Selecting the plain ``db`` fixture
     lets pytest-django flush the seeds afterwards, so the test body runs without them.
@@ -498,7 +550,8 @@ def test_a_direct_transactional_db_request_still_starts_with_the_seeds(transacti
 
 @pytest.mark.django_db
 def test_a_flushed_rule_row_is_restored_and_not_reported_as_intact():
-    """Migration 0017's rules are seeded state too.
+    """
+    Migration 0017's rules are seeded state too.
 
     Without them a transactional flush disarms the "S/N " serial strip and the routing-engine
     include rule for every test that follows, which only shows up in a full-suite run.
@@ -861,7 +914,8 @@ def test_seed_intactness_requires_the_bridge_seed_identity():
 
 @pytest.mark.django_db
 def test_reverse_of_the_inventory_seed_keeps_a_disabled_operator_rule():
-    """The 0010 rollback matches seeded rows on a signature of non-free-text fields.
+    """
+    The 0010 rollback matches seeded rows on a signature of non-free-text fields.
 
     ``enabled`` is a boolean, not free text, so a disabled operator rule that happens to share
     every other signature value must not be swept up with the seed.

@@ -6,9 +6,7 @@ from virtualization.tables import VirtualMachineTable
 
 
 class VMStatusTable(VirtualMachineTable):
-    """
-    Table for displaying virtual machine LibreNMS status.
-    """
+    """Table for displaying virtual machine LibreNMS status."""
 
     librenms_status = Column(
         verbose_name="LibreNMS Status",
