@@ -1,4 +1,5 @@
-"""Tests for SingleCableVerifyView and SingleInterfaceVerifyView VC resolution.
+"""
+Tests for SingleCableVerifyView and SingleInterfaceVerifyView VC resolution.
 
 Verifies that both views delegate VC device resolution to
 get_librenms_sync_device() and handle the None return gracefully
@@ -72,21 +73,48 @@ class TestSingleCableVerifyView:
         return view
 
     @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_no_resolvable_sync_device_returns_empty_row(self, mock_cache, mock_sync):
-        """VC where get_librenms_sync_device returns None -> empty row, no crash."""
-        device = _real_vc_device("cbl-nosync")
-        mock_sync.return_value = None
+    def test_vc_no_resolvable_sync_device_falls_back_to_the_page_device(self):
+        """Verify a virtual chassis without a resolvable sync member reads the authorized page device snapshot."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        _virtual_chassis, (device, _sibling) = make_virtual_chassis_members("cbl-nosync")
+        device.vc_position = None
+        device.save(update_fields=["vc_position"])
+        assert get_librenms_sync_device(device, server_key="default") is None
+
+        interface = make_interface(device, "Gi0/42")
         view, request = _real_verify_view(
-            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "42"}, _verify_superuser("cbl-nosync")
+            SingleCableVerifyView, {"device_id": device.pk, "row_id": "42"}, _verify_superuser("cbl-nosync")
         )
-        response = view.post(request)
+        cache_key = view.get_cache_key(device, "links", "default")
+        cache.set(
+            cache_key,
+            {
+                "links": [
+                    {
+                        "local_port": interface.name,
+                        "local_port_id": 42,
+                        "remote_port": "",
+                        "remote_device": "",
+                        "_source": "main",
+                    }
+                ]
+            },
+            timeout=300,
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
 
         data = json.loads(response.content)
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
-        mock_cache.get.assert_not_called()
+        assert f"/dcim/interfaces/{interface.pk}/" in data["formatted_row"]["local_port"]
 
     @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
@@ -187,6 +215,89 @@ class TestSingleInterfaceVerifyView:
         view._librenms_api = MagicMock()
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
+
+    @pytest.mark.django_db
+    def test_verify_response_hides_vlan_metadata_from_a_user_without_ipam_view_rights(self):
+        """The gate only checks view_device, so the IPAM reads must be scoped to the caller."""
+        from dcim.models import Device, Site
+        from django.contrib.contenttypes.models import ContentType
+        from django.core.cache import cache
+        from ipam.models import VLAN, VLANGroup
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+
+        device = make_device("verify-ipam-scope")
+        group = VLANGroup.objects.create(
+            name="Verify Hidden VLAN Group",
+            slug="verify-hidden-vlan-group",
+            scope_type=ContentType.objects.get_for_model(Site),
+            scope_id=device.site.pk,
+        )
+        VLAN.objects.create(vid=100, name="Verify Hidden VLAN", group=group, status="active")
+
+        view = SingleInterfaceVerifyView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(
+            cache_key,
+            {
+                "ports": [
+                    {
+                        "port_id": 41,
+                        "ifName": "Ethernet1",
+                        "ifDescr": "Ethernet1",
+                        "ifAlias": "",
+                        "ifType": "ethernetCsmacd",
+                        "ifSpeed": 1_000_000_000,
+                        "ifPhysAddress": "",
+                        "ifMtu": 1500,
+                        "ifAdminStatus": "up",
+                        "untagged_vlan": 100,
+                        "_source": "host",
+                    }
+                ],
+                "port_stack_relationships": {},
+            },
+        )
+
+        def vlans_cell_for(user):
+            request = make_request(
+                "post",
+                json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "interface_name": "Ethernet1",
+                        "interface_name_field": "ifName",
+                        "port_id": 41,
+                    }
+                ),
+                user=user,
+                path="/verify/",
+                content_type="application/json",
+            )
+            response = view.post(request)
+            assert response.status_code == 200
+            return json.loads(response.content)["formatted_row"]["vlans"]
+
+        try:
+            visible = vlans_cell_for(_verify_superuser("ipam-scope-admin"))
+            restricted = vlans_cell_for(
+                make_user_with_perms("verify-ipam-scope-user", [("view", Device)], plugin_write=False)
+            )
+        finally:
+            cache.delete(cache_key)
+
+        # The group name and its pk reach the tooltip and the hidden group input only for a
+        # caller who may view the group.
+        assert group.name in visible
+        assert f'value="{group.pk}"' in visible
+        assert group.name not in restricted
+        assert f'value="{group.pk}"' not in restricted
+        assert "Not in NetBox" in restricted
 
     @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
@@ -2092,7 +2203,8 @@ class TestSingleModuleVerifyPermissionOrder:
 
 @pytest.mark.django_db
 def test_module_verify_rejects_an_out_of_range_device_id_like_its_siblings():
-    """The module endpoint let a raw JSON value reach the pk lookup, so a bad request became a
+    """
+    The module endpoint let a raw JSON value reach the pk lookup, so a bad request became a
     database error and a 500 where the interface and VLAN-group endpoints answer 400."""
     import json as json_module
 
@@ -2137,3 +2249,59 @@ def test_verify_rejects_a_device_id_beyond_the_bigint_range():
 
     assert response.status_code == 400
     assert json_module.loads(response.content)["message"] == "No device ID provided"
+
+
+@pytest.mark.django_db
+def test_cable_verify_selects_the_cached_row_named_by_row_id():
+    """Verify a populated cable cache selects the row named by row_id instead of returning the default row."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.utils import assign_cable_row_ids
+    from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+    device = _make_gate_device(name="cbl-rowid-device")
+    links = [
+        {
+            "local_port_id": 10,
+            "local_port": "ttyS0",
+            "remote_port": "console-A",
+            "remote_hostname": "peer-a",
+            "remote_port_id": 20,
+        },
+        {
+            "local_port_id": 11,
+            "local_port": "ttyS1",
+            "remote_port": "console-B",
+            "remote_hostname": "peer-b",
+            "remote_port_id": 21,
+        },
+    ]
+    with_row_ids = assign_cable_row_ids(links)
+    second_row_id = with_row_ids[1]["row_id"]
+    assert second_row_id != with_row_ids[0]["row_id"], "the two rows must be distinguishable"
+
+    view_probe = SingleCableVerifyView()
+    cache_key = view_probe.get_cache_key(device, "links", "default")
+    cache.set(cache_key, {"links": links}, timeout=300)
+
+    def _render(row_id, tag):
+        view, request = _real_verify_view(
+            SingleCableVerifyView,
+            {"device_id": device.pk, "row_id": row_id},
+            _verify_superuser(f"cbl-rowid-{tag}"),
+        )
+        response = view.post(request)
+        data = json.loads(response.content)
+        assert data["status"] == "success"
+        return json.dumps(data["formatted_row"])
+
+    try:
+        second = _render(second_row_id, "second")
+        first = _render(with_row_ids[0]["row_id"], "first")
+    finally:
+        cache.delete(cache_key)
+
+    # Each row_id must select its own row: asserting only one direction would pass just as well
+    # if the view always returned the same row.
+    assert "console-B" in second and "console-A" not in second
+    assert "console-A" in first and "console-B" not in first

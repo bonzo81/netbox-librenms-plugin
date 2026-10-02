@@ -107,7 +107,8 @@ When the plugin lists, reads, creates, or modifies NetBox objects (including dev
 | Delete interfaces | `dcim.delete_interface` |
 | Sync VM interfaces | `virtualization.add_vminterface`, `virtualization.change_vminterface` |
 | Delete VM interfaces | `virtualization.delete_vminterface` |
-| Sync cables | `dcim.add_cable`, `dcim.change_cable` |
+| Sync cables | `dcim.add_cable`, `dcim.change_cable`, plus `change` on the terminations the row names (Interface, or ConsoleServerPort + ConsolePort for serial rows) |
+| Replace an existing cable | Above + `dcim.delete_cable`, with both `view` and `delete` scope covering the cable being replaced |
 | Sync IP addresses | `ipam.add_ipaddress`, `ipam.change_ipaddress` |
 | Sync VLANs | `ipam.add_vlan`, `ipam.change_vlan` |
 | Sync device fields | `dcim.change_device` |

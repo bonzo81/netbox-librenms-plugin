@@ -24,6 +24,7 @@ from netbox_librenms_plugin.filters import (
     NormalizationRuleFilterSet,
     PlatformMappingFilterSet,
     PortStackLagPatternFilterSet,
+    SerialSensorTypePatternFilterSet,
 )
 from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
 from netbox_librenms_plugin.models import (
@@ -37,6 +38,7 @@ from netbox_librenms_plugin.models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 
 from .serializers import (
@@ -51,6 +53,7 @@ from .serializers import (
     NormalizationRuleSerializer,
     PlatformMappingSerializer,
     PortStackLagPatternSerializer,
+    SerialSensorTypePatternSerializer,
     SyncJobStatusSerializer,
 )
 
@@ -173,6 +176,16 @@ class PortStackLagPatternViewSet(NetBoxModelViewSet):
     serializer_class = PortStackLagPatternSerializer
 
 
+class SerialSensorTypePatternViewSet(NetBoxModelViewSet):
+    """API viewset for SerialSensorTypePattern CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = SerialSensorTypePatternFilterSet
+
+    queryset = SerialSensorTypePattern.objects.all()
+    serializer_class = SerialSensorTypePatternSerializer
+
+
 @extend_schema(
     request=None,
     responses={
@@ -198,6 +211,7 @@ def sync_job_status(request, job_pk):
 
     Returns:
         JsonResponse with updated status
+
     """
     try:
         job = Job.objects.get(pk=job_pk, user=request.user, name__in=_LIBRENMS_JOB_NAMES)

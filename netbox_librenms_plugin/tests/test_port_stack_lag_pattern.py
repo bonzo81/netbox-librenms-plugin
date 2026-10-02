@@ -35,7 +35,8 @@ class TestPortStackLagPattern:
         assert model.compiled_sap_patterns_for_os("junos") == []
 
     def test_the_unscoped_lag_read_is_a_superset_of_every_scoped_read(self):
-        """The refresh gates the scoped LAG read on a name signal measured with the unscoped set.
+        """
+        The refresh gates the scoped LAG read on a name signal measured with the unscoped set.
 
         That gate is only safe while the unscoped read returns every stored row, so a scoped
         pattern can never match a name the unscoped signal missed. Narrowing the None case would
@@ -52,7 +53,8 @@ class TestPortStackLagPattern:
         assert r"^Port-Channel\d+$" in unscoped
 
     def test_an_unknown_os_applies_every_stored_sap_rule(self):
-        """The SAP reader over-skips rather than under-skips, the opposite of the LAG reader.
+        """
+        The SAP reader over-skips rather than under-skips, the opposite of the LAG reader.
 
         An unmatched LAG regex invents a relationship; an unmatched SAP regex only suppresses
         one. So an OS this model cannot resolve must keep every vendor's SAP rule, which is also
@@ -305,11 +307,7 @@ class TestHasLagSignalsFieldSelection:
         )
 
     def test_non_string_name_is_skipped_not_crashed(self):
-        """A truthy non-string ifName/ifDescr (numeric/list from a malformed payload) is skipped, not crashed.
-
-        Without the isinstance(str) guard the non-string reaches pat.search()/sub_iface_re.match() and
-        raises TypeError, which 500s the whole interface refresh — the resolver's _port_names skips it.
-        """
+        """Verify truthy non-string interface names do not raise TypeError during relationship signal checks."""
         view = self._make_view()
         ports = [
             {"ifName": 123, "ifType": "ethernetCsmacd"},  # truthy non-string name
@@ -558,12 +556,7 @@ class TestMigration0014Preflight:
 
 @pytest.mark.django_db
 class TestLagPatternSharedLoad:
-    """The interface-refresh LAG gating loads OS-scoped patterns once and shares them.
-
-    The signal check and resolve_port_relationships each re-queried and recompiled
-    PortStackLagPattern per call, so a single refresh loaded the scoped patterns twice (plus the
-    resolver's own load). Both now accept a pre-loaded compiled list so the caller loads once.
-    """
+    """Verify one interface refresh loads and shares its OS-scoped LAG patterns."""
 
     def _view(self):
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
@@ -665,11 +658,7 @@ class TestLagPatternSharedLoad:
 
 @pytest.mark.django_db
 def test_mapping_bulk_import_routes_resolve_without_the_model_view_registry():
-    """urls.py owns every mapping bulk-import route, so no register_model_view is needed.
-
-    The decorators added no URL because urls.py never includes get_model_urls(). This pins the
-    explicit routes, so removing them cannot silently take the Import views offline.
-    """
+    """Verify explicit URL patterns keep mapping bulk-import views online without the model view registry."""
     from django.urls import resolve, reverse
 
     from netbox_librenms_plugin.views import mapping_views
@@ -684,6 +673,7 @@ def test_mapping_bulk_import_routes_resolve_without_the_model_view_registry():
         "platformmapping_bulk_import": mapping_views.PlatformMappingBulkImportView,
         "carrierautoinstallrule_bulk_import": mapping_views.CarrierAutoInstallRuleBulkImportView,
         "portstacklagpattern_bulk_import": mapping_views.PortStackLagPatternBulkImportView,
+        "serialsensortypepattern_bulk_import": mapping_views.SerialSensorTypePatternBulkImportView,
     }
 
     for route, view_class in expected.items():

@@ -1,0 +1,764 @@
+"""Tests for serial_utils.py — mostly a pure mapper; the recognized-type map is DB-backed."""
+
+import json
+import os
+import pytest
+
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "acs6048_sensors_fixture.json")
+
+
+def _load_fixture() -> list[dict]:
+    with open(FIXTURE_PATH) as f:
+        return json.load(f)
+
+
+class TestParsePortNumber:
+    def test_standard_index(self):
+        from netbox_librenms_plugin.serial_utils import parse_port_number
+
+        assert parse_port_number("acsSerialPortTableStatus.7") == 7
+
+    def test_two_digit_index(self):
+        from netbox_librenms_plugin.serial_utils import parse_port_number
+
+        assert parse_port_number("acsSerialPortTableStatus.49") == 49
+
+    def test_no_suffix_returns_none(self):
+        from netbox_librenms_plugin.serial_utils import parse_port_number
+
+        assert parse_port_number("acsSerialPortTableStatus") is None
+
+    def test_empty_string_returns_none(self):
+        from netbox_librenms_plugin.serial_utils import parse_port_number
+
+        assert parse_port_number("") is None
+
+    def test_none_returns_none(self):
+        from netbox_librenms_plugin.serial_utils import parse_port_number
+
+        assert parse_port_number(None) is None
+
+    def test_oversized_numeric_suffix_returns_none(self):
+        from netbox_librenms_plugin.serial_utils import parse_port_number
+
+        assert parse_port_number("vendorStatus." + ("9" * 5000)) is None
+
+
+class TestStripStatusSuffix:
+    def test_strips_status(self):
+        from netbox_librenms_plugin.serial_utils import strip_status_suffix
+
+        assert strip_status_suffix("rdev-d9b298-RA1 Status") == "rdev-d9b298-RA1"
+
+    def test_strips_default_port_name(self):
+        from netbox_librenms_plugin.serial_utils import strip_status_suffix
+
+        assert strip_status_suffix("ttyS49 Status") == "ttyS49"
+
+    def test_no_suffix_unchanged(self):
+        from netbox_librenms_plugin.serial_utils import strip_status_suffix
+
+        assert strip_status_suffix("bare label") == "bare label"
+
+    def test_empty_string(self):
+        from netbox_librenms_plugin.serial_utils import strip_status_suffix
+
+        assert strip_status_suffix("") == ""
+
+
+@pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows
+class TestMapSensorsToSerialLinks:
+    def test_basic_row_shape(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 1975,
+                "device_id": 12,
+                "sensor_type": "acsSerialPortTable",
+                "sensor_index": "acsSerialPortTableStatus.11",
+                "sensor_descr": "rdev-d9b298-RA1 Status",
+                "sensor_current": 2,
+                "group": "Serial Ports",
+            }
+        ]
+        links = map_sensors_to_serial_links(sensors)
+        assert len(links) == 1
+        row = links[0]
+        assert row["local_port"] == "ttyS11"
+        assert row["local_port_id"] == "serial:1975"
+        assert row["remote_device"] == "rdev-d9b298-RA1"
+        assert row["remote_port"] is None
+        assert row["remote_device_id"] is None
+        assert row["is_configured"] is True
+        assert row["_source"] == "serial"
+        assert row["sensor_id"] == 1975
+        assert row["sensor_index_int"] == 11
+        # device_id defaults to None when the caller doesn't supply it.
+        assert row["device_id"] is None
+
+    def test_device_id_threaded_into_rows(self):
+        """The caller's NetBox device_id is carried on each row so the cable table's row_attrs (record["device_id"]) is satisfied even before enrich_links_data runs."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 7007,
+                "device_id": 12,
+                "sensor_type": "acsSerialPortTable",
+                "sensor_index": "acsSerialPortTableStatus.7",
+                "sensor_descr": "host-7 Status",
+                "sensor_current": 2,
+                "group": "Serial Ports",
+            }
+        ]
+        links = map_sensors_to_serial_links(sensors, device_id=55)
+        assert links[0]["device_id"] == 55
+
+    @pytest.mark.django_db
+    def test_serial_row_renders_in_cable_table_without_keyerror(self):
+        """End-to-end: a serial row must render in LibreNMSCableTable."""
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
+
+        dev = make_device("serial-tbl-dev")
+        rows = map_sensors_to_serial_links(
+            [
+                {
+                    "sensor_id": 7007,
+                    "device_id": 12,
+                    "sensor_type": "acsSerialPortTable",
+                    "sensor_index": "acsSerialPortTableStatus.7",
+                    "sensor_descr": "host-7 Status",
+                    "sensor_current": 2,
+                    "group": "Serial Ports",
+                }
+            ],
+            device_id=dev.id,
+        )
+        # The cable view assigns row identities before rendering; the table trusts them.
+        table = LibreNMSCableTable(assign_cable_row_ids(rows), device=dev)
+        request = RequestFactory().get("/")
+        RequestConfig(request).configure(table)
+        html = table.as_html(request)  # evaluates row_attrs (record["device_id"]) per row
+        assert f'data-device="{dev.id}"' in html
+
+    def test_default_named_port_is_not_configured(self):
+        """A port whose label still equals the default name (ttyS49) is unconfigured."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 2016,
+                "device_id": 12,
+                "sensor_type": "acsSerialPortTable",
+                "sensor_index": "acsSerialPortTableStatus.49",
+                "sensor_descr": "ttyS49 Status",
+                "sensor_current": 1,
+                "group": "Serial Ports",
+            }
+        ]
+        links = map_sensors_to_serial_links(sensors)
+        assert len(links) == 1
+        assert links[0]["is_configured"] is False
+        assert links[0]["remote_device"] == "ttyS49"
+
+    def test_non_list_sensors_fails_closed_to_empty(self):
+        """Verify malformed non-list sensor payloads fail closed to an empty result."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        for bad in (None, {"sensor_id": 1}, 42, "not-a-list"):
+            assert map_sensors_to_serial_links(bad) == []
+
+    def test_unknown_sensor_type_skipped(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 9999,
+                "device_id": 12,
+                "sensor_type": "someOtherTable",
+                "sensor_index": "someOtherTable.1",
+                "sensor_descr": "Foo Status",
+                "sensor_current": 2,
+                "group": "Other",
+            }
+        ]
+        assert map_sensors_to_serial_links(sensors) == []
+
+    def test_unparseable_index_skipped(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 9998,
+                "device_id": 12,
+                "sensor_type": "acsSerialPortTable",
+                "sensor_index": "acsSerialPortTableStatus",  # no trailing .N
+                "sensor_descr": "rdev-d9b298-RA1 Status",
+                "sensor_current": 2,
+                "group": "Serial Ports",
+            }
+        ]
+        assert map_sensors_to_serial_links(sensors) == []
+
+    def test_sorted_by_port_number(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 100 + n,
+                "device_id": 12,
+                "sensor_type": "acsSerialPortTable",
+                "sensor_index": f"acsSerialPortTableStatus.{n}",
+                "sensor_descr": f"device-{n} Status",
+                "sensor_current": 2,
+                "group": "Serial Ports",
+            }
+            for n in [33, 7, 49, 11]
+        ]
+        links = map_sensors_to_serial_links(sensors)
+        assert [r["sensor_index_int"] for r in links] == [7, 11, 33, 49]
+
+    def test_custom_port_name_pattern(self):
+        # Per-type naming is set via the sensor_types map; it takes precedence over the fallback
+        # port_name_pattern (so the configured map, not the default, wins for a known type).
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 200,
+                "device_id": 12,
+                "sensor_type": "acsSerialPortTable",
+                "sensor_index": "acsSerialPortTableStatus.3",
+                "sensor_descr": "MyDevice Status",
+                "sensor_current": 2,
+                "group": "Serial Ports",
+            }
+        ]
+        links = map_sensors_to_serial_links(sensors, sensor_types={"acsSerialPortTable": "serial{N}"})
+        assert links[0]["local_port"] == "serial3"
+
+    def test_conflicting_sensors_for_one_local_port_are_all_dropped(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 201,
+                "sensor_type": "vendorPortState",
+                "sensor_index": "vendorPortState.1",
+                "sensor_descr": "router-a Status",
+            },
+            {
+                "sensor_id": 301,
+                "sensor_type": "vendorPortLabel",
+                "sensor_index": "vendorPortLabel.1",
+                "sensor_descr": "router-b Status",
+            },
+        ]
+
+        links = map_sensors_to_serial_links(
+            sensors,
+            sensor_types={
+                "vendorPortState": "ttyS{N}",
+                "vendorPortLabel": "ttyS{N}",
+            },
+        )
+
+        assert links == []
+
+    def test_conflicting_sensors_are_named_in_a_warning(self, caplog):
+        import logging
+
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 202,
+                "sensor_type": "vendorPortState",
+                "sensor_index": "vendorPortState.2",
+                "sensor_descr": "router-a Status",
+            },
+            {
+                "sensor_id": 302,
+                "sensor_type": "vendorPortLabel",
+                "sensor_index": "vendorPortLabel.2",
+                "sensor_descr": "router-b Status",
+            },
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.serial_utils"):
+            links = map_sensors_to_serial_links(
+                sensors,
+                device_id=42,
+                sensor_types={
+                    "vendorPortState": "ttyS{N}",
+                    "vendorPortLabel": "ttyS{N}",
+                },
+            )
+
+        assert links == []
+        assert "ttyS2" in caplog.text
+        assert "42" in caplog.text
+
+    def test_empty_input(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        assert map_sensors_to_serial_links([]) == []
+
+
+@pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows
+class TestMapSensorsMalformedRows:
+    """A single malformed LibreNMS sensor row must not crash mapping and drop ALL serial rows."""
+
+    def _valid(self, port=7, sid=7007):
+        return {
+            "sensor_id": sid,
+            "device_id": 12,
+            "sensor_type": "acsSerialPortTable",
+            "sensor_index": f"acsSerialPortTableStatus.{port}",
+            "sensor_descr": f"box-{port} Status",
+            "sensor_current": 2,
+            "group": "Serial Ports",
+        }
+
+    def test_non_dict_row_skipped(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(["not-a-dict", None, self._valid()])
+        assert [r["sensor_id"] for r in links] == [7007]
+
+    def test_missing_sensor_id_skipped(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        bad = self._valid()
+        del bad["sensor_id"]
+        links = map_sensors_to_serial_links([bad, self._valid(port=8, sid=7008)])
+        assert [r["sensor_id"] for r in links] == [7008]
+
+    @pytest.mark.parametrize("sensor_id", ["';alert(1);//", 0, -1, True, [], {}])
+    def test_invalid_sensor_id_is_skipped(self, sensor_id):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensor = self._valid(sid=sensor_id)
+
+        assert map_sensors_to_serial_links([sensor]) == []
+
+    @pytest.mark.django_db
+    def test_sync_action_uses_native_button_value_without_inline_javascript(self):
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import assign_cable_row_ids
+
+        device = make_device("serial-action-button")
+        rows = map_sensors_to_serial_links([self._valid(sid=7008)], device_id=device.pk)
+        rows[0]["can_create_cable"] = True
+        table = LibreNMSCableTable(assign_cable_row_ids(rows), device=device)
+        request = RequestFactory().get("/")
+        RequestConfig(request).configure(table)
+
+        html = table.as_html(request)
+
+        assert "onclick=" not in html
+        assert 'name="select"' in html
+        assert 'value="serial:7008"' in html
+
+    def test_non_string_sensor_descr_does_not_crash(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        bad = self._valid(port=9, sid=7009)
+        bad["sensor_descr"] = None  # malformed: not a string
+        links = map_sensors_to_serial_links([bad])
+        assert len(links) == 1
+        # Falls back to an empty label (so it reads as the default-named, unconfigured port).
+        assert links[0]["remote_device"] == ""
+        # An empty label must NOT count as configured ("" != local_port is True, so the
+        # is_configured flag must guard on bool(label)).
+        assert links[0]["is_configured"] is False
+
+    def test_non_string_sensor_index_does_not_crash(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        bad = self._valid(port=10, sid=7010)
+        bad["sensor_index"] = 5  # malformed: int, not "….N" string → unparseable, skipped
+        links = map_sensors_to_serial_links([bad, self._valid(port=11, sid=7011)])
+        assert [r["sensor_id"] for r in links] == [7011]
+
+
+@pytest.mark.django_db
+class TestConfigurableSensorTypes:
+    """Verify stored sensor-type patterns control vendor recognition and local console-port names."""
+
+    def _cisco_line(self, sid=13650, port=2, descr="test_location Status"):
+        # Real device-52 (Catalyst 8300) shape: tsLineActive.<line> index, "<peer> Status" descr.
+        return {
+            "sensor_id": sid,
+            "device_id": 52,
+            "sensor_type": "OLD-CISCO-TS-MIB::ltsLineTable",
+            "sensor_index": f"tsLineActive.{port}",
+            "sensor_descr": descr,
+            "sensor_current": 0,
+            "group": "Serial Ports",
+        }
+
+    def _acs_line(self, sid=1975, port=11, descr="host Status"):
+        return {
+            "sensor_id": sid,
+            "device_id": 12,
+            "sensor_type": "acsSerialPortTable",
+            "sensor_index": f"acsSerialPortTableStatus.{port}",
+            "sensor_descr": descr,
+            "sensor_current": 2,
+            "group": "Serial Ports",
+        }
+
+    def test_cisco_async_line_uses_its_configured_port_name_pattern(self):
+        """An IOS-XE async-line sensor maps to the configured Cisco port name."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links([self._cisco_line(port=2)])
+        assert len(links) == 1
+        row = links[0]
+        assert row["local_port"] == "Line 2"
+        assert row["remote_device"] == "test_location"  # "<peer> Status" -> peer label, same as Avocent
+        assert row["is_configured"] is True
+        assert row["sensor_index_int"] == 2
+        assert row["_source"] == "serial"
+
+    def test_each_type_gets_its_own_pattern(self):
+        """Avocent and Cisco rows in one payload each use their vendor's configured name pattern."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links([self._acs_line(port=11), self._cisco_line(port=2)])
+        by_id = {r["sensor_id"]: r["local_port"] for r in links}
+        assert by_id[1975] == "ttyS11"  # Avocent
+        assert by_id[13650] == "Line 2"  # Cisco
+
+    def test_explicit_map_override_filters_and_names(self):
+        """An explicit {type: pattern} map overrides both the recognized set and the naming."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(
+            [self._acs_line(port=11), self._cisco_line(port=2)],
+            sensor_types={"acsSerialPortTable": "console{N}"},
+        )
+        assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "console11")]
+
+    def test_explicit_set_override_uses_fallback_pattern(self):
+        """A bare set of types (no patterns) filters and names via the fallback port_name_pattern."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(
+            [self._acs_line(port=11), self._cisco_line(port=2)],
+            sensor_types=frozenset({"acsSerialPortTable"}),
+        )
+        assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "ttyS11")]
+
+    def test_an_unusable_configured_pattern_falls_back_instead_of_aborting(self):
+        """
+        One bad pattern must not drop every serial row.
+
+        The pattern comes from the SerialSensorTypePattern table, which takes free text. A
+        truthy non-string reaches ``.replace`` and raises, and nothing catches it, so a single
+        bad row would lose the whole device's serial links.
+        """
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        for unusable in (123, ["console{N}"], {"pattern": "console{N}"}, "console-no-placeholder"):
+            links = map_sensors_to_serial_links(
+                [self._acs_line(port=11)],
+                sensor_types={"acsSerialPortTable": unusable},
+            )
+
+            assert [(r["sensor_id"], r["local_port"]) for r in links] == [(1975, "ttyS11")], unusable
+
+    def test_an_unusable_fallback_pattern_still_names_every_port_uniquely(self):
+        """The caller-supplied fallback is no safer than a configured one, so guard it too."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(
+            [self._acs_line(port=11), self._acs_line(sid=1976, port=12)],
+            port_name_pattern="console",
+            sensor_types=frozenset({"acsSerialPortTable"}),
+        )
+
+        # A pattern with no {N} would name both ports the same, so the default has to take over.
+        assert sorted(r["local_port"] for r in links) == ["ttyS11", "ttyS12"]
+
+    def test_generator_sensor_types_not_consumed_by_membership_checks(self):
+        """Verify a generator of sensor types is materialized once so every matching row is recognized."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(
+            [self._acs_line(sid=1975, port=11), self._acs_line(sid=1976, port=12)],
+            sensor_types=(t for t in ["acsSerialPortTable"]),
+        )
+        assert [r["local_port"] for r in links] == ["ttyS11", "ttyS12"]
+
+    def test_get_patterns_default_includes_avocent_and_cisco(self):
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        patterns = get_serial_sensor_type_patterns()
+        assert patterns["acsSerialPortTable"] == "ttyS{N}"
+        assert patterns["OLD-CISCO-TS-MIB::ltsLineTable"] == "Line {N}"
+
+    def test_get_patterns_reads_added_rows(self):
+        """A new vendor is one row: its type is recognized and named by its own pattern."""
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        SerialSensorTypePattern.objects.create(sensor_type="fooSerialTable", port_name_pattern="foo{N}")
+
+        patterns = get_serial_sensor_type_patterns()
+        assert patterns["fooSerialTable"] == "foo{N}"
+        # The seeded vendors stay recognized alongside the new one.
+        assert patterns["acsSerialPortTable"] == "ttyS{N}"
+
+    def test_deleting_all_rows_disables_recognition(self):
+        """Verify deleting all stored sensor-type patterns disables recognition without restoring defaults."""
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, map_sensors_to_serial_links
+
+        SerialSensorTypePattern.objects.all().delete()
+
+        assert get_serial_sensor_type_patterns() == {}
+        assert map_sensors_to_serial_links([self._acs_line(port=11)]) == []
+
+
+@pytest.mark.django_db
+class TestSerialSensorTypePatternModel:
+    """SerialSensorTypePattern validation and seeding (replaces the old plugin setting)."""
+
+    def _make(self, **kwargs):
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        defaults = {"sensor_type": "someSerialTable", "port_name_pattern": "tty{N}"}
+        defaults.update(kwargs)
+        return SerialSensorTypePattern(**defaults)
+
+    def test_migration_seeds_avocent_and_cisco(self):
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        by_type = {p.sensor_type: p.port_name_pattern for p in SerialSensorTypePattern.objects.all()}
+        assert by_type["acsSerialPortTable"] == "ttyS{N}"
+        assert by_type["OLD-CISCO-TS-MIB::ltsLineTable"] == "Line {N}"
+
+    def test_blank_sensor_type_rejected(self):
+        from django.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="sensor_type"):
+            self._make(sensor_type="   ").save()
+
+    def test_pattern_without_port_number_placeholder_rejected(self):
+        """A pattern missing {N} would name every port on the device identically."""
+        from django.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="{N}"):
+            self._make(port_name_pattern="ttyS7").save()
+
+    def test_sensor_type_case_is_preserved(self):
+        """Recognition matches LibreNMS payload values exactly — clean() must NOT lowercase."""
+        row = self._make(sensor_type="  fooSerialTable  ")
+        row.save()
+        assert row.sensor_type == "fooSerialTable"
+
+    def test_case_insensitive_duplicate_rejected(self):
+        """A case-variant of an existing sensor_type is refused outright."""
+        # 'ACSSERIALPORTTABLE' next to the seeded 'acsSerialPortTable' would be a trap: matching
+        # is exact-case, so only one of the two can ever match real payloads.
+        from django.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._make(sensor_type="ACSSERIALPORTTABLE").save()
+
+    def test_whitespace_padded_duplicate_rejected_by_constraint(self):
+        """Verify the database constraint rejects duplicates after canonical whitespace trimming."""
+        from django.core.exceptions import ValidationError
+
+        padded = self._make(sensor_type=" acsSerialPortTable ")
+        with pytest.raises(ValidationError):
+            padded.validate_constraints()
+
+    def test_tab_padded_duplicate_rejected_by_database_constraint(self):
+        """The database canonicalizes the same whitespace as ``str.strip()``."""
+        from django.db import IntegrityError, transaction
+
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        duplicate = SerialSensorTypePattern(sensor_type="\tacsSerialPortTable\t", port_name_pattern="tty{N}")
+        with pytest.raises(IntegrityError), transaction.atomic():
+            SerialSensorTypePattern.objects.bulk_create([duplicate])
+
+    def test_clean_bypassing_rows_are_normalized_or_rejected_on_read(self):
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
+
+        SerialSensorTypePattern.objects.bulk_create(
+            [
+                SerialSensorTypePattern(
+                    sensor_type=" bulkSerialState ",
+                    port_name_pattern=" console{N} ",
+                ),
+                SerialSensorTypePattern(
+                    sensor_type="brokenSerialState",
+                    port_name_pattern="console",
+                ),
+            ]
+        )
+
+        patterns = get_serial_sensor_type_patterns()
+
+        assert patterns["bulkSerialState"] == "console{N}"
+        assert "brokenSerialState" not in patterns
+
+    def test_api_requires_plugin_permission_and_supports_crud(self, client):
+        """The serial rule is available through the permission-gated rule API."""
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        url = reverse("plugins-api:netbox_librenms_plugin-api:serialsensortypepattern-list")
+        user = get_user_model().objects.create_user(username="serial-pattern-api-denied", password="x")
+        client.force_login(user)
+        assert client.get(url).status_code == 403
+
+        client.force_login(make_superuser())
+        response = client.post(
+            url,
+            {
+                "sensor_type": "exampleSerialState",
+                "port_name_pattern": "Line {N}",
+                "description": "Created through API",
+            },
+            content_type="application/json",
+        )
+
+        assert response.status_code == 201, response.json()
+        detail_url = reverse(
+            "plugins-api:netbox_librenms_plugin-api:serialsensortypepattern-detail",
+            args=[response.json()["id"]],
+        )
+        response = client.patch(
+            detail_url,
+            {"description": "Updated through API"},
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        assert response.json()["description"] == "Updated through API"
+
+        response = client.delete(detail_url)
+        assert response.status_code == 204
+        assert not SerialSensorTypePattern.objects.filter(sensor_type="exampleSerialState").exists()
+
+
+@pytest.mark.django_db  # the default sensor-type map is read from SerialSensorTypePattern rows
+class TestMapSensorsWithFixture:
+    """Integration-style tests using the captured device-12 (ACS6048) fixture."""
+
+    # @staticmethod (not an instance method): a class-scoped fixture defined as a plain method
+    # is deprecated (PytestRemovedIn10Warning) because pytest runs it on a different instance
+    # than the tests. It uses neither self nor cls, so staticmethod is the correct form.
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def fixture_sensors():
+        return _load_fixture()
+
+    def test_fixture_loads_49_sensors(self, fixture_sensors):
+        assert len(fixture_sensors) == 49
+
+    def test_all_are_acs_type(self, fixture_sensors):
+        for s in fixture_sensors:
+            assert s["sensor_type"] == "acsSerialPortTable"
+
+    def test_mapper_returns_49_rows(self, fixture_sensors):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(fixture_sensors)
+        assert len(links) == 49
+
+    def test_all_source_serial(self, fixture_sensors):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(fixture_sensors)
+        assert all(r["_source"] == "serial" for r in links)
+
+    def test_ports_numbered_1_to_49(self, fixture_sensors):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(fixture_sensors)
+        assert [r["sensor_index_int"] for r in links] == list(range(1, 50))
+
+    def test_port_11_resolves_configured_remote_device(self, fixture_sensors):
+        """Index 11 = rdev-d9b298-RA1 — the clearest resolvable label in the fixture."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(fixture_sensors)
+        row = links[10]  # 0-indexed, port 11
+        assert row["sensor_index_int"] == 11
+        assert row["local_port"] == "ttyS11"
+        assert row["remote_device"] == "rdev-d9b298-RA1"
+        assert row["is_configured"] is True
+
+    def test_port_49_is_default_unconfigured(self, fixture_sensors):
+        """Index 49 = ttyS49 Status — the unused appliance port, not configured."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(fixture_sensors)
+        row = links[48]  # last row
+        assert row["sensor_index_int"] == 49
+        assert row["local_port"] == "ttyS49"
+        assert row["remote_device"] == "ttyS49"
+        assert row["is_configured"] is False
+
+    def test_port_44_vendor_alias_is_configured(self, fixture_sensors):
+        """Index 44 = a console-alias label (pseudonymized), configured but won't resolve."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(fixture_sensors)
+        row = links[43]
+        assert row["sensor_index_int"] == 44
+        assert row["remote_device"] == "rdev-9401f4-con1"
+        assert row["is_configured"] is True
+
+    def test_fixture_carries_no_raw_operator_labels(self, fixture_sensors):
+        """Verify every bundled serial-port label uses the safe pseudonym or default ttySNN format."""
+        import re
+
+        from netbox_librenms_plugin.serial_utils import strip_status_suffix
+
+        safe = re.compile(r"^(rdev-[0-9a-f]{6}(-.*)?|ttyS\d+)$")
+        leaked = sorted(
+            label for s in fixture_sensors if not safe.match(label := strip_status_suffix(s.get("sensor_descr") or ""))
+        )
+        assert not leaked, f"raw operator-style labels leaked into the fixture: {leaked}"
+
+    def test_configured_count(self, fixture_sensors):
+        """48 out of 49 ports have custom labels (all except ttyS49)."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(fixture_sensors)
+        configured = [r for r in links if r["is_configured"]]
+        unconfigured = [r for r in links if not r["is_configured"]]
+        assert len(unconfigured) == 1
+        assert unconfigured[0]["local_port"] == "ttyS49"
+        assert len(configured) == 48
+
+    def test_local_port_id_format(self, fixture_sensors):
+        """All local_port_ids follow the 'serial:<sensor_id>' pattern."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(fixture_sensors)
+        for row in links:
+            assert row["local_port_id"].startswith("serial:")
+            assert row["local_port_id"].split(":", 1)[1].isdigit()

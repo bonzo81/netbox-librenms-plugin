@@ -17,6 +17,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
+class _RawResponse:
+    """One response body that the test server must not JSON-encode."""
+
+    def __init__(self, status, body, content_type):
+        self.status = status
+        self.body = body.encode() if isinstance(body, str) else body
+        self.content_type = content_type
+
+
 class _LibreNMSHandler(BaseHTTPRequestHandler):
     """Request handler that dispatches to registered route responses."""
 
@@ -25,8 +34,11 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status, body):
         data = json.dumps(body).encode()
+        self._send_body(status, data, "application/json")
+
+    def _send_body(self, status, data, content_type):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         try:
             self.end_headers()
@@ -61,6 +73,9 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         for key in candidates:
             if key in routes:
                 entry = routes[key]
+                if isinstance(entry, _RawResponse):
+                    self._send_body(entry.status, entry.body, entry.content_type)
+                    return
                 if callable(entry):
                     status, resp_body = entry(**request)
                 else:
@@ -130,6 +145,18 @@ class MockLibreNMSServer:
             self._server.routes[key] = body
         else:
             self._server.routes[key] = (status, body)
+
+    def register_raw(
+        self,
+        path: str,
+        body: str | bytes,
+        status: int = 200,
+        content_type: str = "text/plain",
+        method: str | None = None,
+    ):
+        """Register a response body without JSON encoding it."""
+        key = f"{method} {path}" if method else path
+        self._server.routes[key] = _RawResponse(status, body, content_type)
 
     def start(self):
         self._thread.start()

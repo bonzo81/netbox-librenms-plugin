@@ -1,0 +1,37 @@
+{% comment %}
+Port list for the picked remote device. Free ports first; already-cabled ports are selectable
+too (the sync's classify gate protects them — non-owned cables raise the force modal).
+Context: device, free_ports, cabled_ports, port_noun.
+{% endcomment %}
+<div class="remote-picker-active">
+  <label class="form-label small mb-1" for="remote-picker-port-select">
+    Remote port on <strong>{{ device.name }}</strong>
+  </label>
+  <select name="remote_interface_id" id="remote-picker-port-select" class="form-select">
+    <option value="">— choose a port —</option>
+    {% if free_ports %}
+      <optgroup label="Available">
+        {% for port in free_ports %}<option value="{{ port.pk }}">{{ port.name }}</option>{% endfor %}
+      </optgroup>
+    {% endif %}
+    {% if cabled_ports %}
+      <optgroup label="Already cabled (overwrite-protected)">
+        {% for port in cabled_ports %}<option value="{{ port.pk }}">{{ port.name }} — cabled</option>{% endfor %}
+      </optgroup>
+    {% endif %}
+  </select>
+  {% if not free_ports and not cabled_ports %}
+    <div class="text-muted small mt-1">This device has no {{ port_noun }}.</div>
+  {% endif %}
+</div>
+<script>
+  {# Gate the save button on an actual port selection (idiom shared with the force modal). #}
+  (function () {
+    var select = document.getElementById('remote-picker-port-select');
+    var save = document.getElementById('remote-picker-save');
+    if (!select || !save) return;
+    function sync() { save.disabled = !select.value; }
+    select.addEventListener('change', sync);
+    sync();
+  })();
+</script>

@@ -16,6 +16,7 @@ from dcim.models import (
 )
 from django import forms
 from django.core.exceptions import MultipleObjectsReturned
+from django.db import IntegrityError, transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
@@ -46,19 +47,22 @@ from .models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
+from .utils import _free_cable_tag_slug, normalize_cable_tag_slug
 
 logger = logging.getLogger(__name__)
 
 
 def _get_librenms_server_choices():
     """
-    Helper function to get server choices from plugin configuration.
+    Return server choices from the plugin configuration.
 
     Shared between ServerConfigForm and other forms that need server selection.
 
     Returns:
         list[tuple[str, str]]: The configured server values and display labels.
+
     """
     choices = []
 
@@ -97,6 +101,7 @@ def _get_librenms_poller_group_choices(server_key=None):
 
     Returns:
         list[tuple[str, str]]: The (value, label) choices for the poller group field.
+
     """
     from django.core.cache import cache
 
@@ -249,6 +254,7 @@ class ImportSettingsForm(NetBoxModelForm):
 
         Raises:
             forms.ValidationError: If the pattern has an invalid placeholder or format.
+
         """
         pattern = self.cleaned_data.get("vc_member_name_pattern")
 
@@ -357,6 +363,110 @@ class ImportSettingsForm(NetBoxModelForm):
                     )
 
         return cleaned_data
+
+
+class CableSyncSettingsForm(NetBoxModelForm):
+    """
+    Form for the cable-sync provenance settings (tag name, tag/cable color, description).
+
+    DB/UI-managed rather than PLUGINS_CONFIG so changing them needs no NetBox restart; the
+    color field renders NetBox's standard color picker via the model ColorField's widget.
+    """
+
+    class Meta:
+        model = LibreNMSSettings
+        fields = [
+            "cable_sync_tag",
+            "cable_sync_tag_color",
+            "cable_sync_description",
+        ]
+
+    def __init__(self, *args, **kwargs):
+        self.user = kwargs.pop("user", None)
+        instance = kwargs.get("instance")
+        self._original_tag_name = getattr(instance, "cable_sync_tag", None)
+        super().__init__(*args, **kwargs)
+
+    def clean_cable_sync_tag(self):
+        from extras.models import Tag
+
+        tag_name = self.cleaned_data["cable_sync_tag"]
+        normalize_cable_tag_slug(tag_name)
+        old_tag = Tag.objects.filter(name=self._original_tag_name).first()
+        # Check the collision even when the provenance tag is gone: without the old row to exclude,
+        # every tag carrying this name is an unrelated one this setting must not adopt.
+        clash = Tag.objects.filter(name=tag_name)
+        if old_tag is not None:
+            clash = clash.exclude(pk=old_tag.pk)
+        if clash.exists():
+            raise forms.ValidationError("A different tag already uses this name.")
+        return tag_name
+
+    @transaction.atomic
+    def save(self, commit=True):
+        """Persist settings and reserve or update the provenance Tag."""
+        from django.core.exceptions import PermissionDenied
+        from extras.models import Tag
+
+        if not commit:
+            return super().save(commit=False)
+
+        model = self._meta.model
+        locked_settings = model.objects.select_for_update().get(pk=self.instance.pk)
+        old_tag_name = locked_settings.cable_sync_tag
+        new_tag_name = self.cleaned_data["cable_sync_tag"]
+
+        # Lock both names so a concurrent create of the target name cannot land between the clean
+        # check and the rename, but only ever mutate the row this setting owns. Falling back to a
+        # row matching the new name would rename an unrelated global tag when the old one is gone.
+        locked_tags = list(Tag.objects.select_for_update().filter(name__in={old_tag_name, new_tag_name}))
+        tag = next((candidate for candidate in locked_tags if candidate.name == old_tag_name), None)
+        if tag is None and any(candidate.name == new_tag_name for candidate in locked_tags):
+            # The old provenance tag is gone and an unrelated tag took the target name after
+            # clean_cable_sync_tag ran, so the settings must not adopt it.
+            raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."})
+        new_color = self.cleaned_data["cable_sync_tag_color"]
+        if tag is None:
+            if self.user is not None and not self.user.has_perm("extras.add_tag"):
+                raise PermissionDenied("You do not have permission to create the cable provenance tag.")
+            slug = _free_cable_tag_slug(normalize_cable_tag_slug(new_tag_name))
+            try:
+                # Keep the insert in a savepoint so an integrity error does not poison the outer
+                # transaction before the form converts it into a field error.
+                with transaction.atomic():
+                    tag = Tag.objects.create(name=new_tag_name, slug=slug, color=new_color)
+            except IntegrityError as exc:
+                # A concurrent insert can take either the unique name or the selected free slug.
+                # Do not adopt that row because this settings form did not create it.
+                raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
+            if self.user is not None and not Tag.objects.restrict(self.user, "add").filter(pk=tag.pk).exists():
+                raise PermissionDenied("You do not have permission to create the cable provenance tag.")
+        else:
+            update_fields = []
+            if tag.name != new_tag_name:
+                tag.name = new_tag_name
+                update_fields.append("name")
+            if tag.color != new_color:
+                tag.color = new_color
+                update_fields.append("color")
+            if update_fields:
+                if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
+                    raise PermissionDenied("You do not have permission to change the cable provenance tag.")
+                try:
+                    tag.save(update_fields=update_fields)
+                except IntegrityError as exc:
+                    # select_for_update cannot lock a name that has no row yet, so a concurrent
+                    # create can take the target name between clean_cable_sync_tag and this save.
+                    raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
+                if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
+                    raise PermissionDenied("You do not have permission to change the cable provenance tag.")
+
+        setting_fields = ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description")
+        for field_name in setting_fields:
+            setattr(locked_settings, field_name, self.cleaned_data[field_name])
+        locked_settings.save(update_fields=setting_fields)
+        self.instance = locked_settings
+        return locked_settings
 
 
 # Keep for backward compatibility if needed elsewhere
@@ -1048,6 +1158,36 @@ class LocationMappingFilterForm(NetBoxModelFilterSetForm):
     model = LocationMapping
 
 
+class SerialSensorTypePatternForm(NetBoxModelForm):
+    """Form for creating and editing SerialSensorTypePattern objects."""
+
+    class Meta:
+        """Meta options."""
+
+        model = SerialSensorTypePattern
+        fields = ["sensor_type", "port_name_pattern", "description"]
+
+
+class SerialSensorTypePatternImportForm(NetBoxModelImportForm):
+    """Form for bulk importing SerialSensorTypePattern objects from CSV/JSON/YAML."""
+
+    class Meta:
+        """Meta options."""
+
+        model = SerialSensorTypePattern
+        fields = ["sensor_type", "port_name_pattern", "description"]
+
+
+class SerialSensorTypePatternFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering SerialSensorTypePattern objects."""
+
+    sensor_type = forms.CharField(required=False, label="Sensor Type")
+    port_name_pattern = forms.CharField(required=False, label="Port Name Pattern")
+    description = forms.CharField(required=False, label="Description")
+
+    model = SerialSensorTypePattern
+
+
 class BaseSNMPForm(forms.Form):
     """Base form with fields shared by both SNMPv1/v2c and SNMPv3 LibreNMS device forms."""
 
@@ -1517,6 +1657,7 @@ class DeviceImportConfigForm(forms.Form):
                 suggested_site: Pre-selected site
                 suggested_device_type: Pre-selected device type
                 suggested_role: Pre-selected device role
+
         """
         # Extract custom kwargs
         libre_device = kwargs.pop("libre_device", {})

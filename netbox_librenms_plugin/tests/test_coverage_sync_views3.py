@@ -156,12 +156,7 @@ class TestGetCachedPortsData:
 
 
 class TestSyncInterface:
-    """
-    Which device the LibreNMS row is written to, resolved against real rows.
-
-    ``update_interface_attributes`` and ``_sync_interface_vlans`` stay stubbed: they are the
-    view's own next steps, and these tests are about target selection, not field copying.
-    """
+    """Verify which real device or virtual chassis member receives each LibreNMS interface row."""
 
     def _v(self, request=None):
         v = _make_iv(request)
@@ -271,6 +266,25 @@ class TestSyncInterface:
 
         view.update_interface_attributes.assert_not_called()
         assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
+
+    def test_existing_interface_with_an_unconstrained_change_grant_is_synced(self):
+        """The permission-scoped skip must disappear when the existing interface is changeable."""
+        from dcim.models import Device, Interface
+
+        device = make_device("sync-interface-change-control")
+        existing = make_interface(device, "eth0")
+        make_interface(device, "eth1")
+        user = make_user_with_perms(
+            "sync-interface-change-control",
+            [("view", Device), ("add", Interface), ("change", Interface)],
+        )
+        request = make_request("post", user=user)
+        view = self._v(request)
+
+        view.sync_interface(device, {"ifName": existing.name}, [], "ifName")
+
+        view.update_interface_attributes.assert_called_once()
+        assert view._skipped_conflicts == []
 
     def test_vm_uses_vminterface(self):
         from virtualization.models import VMInterface
@@ -565,32 +579,6 @@ class TestDeleteNetBoxInterfacesPost:
         assert "error(s)" in data["message"]
         assert not Interface.objects.filter(pk=mine.pk).exists()
         assert Interface.objects.filter(pk=stranger.pk).exists()
-
-
-# ===========================================================================
-# cables.py lines 147-149: exception path in process_interface_sync
-# ===========================================================================
-
-
-class TestCablesExceptionPath:
-    def test_exception_hits_147_to_149(self):
-        """Lines 147-149: logger.exception + invalid.append when _passthrough_atomic used."""
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        v = object.__new__(SyncCablesView)
-        v._librenms_api = MagicMock()
-        v.request = MagicMock()
-
-        def raise_err(iface, links):
-            raise RuntimeError("deliberate for coverage")
-
-        v.process_single_interface = raise_err
-
-        with patch("netbox_librenms_plugin.views.sync.cables.transaction") as mt:
-            mt.atomic = _pa
-            results = v.process_interface_sync([{"local_port_id": "eth_x"}], [])
-
-        assert "eth_x" in results["invalid"]
 
 
 # ===========================================================================
