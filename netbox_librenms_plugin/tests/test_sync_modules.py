@@ -8719,7 +8719,13 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
             match_pattern=r"^S/N (.+)$",
             replacement=r"MEMBER-\1",
         )
-    rows = [{"entPhysicalIndex": 1, "entPhysicalClass": "chassis", "entPhysicalContainedIn": 0}]
+    rows = [
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalClass": "stack" if mixed_manufacturers else "chassis",
+            "entPhysicalContainedIn": 0,
+        }
+    ]
     rows.extend(
         {
             "entPhysicalIndex": number + 1,
