@@ -6,6 +6,7 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
+from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -104,6 +105,17 @@ def _inventory_item_offsettable(item: dict) -> bool:
     idx_ok = idx is None or (isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0)
     parent_ok = parent is None or (isinstance(parent, int) and not isinstance(parent, bool) and parent >= 0)
     return idx_ok and parent_ok
+
+
+def _inventory_item_key(item: dict):
+    """
+    Return the key an item's attributed ignore context is stored under.
+
+    The LibreNMS index is the item's identity everywhere else in this view, and it survives the
+    presentation copies _collect_top_items() makes, which object identity does not.
+    """
+    index = item.get("entPhysicalIndex")
+    return ("index", index) if index is not None else ("object", id(item))
 
 
 def _class_is_included(item: dict, rules: list) -> bool:
@@ -230,7 +242,7 @@ def _check_ignore_rules(  # noqa: C901
 
 class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
-    Synchronize module and inventory data from LibreNMS.
+    Base view for synchronizing module/inventory data from LibreNMS.
 
     Fetches inventory, matches against NetBox module bays and module types,
     and renders a comparison table.
@@ -244,7 +256,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return self.restrict_object_or_404(self.model, pk=pk)
 
     def get_table(self, data, obj):
-        """Return the table class. Subclasses should override."""
+        """Return the table class. Subclasses must override this method."""
         raise NotImplementedError("Subclasses must implement get_table()")
 
     def _get_sync_device(self, obj, server_key=None):
@@ -318,7 +330,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         return Interface.objects.filter(device=device, module__isnull=True, name__in=template_names).count()
 
-    def _infer_vc_member_for_item(self, obj, item, index_map, vc_members):
+    @staticmethod
+    def _vc_member_at_position(vc_members, position):
+        """Return the VC member at a normalized positive position, or None."""
+        try:
+            position = int(position)
+        except (TypeError, ValueError):
+            return None
+        if position <= 0:
+            return None
+        return next((member for member in vc_members if getattr(member, "vc_position", None) == position), None)
+
+    @classmethod
+    def _infer_vc_member_for_item(cls, obj, item, index_map, vc_members, inherited_member=None):
         """
         Infer VC member ownership for an inventory item using LibreNMS ENTITY data.
 
@@ -330,12 +354,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return obj, "default"
 
         member_by_serial = {
-            self._normalize_serial(getattr(member, "serial", "")): member
+            cls._normalize_serial(getattr(member, "serial", "")): member
             for member in vc_members
-            if self._normalize_serial(getattr(member, "serial", ""))
+            if cls._normalize_serial(getattr(member, "serial", ""))
         }
 
-        item_serial = self._normalize_serial(item.get("entPhysicalSerialNum"))
+        item_serial = cls._normalize_serial(item.get("entPhysicalSerialNum"))
         if item_serial and item_serial in member_by_serial:
             return member_by_serial[item_serial], "serial"
 
@@ -345,22 +369,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         while parent_idx and parent_idx in index_map and parent_idx not in visited:
             visited.add(parent_idx)
             parent = index_map[parent_idx]
-            parent_serial = self._normalize_serial(parent.get("entPhysicalSerialNum"))
+            parent_serial = cls._normalize_serial(parent.get("entPhysicalSerialNum"))
             if parent_serial and parent_serial in member_by_serial:
                 return member_by_serial[parent_serial], "ancestor-serial"
             parent_idx = parent.get("entPhysicalContainedIn", 0)
 
-        # Position-based fallback from ENTITY parentRelPos.
-        rel_pos = item.get("entPhysicalParentRelPos")
-        try:
-            rel_pos = int(rel_pos)
-        except (TypeError, ValueError):
-            rel_pos = None
+        # A descendant's parentRelPos is its hardware slot, not its Virtual Chassis position.
+        # Inherit the parent context unless this item or an ancestor supplied member serial evidence.
+        if inherited_member is not None:
+            return inherited_member, "parent-context"
 
-        if rel_pos:
-            for member in vc_members:
-                if getattr(member, "vc_position", None) == rel_pos:
-                    return member, "position"
+        # Position-based fallback from ENTITY parentRelPos.
+        positioned_member = cls._vc_member_at_position(vc_members, item.get("entPhysicalParentRelPos"))
+        if positioned_member is not None:
+            return positioned_member, "position"
 
         # Name/model hint fallback: common "<position>/..." prefixes.
         hints = [
@@ -374,13 +396,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             match = re.match(r"^\D*([1-9]\d*)[/:\-].*", hint)
             if not match:
                 continue
-            try:
-                hinted_pos = int(match.group(1))
-            except (TypeError, ValueError):
-                continue
-            for member in vc_members:
-                if getattr(member, "vc_position", None) == hinted_pos:
-                    return member, "name-hint"
+            hinted_member = cls._vc_member_at_position(vc_members, match.group(1))
+            if hinted_member is not None:
+                return hinted_member, "name-hint"
 
         return obj, "default"
 
@@ -390,7 +408,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Rebind the API to the POSTed server BEFORE resolving the sync device / librenms_id
         # so the inventory fetch + cache scope all target the same server in a multi-server
         # tab refresh. Resolve before _get_sync_device so VC resolution uses the same key.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             # rebind_api_for_server() returned None to avoid building a missing/misconfigured
@@ -458,7 +476,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             )
 
         for item in inventory_data:
-            item["_source"] = "main"
+            item["_source"] = MAIN_INVENTORY_SOURCE
 
         # Fetch ports once and reuse in subsequent enrichment steps.
         ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
@@ -481,7 +499,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # this reordering those high indices could fall inside the OOB namespace.
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
         for item in inventory_data:
-            item.setdefault("_source", "main")
+            item.setdefault("_source", MAIN_INVENTORY_SOURCE)
         # Enrich port rows with stable LibreNMS port_id using ports data so
         # interface matching works even when transceiver metadata is absent.
         self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
@@ -528,7 +546,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # non-negative, so the offset clears every main index.
                 _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
                 for item in oob_inventory:
-                    item["_source"] = "oob"
+                    item["_source"] = OOB_INVENTORY_SOURCE
                     if (idx := item.get("entPhysicalIndex")) is not None:
                         item["entPhysicalIndex"] = idx + _OOB_OFFSET
                     if (parent := item.get("entPhysicalContainedIn")) not in (None, 0):
@@ -722,15 +740,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         self._exact_bay_mappings, self._regex_bay_mappings = load_bay_mappings()
 
-        # Load enabled ignore rules once; passed to _check_ignore_rules throughout.
-        ignore_rules = get_enabled_ignore_rules()
-
-        # Device serial for serial_matches_device rules (strip whitespace defensively).
-        device_serial = (getattr(obj, "serial", None) or "").strip()
-
-        # Manufacturer for module-type normalization rules — passed explicitly to
-        # _build_table_rows/_build_row instead of stored as an instance attribute.
+        # Resolve ignore policy once per attributed VC member. A stacked device can contain
+        # inventory for members with different manufacturers and device serials.
         manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
+        vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
+        default_ignore_context, item_ignore_contexts = self._build_inventory_ignore_contexts(
+            obj,
+            inventory_data,
+            index_map,
+            vc_members,
+            get_enabled_ignore_rules,
+        )
+        ignore_rules = default_ignore_context["ignore_rules"]
+        device_serial = default_ignore_context["device_serial"]
 
         # Preload NormalizationRule rows once to avoid N+1 queries inside the
         # _match_module_bay and resolve_module_type loops.
@@ -739,26 +761,34 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self._norm_rules_serial = preload_normalization_rules("serial", manufacturer=manufacturer)
         # Pre-compute ignore rule results once to avoid calling _check_ignore_rules
         # twice per item (once in _find_transparent_indices, once in _collect_top_items).
-        ignore_cache = {
-            item["entPhysicalIndex"]: _check_ignore_rules(
+        ignore_cache = {}
+        for item in inventory_data:
+            idx = item.get("entPhysicalIndex")
+            if idx is None:
+                continue
+            item_context = item_ignore_contexts[_inventory_item_key(item)]
+            ignore_cache[idx] = _check_ignore_rules(
                 item,
                 index_map.get(item.get("entPhysicalContainedIn")),
-                ignore_rules,
+                item_context["ignore_rules"],
                 index_map,
-                device_serial,
+                item_context["device_serial"],
             )
-            for item in inventory_data
-            if item.get("entPhysicalIndex") is not None
-        }
 
         module_types = self._get_module_types()
         self._generic_module_types = self._get_generic_module_types()
         self._module_type_ambiguities = self._get_module_type_ambiguities()
-        self._carrier_install_rules = self._get_carrier_install_rules(manufacturer)
+        self._carrier_install_rules_by_manufacturer = {}
 
         transparent_indices = self._find_transparent_indices(inventory_data, ignore_cache)
         top_items = self._collect_top_items(
-            inventory_data, index_map, ignore_rules, device_serial, transparent_indices, ignore_cache
+            inventory_data,
+            index_map,
+            ignore_rules,
+            device_serial,
+            transparent_indices,
+            ignore_cache,
+            ignore_contexts=item_ignore_contexts,
         )
         table_data = self._build_table_rows(
             obj,
@@ -769,6 +799,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             device_serial,
             module_types,
             manufacturer=manufacturer,
+            vc_members=vc_members,
+            ignore_contexts=item_ignore_contexts,
         )
         for row in table_data:
             inventory_item = index_map.get(row.get("ent_physical_index"))
@@ -824,8 +856,132 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 transparent_indices.add(idx)
         return transparent_indices
 
+    @classmethod
+    def _build_inventory_ignore_contexts(
+        cls,
+        obj,
+        inventory_data,
+        index_map,
+        vc_members,
+        get_enabled_ignore_rules,
+    ):
+        """Return the page policy and per-item policies for attributed VC members."""
+        policy_cache = {}
+
+        def policy_for(device):
+            device_id = getattr(device, "pk", None)
+            if device_id not in policy_cache:
+                manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+                policy_cache[device_id] = {
+                    "manufacturer": manufacturer,
+                    "ignore_rules": get_enabled_ignore_rules(manufacturer),
+                    "device_serial": (getattr(device, "serial", None) or "").strip(),
+                }
+            return policy_cache[device_id]
+
+        default_context = policy_for(obj)
+        item_contexts = {}
+
+        def context_for(item, resolving=None):
+            """Resolve one item after its parent so weak child hints cannot replace ownership."""
+            item_key = _inventory_item_key(item)
+            if item_key in item_contexts:
+                return item_contexts[item_key]
+            if item.get("_source") == OOB_INVENTORY_SOURCE:
+                item_contexts[item_key] = {
+                    **default_context,
+                    "selected_device": obj,
+                    "resolution_source": OOB_INVENTORY_SOURCE,
+                }
+                return item_contexts[item_key]
+
+            resolving = set() if resolving is None else resolving
+            inherited_member = None
+            parent = index_map.get(item.get("entPhysicalContainedIn"))
+            if parent is not None and _inventory_item_key(parent) not in resolving:
+                parent_context = context_for(parent, resolving | {item_key})
+                # A generic stack/container root can only fall back to the page device. It has not
+                # established ownership, so let a chassis child use its own position or name hint.
+                parent_class = _normalize_librenms_text(parent.get("entPhysicalClass"))
+                parent_model = _normalize_librenms_text(parent.get("entPhysicalModelName")).lower()
+                generic_root = parent_context["resolution_source"] == "default" and (
+                    parent_class == "stack"
+                    or (parent_class == "container" and parent_model in _GENERIC_CONTAINER_MODELS)
+                )
+                if not generic_root:
+                    inherited_member = parent_context["selected_device"]
+
+            selected_device, resolution_source = cls._infer_vc_member_for_item(
+                obj,
+                item,
+                index_map,
+                vc_members,
+                inherited_member=inherited_member,
+            )
+            policy = policy_for(selected_device)
+            item_contexts[item_key] = {
+                **policy,
+                "selected_device": selected_device,
+                "resolution_source": resolution_source,
+            }
+            return item_contexts[item_key]
+
+        for item in inventory_data:
+            context_for(item)
+        return default_context, item_contexts
+
     @staticmethod
-    def _collect_top_items(inventory_data, index_map, ignore_rules, device_serial, transparent_indices, ignore_cache):  # noqa: C901
+    def _ignore_policy_for_item(item, ignore_contexts, default_rules, default_device_serial):
+        """Return one item's attributed policy, or the caller's default policy."""
+        context = ignore_contexts.get(_inventory_item_key(item)) if ignore_contexts is not None else None
+        if context is None:
+            return default_rules, default_device_serial
+        return context["ignore_rules"], context["device_serial"]
+
+    @staticmethod
+    def _has_inventory_ancestor(
+        item,
+        index_map,
+        transparent_indices,
+        ignore_contexts,
+        default_rules,
+        default_device_serial,
+    ):
+        """Return whether an item belongs below a visible inventory-class ancestor."""
+        current_idx = item.get("entPhysicalContainedIn", 0)
+        visited_ancestors = set()
+        while current_idx and current_idx in index_map and current_idx not in visited_ancestors:
+            visited_ancestors.add(current_idx)
+            ancestor = index_map[current_idx]
+            if current_idx in transparent_indices:
+                current_idx = ancestor.get("entPhysicalContainedIn", 0)
+                continue
+            anc_class = _normalize_librenms_text(ancestor.get("entPhysicalClass"))
+            ancestor_rules, _ancestor_device_serial = BaseModuleTableView._ignore_policy_for_item(
+                ancestor,
+                ignore_contexts,
+                default_rules,
+                default_device_serial,
+            )
+            if anc_class in INVENTORY_CLASSES or _class_is_included(ancestor, ancestor_rules):
+                anc_model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
+                if anc_model in _GENERIC_CONTAINER_MODELS:
+                    current_idx = ancestor.get("entPhysicalContainedIn", 0)
+                    continue
+                return True
+            current_idx = ancestor.get("entPhysicalContainedIn", 0)
+        return False
+
+    @staticmethod
+    def _collect_top_items(
+        inventory_data,
+        index_map,
+        ignore_rules,
+        device_serial,
+        transparent_indices,
+        ignore_cache,
+        ignore_contexts=None,
+    ):  # noqa: C901
         """
         Collect top-level inventory items for the sync table.
 
@@ -839,6 +995,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             device_serial (str): The NetBox device serial.
             transparent_indices (set): Physical indices for transparent parents.
             ignore_cache (dict): Cached ignore actions keyed by physical index.
+            ignore_contexts (dict | None): Per-item ignore policies for attributed VC members.
 
         Returns:
             list: The top-level inventory items for the sync table.
@@ -846,6 +1003,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         top_items = []
         for item in inventory_data:
+            item_rules, item_device_serial = BaseModuleTableView._ignore_policy_for_item(
+                item,
+                ignore_contexts,
+                ignore_rules,
+                device_serial,
+            )
             if item.get("_from_transceiver_api"):
                 idx = item.get("entPhysicalIndex")
                 action = (
@@ -854,9 +1017,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     else _check_ignore_rules(
                         item,
                         index_map.get(item.get("entPhysicalContainedIn")),
-                        ignore_rules,
+                        item_rules,
                         index_map,
-                        device_serial,
+                        item_device_serial,
                     )
                 )
                 if action in ("skip", "transparent"):
@@ -873,7 +1036,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
             admitted_by_rule = False
             if phys_class not in INVENTORY_CLASSES:
-                if not _class_is_included(item, ignore_rules):
+                if not _class_is_included(item, item_rules):
                     continue
                 admitted_by_rule = True
             idx = item.get("entPhysicalIndex")
@@ -883,9 +1046,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 else _check_ignore_rules(
                     item,
                     index_map.get(item.get("entPhysicalContainedIn")),
-                    ignore_rules,
+                    item_rules,
                     index_map,
-                    device_serial,
+                    item_device_serial,
                 )
             )
             if action == "skip":
@@ -900,28 +1063,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 continue
             # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
             # Transparent ancestors are treated as generic containers.
-            is_descendant = False
-            current_idx = item.get("entPhysicalContainedIn", 0)
-            visited_ancestors = set()
-            while current_idx and current_idx in index_map and current_idx not in visited_ancestors:
-                visited_ancestors.add(current_idx)
-                ancestor = index_map[current_idx]
-                if current_idx in transparent_indices:
-                    current_idx = ancestor.get("entPhysicalContainedIn", 0)
-                    continue
-                anc_class = _normalize_librenms_text(ancestor.get("entPhysicalClass"))
-                # A rule-admitted ancestor reaches the table as a row of its own, so it parents
-                # its children exactly like a built-in class. Ignoring it here let a standard
-                # child reach top level while _get_sub_components() also rendered it below.
-                if anc_class in INVENTORY_CLASSES or _class_is_included(ancestor, ignore_rules):
-                    anc_model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
-                    if anc_model in _GENERIC_CONTAINER_MODELS:
-                        current_idx = ancestor.get("entPhysicalContainedIn", 0)
-                        continue
-                    is_descendant = True
-                    break
-                current_idx = ancestor.get("entPhysicalContainedIn", 0)
-            if is_descendant:
+            # A rule-admitted ancestor reaches the table as a row of its own, so it parents
+            # its children exactly like a built-in class. Ignoring it here lets a standard
+            # child reach top level while _get_sub_components() also renders it below.
+            if BaseModuleTableView._has_inventory_ancestor(
+                item,
+                index_map,
+                transparent_indices,
+                ignore_contexts,
+                ignore_rules,
+                device_serial,
+            ):
                 continue
             # Mark only rows that reach the table at top level. A Cisco converter is class
             # "other" too, but it hangs under a container and keeps its own name.
@@ -976,16 +1128,31 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         device_serial,
         module_types,
         manufacturer=None,
+        vc_members=None,
+        ignore_contexts=None,
     ):
         """Build table rows from top-level items and their sub-components."""
-        vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
+        if vc_members is None:
+            vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
 
         member_contexts = self._build_member_contexts(obj, vc_members)
+        ignore_contexts = ignore_contexts or {}
 
         table_data = []
 
         for item in top_items:
-            target_device, resolution_source = self._infer_vc_member_for_item(obj, item, index_map, vc_members)
+            ignore_context = ignore_contexts.get(_inventory_item_key(item))
+            if ignore_context is None:
+                target_device, resolution_source = self._infer_vc_member_for_item(obj, item, index_map, vc_members)
+                target_ignore_rules = ignore_rules
+                target_device_serial = device_serial
+                target_manufacturer = manufacturer
+            else:
+                target_device = ignore_context["selected_device"]
+                resolution_source = ignore_context["resolution_source"]
+                target_ignore_rules = ignore_context["ignore_rules"]
+                target_device_serial = ignore_context["device_serial"]
+                target_manufacturer = ignore_context["manufacturer"]
             target_context = member_contexts.get(target_device.id) or member_contexts.get(obj.id)
             if target_context is None:
                 continue
@@ -995,12 +1162,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 target_context,
                 index_map,
                 children_by_parent,
-                ignore_rules,
-                device_serial,
+                target_ignore_rules,
+                target_device_serial,
                 module_types,
-                manufacturer=manufacturer,
+                manufacturer=target_manufacturer,
                 selected_device=target_device,
                 resolution_source=resolution_source,
+                member_contexts=member_contexts,
+                ignore_contexts=ignore_contexts,
             )
 
         return table_data
@@ -1036,6 +1205,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 manufacturer=manufacturer,
                 selected_device=member,
                 resolution_source="manual",
+                member_contexts=member_contexts,
             )
 
         return table_data
@@ -1114,7 +1284,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # the main device's interfaces are indexed in target_context. Matching an
         # OOB row by name would bind it to an unrelated main-device interface, so
         # skip interface matching entirely for OOB-sourced rows.
-        if row.get("_source") == "oob":
+        if row.get("_source") == OOB_INVENTORY_SOURCE:
             return
         try:
             port_id = int(row.get("librenms_port_id") or 0)
@@ -1178,6 +1348,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         row["can_update_interface_binding"] = True
 
+    def _activate_row_context(self, target_context, selected_device):
+        """Select the device-specific state used while one inventory row is built."""
+        self._current_device_bays = target_context.get("device_bays") or {}
+        selected_type = getattr(selected_device, "device_type", None)
+        manufacturer = getattr(selected_type, "manufacturer", None)
+        self._current_manufacturer = manufacturer
+        self._current_manufacturer_id = getattr(manufacturer, "id", None)
+        self._current_manufacturer_name = getattr(manufacturer, "name", None)
+        self._carrier_install_rules = self._carrier_install_rules_for(manufacturer)
+
     def _append_rows_for_item_context(  # noqa: C901
         self,
         table_data,
@@ -1191,21 +1371,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         manufacturer,
         selected_device,
         resolution_source,
+        member_contexts=None,
+        ignore_contexts=None,
     ):
         """Append one top-level item and descendants using one target device context."""
-        # Stash full device-level bay set for the holder-install hint in
-        # _build_no_bay_warning. Set per-item-context so virtual-chassis members
-        # see the right device's bays.
-        self._current_device_bays = target_context.get("device_bays") or {}
-        # Manufacturer for ModuleBayMapping vendor-scoping: prefer mappings
-        # whose manufacturer matches this device's manufacturer; fall back to
-        # vendor-agnostic (NULL) mappings; skip mappings scoped to a different
-        # manufacturer. Set per-item-context so VC members resolve correctly.
-        sel_dt = getattr(selected_device, "device_type", None)
-        sel_mfr = getattr(sel_dt, "manufacturer", None)
-        self._current_manufacturer = sel_mfr
-        self._current_manufacturer_id = getattr(sel_mfr, "id", None)
-        self._current_manufacturer_name = getattr(sel_mfr, "name", None)
+        member_contexts = member_contexts or {selected_device.id: target_context}
+        ignore_contexts = ignore_contexts or {}
+        self._activate_row_context(target_context, selected_device)
         # Top-level items match against the full bay set: device-level bays plus
         # bays exposed by already-installed carriers/modules. This lets a
         # cpmModule reported by SNMP at the chassis level (e.g. Nokia 'Slot A')
@@ -1294,33 +1466,57 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             index_map,
             ignore_rules,
             device_serial,
+            ignore_contexts=ignore_contexts,
         )
+        target_context_by_depth = {0: target_context}
         for depth, sub_item in sub_items:
+            sub_policy = ignore_contexts.get(_inventory_item_key(sub_item))
+            if sub_policy is None:
+                sub_selected_device = selected_device
+                sub_resolution_source = resolution_source
+                sub_manufacturer = manufacturer
+            else:
+                sub_selected_device = sub_policy["selected_device"]
+                sub_resolution_source = sub_policy["resolution_source"]
+                sub_manufacturer = sub_policy["manufacturer"]
+            sub_target_context = member_contexts.get(sub_selected_device.id) or target_context
+            parent_target_context = target_context_by_depth.get(depth - 1, target_context)
+            target_context_by_depth[depth] = sub_target_context
+
             # Fallbacks return the top-level state so the first iteration
             # (typically depth=1) inherits the right scope semantics rather
             # than silently defaulting to False.
-            scope_bays = bays_by_depth.get(depth, child_bays)
-            scope_uninstalled = scope_uninstalled_by_depth.get(depth, scope_uninstalled_init)
-            scope_preserved = scope_preserved_by_depth.get(depth, scope_preserved_init)
-            scope_empty_installed_bays = scope_empty_installed_bays_by_depth.get(depth, scope_empty_installed_bays_init)
+            if sub_target_context is parent_target_context:
+                scope_bays = bays_by_depth.get(depth, child_bays)
+                scope_uninstalled = scope_uninstalled_by_depth.get(depth, scope_uninstalled_init)
+                scope_preserved = scope_preserved_by_depth.get(depth, scope_preserved_init)
+                scope_empty_installed_bays = scope_empty_installed_bays_by_depth.get(
+                    depth, scope_empty_installed_bays_init
+                )
+            else:
+                scope_bays = sub_target_context["all_bays"]
+                scope_uninstalled = False
+                scope_preserved = False
+                scope_empty_installed_bays = False
+            self._activate_row_context(sub_target_context, sub_selected_device)
             sub_row = self._build_row(
                 sub_item,
                 index_map,
                 scope_bays,
                 module_types,
                 depth=depth,
-                manufacturer=manufacturer,
-                sibling_counts=target_context["sibling_counts"],
+                manufacturer=sub_manufacturer,
+                sibling_counts=sub_target_context["sibling_counts"],
                 scope_uninstalled=scope_uninstalled,
                 scope_preserved=scope_preserved,
                 scope_empty_installed_bays=scope_empty_installed_bays,
-                normalized_serial=self._normalized_item_serial(sub_item, manufacturer),
+                normalized_serial=self._normalized_item_serial(sub_item, sub_manufacturer),
             )
-            sub_row["selected_device_id"] = selected_device.id
-            sub_row["selected_device_name"] = selected_device.name
-            sub_row["member_resolution_source"] = resolution_source
-            self._apply_carrier_install_rules(sub_row, sub_item, selected_device)
-            self._attach_interface_match(sub_row, target_context)
+            sub_row["selected_device_id"] = sub_selected_device.id
+            sub_row["selected_device_name"] = sub_selected_device.name
+            sub_row["member_resolution_source"] = sub_resolution_source
+            self._apply_carrier_install_rules(sub_row, sub_item, sub_selected_device)
+            self._attach_interface_match(sub_row, sub_target_context)
             table_data.append(sub_row)
 
             # Update bay scope for children of this sub-item.
@@ -1332,7 +1528,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     and matched_sub_bay.installed_module
                 ):
                     sub_module_id = matched_sub_bay.installed_module.pk
-                    sub_bays = target_context["module_scoped_bays"].get(sub_module_id, {})
+                    sub_bays = sub_target_context["module_scoped_bays"].get(sub_module_id, {})
                     bays_by_depth[depth + 1] = sub_bays
                     scope_uninstalled_by_depth[depth + 1] = False
                     scope_preserved_by_depth[depth + 1] = False
@@ -1357,12 +1553,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     scope_preserved_by_depth[depth + 1] = True
                 scope_empty_installed_bays_by_depth[depth + 1] = scope_empty_installed_bays
 
-            if sub_row.get("can_install"):
+            if sub_selected_device == selected_device and sub_row.get("can_install"):
                 table_data[parent_row_idx]["has_installable_children"] = True
             # When parent bay is uninstalled, sub-rows have empty bays so
             # can_install is False, but module_type_id is still resolved.
             # Use it to enable "Install Branch" without a second resolve pass.
-            elif parent_bay_matched_but_uninstalled and sub_row.get("module_type_id"):
+            elif (
+                sub_selected_device == selected_device
+                and parent_bay_matched_but_uninstalled
+                and sub_row.get("module_type_id")
+            ):
                 table_data[parent_row_idx]["has_installable_children"] = True
 
         # If the installed module's type has no bay templates but has LibreNMS
@@ -1371,7 +1571,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if parent_installed_module and not child_bays:
             first_no_bay_child_idx = None
             for i in range(parent_row_idx + 1, len(table_data)):
-                if table_data[i].get("no_bay_reason") == "empty_parent_bays":
+                if (
+                    table_data[i].get("selected_device_id") == selected_device.id
+                    and table_data[i].get("no_bay_reason") == "empty_parent_bays"
+                ):
                     first_no_bay_child_idx = i
                     break
             if first_no_bay_child_idx is not None:
@@ -1827,7 +2030,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     return module_bays[pattern]
         return None
 
-    def _get_sub_components(self, parent_idx, children_by_parent, index_map, ignore_rules, device_serial=""):
+    def _get_sub_components(
+        self,
+        parent_idx,
+        children_by_parent,
+        index_map,
+        ignore_rules,
+        device_serial="",
+        ignore_contexts=None,
+    ):
         """
         Find descendant items with a model name (real hardware, not empty containers).
 
@@ -1837,6 +2048,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             index_map (dict): Inventory items keyed by physical index.
             ignore_rules (list): The ignore rules to apply.
             device_serial (str): The NetBox device serial.
+            ignore_contexts (dict | None): Per-item policies for attributed VC members.
 
         Returns:
             list[tuple[int, dict]]: The descendant items paired with their depths.
@@ -1852,6 +2064,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             depth=1,
             results=results,
             visited={parent_idx},
+            ignore_contexts=ignore_contexts,
         )
         return results
 
@@ -1865,6 +2078,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         results,
         visited=None,
         device_serial="",
+        ignore_contexts=None,
     ):
         """Recursively collect descendant items that have a model name."""
         if visited is None:
@@ -1879,7 +2093,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Apply ignore rules: skip drops the item and its subtree; transparent
             # hides the item but promotes its children to the current depth level.
             parent_item = index_map.get(parent_idx)
-            action = _check_ignore_rules(child, parent_item, ignore_rules, index_map, device_serial)
+            child_rules, child_device_serial = self._ignore_policy_for_item(
+                child,
+                ignore_contexts,
+                ignore_rules,
+                device_serial,
+            )
+            action = _check_ignore_rules(child, parent_item, child_rules, index_map, child_device_serial)
             if action == "skip":
                 continue
             if action == "transparent":
@@ -1893,7 +2113,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth,
                     results=results,
                     visited=visited,
-                    device_serial=device_serial,
+                    device_serial=child_device_serial,
+                    ignore_contexts=ignore_contexts,
                 )
                 continue
             model = _normalize_librenms_text(child.get("entPhysicalModelName")).lower()
@@ -1908,7 +2129,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth + 1,
                     results=results,
                     visited=visited,
-                    device_serial=device_serial,
+                    device_serial=child_device_serial,
+                    ignore_contexts=ignore_contexts,
                 )
             else:
                 # Skip generic/empty items, but check their children
@@ -1920,7 +2142,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth,
                     results=results,
                     visited=visited,
-                    device_serial=device_serial,
+                    device_serial=child_device_serial,
+                    ignore_contexts=ignore_contexts,
                 )
 
     def _group_children_under_parents(self, table_data):
@@ -2018,6 +2241,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             qs = qs.filter(manufacturer__isnull=True)
         return list(qs)
 
+    def _carrier_install_rules_for(self, manufacturer):
+        """Return cached carrier rules for one row's selected manufacturer."""
+        rule_cache = self.__dict__.setdefault("_carrier_install_rules_by_manufacturer", {})
+        manufacturer_id = getattr(manufacturer, "pk", None)
+        if manufacturer_id not in rule_cache:
+            rule_cache[manufacturer_id] = self._get_carrier_install_rules(manufacturer)
+        return rule_cache[manufacturer_id]
+
     def _apply_carrier_install_rules(self, row, item, selected_device):
         """
         Attach carrier_install_options to a No Bay row when configured rules match.
@@ -2046,7 +2277,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # OOB controller rows are stamped read-only in _build_row; never offer carrier
         # install options on them either (this runs after _build_row, so the central
         # stamp doesn't cover it).
-        if row.get("_source") == "oob":
+        if row.get("_source") == OOB_INVENTORY_SOURCE:
             return
         device_bays = getattr(self, "_current_device_bays", None) or {}
         if not device_bays:
@@ -2236,7 +2467,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _fpc_slot_matches(candidate_name, bay):
         """
-        Validate a regex-matched bay against a positional FPC descriptor.
+        Validate a matched bay against a positional FPC descriptor.
 
         Returns True if the descriptor has no FPC reference, or if the bay's parent
         module slot position matches the FPC number in the descriptor. Prevents
@@ -2598,7 +2829,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             scope_preserved (bool): Whether the bay scope came from an unmatched ancestor.
             scope_empty_installed_bays (bool): Whether the installed parent type has
                 no bay templates.
-            normalized_serial: Optional serial that was normalized for the selected device.
+            normalized_serial (str | None): Serial already normalized for the selected manufacturer.
 
         Returns:
             dict: The table row for the inventory item.
@@ -2629,7 +2860,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # integrated-child duplicates, which would otherwise steal the row into the "Integrated"
         # path and drop its OOB status). Emit a read-only informational row with neutral
         # bay/type/status. (A late post-match scrub can't undo a status the matching computed.)
-        if item.get("_source") == "oob":
+        if item.get("_source") == OOB_INVENTORY_SOURCE:
             return {
                 "name": name,
                 "model": model_name or "-",
@@ -2649,7 +2880,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "librenms_ifname": item.get("_librenms_ifname"),
                 "librenms_ifdescr": item.get("_librenms_ifdescr"),
                 "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
-                "_source": "oob",
+                "_source": OOB_INVENTORY_SOURCE,
             }
 
         # Detect "integrated child" SNMP duplicates (e.g. Nokia XIOM with a
@@ -2677,7 +2908,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "has_installable_children": False,
                 "integrated_in_name": ancestor_name,
                 "integrated_in_index": integrating_ancestor.get("entPhysicalIndex"),
-                "_source": item.get("_source", "main"),
+                "_source": item.get("_source", MAIN_INVENTORY_SOURCE),
             }
 
         # Match to NetBox module bay
@@ -2726,7 +2957,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "librenms_ifname": item.get("_librenms_ifname"),
             "librenms_ifdescr": item.get("_librenms_ifdescr"),
             "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
-            "_source": item.get("_source", "main"),
+            "_source": item.get("_source", MAIN_INVENTORY_SOURCE),
         }
         if name_conflict_reason:
             row["name_conflict_reason"] = name_conflict_reason
@@ -2877,7 +3108,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _derive_bay_template_suggestion(item):
         """
-        Derive Add Bay Template values from a LibreNMS inventory item.
+        Derive an Add Bay Template suggestion from a LibreNMS inventory item.
 
         - ``name``: the LibreNMS item name as-is (the user can edit before
           submit).  Falls back to a class-derived placeholder when the name
@@ -2937,7 +3168,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         holder_hint=None,
     ):
         """
-        Explain how to complete the NetBox model when bay matching produces "No Bay".
+        Explain the missing NetBox model data when bay matching produces "No Bay".
 
         Distinguishes:
           - empty scope due to an uninstalled ancestor -> install the ancestor
@@ -3272,7 +3503,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _suggest_bay_mapping_from_descr_trail(item, candidate_names, item_name, item_class):
         r"""
-        Derive a final ModuleBayMapping suggestion from ``entPhysicalDescr``.
+        Derive a ModuleBayMapping suggestion from ``entPhysicalDescr``.
 
         Useful for vendors that report the model string in entPhysicalName
         and the human-readable position in entPhysicalDescr (e.g. Juniper
@@ -3595,7 +3826,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         serial_rows: dict = {}
         for row in table_data:
-            if row.get("_source") == "oob" or row.get("status") == "Integrated":
+            if row.get("_source") == OOB_INVENTORY_SOURCE or row.get("status") == "Integrated":
                 continue
             serial = row.get("serial", "")
             if not serial or serial.lower() in _PLACEHOLDER_VALUES:
@@ -3640,7 +3871,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Args:
             table_data (list): The table rows to check and update.
             index_map (dict | None): Inventory items by entPhysicalIndex, for ancestry checks.
-            obj: The page device whose install scope limits relevant conflicts.
+            obj (Device | None): Device whose VC membership bounds valid conflicts.
 
         """
         from dcim.models import Module

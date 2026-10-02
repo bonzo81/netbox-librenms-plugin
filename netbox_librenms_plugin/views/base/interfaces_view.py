@@ -6,6 +6,7 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
+from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
@@ -42,7 +43,7 @@ class BaseInterfaceTableView(
     VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View
 ):
     """
-    Fetch LibreNMS interface data and generate table data.
+    Base view for fetching interface data from LibreNMS and generating table data.
 
     Includes VLAN enrichment for interface VLAN sync functionality.
     """
@@ -73,6 +74,7 @@ class BaseInterfaceTableView(
 
         Raises:
             NotImplementedError: Always, because subclasses must implement this method.
+
         """
         raise NotImplementedError
 
@@ -87,6 +89,7 @@ class BaseInterfaceTableView(
 
         Raises:
             NotImplementedError: Always, because subclasses must implement this method.
+
         """
         raise NotImplementedError
 
@@ -109,6 +112,7 @@ class BaseInterfaceTableView(
 
         Returns:
             HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
+
         """
         SyncCacheConsistency(obj).mark_refresh_failure(
             SyncTab.INTERFACES,
@@ -126,7 +130,7 @@ class BaseInterfaceTableView(
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """
-        Return the table class used to render interface data.
+        Return the table class to use for rendering interface data.
 
         Can be overridden by subclasses to use different tables.
 
@@ -135,6 +139,7 @@ class BaseInterfaceTableView(
             obj: Device or VirtualMachine object
             interface_name_field: Field to use for interface name ('ifName' or 'ifDescr')
             vlan_groups: List of VLANGroup objects for VLAN group dropdowns
+
         """
         raise NotImplementedError("Subclasses must implement get_table()")
 
@@ -158,6 +163,7 @@ class BaseInterfaceTableView(
         Returns:
             dict: Name and LibreNMS ID indexes plus the number of interfaces carrying each ID.
                 LibreNMS IDs that map to more than one interface are dropped from the direct index.
+
         """
         by_name = {}
         by_librenms_id = {}
@@ -208,7 +214,7 @@ class BaseInterfaceTableView(
         # lookups AND the cache writes below all target the same server in a multi-server
         # tab refresh — otherwise data fetched from the session/default server is cached
         # under the POSTed key (wrong interface set). Mirrors cables/ip/modules/vlan views.
-        post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        post_server_key = self.rebind_api_for_posted_server(request.POST)
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             # This POST is HTMX (the success path swaps in the partial), so a bare redirect would
@@ -280,7 +286,7 @@ class BaseInterfaceTableView(
         # Enrich ports with VLAN data for trunk ports
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
         for port in enriched_ports:
-            port["_source"] = "main"
+            port["_source"] = MAIN_INVENTORY_SOURCE
         librenms_data["ports"] = enriched_ports
 
         # If an OOB controller is linked, fetch its ports and merge them in. The
@@ -322,7 +328,7 @@ class BaseInterfaceTableView(
                 oob_ports = oob_raw.get("ports", [])
                 oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
                 for port in oob_enriched:
-                    port["_source"] = "oob"
+                    port["_source"] = OOB_INVENTORY_SOURCE
 
                 # Detect shared-LOM: same MAC seen on BOTH main and OOB sides.
                 # Build separate per-source MAC sets so that within-source
@@ -379,7 +385,7 @@ class BaseInterfaceTableView(
         # only consider host ports. An OOB-only row matching the ifType/name heuristic would
         # otherwise trigger a host port_stack fetch (and the "may be incomplete" warning) even
         # when the main device has no such relationships.
-        host_ports_final = [p for p in librenms_data.get("ports", []) if p.get("_source") != "oob"]
+        host_ports_final = [p for p in librenms_data.get("ports", []) if p.get("_source") != OOB_INVENTORY_SOURCE]
         self._enrich_port_stack_relationships(
             request,
             librenms_data,
@@ -533,6 +539,7 @@ class BaseInterfaceTableView(
 
         Returns:
             List of enriched port dicts with VLAN data
+
         """
         enriched = []
         for port in ports:
@@ -565,11 +572,12 @@ class BaseInterfaceTableView(
                 None.
             fresh_data: Optional in-memory ports snapshot to render from instead of
                 the cache.
-            sync_device: Optional device that owns the selected LibreNMS synchronization data.
+            sync_device: Device that owns the LibreNMS identity and cache entry.
 
         Returns:
             dict: The template context (object, table, vlan_groups, server_key,
                 oob_incomplete and related render state).
+
         """
         ports_data = []
         table = None
@@ -640,8 +648,17 @@ class BaseInterfaceTableView(
 
         # Include every member's scope so rows owned by another member can resolve their VLANs.
         vlan_scope_devices = virtual_chassis_members or [obj]
-        vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices)
-        lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+        # The tab gate checks the object's own view permission only, and the table serialises VLAN
+        # ids plus each group's id and name, so read IPAM as the caller.
+        vlan_scope_user = self.vlan_scope_user(request)
+        vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices, user=vlan_scope_user)
+        lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
+        hidden_ipam_permissions = self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user)
+        vlan_scope_incomplete = self.vlan_scope_is_incomplete(
+            vlan_scope_devices,
+            vlan_scope_user,
+            scoped_groups=vlan_groups,
+        )
         vlan_groups_by_device = {
             device.pk: self.filter_vlan_groups_for_device(vlan_groups, device) for device in vlan_scope_devices
         }
@@ -838,7 +855,7 @@ class BaseInterfaceTableView(
             librenms_interface_names = {
                 port.get(interface_name_field)
                 for port in ports_data
-                if port.get(interface_name_field) and port.get("_source") != "oob"
+                if port.get(interface_name_field) and port.get("_source") != OOB_INVENTORY_SOURCE
             }
 
             netbox_only_interfaces = []
@@ -899,6 +916,8 @@ class BaseInterfaceTableView(
             "server_key": server_key,
             "oob_incomplete": oob_incomplete,
             "relationship_data_incomplete": relationship_data_incomplete,
+            "hidden_ipam_permissions": hidden_ipam_permissions,
+            "vlan_scope_incomplete": vlan_scope_incomplete,
         }
 
     @staticmethod

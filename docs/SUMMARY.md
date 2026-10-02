@@ -29,5 +29,6 @@
   * [Templates](development/templates.md)
   * [Extension Points](development/extension_points.md)
   * [Testing](development/testing.md)
+  * [Contributing Data Shapes](development/contributing-data-shapes.md)
 * [Changelog](changelog.md)
 * [Contributing](contributing.md)

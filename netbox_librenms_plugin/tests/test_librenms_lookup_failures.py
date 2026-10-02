@@ -1,4 +1,5 @@
-"""A failed LibreNMS lookup must say which failure it was.
+"""
+A failed LibreNMS lookup must say which failure it was.
 
 A device that LibreNMS does not have, a device LibreNMS errors on, and a server that cannot be
 reached are three different problems with three different fixes. Reporting all of them as
@@ -156,6 +157,72 @@ def test_the_sync_page_reports_a_discovered_id_conflict(client, librenms_server,
 
     assert response.status_code == 200
     assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in body
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "url_name",
+    ["update_device_name", "update_device_serial", "update_device_type", "update_device_platform"],
+)
+def test_the_device_field_handlers_name_a_conflict_owner_the_caller_may_view(
+    client, librenms_server, settings, url_name
+):
+    """These four rendered the generic message even for a caller who may view the owner."""
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-field-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-field-conflict-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-field-conflict-user"))
+
+    response = client.post(
+        reverse(f"plugins:netbox_librenms_plugin:{url_name}", args=[target.pk]),
+        {"server_key": server_key},
+    )
+    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "url_name",
+    ["update_device_name", "update_device_serial", "update_device_type", "update_device_platform"],
+)
+def test_the_device_field_handlers_withhold_an_owner_outside_the_view_scope(
+    client, librenms_server, settings, url_name
+):
+    """Upgrading the message must stay scoped: the search behind it is unrestricted."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    owner = make_device("librenms-field-hidden-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
+    target = make_device("librenms-field-hidden-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    viewer = make_user_with_perms(
+        f"librenms-field-hidden-{url_name}",
+        [("view", Device), ("change", Device)],
+        constraints={"pk": target.pk},
+    )
+    client.force_login(viewer)
+
+    response = client.post(
+        reverse(f"plugins:netbox_librenms_plugin:{url_name}", args=[target.pk]),
+        {"server_key": server_key},
+    )
+    rendered_messages = " ".join(str(message) for message in get_messages(response.wsgi_request))
+
+    assert owner.name not in rendered_messages
+    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned" in rendered_messages
 
 
 @pytest.mark.django_db

@@ -51,6 +51,74 @@ def _make_request(post_data=None, get_data=None, user=None):
     return request
 
 
+def test_an_unreadable_vlan_scope_skips_the_vlan_write_instead_of_clearing_it(settings):
+    """A hidden VLAN reads as absent, so syncing it would destroy an assignment we cannot see."""
+    from dcim.models import Interface
+    from ipam.models import VLAN
+
+    configure_default_librenms_server(settings)
+    device = make_device("vlan-scope-hidden-device")
+    vlan = VLAN.objects.create(vid=812, name="hidden-scope-vlan")
+    interface = make_interface(device, "GigabitEthernet0/1")
+    interface.mode = "access"
+    interface.untagged_vlan = vlan
+    interface.save()
+    # Interface change without any IPAM view grant: exactly the caller the guard is for.
+    user = make_user_with_perms("vlan-scope-hidden-user", [("view", type(device)), ("change", Interface)])
+    view = _sync_view(_make_request(user=user))
+
+    view._prepare_vlan_lookup_maps([device])
+    assert view._vlan_scope_incomplete, "precondition: the VLAN scope must read as incomplete"
+    view.sync_interface(
+        device,
+        {"ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []},
+        exclude_columns=set(),
+        interface_name_field="ifName",
+    )
+
+    interface.refresh_from_db()
+    assert interface.untagged_vlan_id == vlan.pk, "the hidden VLAN assignment was cleared"
+
+
+def test_a_constrained_vlan_grant_also_skips_the_vlan_write(settings):
+    """A constrained grant passes the model-level permission check while still hiding VLANs."""
+    from dcim.models import Interface
+    from ipam.models import VLAN
+
+    configure_default_librenms_server(settings)
+    device = make_device("vlan-constrained-device")
+    visible = VLAN.objects.create(vid=901, name="constrained-visible-vlan")
+    hidden = VLAN.objects.create(vid=902, name="constrained-hidden-vlan")
+    interface = make_interface(device, "GigabitEthernet0/2")
+    interface.mode = "access"
+    interface.untagged_vlan = hidden
+    interface.save()
+    # VLAN view IS granted, so hidden_vlan_permissions() reports nothing missing, but the
+    # constraint still hides the VLAN this interface actually uses.
+    user = make_user_with_perms("vlan-constrained-user", [("view", type(device)), ("change", Interface)])
+    user = grant(user, "view", VLAN, constraints={"pk": visible.pk}, name="vlan-constrained-visible-only")
+    view = _sync_view(_make_request(user=user))
+
+    view._prepare_vlan_lookup_maps([device])
+    assert not view.hidden_vlan_permissions([device], user), (
+        "precondition: the model-level permission check must pass, or this repeats the other test"
+    )
+    assert view._vlan_scope_incomplete, "a constrained grant still hides VLANs, so the scope is incomplete"
+    view.sync_interface(
+        device,
+        {"ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []},
+        exclude_columns=set(),
+        interface_name_field="ifName",
+    )
+
+    interface.refresh_from_db()
+    assert interface.untagged_vlan_id == hidden.pk, "the constrained-hidden VLAN assignment was cleared"
+    # The skip must be explained: the permission-name check reports nothing missing for this user.
+    assert any("cannot view every VLAN in scope" in text for text in message_texts(view.request, "warning")), (
+        "a silently skipped VLAN sync leaves the user with no way to tell why"
+    )
+
+
 def _sync_view(request=None):
     """The real SyncInterfacesView; only the LibreNMS client is stubbed."""
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -1977,9 +2045,11 @@ class TestInterfaceContextVirtualChassisOwner:
         assert row["port_id"] == 10
         assert 'name="device_selection_10"' in str(context["table"].render_device_selection(None, row))
         assert 'name="vlan_group_10_100"' in str(context["table"].render_vlans(None, row))
+        # The sync path reads VLANs through the caller's restricted queryset, so this user needs
+        # the IPAM view grants for the rack-scoped group selection under test to run at all.
         user = make_user_with_perms(
             "sync-vlan-owner",
-            [("view", Device), ("add", Interface), ("change", Interface)],
+            [("view", Device), ("add", Interface), ("change", Interface), ("view", VLANGroup), ("view", VLAN)],
         )
         request = _make_request(
             post_data={
@@ -4225,7 +4295,8 @@ class TestSyncLagAndParentRelationships:
         """
         Run the relationship pass for one VM sub-interface, optionally shrinking the
         VMInterface name limit. Interface and VMInterface both allow 64 in NetBox 4.7, so the
-        gate reading the wrong model is only observable once the two differ."""
+        gate reading the wrong model is only observable once the two differ.
+        """
         from unittest.mock import patch
 
         from virtualization.models import VMInterface

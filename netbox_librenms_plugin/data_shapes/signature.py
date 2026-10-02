@@ -1,0 +1,410 @@
+"""
+Lightweight, informational fingerprint of what a data-shape recording exercises.
+
+The signature captures the axes that matter for the outcome tests — OS family, Virtual-Chassis
+shape, LAG style, sub-interface style, port_stack/VLAN/transceiver/VRF presence — so a contributor
+(or the mgmt command) can get a fuzzy "is this shape already covered?" verdict. It is a nudge,
+not a gate: :func:`classify_novelty` returns ``"new"`` / ``"likely-covered"`` with the closest
+match and a reason, never an authoritative decision.
+"""
+
+import re
+
+from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
+from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
+from netbox_librenms_plugin.data_shapes.ports import (
+    ANON_INTERFACE_NAME_RE,
+    compile_lag_patterns,
+    name_matches_lag_pattern,
+    port_has_vlan,
+    port_is_lag,
+    port_names,
+)
+from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
+
+# Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
+# "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
+# so an ios recording does not *cover* an iosxr shape; it's only "similar". Recordings carry a
+# pseudonymized OS (see pseudonymize_os), so the map is precomputed for BOTH the raw OS strings and
+# their stable os-<hash> tokens — that way novelty works whether it reads a raw or anonymized
+# signature. Extend with new variants (e.g. a Junos-Evolved OS string) as they appear.
+_OS_FAMILY_RAW = {
+    "ios": "cisco",
+    "iosxe": "cisco",
+    "iosxr": "cisco",
+    "nxos": "cisco",
+    "asa": "cisco",
+    "ftd": "cisco",
+    "junos": "juniper",
+    "junos-evo": "juniper",
+    "junosevo": "juniper",
+    "eos": "arista",
+    "routeros": "mikrotik",
+    "timos": "nokia",
+    "sros": "nokia",
+    "arcos": "arrcus",
+    "vrp": "huawei",
+}
+_OS_FAMILY = {}
+for _os, _fam in _OS_FAMILY_RAW.items():
+    _OS_FAMILY[_os] = _fam
+    _OS_FAMILY[pseudonymize_os(_os)] = _fam
+
+
+def _os_family(os_name):
+    """
+    Return a coarse vendor family for an OS string (raw or pseudonymized), for similarity matching.
+
+    A recognized OS maps to its vendor (ios/iosxr maps to "cisco"). An unrecognized (niche) OS falls back
+    to its own pseudonymized token, so two recordings of the same niche OS still relate to each
+    other while different ones don't.
+
+    Args:
+        os_name (str | None): A raw or pseudonymized OS name.
+
+    Returns:
+        str | None: The vendor family, a pseudonymized OS token, or None for a missing OS name.
+
+    """
+    if not isinstance(os_name, str) or not os_name:
+        return None
+    return _OS_FAMILY.get(os_name) or _OS_FAMILY.get(os_name.lower()) or pseudonymize_os(os_name)
+
+
+def _body(recording, predicate):
+    """
+    Return the first response body whose route key satisfies *predicate*.
+
+    A tagged status envelope is unwrapped, but a NON-2xx one yields ``None``: replay's real client
+    drops a non-2xx response and sees no usable data, so the signature must not count a failed
+    response (e.g. a captured 500 carrying ``{"transceivers": [...]}``) as present data.
+
+    Args:
+        recording (dict): A recording that contains response route keys and bodies.
+        predicate (Callable[[str], bool]): A function that selects a response route key.
+
+    Returns:
+        object | None: The first matching successful response body, or None if no usable body exists.
+
+    """
+    for key, value in recording.get("responses", {}).items():
+        if predicate(key):
+            status, body = unwrap_response(value)
+            return body if 200 <= status < 300 else None
+    return None
+
+
+def _inventory_items(body):
+    """Return the ``inventory`` list from an inventory response body, or []."""
+    if isinstance(body, dict) and isinstance(body.get("inventory"), list):
+        return [i for i in body["inventory"] if isinstance(i, dict)]
+    return []
+
+
+def _ports(recording):
+    """Return the HOST device's ports list (anchored on devices/<device_id>/ports), or []."""
+    # Anchor on the host device_id exactly as compress.py does, so an OOB recording carrying a second
+    # /ports route (the controller's, devices/<oob_id>/ports) can't be fingerprinted instead of the
+    # host's just because it happens to come first in dict order. Fall back to any /ports route when
+    # the recording has no device_id or a differently-keyed host route.
+    device_id = recording.get("device_id")
+    body = None
+    if device_id is not None:
+        body = _body(recording, lambda k: k.split("?", 1)[0].endswith(f"devices/{device_id}/ports"))
+    if body is None:
+        body = _body(recording, lambda k: k.split("?", 1)[0].endswith("/ports"))
+    if isinstance(body, dict) and isinstance(body.get("ports"), list):
+        return [p for p in body["ports"] if isinstance(p, dict)]
+    return []
+
+
+def compute_shape_signature(recording):
+    """
+    Compute the testing-relevant fingerprint of a recording.
+
+    Args:
+        recording (dict): A recording (raw or anonymized — the signature only reads structural
+            fields that anonymization preserves).
+
+    Returns:
+        dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base},
+            lag:{present,ieee8023ad,name_prefix}, sub_interfaces:{present,styles}, port_stack,
+            vlans, transceivers, serial, vrf, oob}``.
+
+    """
+    device_id = recording.get("device_id")
+    dev_body = _body(recording, lambda k: k == f"GET /api/v0/devices/{device_id}")
+    meta = recording_meta(recording)
+    os_name = meta.get("os")
+    if os_name is None and isinstance(dev_body, dict):
+        devices = dev_body.get("devices")
+        if isinstance(devices, list) and devices and isinstance(devices[0], dict):
+            os_name = devices[0].get("os")
+
+    # Virtual chassis: root container class + chassis members under it.
+    root_items = _inventory_items(_body(recording, lambda k: "entPhysicalContainedIn=0" in k))
+    root_class = None
+    if any(i.get("entPhysicalClass") == "stack" for i in root_items):
+        root_class = "stack"
+    elif any(i.get("entPhysicalClass") == "chassis" for i in root_items):
+        root_class = "chassis"
+    chassis = [i for i in _inventory_items(_body(recording, lambda k: "entPhysicalClass=chassis" in k))]
+    positions = [i.get("entPhysicalParentRelPos") for i in chassis if isinstance(i.get("entPhysicalParentRelPos"), int)]
+    vc = {
+        "present": len(chassis) > 1,
+        "root_class": root_class,
+        "member_count": len(chassis),
+        "position_base": min(positions) if positions else None,
+    }
+
+    # LAG + sub-interface styles from ports. LAG detection mirrors the client's
+    # resolve_port_relationships._is_lag_aggregate: an ieee8023adLag ifType OR a name matching a
+    # configured per-OS LAG pattern (captured in the recording's lag_patterns). Reading ifType alone
+    # would fingerprint a pattern-based LAG shape (e.g. Cisco "Po1") as lag.present=False, collapsing
+    # a real LAG into a non-LAG novelty bucket.
+    ports = _ports(recording)
+    compiled_lag_patterns = compile_lag_patterns(recording)
+    lag_ports = [p for p in ports if port_is_lag(p, compiled_lag_patterns)]
+    lag_port_names = []
+    for port in lag_ports:
+        names = port_names(port)
+        if port.get("ifType") == "ieee8023adLag":
+            if names:
+                lag_port_names.append(names[0])
+            continue
+        matching_name = next((name for name in names if name_matches_lag_pattern(name, compiled_lag_patterns)), None)
+        if matching_name is not None:
+            lag_port_names.append(matching_name)
+    # name_prefix is the LAG naming CONVENTION. Strip a trailing sub-unit (".N") BEFORE the aggregate
+    # number so a first LAG port of "ae1.0" yields "ae" (like "ae2.0"), not "ae1." — the arbitrary
+    # aggregate number is not a structural difference between two ae<N>.<unit> devices.
+    if lag_port_names and ANON_INTERFACE_NAME_RE.fullmatch(lag_port_names[0]):
+        name_prefix = "custom"
+    else:
+        name_prefix = re.sub(r"\d+$", "", re.sub(r"\.\d+$", "", lag_port_names[0])) if lag_port_names else None
+    sub_styles = set()
+    for p in ports:
+        # Scan BOTH name fields (port_names) like every neighbouring detector: on ifDescr-mode
+        # devices the structured ".N" sub-unit name lives in ifDescr while ifName carries an
+        # arbitrary (anonymized) label, and an ifName-only scan reads them as sub-interface-free.
+        for name in port_names(p):
+            if re.search(r"\.\d+$", name):
+                sub_styles.add("dot-numeric")
+    port_stack_body = _body(recording, lambda k: k.endswith("/port_stack"))
+    port_stack = bool(isinstance(port_stack_body, dict) and port_stack_body.get("mappings"))
+
+    # Require an actual non-empty transceivers list, not merely a captured /transceivers body:
+    # a JSON error/404 body is still "not None" and would otherwise inflate the novelty signature.
+    transceiver_body = _body(recording, lambda k: k.endswith("/transceivers"))
+    has_transceivers = (
+        isinstance(transceiver_body, dict)
+        and isinstance(transceiver_body.get("transceivers"), list)
+        and bool(transceiver_body["transceivers"])
+    )
+
+    # Serial-port sensor presence. Capture synthesizes a /resources/sensors body carrying ONLY the
+    # device's serial sensors (and records the route only when there are any), so a non-empty sensors
+    # list is the authoritative signal that this recording exercises the serial-console shape. Without
+    # this axis a serial capture and a plain host of the same OS/VC/LAG/sub shape collapse into one
+    # novelty bucket — the modal would report the first Avocent serial shape as already covered by a
+    # non-serial sibling. Mirrors the transceivers axis (require a real non-empty list, not just a body).
+    serial_body = _body(recording, lambda k: k.split("?", 1)[0].endswith("/resources/sensors"))
+    has_serial = (
+        isinstance(serial_body, dict) and isinstance(serial_body.get("sensors"), list) and bool(serial_body["sensors"])
+    )
+
+    # VRF presence. Capture records /routing/vrf only for a device whose ports carry a VRF id, and
+    # stores a body holding just that device's rows, so a non-empty list is the authoritative
+    # signal that this recording exercises the VRF shape. Without this axis a VRF capture and a
+    # plain one of the same OS/VC/LAG/sub shape collapse into one novelty bucket. Mirrors the
+    # transceivers axis: require a real non-empty list, not merely a captured body.
+    vrf_body = _body(recording, lambda k: k.split("?", 1)[0].endswith("/routing/vrf"))
+    has_vrf = isinstance(vrf_body, dict) and isinstance(vrf_body.get("vrfs"), list) and bool(vrf_body["vrfs"])
+
+    # OOB controller presence. Capture stamps meta["oob_id"] only when a separate OOB-controller
+    # device's ports were merged into the host capture (and anonymization preserves meta), so it's
+    # the authoritative signal. Without it an OOB and a non-OOB capture of the same host OS share an
+    # identical signature and collapse into one novelty bucket — the capture modal would report an
+    # OOB topology as already known when only the plain-host shape exists.
+    oob_present = meta.get("oob_id") is not None  # meta normalized to a dict at the top
+
+    return {
+        "os": os_name,
+        "virtual_chassis": vc,
+        "lag": {
+            "present": bool(lag_ports),
+            # ieee8023ad reflects the ifType-based detection style specifically — a LAG found
+            # only via a configured name pattern must not claim the 802.3ad-ifType style is
+            # covered (present and ieee8023ad are distinct axes, else they'd always be equal).
+            "ieee8023ad": any(p.get("ifType") == "ieee8023adLag" for p in lag_ports),
+            "name_prefix": name_prefix,
+        },
+        "sub_interfaces": {"present": bool(sub_styles), "styles": sorted(sub_styles)},
+        "port_stack": port_stack,
+        "vlans": any(port_has_vlan(p) for p in ports),
+        "transceivers": has_transceivers,
+        "serial": has_serial,
+        "vrf": has_vrf,
+        "oob": oob_present,
+    }
+
+
+def _structural_axes(signature):
+    """Reduce a signature to the OS-independent shape axes used for novelty matching."""
+    # classify_novelty() is also a public helper for caller-supplied manifests. Keep it robust even
+    # though load_manifest() rejects malformed entries at the generated-artifact boundary.
+    vc = signature.get("virtual_chassis")
+    if not isinstance(vc, dict):
+        vc = {}
+    lag = signature.get("lag")
+    if not isinstance(lag, dict):
+        lag = {}
+    sub = signature.get("sub_interfaces")
+    if not isinstance(sub, dict):
+        sub = {}
+    # Coerce styles before tuple(): a malformed entry like {"styles": null} would otherwise raise
+    # here, while every other malformed section is degraded gracefully above.
+    styles = sub.get("styles", ())
+    if not isinstance(styles, (list, tuple)):
+        styles = ()
+    return (
+        vc.get("present", False),
+        vc.get("root_class"),
+        vc.get("member_count"),
+        vc.get("position_base"),
+        lag.get("present", False),
+        # The ifType-vs-pattern LAG detection style is a distinct shape: a pattern-only LAG
+        # (ieee8023ad False) must not be reported as covered by an 802.3ad-ifType LAG, and vice versa.
+        lag.get("ieee8023ad", False),
+        lag.get("name_prefix"),
+        sub.get("present", False),
+        tuple(styles),
+        signature.get("port_stack", False),
+        signature.get("vlans", False),
+        signature.get("transceivers", False),
+        signature.get("serial", False),
+        signature.get("vrf", False),
+        signature.get("oob", False),
+    )
+
+
+def signature_schema_errors(signature):  # noqa: C901
+    """Return schema errors for one generated novelty signature."""
+    if not isinstance(signature, dict):
+        return ["signature must be a JSON object"]
+
+    errors = []
+    os_name = signature.get("os")
+    if "os" not in signature or (os_name is not None and not isinstance(os_name, str)):
+        errors.append("os must be a string or null")
+
+    vc = signature.get("virtual_chassis")
+    if not isinstance(vc, dict):
+        errors.append("virtual_chassis must be an object")
+    else:
+        if not isinstance(vc.get("present"), bool):
+            errors.append("virtual_chassis.present must be a boolean")
+        root_class = vc.get("root_class")
+        if root_class is not None and not isinstance(root_class, str):
+            errors.append("virtual_chassis.root_class must be a string or null")
+        member_count = vc.get("member_count")
+        if not isinstance(member_count, int) or isinstance(member_count, bool) or member_count < 0:
+            errors.append("virtual_chassis.member_count must be a non-negative integer")
+        position_base = vc.get("position_base")
+        if position_base is not None and (not isinstance(position_base, int) or isinstance(position_base, bool)):
+            errors.append("virtual_chassis.position_base must be an integer or null")
+
+    lag = signature.get("lag")
+    if not isinstance(lag, dict):
+        errors.append("lag must be an object")
+    else:
+        if not isinstance(lag.get("present"), bool):
+            errors.append("lag.present must be a boolean")
+        if not isinstance(lag.get("ieee8023ad"), bool):
+            errors.append("lag.ieee8023ad must be a boolean")
+        name_prefix = lag.get("name_prefix")
+        if name_prefix is not None and not isinstance(name_prefix, str):
+            errors.append("lag.name_prefix must be a string or null")
+
+    sub_interfaces = signature.get("sub_interfaces")
+    if not isinstance(sub_interfaces, dict):
+        errors.append("sub_interfaces must be an object")
+    else:
+        if not isinstance(sub_interfaces.get("present"), bool):
+            errors.append("sub_interfaces.present must be a boolean")
+        styles = sub_interfaces.get("styles")
+        if not isinstance(styles, list) or any(not isinstance(style, str) for style in styles):
+            errors.append("sub_interfaces.styles must be a list of strings")
+
+    for name in ("port_stack", "vlans", "transceivers", "serial", "vrf", "oob"):
+        if not isinstance(signature.get(name), bool):
+            errors.append(f"{name} must be a boolean")
+    return errors
+
+
+def build_manifest(recordings):
+    """Build a novelty manifest (``[{name, signature}]``) from an iterable of recordings."""
+    return [{"name": r.get("name"), "signature": compute_shape_signature(r)} for r in recordings]
+
+
+def classify_novelty(signature, manifest):
+    """
+    Graded-similarity classification of a signature against a manifest of covered shapes.
+
+    Three verdicts, because OS variants are *similar but not interchangeable* — an ios recording
+    shares almost everything with an iosxr one yet they differ (notably ifName/ifDescr), so the
+    former should not be reported as fully *covering* the latter:
+
+    * ``likely-covered`` — a covered shape has the SAME OS (pseudonymized token) and the same
+      VC/LAG/sub-interface shape.
+    * ``similar`` — a covered shape has the same VC/LAG/sub-interface shape and a related OS (same
+      vendor family, e.g. ios↔iosxr, junos↔Junos-Evolved) but not the exact OS — likely still worth
+      adding, just informed by the close neighbour.
+    * ``new`` — nothing shares both the shape and the OS family.
+
+    Args:
+        signature (dict): Output of :func:`compute_shape_signature` (raw or anonymized OS both work).
+        manifest (list[dict]): ``[{name, signature}]`` entries (see :func:`build_manifest`).
+
+    Returns:
+        dict: ``{"verdict": "likely-covered" | "similar" | "new", "closest": <name|None>,
+            "why": <str>}``.
+
+    """
+    target_shape = _structural_axes(signature)
+    target_os = pseudonymize_os(signature.get("os"))
+    target_family = _os_family(signature.get("os"))
+
+    similar = None
+    for entry in manifest:
+        # The manifest is an on-disk artifact: a malformed item (a non-dict entry, or a
+        # null/non-dict "signature") must be skipped rather than crash novelty evaluation in
+        # the capture flow.
+        if not isinstance(entry, dict):
+            continue
+        sig = entry.get("signature")
+        if not isinstance(sig, dict):
+            continue
+        if _structural_axes(sig) != target_shape:
+            continue
+        name = entry.get("name")
+        if pseudonymize_os(sig.get("os")) == target_os:
+            return {
+                "verdict": "likely-covered",
+                "closest": name,
+                "why": f"shares the same OS + VC/LAG/sub-interface shape with '{name}'",
+            }
+        if similar is None and target_family is not None and _os_family(sig.get("os")) == target_family:
+            similar = name
+
+    if similar is not None:
+        return {
+            "verdict": "similar",
+            "closest": similar,
+            "why": f"same VC/LAG/sub-interface shape as '{similar}' on a related OS variant — likely worth adding",
+        }
+    return {
+        "verdict": "new",
+        "closest": None,
+        "why": "no covered shape shares its OS + VC/LAG/sub-interface shape",
+    }

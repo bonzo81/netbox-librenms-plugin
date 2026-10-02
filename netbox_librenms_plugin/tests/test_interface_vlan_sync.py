@@ -169,7 +169,7 @@ class TestPortVlanEnrichment:
 
         configure_librenms_servers(
             settings,
-            {"default": {"librenms_url": "http://default.librenms.test", "api_token": "token-default"}},
+            {"default": {"librenms_url": "https://default.librenms.test", "api_token": "token-default"}},
         )
         return LibreNMSAPI(server_key="default")
 

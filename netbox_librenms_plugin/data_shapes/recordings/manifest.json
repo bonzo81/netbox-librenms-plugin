@@ -1,0 +1,309 @@
+[
+  {
+    "name": "arcos-lag-transceivers",
+    "signature": {
+      "os": "os-2519ea",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "bond"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": false,
+      "transceivers": true,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
+    "name": "avocent-serial-ports",
+    "signature": {
+      "os": "os-bd42c9",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": null,
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": true,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
+    "name": "cisco-lag-and-subinterface",
+    "signature": {
+      "os": "os-901310",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": null,
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "Port-channel"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
+    "name": "cisco-stackwise-3member",
+    "signature": {
+      "os": "os-901310",
+      "virtual_chassis": {
+        "present": true,
+        "root_class": "stack",
+        "member_count": 3,
+        "position_base": 1
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
+    "name": "iosxe-subinterfaces",
+    "signature": {
+      "os": "os-48b51d",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": false,
+        "name_prefix": "Po"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": false,
+      "transceivers": true,
+      "serial": false,
+      "vrf": true,
+      "oob": false
+    }
+  },
+  {
+    "name": "juniper-vc-2member",
+    "signature": {
+      "os": "os-990f10",
+      "virtual_chassis": {
+        "present": true,
+        "root_class": "chassis",
+        "member_count": 2,
+        "position_base": 0
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
+    "name": "junos-subinterfaces",
+    "signature": {
+      "os": "os-990f10",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "ae"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": false,
+      "transceivers": true,
+      "serial": false,
+      "vrf": true,
+      "oob": false
+    }
+  },
+  {
+    "name": "linux-host-oob",
+    "signature": {
+      "os": "os-9bf16a",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": null,
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "vrf": false,
+      "oob": true
+    }
+  },
+  {
+    "name": "linux-host",
+    "signature": {
+      "os": "os-9bf16a",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": null,
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
+    "name": "linux-virtual-machine",
+    "signature": {
+      "os": "os-9bf16a",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": null,
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
+    "name": "nokia-timos-transceivers",
+    "signature": {
+      "os": "os-57cfb3",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "lag-"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": true,
+      "transceivers": true,
+      "serial": false,
+      "vrf": true,
+      "oob": false
+    }
+  }
+]

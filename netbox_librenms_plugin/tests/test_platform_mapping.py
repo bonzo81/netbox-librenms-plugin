@@ -302,6 +302,7 @@ class TestToYamlOnAllMappingModels:
         rule.pattern = "IDPROM"
         rule.action = "skip"
         rule.require_serial_match_parent = False
+        rule.manufacturer_id = None
         rule.enabled = True
         rule.description = ""
 
@@ -621,7 +622,7 @@ class TestReplacementTemplateValidation:
     # --- ModuleBayMapping ---
 
     def test_module_bay_mapping_rejects_out_of_range_backref(self):
-        """Referencing group \\2 when pattern has only one group should raise ValidationError."""
+        r"""Referencing group \\2 when pattern has only one group should raise ValidationError."""
         import pytest
         from django.core.exceptions import ValidationError
 
@@ -640,7 +641,7 @@ class TestReplacementTemplateValidation:
         assert "netbox_bay_name" in exc_info.value.message_dict
 
     def test_module_bay_mapping_accepts_valid_backref(self):
-        """Valid \\1 back-reference on a single-group pattern is accepted."""
+        r"""Valid \\1 back-reference on a single-group pattern is accepted."""
         from netbox_librenms_plugin.models import ModuleBayMapping
 
         mapping = ModuleBayMapping.__new__(ModuleBayMapping)
@@ -654,7 +655,7 @@ class TestReplacementTemplateValidation:
             mapping.clean()  # Should not raise
 
     def test_module_bay_mapping_accepts_named_backref(self):
-        """Valid \\g<n> back-reference on a named-group pattern is accepted."""
+        r"""Valid \\g<n> back-reference on a named-group pattern is accepted."""
         from netbox_librenms_plugin.models import ModuleBayMapping
 
         mapping = ModuleBayMapping.__new__(ModuleBayMapping)
@@ -689,7 +690,7 @@ class TestReplacementTemplateValidation:
     # --- NormalizationRule ---
 
     def test_normalization_rule_rejects_out_of_range_backref(self):
-        """Replacement referencing group \\2 when pattern has only 1 group raises ValidationError."""
+        r"""Replacement referencing group \\2 when pattern has only 1 group raises ValidationError."""
         import pytest
         from django.core.exceptions import ValidationError
 
@@ -708,7 +709,7 @@ class TestReplacementTemplateValidation:
         assert "replacement" in exc_info.value.message_dict
 
     def test_normalization_rule_accepts_valid_backref(self):
-        """Replacement \\1 on single-group pattern is accepted."""
+        r"""Replacement \\1 on single-group pattern is accepted."""
         from netbox_librenms_plugin.models import NormalizationRule
 
         rule = NormalizationRule.__new__(NormalizationRule)
@@ -722,7 +723,7 @@ class TestReplacementTemplateValidation:
             rule.clean()  # Should not raise
 
     def test_normalization_rule_accepts_named_backref(self):
-        """Replacement \\g<name> on named-group pattern is accepted."""
+        r"""Replacement \\g<name> on named-group pattern is accepted."""
         from netbox_librenms_plugin.models import NormalizationRule
 
         rule = NormalizationRule.__new__(NormalizationRule)

@@ -11,6 +11,7 @@ from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     check_vlan_group_matches,
@@ -897,7 +898,7 @@ class LibreNMSInterfaceTable(tables.Table):
         # member dropdown via SingleInterfaceVerifyView) flips a deliberately-unmatched
         # shared-LOM row to green "matched", comparing speed/MTU/MAC against an
         # unrelated host interface and inviting a sync the server then silently skips.
-        if port_data.get("_source") == "oob":
+        if port_data.get("_source") == OOB_INVENTORY_SOURCE:
             port_data["netbox_interface"] = None
         # Preserve a netbox_interface already resolved by the stable port_id (e.g. the single-
         # interface verify view resolves by port_id first). Only fall back to the fragile name

@@ -10,6 +10,8 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from netbox.plugins import get_plugin_config
 
+from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
+
 # HTTP request timeout constants (in seconds)
 DEFAULT_API_TIMEOUT = 10
 EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device listing)
@@ -25,6 +27,23 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 HTTP_NOT_FOUND = 404
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_api_url(url):
+    """Require a well-formed HTTP or HTTPS URL for the LibreNMS API."""
+    if not isinstance(url, str):
+        raise ValueError("LibreNMS API URLs must use HTTP or HTTPS and include a host.")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("LibreNMS API URLs must use HTTP or HTTPS and include a host.")
+    try:
+        # urlsplit() parses the port only when it is read, so an unusable one would otherwise
+        # pass here, be offered in the server picker, and fail when a request is prepared.
+        _ = parsed.port
+    except ValueError:
+        raise ValueError("LibreNMS API URLs must use a valid port.") from None
+    if "?" in url or "#" in url:
+        raise ValueError("LibreNMS API URLs must not include a query or fragment.")
 
 
 class LibreNMSIDConflictError(ValueError):
@@ -105,6 +124,28 @@ class LibreNMSUnreachable(Exception):
     """
 
 
+class _TokenScopedSession(requests.Session):
+    """
+    Keep ``X-Auth-Token`` on the host the request was addressed to.
+
+    ``requests`` drops only ``Authorization`` when a redirect crosses hosts and forwards every
+    other header, so a LibreNMS that redirects elsewhere would hand the API token to whatever
+    answered. Redirects still follow, which a reverse proxy in front of LibreNMS may rely on.
+    """
+
+    def rebuild_auth(self, prepared_request, response):
+        super().rebuild_auth(prepared_request, response)
+        # requests already decides this for Authorization: it strips on a host, scheme or port
+        # change, allowing only the http:80 -> https:443 upgrade. Reuse that instead of keeping a
+        # second, weaker copy of the rule for our own header.
+        if self.should_strip_auth(response.request.url, prepared_request.url):
+            prepared_request.headers.pop("X-Auth-Token", None)
+
+
+# Module-level so every call shares one connection pool, and so tests have one seam to patch.
+_session = _TokenScopedSession()
+
+
 class LibreNMSAPI:
     """Client to interact with the LibreNMS API and retrieve interface data for devices."""
 
@@ -127,7 +168,13 @@ class LibreNMSAPI:
             bool: True if the configuration is a usable server mapping.
 
         """
-        return isinstance(config, dict) and bool(config.get("librenms_url")) and bool(config.get("api_token"))
+        if not isinstance(config, dict) or not config.get("librenms_url") or not config.get("api_token"):
+            return False
+        try:
+            _validate_api_url(config["librenms_url"])
+        except (TypeError, ValueError):
+            return False
+        return True
 
     def __init__(self, server_key=None):
         """
@@ -235,6 +282,7 @@ class LibreNMSAPI:
 
         if not self.librenms_url or not self.api_token:
             raise ValueError(f"LibreNMS URL or API token is not configured for server '{server_key}'.")
+        _validate_api_url(self.librenms_url)
 
         self.headers = {"X-Auth-Token": self.api_token}
 
@@ -247,7 +295,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/system",
                 headers=self.headers,
                 verify=self.verify_ssl,
@@ -325,11 +373,9 @@ class LibreNMSAPI:
                 # and then failing the moment it is chosen.
                 if not cls._is_usable_server_config(config):
                     logger.warning(
-                        "Skipping unusable LibreNMS server config %r (needs a librenms_url and api_token).",
+                        "Skipping unusable LibreNMS server config %r (needs a valid HTTP(S) librenms_url and a non-empty api_token).",
                         key,
                     )
-                    continue
-                if not config.get("librenms_url") or not config.get("api_token"):
                     continue
                 result[key] = config.get("display_name", key)
             return result
@@ -337,7 +383,8 @@ class LibreNMSAPI:
             # Legacy single-server configuration
             legacy_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
             legacy_token = get_plugin_config("netbox_librenms_plugin", "api_token")
-            if legacy_url and legacy_token:
+            legacy_config = {"librenms_url": legacy_url, "api_token": legacy_token}
+            if cls._is_usable_server_config(legacy_config):
                 return {"default": f"Default Server ({legacy_url})"}
             return {}
 
@@ -378,7 +425,7 @@ class LibreNMSAPI:
 
     def get_librenms_id(self, obj):
         """
-        Return the object's configured or discovered LibreNMS ID.
+        Resolve a LibreNMS device ID for a NetBox object.
 
         Args:
             obj: NetBox object with a librenms_id custom field or discovery identity.
@@ -558,7 +605,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{ip_address}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -582,7 +629,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{hostname}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -625,7 +672,7 @@ class LibreNMSAPI:
             return False, None
 
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -667,6 +714,40 @@ class LibreNMSAPI:
             # A 2xx whose body carries no usable device is treated as absent, as before.
             return False, None
 
+    def _raw_get(self, path: str, params: dict | None = None) -> tuple[int, object]:
+        """
+        Issue a raw GET against the LibreNMS API and return ``(status_code, body)`` verbatim.
+
+        Unlike the typed ``get_*`` helpers this performs no shape validation or normalisation:
+        it returns the parsed JSON body exactly as LibreNMS sent it so the data-shape capture
+        tooling records the real wire shape. A transport error yields ``(0, None)`` and a
+        non-JSON body yields ``(status_code, None)``.
+
+        Args:
+            path (str): API path relative to ``/api/v0/`` (e.g. ``"devices/1000"``).
+            params (dict | None): Optional query parameters.
+
+        Returns:
+            tuple: ``(status_code, body)`` where body is the parsed JSON (dict/list/scalar) or None.
+
+        """
+        url = f"{self.librenms_url}/api/v0/{path.lstrip('/')}"
+        try:
+            response = _session.get(
+                url,
+                headers=self.headers,
+                params=params or {},
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+        except requests.exceptions.RequestException:
+            return 0, None
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        return response.status_code, body
+
     def get_ports(self, device_id, with_vlans=True):
         """
         Fetch ports data from LibreNMS for a device using its primary IP.
@@ -684,13 +765,11 @@ class LibreNMSAPI:
 
         """
         try:
-            params = {
-                "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
-            }
+            params = {"columns": LIBRENMS_PORTS_COLUMNS}
             if with_vlans:
                 params["with"] = "vlans"
 
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/ports",
                 headers=self.headers,
                 params=params,
@@ -724,7 +803,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/port_stack",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -754,7 +833,10 @@ class LibreNMSAPI:
             # The documented success envelope always contains a list-valued mappings field,
             # including when no relationships exist. Missing, null, non-list, or mixed-list data
             # is malformed. It must not become an authoritative empty relationship snapshot.
-            if not isinstance(mappings, list) or any(not isinstance(item, dict) for item in mappings):
+            if not isinstance(mappings, list) or any(
+                not isinstance(item, dict) or "high_port_id" not in item or "low_port_id" not in item
+                for item in mappings
+            ):
                 logger.warning("Unexpected port_stack response for device %s: %r", device_id, data)
                 return False, "Unexpected response format from LibreNMS (invalid 'mappings' payload)"
             return True, mappings
@@ -844,6 +926,18 @@ class LibreNMSAPI:
 
         """
         from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS
+
+        # A 0-port device (e.g. an iosxr management node with an empty ifTable) can surface
+        # `ports`/`port_stack` as None when a caller threads a missing or `null` payload field
+        # straight in — `ports_data["ports"]` is None when the LibreNMS body carries
+        # `"ports": null`, and likewise a null `mappings`. Coerce any non-list input to [] so
+        # resolution is a clean no-op instead of crashing on iteration ("'NoneType' object is
+        # not iterable"). A dict/str input already yields no usable entries below; normalizing
+        # here keeps that behaviour while closing the None gap.
+        if not isinstance(ports, list):
+            ports = []
+        if not isinstance(port_stack, list):
+            port_stack = []
         from netbox_librenms_plugin.utils import normalize_librenms_port_id
 
         # Ignore malformed port items without losing valid relationships from the same payload.
@@ -906,6 +1000,15 @@ class LibreNMSAPI:
                     except (_re.error, TypeError) as exc:
                         logger.warning("Skipping invalid bridge name pattern %r: %s", pattern_str, exc)
 
+        def _matches_name_patterns(name, patterns) -> bool:
+            if not isinstance(name, str):
+                return False
+            try:
+                return any(pattern.search(name) for pattern in patterns)
+            except UnicodeEncodeError:
+                # Recording patterns use RE2, which requires a UTF-8 subject.
+                return False
+
         def _has_sap_name(*ports) -> bool:
             """Return whether any name on these ports matches an excluded SAP pattern."""
             names = tuple(
@@ -914,7 +1017,7 @@ class LibreNMSAPI:
                 for field in INTERFACE_NAME_FIELDS
                 if isinstance(name := port.get(field), str) and name
             )
-            return any(pattern.search(name) for pattern in compiled_sap_patterns for name in names)
+            return any(_matches_name_patterns(name, compiled_sap_patterns) for name in names)
 
         # Validate and remove SAP rows once so fallback cannot reconsider them.
         filtered_port_pairs = []
@@ -974,14 +1077,12 @@ class LibreNMSAPI:
                 if port.get("ifType") == "ieee8023adLag":
                     return True
                 name = port.get(field)
-                return isinstance(name, str) and any(pattern.search(name) for pattern in compiled_patterns)
+                return _matches_name_patterns(name, compiled_patterns)
 
             def _is_bridge(port: dict) -> bool:
                 return any(
-                    pattern.search(name)
+                    _matches_name_patterns(port.get(name_field), compiled_bridge_patterns)
                     for name_field in INTERFACE_NAME_FIELDS
-                    if isinstance(name := port.get(name_field), str)
-                    for pattern in compiled_bridge_patterns
                 )
 
             def _relate(mapping: dict, conflicted_keys: set, key_port: dict, value_port: dict) -> None:
@@ -1182,7 +1283,7 @@ class LibreNMSAPI:
                     payload[key] = value
 
         try:
-            response = requests.post(
+            response = _session.post(
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
                 json=payload,
@@ -1215,7 +1316,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.patch(
+            response = _session.patch(
                 f"{self.librenms_url}/api/v0/devices/{device_id}",
                 headers=self.headers,
                 json=field_data,
@@ -1249,7 +1350,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/resources/locations",
                 headers=self.headers,
                 timeout=EXTENDED_API_TIMEOUT,
@@ -1284,7 +1385,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.post(
+            response = _session.post(
                 f"{self.librenms_url}/api/v0/locations",
                 headers=self.headers,
                 json=location_data,
@@ -1325,7 +1426,7 @@ class LibreNMSAPI:
         """
         try:
             encoded_location_name = urllib.parse.quote(location_name, safe="")
-            response = requests.patch(
+            response = _session.patch(
                 f"{self.librenms_url}/api/v0/locations/{encoded_location_name}",
                 headers=self.headers,
                 json=location_data,
@@ -1357,7 +1458,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/links",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1393,7 +1494,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/ip",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1422,6 +1523,67 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
+    def get_device_vrfs(self, device_id):
+        """
+        Return the VRFs LibreNMS holds for one device.
+
+        ``/api/v0/routing/vrf`` serves the whole instance by default and documents a ``hostname``
+        filter that accepts a device id. The filter is asked for AND the returned rows are checked
+        against ``device_id``: a server that ignores the parameter would otherwise hand back every
+        other device's VRF names, which a data-shape recording then publishes.
+
+        Args:
+            device_id: LibreNMS device ID.
+
+        Returns:
+            tuple: (success: bool, data: list of VRF dicts or error string)
+
+        """
+        try:
+            response = _session.get(
+                f"{self.librenms_url}/api/v0/routing/vrf",
+                headers=self.headers,
+                params={"hostname": str(device_id)},
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == HTTP_NOT_FOUND:
+                return self._classify_missing_vrfs(e)
+            return False, str(e)
+        except ValueError as e:
+            # JSONDecodeError subclasses both ValueError and RequestException, so a parse failure
+            # must be classified here or it is mislabeled as a connection problem (mirrors
+            # get_port_stack).
+            return False, f"Invalid JSON from LibreNMS: {str(e)}"
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
+
+        if not isinstance(result, dict) or result.get("status") != "ok":
+            message = result.get("message") if isinstance(result, dict) else None
+            return False, message or "Unexpected response format"
+        rows = result.get("vrfs")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            return False, "Unexpected response format: 'vrfs' must be a list of objects"
+        if any(row.get("device_id") is None for row in rows):
+            return False, "Unexpected response format: VRF rows must include 'device_id'"
+        wanted = str(device_id)
+        return True, [row for row in rows if str(row["device_id"]) == wanted]
+
+    @staticmethod
+    def _classify_missing_vrfs(error):
+        """Tell "this instance holds no VRF table" apart from a stale device id."""
+        try:
+            payload = error.response.json()
+        except (TypeError, ValueError):
+            payload = None
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if isinstance(message, str) and "vrfs do not exist" in message.lower():
+            return True, []
+        return False, message or str(error)
+
     def get_port_by_id(self, port_id):
         """
         Fetch specific port data from LibreNMS using port ID.
@@ -1434,7 +1596,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/ports/{port_id}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1472,7 +1634,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/inventory/{device_id}/all",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1521,7 +1683,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/transceivers",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1572,7 +1734,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/poller_group",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1627,7 +1789,7 @@ class LibreNMSAPI:
                 params["entPhysicalContainedIn"] = str(ent_physical_contained_in)
 
             # Try the filtered endpoint first (non-/all)
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/inventory/{device_id}",
                 headers=self.headers,
                 params=params,
@@ -1731,7 +1893,7 @@ class LibreNMSAPI:
                     if value is not None and value != "":
                         params[key] = value
 
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
                 params=params,
@@ -1797,7 +1959,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/resources/vlans",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
@@ -1890,7 +2052,7 @@ class LibreNMSAPI:
         serial_types = sensor_types if sensor_types is not None else get_serial_sensor_type_patterns()
 
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/resources/sensors",
                 headers=self.headers,
                 timeout=EXTENDED_API_TIMEOUT,
@@ -2034,7 +2196,7 @@ class LibreNMSAPI:
 
         """
         try:
-            response = requests.get(
+            response = _session.get(
                 f"{self.librenms_url}/api/v0/ports/{port_id}",
                 headers=self.headers,
                 params={"with": "vlans"},

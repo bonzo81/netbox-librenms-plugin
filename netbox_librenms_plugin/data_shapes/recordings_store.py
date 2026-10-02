@@ -1,0 +1,155 @@
+"""
+Locate and load the bundled data-shape recordings and the novelty manifest.
+
+Single source of truth for where recordings live and how they're loaded, shared by the test
+suite, the management command (which writes the manifest), and the in-plugin capture view (which
+reads it for the novelty verdict). The recordings live INSIDE the package
+(``data_shapes/recordings/``) — not under ``tests/`` — but only ``manifest.json`` is packaged in
+the wheel (see ``[tool.setuptools.package-data]``); the full recording fixtures are dev/test-time
+only, so ``iter_recording_paths()`` is empty in a wheel install. The runtime capture view needs
+only the manifest; ``--rebuild-manifest`` therefore runs from a source checkout (and refuses to
+overwrite the manifest when no recordings are present). Manifest failures stop novelty
+classification because an empty fallback would label every otherwise-covered shape as new.
+"""
+
+import json
+from pathlib import Path
+
+from netbox_librenms_plugin.data_shapes.envelope import STATUS_KEY, is_malformed_status_envelope
+
+# data_shapes/recordings/ (a data directory inside the data_shapes package, so it ships).
+RECORDINGS_DIR = Path(__file__).resolve().parent / "recordings"
+MANIFEST_PATH = RECORDINGS_DIR / "manifest.json"
+MANIFEST_NAME = MANIFEST_PATH.name
+SUPPORTED_EXPECTED_OUTCOMES = frozenset(
+    {
+        "virtual_chassis",
+        "lag_members",
+        "sub_interfaces",
+        "transceivers",
+        "serial_ports",
+        "oob",
+    }
+)
+
+
+def recording_meta(recording):
+    """Return recording metadata as a dict when the optional field has another shape."""
+    meta = recording.get("meta")
+    return meta if isinstance(meta, dict) else {}
+
+
+def iter_recording_paths():
+    """Return the sorted list of recording JSON file paths (excluding the novelty manifest)."""
+    return sorted(p for p in RECORDINGS_DIR.glob("*.json") if p.name != MANIFEST_NAME)
+
+
+def load_recording(name: str) -> dict:
+    """Load a single recording by name, with or without the ``.json`` suffix."""
+    filename = name if name.endswith(".json") else f"{name}.json"
+    # The manifest is a list of signatures, not a recording — iter_recording_paths() excludes it,
+    # so reject it here too rather than return a list from a helper that advertises a single dict.
+    if filename == MANIFEST_NAME:
+        raise ValueError("manifest.json is not a recording")
+    # Constrain the resolved path to RECORDINGS_DIR so a name like "../../secrets" can't escape
+    # the recordings directory (defensive: callers pass fixed fixture names today, but keep the
+    # loader safe if a name ever becomes caller-derived).
+    base_dir = RECORDINGS_DIR.resolve()
+    candidate = (base_dir / filename).resolve()
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError as exc:
+        raise ValueError(f"Invalid recording name: {name!r}") from exc
+    loaded = json.loads(candidate.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{filename!r} is not a recording object")
+    return loaded
+
+
+def iter_recordings() -> list[dict]:
+    """Load and return every bundled recording (excluding the manifest), sorted by path."""
+    return [load_recording(path.name) for path in iter_recording_paths()]
+
+
+# Back-compat alias used by the management command / novelty manifest builder.
+load_bundled_recordings = iter_recordings
+
+
+def load_manifest():
+    """Load the novelty manifest, or raise when the generated artifact is unavailable."""
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeError(f"Could not read data-shape manifest {MANIFEST_PATH.name!r}.") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} is not valid JSON.") from exc
+    if errors := manifest_schema_errors(manifest):
+        raise RuntimeError(f"Data-shape manifest {MANIFEST_PATH.name!r} {errors[0]}.")
+    return manifest
+
+
+def manifest_schema_errors(manifest):
+    """
+    Return a list of schema problems with a novelty manifest (empty when valid).
+
+    The rebuild command checks what it generated against this, so a manifest that load_manifest()
+    would reject can never replace the shipped one and leave novelty classification unavailable.
+    """
+    from netbox_librenms_plugin.data_shapes.signature import signature_schema_errors
+
+    if not isinstance(manifest, list):
+        return ["must contain a JSON list"]
+    errors = []
+    for index, entry in enumerate(manifest):
+        if not isinstance(entry, dict):
+            errors.append(f"entry {index} must be an object")
+            continue
+        if not isinstance(entry.get("name"), str) or not entry["name"]:
+            errors.append(f"entry {index} must have a non-empty name")
+        if entry_errors := signature_schema_errors(entry.get("signature")):
+            errors.append(f"entry {index} is invalid: {entry_errors[0]}")
+    return errors
+
+
+def recording_schema_errors(recording):
+    """
+    Return a list of human-readable schema problems with a recording (empty when valid).
+
+    Args:
+        recording: The parsed recording object.
+
+    Returns:
+        list[str]: One message per violated schema expectation.
+
+    """
+    errors = []
+    if not isinstance(recording, dict):
+        return ["recording must be a JSON object"]
+    schema_version = recording.get("schema_version")
+    # Reject bool explicitly: bool is an int subclass, so True/False would otherwise slip through
+    # an `isinstance(..., int)` / `!= 1` check and let a malformed recording validate.
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
+        errors.append("schema_version must be 1")
+    if not isinstance(recording.get("name"), str) or not recording.get("name"):
+        errors.append("name must be a non-empty string")
+    device_id = recording.get("device_id")
+    if not isinstance(device_id, int) or isinstance(device_id, bool):
+        errors.append("device_id must be an integer")
+    responses = recording.get("responses")
+    if not isinstance(responses, dict) or not responses:
+        errors.append("responses must be a non-empty object")
+    else:
+        # A value carrying the reserved status key must be a complete envelope. The key has no
+        # other legitimate use, so a half-written one is a broken recording, not a body.
+        malformed = sorted(key for key, value in responses.items() if is_malformed_status_envelope(value))
+        if malformed:
+            errors.append(f"responses carry an invalid {STATUS_KEY} envelope: {malformed}")
+    expected = recording.get("expected")
+    if "expected" in recording:
+        if not isinstance(expected, dict) or not expected:
+            errors.append("expected must be a non-empty object when present")
+        else:
+            unknown_outcomes = sorted(set(expected) - SUPPORTED_EXPECTED_OUTCOMES)
+            if unknown_outcomes:
+                errors.append(f"expected contains unknown outcome keys: {', '.join(unknown_outcomes)}")
+    return errors

@@ -33,6 +33,7 @@ from .views import (
     CarrierAutoInstallRuleListView,
     CarrierAutoInstallRuleView,
     ConvertLegacyLibreNMSIdView,
+    CaptureDataShapeView,
     CreateAndAssignPlatformView,
     CreatePlatformFromImportView,
     DeleteNetBoxInterfacesView,
@@ -205,6 +206,11 @@ urlpatterns = [
         "<str:object_type>/<int:pk>/sync-cache-fragment/<str:tab>/",
         SyncCacheFragmentView.as_view(),
         name="sync_cache_fragment",
+    ),
+    path(
+        "device/<int:device_id>/capture-data-shape/",
+        CaptureDataShapeView.as_view(),
+        name="capture_data_shape",
     ),
     path(
         "devices/<int:pk>/interface-sync/",
