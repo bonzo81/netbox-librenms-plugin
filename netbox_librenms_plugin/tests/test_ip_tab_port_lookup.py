@@ -148,6 +148,32 @@ class TestIpRowInterfaceNames:
         assert context is not None
         assert len(conversions) <= 4 * (len(ports) + len(raw))
 
+    @pytest.mark.parametrize("port_count", [4, 16])
+    def test_assignment_port_lookup_work_grows_with_ports_and_rows(self, live_librenms, monkeypatch, port_count):
+        from netbox_librenms_plugin import utils
+
+        device = make_device("ip-linear-assignments", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        ports = _seed(live_librenms, port_count)
+        for port in ports:
+            interface = make_interface(device, port["ifName"])
+            _set_librenms_id(interface, port["port_id"])
+        view = _ip_view(live_librenms)
+        success, rows = view.get_ip_addresses(device)
+        assert success
+        conversions = []
+        original = utils.normalize_librenms_port_id
+
+        def record_conversion(value):
+            conversions.append(value)
+            return original(value)
+
+        monkeypatch.setattr(utils, "normalize_librenms_port_id", record_conversion)
+        enriched = view.enrich_ip_data(rows, device, "ifName", server_key=SERVER_KEY)
+
+        assert len(enriched) == port_count
+        assert all(row.get("interface_url") for row in enriched)
+        assert len(conversions) <= 4 * (len(ports) + len(rows)), len(conversions)
+
     def test_enrichment_does_not_fetch_each_port_individually(self, live_librenms):
         """One /devices/{id}/ports read replaces one /ports/{port_id} call per row."""
         device = make_device("ip-fanout", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
@@ -611,3 +637,21 @@ class TestWarmRenderWithoutACachedPortMap:
         assert context is not None
         rows = cache.get(view.get_cache_key(device, "ip_addresses", SERVER_KEY))["ports_by_id"]
         assert sorted(rows) == ["9000", "9001"]
+
+
+@pytest.mark.parametrize(
+    "records, expected",
+    [
+        ({"0042": {"port_id": 42}}, {42: {"port_id": 42}}),
+        ({42: {"port_id": 42}, "0042": {"port_id": 42}}, {42: None}),
+        ({42: None, "0042": {"port_id": 42}}, {42: {"port_id": 42}}),
+        ({"bad": {"port_id": 42}, "0": {"port_id": 0}}, {}),
+    ],
+)
+def test_ip_port_index_preserves_the_canonical_ambiguity_rule(records, expected):
+    from netbox_librenms_plugin.utils import index_ip_port_records, ip_row_port_record
+
+    index = index_ip_port_records(records)
+
+    assert index == expected
+    assert ip_row_port_record(index, "+42") == expected.get(42)

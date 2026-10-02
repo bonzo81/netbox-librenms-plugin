@@ -389,17 +389,23 @@ def normalize_librenms_port_id(value) -> int | None:
     return coerce_librenms_id(value)
 
 
+def index_ip_port_records(ports_by_id):
+    """Index cached records once by canonical ID, with None for an ambiguous ID."""
+    index = {}
+    if isinstance(ports_by_id, dict):
+        for raw_id, port in ports_by_id.items():
+            port_id = normalize_librenms_port_id(raw_id)
+            if port_id is not None and isinstance(port, dict):
+                index[port_id] = None if port_id in index else port
+    return index
+
+
 def ip_row_port_record(ports_by_id, port_id):
-    """Return the one cached port record whose canonical id matches an IP row, else None."""
+    """Read one port from the canonical uniqueness index, or None when it is absent or ambiguous."""
     normalized_id = normalize_librenms_port_id(port_id)
     if normalized_id is None or not isinstance(ports_by_id, dict):
         return None
-    matches = [
-        port
-        for raw_id, port in ports_by_id.items()
-        if normalize_librenms_port_id(raw_id) == normalized_id and isinstance(port, dict)
-    ]
-    return matches[0] if len(matches) == 1 else None
+    return ports_by_id.get(normalized_id)
 
 
 def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):

@@ -293,7 +293,7 @@ class MockLibreNMSServer:
         # registered its own rows either way must keep them.
         stack_route = f"/api/v0/devices/{device_id}/port_stack"
         if not any(key in self.routes for key in (stack_route, f"GET {stack_route}")):
-            self.register(stack_route, {"status": "ok", "mappings": []})
+            self.register(stack_route, {"status": "ok", "mappings": []}, method="GET")
 
     def auth_error_response(self, path="/api/v0/devices"):
         self.register(path, {"status": "error", "message": "Authentication failed"}, status=401)

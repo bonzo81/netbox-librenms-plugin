@@ -35,6 +35,7 @@ from netbox_librenms_plugin.utils import (
     index_ip_source_interfaces,
     index_ip_sync_rows,
     ip_family,
+    index_ip_port_records,
     ip_row_port_record,
     normalize_ip_sync_row_id,
     normalize_librenms_port_id,
@@ -1085,7 +1086,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         cached_index, duplicate_cached_rows = self._cached_ip_index(cached_ips)
         force_intents = force_intents or {}
         create_missing_interfaces = self._create_missing_interfaces(request)
-        cached_ports_by_id = cached_ports_by_id or {}
+        cached_ports_by_id = index_ip_port_records(cached_ports_by_id)
+        bound_ports_by_id = index_ip_port_records(bound_ports_by_id)
         interface_creation_state = None
         prelocked_host_locks = self._prelock_ip_hosts(
             request,

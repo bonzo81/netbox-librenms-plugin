@@ -382,6 +382,18 @@ class TestTheTabRendersIt:
         assert "</i>1 stacked port</span>" in html
         assert "LibreNMS stacks these with this port, but no rule says how: eth0" in html
 
+    @pytest.mark.parametrize("kinds", [None, 7, "invalid", {"key": "lag_members"}])
+    def test_malformed_diagnostic_kinds_do_not_break_the_interfaces_tab(self, kinds):
+        device = self._seed(
+            "stacked-malformed-kinds",
+            self._cached({7998: [8002], 8002: [7998]}, self._diagnostics(kinds=kinds)),
+        )
+
+        html = self._get_tab(device)
+
+        assert "5 of 269 stack rows usable, 5 unclassified" in html
+        assert "<code>eth0</code> &harr; <code>pnet0</code>" in html
+
     def test_the_tab_says_why_the_column_is_empty(self):
         device = self._seed(
             "stacked-diagnostics",

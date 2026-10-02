@@ -375,9 +375,10 @@ def relationship_diagnostics_report(cached_data, interface_name_field="ifName"):
         for first_id, second_id in pairs[:UNCLASSIFIED_PAIR_LIMIT]
     ]
 
+    cached_kinds = diagnostics.get("kinds")
     kinds = [
         {**kind, "label": _KIND_LABELS.get(kind.get("key"), kind.get("key"))}
-        for kind in diagnostics.get("kinds", [])
+        for kind in (cached_kinds if isinstance(cached_kinds, list) else [])
         if isinstance(kind, dict)
     ]
     return {

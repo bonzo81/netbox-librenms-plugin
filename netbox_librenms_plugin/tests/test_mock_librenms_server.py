@@ -29,3 +29,15 @@ def test_mock_server_ignores_disconnect_during_header_write(disconnect_error):
             raise self.disconnect_error
 
     HeaderDisconnectHandler()._send_json(200, {"status": "ok"})
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "PATCH"])
+def test_default_port_stack_route_accepts_only_get(librenms_server, method):
+    import requests
+
+    librenms_server.ports_response(42)
+    response = requests.request(method, f"{librenms_server.url}/api/v0/devices/42/port_stack", timeout=5)
+
+    assert response.status_code == (200 if method == "GET" else 404)
+    if method == "GET":
+        assert response.json()["mappings"] == []

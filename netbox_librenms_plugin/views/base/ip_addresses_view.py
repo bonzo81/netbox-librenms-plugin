@@ -28,6 +28,7 @@ from netbox_librenms_plugin.utils import (
     identify_ip_sync_rows,
     index_ip_source_interfaces,
     index_ip_sync_rows,
+    index_ip_port_records,
     ip_row_port_record,
     normalize_ip_sync_row_id,
     normalize_librenms_port_id,
@@ -697,11 +698,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         """
         if not assignments:
             return
+        port_indexes = tuple(index_ip_port_records(records) for records in port_caches)
         decided = [
             (
                 enriched_ip,
                 ip_assignment_ports(
-                    *port_caches,
+                    *port_indexes,
                     enriched_ip["port_id"],
                     interface,
                     server_key,
