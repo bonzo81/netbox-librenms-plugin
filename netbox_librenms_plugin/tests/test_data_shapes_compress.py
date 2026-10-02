@@ -1,0 +1,590 @@
+"""
+Tests for data-shape port compression: collapse redundant cardinality, preserve outcome + signature.
+
+The invariants: resolve_port_relationships and compute_shape_signature produce identical output for
+the full and compressed recordings (verified by replaying both over real HTTP), while redundant
+high-cardinality ports are dropped.
+"""
+
+import pytest
+
+from netbox_librenms_plugin.data_shapes.compress import compress_recording
+from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+
+
+def _port(port_id, name, iftype, **extra):
+    p = {"port_id": port_id, "ifName": name, "ifType": iftype}
+    p.update(extra)
+    return p
+
+
+def _vrf_compression_recording():
+    """A recording whose only VRF-tagged port is buried among redundant untagged ones."""
+    ports = [_port(1, "1/1/c1/1", "ethernetCsmacd", ifVrf=0)]
+    ports += [_port(100 + i, f"1/1/c2/{i}", "ethernetCsmacd", ifVrf=0) for i in range(60)]
+    ports.append(_port(900, "1/1/c9/1", "ethernetCsmacd", ifVrf=7))
+    return {
+        "schema_version": 1,
+        "name": "vrf-compress",
+        "device_id": 5,
+        "meta": {"os": "timos"},
+        "responses": {
+            "GET /api/v0/devices/5/ports": {"status": "ok", "ports": ports},
+            "GET /api/v0/devices/5/port_stack": {"status": "ok", "mappings": []},
+            "GET /api/v0/routing/vrf": {
+                "status": "ok",
+                "vrfs": [
+                    {"vrf_id": 7, "vrf_name": "v", "device_id": 5},
+                    {"vrf_id": 8, "vrf_name": "unreferenced", "device_id": 5},
+                ],
+            },
+            "GET /api/v0/devices/5/ip": {
+                "status": "ok",
+                "addresses": [
+                    {"ipv4_address": "192.0.2.1", "ipv4_prefixlen": 31, "port_id": 900},
+                    {"ipv4_address": "192.0.2.3", "ipv4_prefixlen": 31, "port_id": 105},
+                ],
+            },
+            "GET /api/v0/devices/5/links": {
+                "status": "ok",
+                "links": [
+                    {"id": 1, "local_port_id": 900, "remote_port": "swp1"},
+                    {"id": 2, "local_port_id": 106, "remote_port": "swp2"},
+                ],
+            },
+        },
+    }
+
+
+def test_compression_keeps_a_vrf_tagged_port():
+    """Dropping every VRF-tagged port leaves a VRF list nothing in the recording references."""
+    recording = _vrf_compression_recording()
+
+    compressed = compress_recording(recording)
+
+    kept = compressed["responses"]["GET /api/v0/devices/5/ports"]["ports"]
+    assert len(kept) < 62
+    assert any(port.get("ifVrf") == 7 for port in kept)
+
+
+def test_compression_drops_vrf_rows_no_surviving_port_references():
+    """A router carries hundreds of VRFs; only the ones a kept port still names are worth shipping."""
+    compressed = compress_recording(_vrf_compression_recording())
+
+    vrfs = compressed["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
+    assert [row["vrf_id"] for row in vrfs] == [7]
+
+
+def test_compression_keeps_the_vrf_list_when_no_port_names_a_listed_vrf():
+    """Emptying the list would flip the signature's vrf facet, which compression must never do."""
+    recording = _vrf_compression_recording()
+    for port in recording["responses"]["GET /api/v0/devices/5/ports"]["ports"]:
+        if port.get("ifVrf"):
+            port["ifVrf"] = 999  # a vrf_id the table does not list
+
+    compressed = compress_recording(recording)
+
+    assert len(compressed["responses"]["GET /api/v0/routing/vrf"]["vrfs"]) == 2
+    assert compute_shape_signature(compressed)["vrf"] is True
+
+
+def test_compression_drops_ip_rows_for_ports_it_removed():
+    """An IP row pointing at a port the recording no longer holds is a dangling reference."""
+    compressed = compress_recording(_vrf_compression_recording())
+
+    kept_ids = {p["port_id"] for p in compressed["responses"]["GET /api/v0/devices/5/ports"]["ports"]}
+    addresses = compressed["responses"]["GET /api/v0/devices/5/ip"]["addresses"]
+    assert addresses
+    assert all(row["port_id"] in kept_ids for row in addresses)
+
+
+def test_compression_drops_link_rows_for_ports_it_removed():
+    """Same for a neighbour link whose local end was compressed away."""
+    compressed = compress_recording(_vrf_compression_recording())
+
+    kept_ids = {p["port_id"] for p in compressed["responses"]["GET /api/v0/devices/5/ports"]["ports"]}
+    links = compressed["responses"]["GET /api/v0/devices/5/links"]["links"]
+    assert links
+    assert all(row["local_port_id"] in kept_ids for row in links)
+
+
+def test_compression_preserves_the_vrf_signature_axis():
+    """The documented invariant: the signature of the compressed recording is unchanged."""
+    recording = _vrf_compression_recording()
+
+    assert compute_shape_signature(compress_recording(recording)) == compute_shape_signature(recording)
+
+
+def _large_recording():
+    """Build a recording with direct and base-name LAGs, a sub-interface, and 200 redundant access ports."""
+    ports = [
+        _port(102, "lag-1", "ieee8023adLag"),  # LAG aggregate (first ieee8023adLag → name_prefix source)
+        _port(101, "1/1/c1/1", "ethernetCsmacd"),  # its member
+        _port(205, "ae10", "ieee8023adLag"),  # sub-interface parent
+        _port(206, "ae10.2221", "l2vlan"),  # sub-interface child
+        _port(300, "xe-0/0/0", "ethernetCsmacd"),  # base of 301, reached only by name resolution
+        _port(301, "xe-0/0/0.0", "ethernetCsmacd"),  # junos LAG member (sub-unit)
+        _port(302, "ae1", "ieee8023adLag"),  # base of 303 (the aggregate), reached by name resolution
+        _port(303, "ae1.0", "ieee8023adLag"),  # junos LAG aggregate (sub-unit)
+    ]
+    # 200 access ports — all the same shape (ethernetCsmacd + VLAN), no relationships. Redundant.
+    for i in range(200):
+        ports.append(_port(1000 + i, f"access-{i}", "ethernetCsmacd", ifVlan=10 + (i % 5)))
+
+    mappings = [
+        {"high_port_id": 101, "low_port_id": 102},  # member -> lag-1
+        {"high_port_id": 205, "low_port_id": 206},  # ae10 -> ae10.2221 (sub)
+        {"high_port_id": 301, "low_port_id": 303},  # xe-0/0/0.0 -> ae1.0 (resolves to phys 300 -> 302)
+    ]
+    return {
+        "schema_version": 1,
+        "name": "big",
+        "description": "",
+        "meta": {"os": "junos"},
+        "device_id": 4242,
+        "responses": {
+            "GET /api/v0/devices/4242": {"status": "ok", "devices": [{"device_id": 4242, "os": "junos"}]},
+            "GET /api/v0/devices/4242/ports": {"status": "ok", "ports": ports},
+            "GET /api/v0/devices/4242/port_stack": {"status": "ok", "mappings": mappings},
+        },
+    }
+
+
+def _resolve(recording, recording_server):
+    server, api = recording_server(recording)
+    _ok, ports = api.get_ports(recording["device_id"])
+    _ok2, stack = api.get_port_stack(recording["device_id"])
+    rel = api.resolve_port_relationships(ports["ports"], stack, lag_patterns={})
+    return (
+        {str(k): str(v) for k, v in rel["lag_members"].items()},
+        {str(k): str(v) for k, v in rel["sub_interfaces"].items()},
+    )
+
+
+def test_compression_rewrites_the_port_count():
+    """LibreNMS sends count beside ports, so a stale count describes a set that is gone."""
+    recording = _large_recording()
+    ports_key = "GET /api/v0/devices/4242/ports"
+    original = recording["responses"][ports_key]["ports"]
+    recording["responses"][ports_key]["count"] = len(original)
+
+    compressed = compress_recording(recording)
+
+    kept = compressed["responses"][ports_key]["ports"]
+    # Precondition: compression really dropped rows, or the count could not drift.
+    assert len(kept) < len(original)
+    assert compressed["responses"][ports_key]["count"] == len(kept)
+
+
+def test_compression_leaves_a_recording_without_a_count_alone():
+    """Not every capture carries count, and inventing one would change the recorded shape."""
+    recording = _large_recording()
+    ports_key = "GET /api/v0/devices/4242/ports"
+
+    compressed = compress_recording(recording)
+
+    assert "count" not in compressed["responses"][ports_key]
+
+
+def test_compression_preserves_relationship_outcome(recording_server):
+    """resolve_port_relationships yields the same LAG/sub maps before and after compression."""
+    rec = _large_recording()
+    full_lag, full_sub = _resolve(rec, recording_server)
+    comp_lag, comp_sub = _resolve(compress_recording(rec), recording_server)
+
+    assert full_lag == comp_lag
+    assert full_sub == comp_sub
+    # Non-vacuous: both relationship kinds are really exercised, incl. the base-name-resolved LAG
+    # and the two units whose parent no port_stack row states (they come from the name fallback).
+    assert full_lag == {"101": "102", "300": "302"}
+    assert full_sub == {"206": "205", "301": "300", "303": "302"}
+
+
+def test_compression_keeps_name_parent_of_a_fingerprint_representative(recording_server):
+    """A retained sub-interface must keep the parent that only its name identifies."""
+    rec = {
+        "schema_version": 1,
+        "name": "name-parent",
+        "device_id": 7,
+        "responses": {
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Gi0/1", "ethernetCsmacd"),
+                    _port(2, "Gi0/2", "ethernetCsmacd"),
+                    _port(3, "Gi0/2.10", "l2vlan"),
+                ],
+            },
+            "GET /api/v0/devices/7/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+
+    full_lag, full_sub = _resolve(rec, recording_server)
+    compressed = compress_recording(rec)
+    compressed_lag, compressed_sub = _resolve(compressed, recording_server)
+
+    assert full_lag == compressed_lag == {}
+    assert full_sub == compressed_sub == {"3": "2"}
+    assert {port["port_id"] for port in compressed["responses"]["GET /api/v0/devices/7/ports"]["ports"]} == {
+        1,
+        2,
+        3,
+    }
+
+
+def test_compression_preserves_ambiguous_name_parent_outcome(recording_server):
+    """Compression must not resolve a parent name that was ambiguous in the full port set."""
+    rec = {
+        "schema_version": 1,
+        "name": "ambiguous-parent",
+        "device_id": 7,
+        "responses": {
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Gi0/2", "ethernetCsmacd"),
+                    _port(2, "Gi0/2", "ethernetCsmacd"),
+                    _port(3, "Gi0/2.10", "l2vlan"),
+                ],
+            },
+            "GET /api/v0/devices/7/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+
+    full_lag, full_sub = _resolve(rec, recording_server)
+    compressed = compress_recording(rec)
+    compressed_lag, compressed_sub = _resolve(compressed, recording_server)
+
+    assert full_lag == compressed_lag == {}
+    assert full_sub == compressed_sub == {}
+    assert {port["port_id"] for port in compressed["responses"]["GET /api/v0/devices/7/ports"]["ports"]} == {
+        1,
+        2,
+        3,
+    }
+
+
+def test_compression_keeps_name_indexes_separate_by_field(recording_server):
+    """An ifDescr collision must not hide the unambiguous ifName parent."""
+    rec = {
+        "schema_version": 1,
+        "name": "separate-name-fields",
+        "device_id": 7,
+        "responses": {
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Gi0/1", "ethernetCsmacd", ifDescr="Gi0/2"),
+                    _port(2, "Gi0/2", "ethernetCsmacd", ifDescr="port-two"),
+                    _port(3, "Gi0/2.10", "l2vlan", ifDescr="port-three"),
+                ],
+            },
+            "GET /api/v0/devices/7/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+
+    full_lag, full_sub = _resolve(rec, recording_server)
+    compressed_lag, compressed_sub = _resolve(compress_recording(rec), recording_server)
+
+    assert full_lag == compressed_lag == {}
+    assert full_sub == compressed_sub == {"3": "2"}
+
+
+def test_compression_keeps_each_name_derived_child(recording_server):
+    """Same-fingerprint sub-interfaces still carry distinct relationship edges."""
+    rec = {
+        "schema_version": 1,
+        "name": "multiple-name-children",
+        "device_id": 7,
+        "responses": {
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Gi0/1", "ethernetCsmacd"),
+                    _port(2, "Gi0/2", "ethernetCsmacd"),
+                    _port(3, "Gi0/1.10", "l2vlan"),
+                    _port(4, "Gi0/2.10", "l2vlan"),
+                ],
+            },
+            "GET /api/v0/devices/7/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+
+    full_lag, full_sub = _resolve(rec, recording_server)
+    compressed_lag, compressed_sub = _resolve(compress_recording(rec), recording_server)
+
+    assert full_lag == compressed_lag == {}
+    assert full_sub == compressed_sub == {"3": "1", "4": "2"}
+
+
+def test_compression_preserves_signature():
+    """The novelty signature is identical for the full and compressed recordings."""
+    rec = _large_recording()
+    assert compute_shape_signature(compress_recording(rec)) == compute_shape_signature(rec)
+
+
+def test_compression_drops_redundant_cardinality():
+    """The 200 same-shape access ports collapse to a single representative; relationship ports stay."""
+    rec = _large_recording()
+    comp = compress_recording(rec)
+
+    full_ports = rec["responses"]["GET /api/v0/devices/4242/ports"]["ports"]
+    comp_ports = comp["responses"]["GET /api/v0/devices/4242/ports"]["ports"]
+    assert len(full_ports) == 208
+    # 8 relationship/structural ports + exactly 1 access representative = 9.
+    assert len(comp_ports) == 9
+
+    kept_ids = {p["port_id"] for p in comp_ports}
+    # Every port named by port_stack survives (referential integrity)...
+    assert {101, 102, 205, 206, 301, 303}.issubset(kept_ids)
+    # ...as do the base-name ports reached only by .N resolution...
+    assert {300, 302}.issubset(kept_ids)
+    # ...and exactly one of the 200 access ports remains.
+    assert len([p for p in comp_ports if p["ifName"].startswith("access-")]) == 1
+
+    assert comp["meta"]["compressed_ports"] == {"from": 208, "to": 9}
+
+
+def test_compression_keeps_transceiver_linked_ports():
+    """A port referenced by a transceiver survives compression even when fingerprint-dedup would drop it — otherwise the transceiver dangles and the replay is no longer self-consistent."""
+    rec = _large_recording()
+    # Point a transceiver at access-50 (port_id 1050), one of the redundant same-fingerprint access
+    # ports that dedup would otherwise collapse into the access-0 representative.
+    rec["responses"]["GET /api/v0/devices/4242/transceivers"] = {
+        "status": "ok",
+        "transceivers": [{"port_id": 1050, "type": "QSFP28", "serial": "SN-x", "model": "M1"}],
+    }
+
+    comp = compress_recording(rec)
+    comp_ports = comp["responses"]["GET /api/v0/devices/4242/ports"]["ports"]
+    comp_ids = {p["port_id"] for p in comp_ports}
+
+    # The transceiver's port is kept (referential integrity)...
+    assert 1050 in comp_ids
+    # ...while the OTHER 198 redundant access ports still collapse: only access-0 (fingerprint
+    # representative) and access-50 (transceiver-linked) remain.
+    access_kept = sorted(p["ifName"] for p in comp_ports if p["ifName"].startswith("access-"))
+    assert access_kept == ["access-0", "access-50"]
+
+
+def test_compression_is_noop_without_redundancy():
+    """A recording with no droppable ports is returned unchanged (no meta annotation added)."""
+    rec = _large_recording()
+    # Keep only the structural ports — every one is relationship-bearing or a distinct shape.
+    structural = rec["responses"]["GET /api/v0/devices/4242/ports"]["ports"][:8]
+    rec["responses"]["GET /api/v0/devices/4242/ports"]["ports"] = structural
+
+    comp = compress_recording(rec)
+
+    assert comp is rec  # untouched
+    assert "compressed_ports" not in comp["meta"]
+
+
+def test_compression_no_ports_route_is_noop():
+    """A recording without a ports response is returned unchanged."""
+    rec = {"schema_version": 1, "name": "x", "device_id": 1, "meta": {}, "responses": {}}
+    assert compress_recording(rec) is rec
+
+
+def test_compression_normalizes_unstructured_meta_when_ports_are_trimmed():
+    recording = _large_recording()
+    recording["meta"] = "unstructured"
+
+    compressed = compress_recording(recording)
+
+    assert compressed["meta"]["compressed_ports"]["from"] > compressed["meta"]["compressed_ports"]["to"]
+    assert recording["meta"] == "unstructured"
+
+
+def test_compression_targets_main_device_not_oob_controller():
+    """With an OOB controller's /ports route present, compression trims the host's ports, not the OOB's."""
+    host_ports = [_port(i, f"eth{i}", "ethernetCsmacd", ifVlan=10) for i in range(20)]  # redundant
+    oob_ports = [_port(900 + i, f"oob{i}", "ethernetCsmacd") for i in range(10)]
+    rec = {
+        "schema_version": 1,
+        "name": "host-oob",
+        "device_id": 39,
+        "meta": {"os": "linux", "oob_id": 25},
+        "responses": {
+            "GET /api/v0/devices/39/ports": {"status": "ok", "ports": host_ports},
+            "GET /api/v0/devices/25/ports": {"status": "ok", "ports": oob_ports},
+        },
+    }
+    comp = compress_recording(rec)
+
+    # The host's 20 same-shape ports collapse to 1; the OOB controller's 10 ports are untouched.
+    assert len(comp["responses"]["GET /api/v0/devices/39/ports"]["ports"]) == 1
+    assert len(comp["responses"]["GET /api/v0/devices/25/ports"]["ports"]) == 10
+    assert comp["meta"]["compressed_ports"] == {"from": 20, "to": 1}
+
+
+def test_compression_vlan_axis_stays_in_lockstep_with_signature():
+    """A no-VLAN port (ifVlan None) must not share a fingerprint with a real-VLAN port and collapse it; the compressed recording's vlans signature must equal the full one's."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 7,
+        "meta": {"os": "ios"},
+        "responses": {
+            "GET /api/v0/devices/7": {"status": "ok", "devices": [{"device_id": 7, "os": "ios"}]},
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    # Same ifType/naming, differing only in VLAN value. A key-presence fingerprint would
+                    # treat them as one shape and keep only the first (no-VLAN) representative.
+                    _port(1, "Gi0/1", "ethernetCsmacd", ifVlan=None),
+                    _port(2, "Gi0/2", "ethernetCsmacd", ifVlan=10),
+                ],
+            },
+        },
+    }
+    full = compute_shape_signature(rec)
+    comp = compute_shape_signature(compress_recording(rec))
+    assert full["vlans"] is True  # the recording genuinely carries VLAN data (Gi0/2)
+    assert comp["vlans"] == full["vlans"]  # compression must not flip the vlans axis to False
+
+
+def test_fingerprint_detects_subinterface_named_in_ifdescr():
+    """Verify that ifDescr-only sub-interfaces get a distinct fingerprint for resolver retention."""
+    from netbox_librenms_plugin.data_shapes.compress import _fingerprint
+
+    base = {"port_id": 1, "ifName": "", "ifType": "ethernetCsmacd", "ifDescr": "ge-1/0/0"}
+    sub = {"port_id": 2, "ifName": "", "ifType": "ethernetCsmacd", "ifDescr": "ge-1/0/0.5"}
+    # Same ifType + no VLAN, so only the sub-interface naming axis (index 1) can distinguish them.
+    assert _fingerprint(base)[1] is False
+    assert _fingerprint(sub)[1] is True
+    assert _fingerprint(base) != _fingerprint(sub)
+
+
+def _ifdescr_mode_recording():
+    """Build a Junos recording whose ifDescr base ports follow sub-units with matching fingerprints."""
+    ports = [
+        _port(501, "", "ethernetCsmacd", ifDescr="ge-1/0/0.0"),  # member sub-unit (port_stack ref)
+        _port(503, "", "ieee8023adLag", ifDescr="ae5.0"),  # aggregate sub-unit (port_stack ref)
+        _port(500, "", "ethernetCsmacd", ifDescr="ge-1/0/0"),  # member base — reached only via ifDescr
+        _port(502, "", "ieee8023adLag", ifDescr="ae5"),  # aggregate base — reached only via ifDescr
+    ]
+    # Redundant same-shape access ports (distinct fingerprint: they carry VLAN) so the fixed path
+    # still compresses — proving the bases survive REAL compression, not a no-op.
+    for i in range(3):
+        ports.append(_port(1000 + i, "", "ethernetCsmacd", ifDescr=f"ge-2/0/{i}", ifVlan=10))
+    mappings = [{"high_port_id": 501, "low_port_id": 503}]  # ge-1/0/0.0 -> ae5.0 (phys 500 -> 502)
+    return {
+        "schema_version": 1,
+        "name": "ifdescr",
+        "description": "",
+        "meta": {"os": "junos"},
+        "device_id": 4242,
+        "responses": {
+            "GET /api/v0/devices/4242": {"status": "ok", "devices": [{"device_id": 4242, "os": "junos"}]},
+            "GET /api/v0/devices/4242/ports": {"status": "ok", "ports": ports},
+            "GET /api/v0/devices/4242/port_stack": {"status": "ok", "mappings": mappings},
+        },
+    }
+
+
+def test_compression_keeps_ifdescr_mode_base_ports(recording_server):
+    """Base ports reached only via a ``.N`` name in ifDescr survive compression, so the resolver yields the same relationships before and after — an ifName-only base scan silently dropped them."""
+    rec = _ifdescr_mode_recording()
+    full_lag, full_sub = _resolve(rec, recording_server)
+    comp = compress_recording(rec)
+    comp_lag, comp_sub = _resolve(comp, recording_server)
+
+    # Non-vacuous: the full recording really resolves a relationship through the ifDescr-only bases.
+    assert full_lag or full_sub
+    # The invariant: identical resolved relationships before and after compression.
+    assert full_lag == comp_lag
+    assert full_sub == comp_sub
+    # Compression actually ran (redundant access ports dropped) yet BOTH ifDescr-only base ports
+    # survived — the exact ports an ifName-only base scan would have dropped.
+    comp_ids = {p["port_id"] for p in comp["responses"]["GET /api/v0/devices/4242/ports"]["ports"]}
+    assert {500, 502}.issubset(comp_ids)
+    assert "compressed_ports" in comp["meta"]
+
+
+def test_build_name_indexes_separate_fields_and_keep_ambiguity_candidates():
+    """Name indexes mirror the resolver's per-field namespaces and retain all candidates."""
+    from netbox_librenms_plugin.data_shapes.compress import _build_name_indexes
+
+    ports = [
+        {"port_id": 1, "ifName": "", "ifDescr": "ae1"},  # name lives only in ifDescr
+        {"port_id": 2, "ifName": "xe-0/0/0", "ifDescr": ""},  # name lives only in ifName
+        {"port_id": 3, "ifName": "dup", "ifDescr": ""},  # 'dup' shared by 3 and 4 -> ambiguous
+        {"port_id": 4, "ifName": "dup", "ifDescr": ""},
+    ]
+    indexes = _build_name_indexes(ports)
+
+    assert [port["port_id"] for port in indexes["ifDescr"]["ae1"]] == [1]
+    assert [port["port_id"] for port in indexes["ifName"]["xe-0/0/0"]] == [2]
+    assert [port["port_id"] for port in indexes["ifName"]["dup"]] == [3, 4]
+    assert "dup" not in indexes["ifDescr"]
+
+
+def test_pattern_matched_lag_port_is_never_deduped_away():
+    """A LAG detected by NAME pattern (Cisco "Po1" is propVirtual, not ieee8023adLag) must keep a fingerprint of its own — otherwise it shares one with any plain propVirtual port and compression drops the device's only LAG, flipping the signature's lag axis."""
+    recording = {
+        "schema_version": 1,
+        "name": "cisco-lag",
+        "device_id": 1,
+        "lag_patterns": {"ios": r"^Po\d+$"},
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [
+                    _port(1, "Vlan10", "propVirtual"),  # same ifType, no relationship, listed first
+                    _port(2, "Po1", "propVirtual"),  # the aggregate, recognized only by name
+                ],
+            }
+        },
+    }
+
+    out = compress_recording(recording)
+
+    kept = {p["ifName"] for p in out["responses"]["GET /api/v0/devices/1/ports"]["ports"]}
+    assert kept == {"Vlan10", "Po1"}
+    # The invariant this module promises: the signature is unchanged by compression.
+    assert compute_shape_signature(out)["lag"] == compute_shape_signature(recording)["lag"]
+    assert compute_shape_signature(out)["lag"]["present"] is True
+
+
+def test_compression_preserves_ip_and_link_presence_per_port_shape():
+    ports = [_port(i, f"eth{i}", "ethernetCsmacd") for i in range(1, 7)]
+    recording = {
+        "schema_version": 1,
+        "name": "referenced-ports",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ports": {"ports": ports},
+            "GET /api/v0/devices/1/ip": {"addresses": [{"port_id": 2, "ipv4_address": "198.18.0.1"}]},
+            "GET /api/v0/devices/1/links": {"links": [{"local_port_id": 3, "remote_port": "eth1"}]},
+        },
+    }
+
+    compressed = compress_recording(recording)
+
+    responses = compressed["responses"]
+    assert (
+        responses["GET /api/v0/devices/1/ip"]["addresses"]
+        == recording["responses"]["GET /api/v0/devices/1/ip"]["addresses"]
+    )
+    assert (
+        responses["GET /api/v0/devices/1/links"]["links"]
+        == recording["responses"]["GET /api/v0/devices/1/links"]["links"]
+    )
+    assert len(responses["GET /api/v0/devices/1/ports"]["ports"]) == 3
+
+
+@pytest.mark.parametrize("suffix,field", [("ip", "addresses"), ("links", "links")])
+@pytest.mark.parametrize("rows", [1, True, {"unexpected": "mapping"}, "error", None])
+def test_compression_preserves_error_responses_with_non_list_rows(suffix, field, rows):
+    from netbox_librenms_plugin.data_shapes.envelope import wrap_response
+    from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+    recording = _vrf_compression_recording()
+    route = f"GET /api/v0/devices/5/{suffix}"
+    error = wrap_response(404, {"status": "error", field: rows})
+    recording["responses"][route] = error
+    assert recording_schema_errors(recording) == []
+    compressed = compress_recording(recording)
+    assert compressed["responses"][route] == error
+    assert len(compressed["responses"]["GET /api/v0/devices/5/ports"]["ports"]) < 62

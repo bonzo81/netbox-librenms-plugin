@@ -16,6 +16,7 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, SERIAL_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
     assign_cable_row_ids,
@@ -58,6 +59,17 @@ def _remote_name_candidates(hostname):
     return hostname, hostname.split(".")[0]
 
 
+def _serial_remote_labels(links):
+    """Keep usable serial labels for the page's name catalog."""
+    return {
+        label
+        for link in links
+        if link.get("_source") == SERIAL_INVENTORY_SOURCE
+        and isinstance((label := link.get("remote_device")), str)
+        and label.strip()
+    }
+
+
 def _remote_name_queries(names):
     """Build bounded case-insensitive name queries for the direct resolver."""
     sorted_names = sorted(names)
@@ -75,6 +87,14 @@ def _remote_name_device_pks(names):
     for name_q in _remote_name_queries(names):
         device_pks.update(Device.objects.filter(name_q).values_list("pk", flat=True))
     return device_pks
+
+
+def _remote_name_devices(names):
+    """Load each case-insensitive name match once in primary-key order."""
+    by_pk = {}
+    for name_q in _remote_name_queries(names):
+        by_pk.update((device.pk, device) for device in Device.objects.filter(name_q))
+    return [by_pk[pk] for pk in sorted(by_pk)]
 
 
 def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
@@ -298,7 +318,7 @@ class BaseCableTableView(
         for link in links:
             requirements = []
             if link.get("can_create_cable"):
-                if link.get("_source") == "serial":
+                if link.get("_source") == SERIAL_INVENTORY_SOURCE:
                     requirements = [
                         (ConsoleServerPort, coerce_librenms_id(link.get("netbox_local_interface_id"))),
                         (ConsolePort, coerce_librenms_id(link.get("netbox_remote_interface_id"))),
@@ -381,7 +401,7 @@ class BaseCableTableView(
 
     def _build_normal_link_context(self, links, obj, server_key):
         """Load normal LLDP/CDP resolution and permission candidates once per snapshot."""
-        normal_links = [link for link in links if link.get("_source") != "serial"]
+        normal_links = [link for link in links if link.get("_source") != SERIAL_INVENTORY_SOURCE]
         if not normal_links:
             return None
 
@@ -853,7 +873,7 @@ class BaseCableTableView(
                 oob_data,
             )
             return True
-        links_data.extend(self._collect_cable_links(oob_links, oob_map, oob_alt_map, "oob"))
+        links_data.extend(self._collect_cable_links(oob_links, oob_map, oob_alt_map, OOB_INVENTORY_SOURCE))
         return True
 
     def get_links_data(self, obj, server_key=None, sync_device=None):
@@ -1076,7 +1096,7 @@ class BaseCableTableView(
         # must not bind a host interface — that would render a wrong local_port_url and
         # cable state. Sync and the actions column already refuse OOB rows; leave the
         # local end unresolved here too.
-        if link.get("_source") == "oob":
+        if link.get("_source") == OOB_INVENTORY_SOURCE:
             return None
         if local_port := link.get("local_port"):
             # Serial rows map to ConsoleServerPort, not Interface. Resolve the CSP on the
@@ -1085,7 +1105,7 @@ class BaseCableTableView(
             # lives on the priority member — querying obj would drop the row to "Console Server
             # Port Not Found" and lose its Sync Cable action. sync_device may be passed in by the
             # caller (resolved once for the whole links loop) to avoid re-resolving it per row.
-            if link.get("_source") == "serial":
+            if link.get("_source") == SERIAL_INVENTORY_SOURCE:
                 if server_key is None:
                     server_key = self.librenms_api.server_key
                 if sync_device is None:
@@ -1233,7 +1253,7 @@ class BaseCableTableView(
         # interface would otherwise present a dead button (in both the table render and the
         # verify response, which both gate the action on can_create_cable).
         link["can_create_cable"] = False
-        actionable = link.get("_source") != "oob"
+        actionable = link.get("_source") != OOB_INVENTORY_SOURCE
 
         if local_interface_id and remote_interface_id:
             if normal_context is not None:
@@ -1439,7 +1459,7 @@ class BaseCableTableView(
                 "duplicate" while a genuinely free port stays uncabled.
             csp: The ConsoleServerPort already loaded for this row (reused when it matches the
                 resolved id, saving a re-fetch by pk).
-            remote_context: Optional preloaded device, port, cable, and trace visibility data.
+            remote_context (dict | None): Preloaded visibility and trace data for remote objects.
 
         Returns:
             None
@@ -1622,7 +1642,7 @@ class BaseCableTableView(
             link (dict): The serial cable-sync row, mutated in place.
             csp: The row's resolved (and cabled) local ConsoleServerPort.
             device: The label-matched NetBox device.
-            remote_context: Optional preloaded port, cable, and trace visibility data.
+            remote_context (dict | None): Preloaded visibility and trace data for remote objects.
 
         Returns:
             bool: True when the row is fully resolved; False to fall through (mismatch).
@@ -1706,7 +1726,7 @@ class BaseCableTableView(
             link (dict): The serial cable-sync row, mutated in place.
             csp: The row's resolved (and cabled) local ConsoleServerPort.
             path: An already-computed ``csp.trace()`` result to reuse (avoids re-tracing).
-            visible_ids: Optional visible object IDs grouped by model.
+            visible_ids (dict | None): Visible object IDs grouped by model.
 
         """
         if path is None:
@@ -1758,7 +1778,7 @@ class BaseCableTableView(
             csp: The row's resolved local ConsoleServerPort.
             target_cp: The ConsolePort the remote should resolve to.
             manual (bool): Mark the row as manually picked (rendered as a hint in the table).
-            remote_context: Optional preloaded port, cable, and trace visibility data.
+            remote_context (dict | None): Preloaded visibility and trace data for remote objects.
 
         """
         link["netbox_remote_device_id"] = target_cp.device_id
@@ -1845,7 +1865,7 @@ class BaseCableTableView(
         """
         if (
             not self.has_write_permission()
-            or link.get("_source") == "oob"
+            or link.get("_source") == OOB_INVENTORY_SOURCE
             or link.get("_multi_termination_unsupported")
             or not link.get("netbox_local_interface_id")
         ):
@@ -1871,17 +1891,9 @@ class BaseCableTableView(
 
     def _build_serial_remote_context(self, links, serial_ports):
         """Bulk-load serial label targets and free ports for one table render."""
-        labels = {
-            label
-            for link in links
-            if link.get("_source") == "serial"
-            if isinstance((label := link.get("remote_device")), str) and label.strip()
-        }
+        labels = _serial_remote_labels(links)
         candidate_names = {candidate for label in labels for candidate in _remote_name_candidates(label)}
-        catalog_by_pk = {}
-        for name_q in _remote_name_queries(candidate_names):
-            catalog_by_pk.update((device.pk, device) for device in Device.objects.filter(name_q))
-        catalog_devices = [catalog_by_pk[pk] for pk in sorted(catalog_by_pk)]
+        catalog_devices = _remote_name_devices(candidate_names)
         visible_device_ids = set(
             self._viewable_queryset(Device)
             .filter(pk__in=[device.pk for device in catalog_devices])
@@ -1889,8 +1901,7 @@ class BaseCableTableView(
         )
         devices_by_name = defaultdict(list)
         for device in catalog_devices:
-            if device.name:
-                devices_by_name[device.name.lower()].append(device)
+            devices_by_name[device.name.lower()].append(device)
 
         devices_by_label = {}
         for label in labels:
@@ -1903,7 +1914,7 @@ class BaseCableTableView(
         manual_ids = {
             normalized
             for link in links
-            if link.get("_source") == "serial"
+            if link.get("_source") == SERIAL_INVENTORY_SOURCE
             if (normalized := coerce_librenms_id(link.get("manual_remote_id"))) is not None
         }
         target_device_ids = {device.pk for device in devices_by_label.values() if device is not None}
@@ -1947,7 +1958,7 @@ class BaseCableTableView(
         )
         links_by_local_port = defaultdict(list)
         for link in links:
-            if link.get("_source") == "serial":
+            if link.get("_source") == SERIAL_INVENTORY_SOURCE:
                 links_by_local_port[link.get("local_port")].append(link)
         trace_paths = {}
         for port in serial_ports:
@@ -2078,7 +2089,7 @@ class BaseCableTableView(
         # avoid a second get_librenms_sync_device() VC-members query per request; falls back to
         # resolving here when called without one.
         serial_sync_device = sync_device or self._viewable_sync_device(obj, server_key)
-        serial_links_present = any(link.get("_source") == "serial" for link in links_data)
+        serial_links_present = any(link.get("_source") == SERIAL_INVENTORY_SOURCE for link in links_data)
         serial_ports = (
             list(self._viewable_queryset(ConsoleServerPort).filter(device=serial_sync_device).select_related("cable"))
             if serial_links_present and serial_sync_device is not None
@@ -2102,7 +2113,7 @@ class BaseCableTableView(
         claimed_remote_cp_ids = {
             manual_id
             for link in links_data
-            if link.get("_source") == "serial"
+            if link.get("_source") == SERIAL_INVENTORY_SOURCE
             and (local_csp := serial_ports_by_name.get(link.get("local_port"))) is not None
             and local_csp.pk in changeable_console_server_port_ids
             if (manual_id := coerce_librenms_id(link.get("manual_remote_id"))) in manual_ports
@@ -2119,7 +2130,7 @@ class BaseCableTableView(
             )
 
             # Serial rows: check CSP cable status, then try to resolve remote ConsolePort.
-            if link.get("_source") == "serial":
+            if link.get("_source") == SERIAL_INVENTORY_SOURCE:
                 # Serial rows already carry the CSP-owning sync device_id from
                 # map_sensors_to_serial_links; don't overwrite it with the viewed obj.id —
                 # on a VC-member page that would default the per-row member dropdown (and the
@@ -2167,7 +2178,8 @@ class BaseCableTableView(
             unresolved_names = {
                 name
                 for link in links_data
-                if link.get("_source") == "serial" and (name := link.get("local_port")) not in serial_ports_by_name
+                if link.get("_source") == SERIAL_INVENTORY_SOURCE
+                and (name := link.get("local_port")) not in serial_ports_by_name
             }
             hidden_serial_port_names = (
                 set(
@@ -2182,7 +2194,8 @@ class BaseCableTableView(
                 links_data[:] = [
                     link
                     for link in links_data
-                    if link.get("_source") != "serial" or link.get("local_port") not in hidden_serial_port_names
+                    if link.get("_source") != SERIAL_INVENTORY_SOURCE
+                    or link.get("local_port") not in hidden_serial_port_names
                 ]
         self._apply_termination_change_scope(
             links_data,
@@ -2288,7 +2301,7 @@ class BaseCableTableView(
             incomplete_sources.append("serial")
         if getattr(self, "_serial_source_skipped", False):
             prior_links = _extract_cached_links(cached_before_refresh) if cached_before_refresh else None
-            links_data.extend(link for link in prior_links or [] if link.get("_source") == "serial")
+            links_data.extend(link for link in prior_links or [] if link.get("_source") == SERIAL_INVENTORY_SOURCE)
             incomplete_sources.append("serial")
         return {
             "links": links_data,
@@ -2638,7 +2651,7 @@ class SingleCableVerifyView(BaseCableTableView):
 
                     # Serial rows have a fixed ConsoleServerPort owner. Their owner selector is
                     # disabled, so they never need the member-change verify path.
-                    if link_data.get("_source") == "serial":
+                    if link_data.get("_source") == SERIAL_INVENTORY_SOURCE:
                         return JsonResponse(
                             {"status": "error", "message": "Serial cable rows have a fixed device owner."},
                             status=400,
@@ -2674,7 +2687,7 @@ class SingleCableVerifyView(BaseCableTableView):
                     # a HOST interface here — mirrors enrich_local_port's guard on the initial
                     # render. Left unresolved, the row takes the labelled, badge-carrying
                     # unresolved branch below instead of linking the wrong interface.
-                    if link_data.get("_source") != "oob":
+                    if link_data.get("_source") != OOB_INVENTORY_SOURCE:
                         # Shared id→dual-name resolution core (issue #88 fallback included), so
                         # this path can't drift from enrich_local_port's again.
                         name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
@@ -2852,12 +2865,12 @@ class CableRemotePickerView(BaseCableTableView):
     def _row_is_viewable(self, request, row, obj, server_key):
         """Return whether the picker requester may view a cached row's local endpoint."""
         source = row.get("_source")
-        if source == "oob":
+        if source == OOB_INVENTORY_SOURCE:
             return False
         local_name = row.get("local_port")
         if not isinstance(local_name, str) or not local_name:
             return False
-        if source != "serial":
+        if source != SERIAL_INVENTORY_SOURCE:
             owner = get_virtual_chassis_member(obj, local_name)
             if owner is None or not self.restricted_queryset(Device).filter(pk=owner.pk).exists():
                 return False
@@ -2913,7 +2926,7 @@ class CableRemotePickerView(BaseCableTableView):
         if denied := self.require_object_permissions("GET"):
             return denied
         obj = self.restrict_object_or_404(Device, pk=pk)
-        server_key = self.rebind_api_for_server(request.GET.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.GET)
         if server_key is None:
             return HttpResponse("Selected LibreNMS server is no longer configured.", status=400)
         row_id = request.GET.get("row_id", "")
@@ -3026,7 +3039,7 @@ class CableRemotePickerView(BaseCableTableView):
         if denied is not None:
             return denied
         obj = self.restrict_object_or_404(Device, pk=pk)
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             return HttpResponse("Selected LibreNMS server is no longer configured.", status=400)
         row_id = request.POST.get("row_id", "")
@@ -3042,7 +3055,7 @@ class CableRemotePickerView(BaseCableTableView):
         if row is None or not self._row_is_viewable(request, row, obj, server_key):
             return HttpResponse("Cable row not found.", status=404)
 
-        serial = row.get("_source") == "serial"
+        serial = row.get("_source") == SERIAL_INVENTORY_SOURCE
         port_model = ConsolePort if serial else Interface
         try:
             remote_pk = int(request.POST.get("remote_interface_id", ""))

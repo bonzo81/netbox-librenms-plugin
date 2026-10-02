@@ -23,6 +23,7 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
     OOB_BADGE_HTML,
+    OOB_INVENTORY_SOURCE,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -469,7 +470,7 @@ def interface_name_fallback_matches_port(interface, port_id, server_key) -> bool
 
 
 def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[int], set[int]]:
-    """Return host IDs that are unique and the subset with a unique selected display name."""
+    """Return unique host and OOB port IDs and the subset with a unique display name across all rows."""
     if not is_list_of_dicts(ports):
         return set(), set()
 
@@ -477,8 +478,8 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
     port_names = {}
     name_counts = {}
     for port in ports:
-        if port.get("_source") == "oob":
-            continue
+        # OOB rows count here too: they sync onto this device, and port_id being a LibreNMS
+        # global primary key means an OOB id can never collide with a host id.
         port_id = normalize_librenms_port_id(port.get("port_id"))
         interface_name = port.get(interface_name_field)
         if port_id is None:
@@ -486,6 +487,7 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
         port_id_counts[port_id] = port_id_counts.get(port_id, 0) + 1
         port_names[port_id] = interface_name
         if isinstance(interface_name, str) and interface_name.strip():
+            # Host and OOB rows share the target NetBox device's interface namespace.
             name_counts[interface_name] = name_counts.get(interface_name, 0) + 1
 
     unique_port_ids = {port_id for port_id, count in port_id_counts.items() if count == 1}
@@ -2799,7 +2801,7 @@ def oob_badge_html(record, leading_space=False):
         SafeString: The badge markup, or ``""`` when the row is not OOB-sourced.
 
     """
-    if record.get("_source") != "oob":
+    if record.get("_source") != OOB_INVENTORY_SOURCE:
         return ""
     # Static trusted markup — mark_safe, not format_html (which requires interpolation
     # args and raises TypeError when given a bare string).
@@ -4906,11 +4908,25 @@ def slashless_route_aliases(patterns):
     return aliases
 
 
-def get_enabled_ignore_rules() -> list:
-    """Return all enabled InventoryIgnoreRule instances as a list."""
+def get_enabled_ignore_rules(manufacturer=None) -> list:
+    """
+    Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
+
+    Scoping follows :func:`apply_normalization_rules`: a manufacturer takes its own rules plus
+    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits an
+    entPhysicalClass the built-in list omits is vendor-specific in practice, so leaving every
+    such rule global made one vendor's quirk change what every other vendor's sync admits.
+    """
+    from django.db.models import Q
+
     from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-    return list(InventoryIgnoreRule.objects.filter(enabled=True).order_by("pk"))
+    rules = InventoryIgnoreRule.objects.filter(enabled=True)
+    if manufacturer is not None and getattr(manufacturer, "pk", None) is not None:
+        rules = rules.filter(Q(manufacturer__isnull=True) | Q(manufacturer=manufacturer))
+    else:
+        rules = rules.filter(manufacturer__isnull=True)
+    return list(rules.order_by("pk"))
 
 
 def load_bay_mappings() -> tuple:

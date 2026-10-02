@@ -8,6 +8,7 @@ them as unused within this file.
 
 from .base.cables_view import BaseCableTableView, CableRemotePickerView, SingleCableVerifyView  # noqa: F401
 from .base.interfaces_view import BaseInterfaceTableView  # noqa: F401
+from .data_shapes import CaptureDataShapeView  # noqa: F401
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView  # noqa: F401
 from .base.librenms_sync_view import BaseLibreNMSSyncView  # noqa: F401
 from .base.vlan_table_view import BaseVLANTableView  # noqa: F401

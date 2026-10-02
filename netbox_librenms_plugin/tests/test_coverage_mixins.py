@@ -11,8 +11,6 @@ Targets:
   - VlanAssignmentMixin._update_interface_vlan_assignment (lines 634, 643, 653, 666)
 """
 
-from unittest.mock import patch
-
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, configure_no_librenms_servers
@@ -21,7 +19,7 @@ from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, co
 def server_entry(key, *, display_name=None):
     """Return a usable server mapping, so build_librenms_api() binds a client for *key*."""
     return {
-        "librenms_url": f"http://{key}.librenms.test",
+        "librenms_url": f"https://{key}.librenms.test",
         "api_token": f"token-{key}",
         "display_name": display_name or key.title(),
     }
@@ -98,7 +96,7 @@ class TestRenderSyncPartial:
 
     def test_merges_real_migrated_context_and_write_permission_into_view_context(self):
         """A real migrated donor's marker + winner + the request user's has_write_permission are merged into the partial context (real build_migrated_context, not a stub re-asserting the dict merge)."""
-        from django.test import RequestFactory
+        from django.test import RequestFactory, override_settings
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
         from netbox_librenms_plugin.utils import mark_librenms_migrated
@@ -118,20 +116,27 @@ class TestRenderSyncPartial:
         request = RequestFactory().post("/")
         request.user = make_superuser()
         m.request = request
-        # Only render is stubbed (it needs a full request + template machinery); build_migrated_context
-        # resolves the donor's real marker against the real winner row.
-        with patch("netbox_librenms_plugin.views.mixins.render") as mock_render:
-            m.render_sync_partial(request, donor, "prod", {"vlan_sync": "X"})
+        templates = [
+            {
+                "BACKEND": "django.template.backends.django.DjangoTemplates",
+                "APP_DIRS": False,
+                "OPTIONS": {
+                    "loaders": [
+                        (
+                            "django.template.loaders.locmem.Loader",
+                            {
+                                "tmpl.html": "{{ vlan_sync }}|{{ migrated_to_marker.device_id }}|"
+                                "{{ migrated_to_winner.pk }}|{{ has_write_permission }}"
+                            },
+                        )
+                    ]
+                },
+            }
+        ]
+        with override_settings(TEMPLATES=templates):
+            response = m.render_sync_partial(request, donor, "prod", {"vlan_sync": "X"})
 
-        _req, template, context = mock_render.call_args.args
-        assert template == "tmpl.html"
-        # The view's payload, the real migration flags, AND has_write_permission are present — a
-        # partial-render exit routed through here can never silently drop the migration controls or
-        # the write-permission flag the "Move to winner" buttons gate on.
-        assert context["vlan_sync"] == "X"
-        assert context["migrated_to_marker"]["device_id"] == winner.pk
-        assert context["migrated_to_winner"].pk == winner.pk
-        assert context["has_write_permission"] is True
+        assert response.content.decode() == f"X|{winner.pk}|{winner.pk}|True"
 
 
 @pytest.mark.django_db
@@ -352,7 +357,7 @@ class TestLibreNMSAPIMixinGetContextData:
 
         assert ctx["foo"] == "bar"
         assert ctx["num"] == 42
-        assert ctx["librenms_server_info"]["url"] == "http://default.librenms.test"
+        assert ctx["librenms_server_info"]["url"] == "https://default.librenms.test"
 
     def test_get_context_data_empty_kwargs_still_adds_server_info(self, settings):
         """Server info is added even when the fallback context starts empty."""
@@ -544,6 +549,26 @@ class TestGetVlanGroupsForDeviceInnerBranches:
         assert expected.issubset(set(groups))
         assert unrelated not in groups
         assert [group.name.lower() for group in groups] == sorted(group.name.lower() for group in groups)
+
+    @pytest.mark.django_db
+    def test_scope_comparison_reuses_the_supplied_scoped_groups(self, django_user_model):
+        """A caller-provided scoped group list must prevent a duplicate scoped lookup."""
+        from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
+
+        class TrackingVlanAssignmentMixin(VlanAssignmentMixin):
+            def __init__(self):
+                self.scope_users = []
+
+            def get_vlan_groups_for_devices(self, devices, user=None):
+                self.scope_users.append(user)
+                return super().get_vlan_groups_for_devices(devices, user=user)
+
+        user = django_user_model.objects.create_user(username="scope-cache-user")
+        mixin = TrackingVlanAssignmentMixin()
+
+        mixin.vlan_scope_is_incomplete([], user, scoped_groups=[])
+
+        assert mixin.scope_users == [None]
 
 
 # =============================================================================
@@ -1277,8 +1302,8 @@ class TestRebindApiForServerOrDefault:
     _CONFIG = {
         "netbox_librenms_plugin": {
             "servers": {
-                "prod-a": {"librenms_url": "http://a.example", "api_token": "tok-a"},
-                "prod-b": {"librenms_url": "http://b.example", "api_token": "tok-b"},
+                "prod-a": {"librenms_url": "https://a.example", "api_token": "tok-a"},
+                "prod-b": {"librenms_url": "https://b.example", "api_token": "tok-b"},
             }
         }
     }

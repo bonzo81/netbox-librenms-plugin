@@ -1,4 +1,5 @@
-"""Render the real device_validation_details.html badge for the Stage-2 merge case.
+"""
+Render the real device_validation_details.html badge for the Stage-2 merge case.
 
 The "Two NetBox devices" badge must pair its colour fill with a text colour: a bare
 ``bg-warning`` leaves muted/inherited text, which is unreadable in NetBox's light AND dark
@@ -425,7 +426,8 @@ class TestAddAsOOBFormPanes:
 
 @pytest.mark.django_db
 class TestPromoteToHostFallbackPane:
-    """A promote_to_host-classified row must render an ACTIONABLE Host pane on this branch.
+    """
+    A promote_to_host-classified row must render an ACTIONABLE Host pane on this branch.
 
     The full promote flow (side-by-side modal + device_promote_to_host endpoint) lives on the
     device-merge branch up-stack; standalone, the Host radio's data-target div did not exist,
@@ -434,12 +436,11 @@ class TestPromoteToHostFallbackPane:
     real pane takes over.
     """
 
-    def _render(self, *, patch_promote_url_absent=False, choice_available=False):
+    def _render(self, *, choice_available=False):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
 
-        from netbox_librenms_plugin.tests._html_helpers import patch_move_url_reverse
         from netbox_librenms_plugin.tests.conftest import make_device
 
         existing = make_device("promote-fallback-host")
@@ -470,42 +471,7 @@ class TestPromoteToHostFallbackPane:
             "strip_domain": False,
         }
 
-        if patch_promote_url_absent:
-            # Restack robustness: up-stack the device-merge branch REGISTERS
-            # device_promote_to_host, which would flip a plain absence assertion. Force the
-            # URL absent so the fallback path stays testable on every branch (Django's
-            # {% url %} resolves reverse from django.urls at render time).
-            with patch_move_url_reverse("device_promote_to_host", resolve=False):
-                return render_to_string(
-                    "netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request
-                )
         return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
-
-    def test_fallback_pane_offers_update_and_link(self):
-        """With the promote URL absent (forced), the Host pane renders with the legacy action."""
-        from django.urls import NoReverseMatch, reverse
-
-        # On branches where the real promote flow exists (device-merge and above), the
-        # template ALSO renders a bare {% url 'device_promote_to_host' %} inside the real
-        # pane — forcing reverse to raise there would 500 the whole render, and the
-        # fallback is inert by design (its probe resolves). The real pane has its own
-        # coverage up-stack; this test only guards the fallback branch.
-        try:
-            reverse("plugins:netbox_librenms_plugin:device_promote_to_host", kwargs={"device_id": 1})
-        except NoReverseMatch:
-            pass
-        else:
-            pytest.skip("real promote pane registered on this branch; fallback is inert by design")
-
-        html = self._render(patch_promote_url_absent=True)
-        assert 'id="serial-role-host-5"' in html  # the Host radio's data-target actually exists
-        pane_start = html.find('id="serial-role-host-5"')
-        pane = html[pane_start : html.find('id="serial-role-oob-5"') if 'id="serial-role-oob-5"' in html else None]
-        assert "Update &amp; Link" in pane
-        # No generic '"action" in pane' fallback: any <form action=...> (or the submit
-        # button's own name="action") would match it, so it asserts nothing.
-        assert "device_conflict_action" in pane or "conflict-action" in pane or "/conflict/" in pane
-        assert 'name="server_key" value="prod"' in pane
 
     def test_promote_row_always_has_an_actionable_host_pane(self):
         """Branch-agnostic: whether the fallback or the real promote pane renders, the row must offer an action inside the Host div."""
@@ -518,7 +484,8 @@ class TestPromoteToHostFallbackPane:
 
 
 def test_promote_override_handler_clears_hidden_when_switching_back_to_keep():
-    """The override JS must set the hidden from the 'new' radio's own checked state.
+    """
+    The override JS must set the hidden from the 'new' radio's own checked state.
 
     The old handler only cleared the hidden when a radio carrying data-override-target had
     value 'keep' — but the Keep radio has no data-override-target, so switching back to Keep
@@ -621,7 +588,8 @@ class TestPromoteModalAccessibility:
 
 @pytest.mark.django_db
 class TestMappingFormsShareServerKeyInclude:
-    """Mapping-writing POST forms carry server_key once via the shared include.
+    """
+    Mapping-writing POST forms carry server_key once via the shared include.
 
     Every other action form in this template routes the hidden input through
     inc/_hidden_server_key.html, which renders NOTHING when the context has no

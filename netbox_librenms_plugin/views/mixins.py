@@ -1074,9 +1074,109 @@ class VlanAssignmentMixin:
         """Return *model*'s queryset, scoped to what *user* may view when a user is given."""
         return model.objects.all() if user is None else model.objects.restrict(user, "view")
 
+    def vlan_scope_user(self, request=None):
+        """
+        Return the user whose IPAM view rights scope the VLAN reads.
+
+        Production always has a request: ``dispatch()`` binds one, and the render helpers take
+        one as an argument. The mixin is also built bare, without a request, so resolve both the
+        request and its user by attribute instead of assuming them. No user means no scoping,
+        which is the behaviour a request-less caller had before.
+
+        Args:
+            request: The request being served, when the caller holds one. Falls back to the
+                request bound on the view.
+
+        Returns:
+            The requesting user, or None when no request is bound.
+
+        """
+        if request is None:
+            request = getattr(self, "request", None)
+        return getattr(request, "user", None)
+
+    def hidden_vlan_permissions(self, devices, user):
+        """
+        Return the IPAM view permissions whose absence hides VLAN data for *devices*.
+
+        The VLAN reads are scoped with ``restrict(user, "view")``, which returns nothing for a
+        user without the grant. That is silent on its own, so the tabs and the sync path render
+        this list to name what the user is missing. A permission is only reported when the
+        unscoped query holds rows, so a user is never warned about data that does not exist.
+
+        Args:
+            devices: The devices whose VLAN scope the caller reads.
+            user: The requesting user, or None when no request is bound.
+
+        Returns:
+            list[str]: The missing permission names, group before VLAN, or an empty list.
+
+        """
+        from django.db.models import Q
+        from ipam.models import VLAN, VLANGroup
+
+        if user is None:
+            return []
+        group_permission = get_permission_for_model(VLANGroup, "view")
+        vlan_permission = get_permission_for_model(VLAN, "view")
+        missing = {perm for perm in (group_permission, vlan_permission) if not user.has_perm(perm)}
+        if not missing:
+            return []
+
+        # Unscoped on purpose: the question is what the caller's grant hides, so the comparison
+        # needs the full scope.
+        groups = self.get_vlan_groups_for_devices(devices)
+        hidden = []
+        if group_permission in missing and groups:
+            hidden.append(group_permission)
+        if vlan_permission in missing:
+            in_scope = Q(group__pk__in=[group.pk for group in groups]) | Q(group__isnull=True)
+            if VLAN.objects.filter(in_scope).exists():
+                hidden.append(vlan_permission)
+        return hidden
+
     def get_vlan_groups_for_device(self, device, user=None):
         """Get all VLAN groups relevant to one device."""
         return self.get_vlan_groups_for_devices([device], user=user)
+
+    def vlan_scope_is_incomplete(self, devices, user, *, scoped_groups=None, unscoped_groups=None):
+        """
+        Return whether *user* sees fewer VLAN groups or VLANs than the unscoped scope holds.
+
+        ``hidden_vlan_permissions`` only compares permission NAMES, and a constrained grant
+        satisfies ``has_perm`` at the model level while still hiding individual rows. Writing
+        VLANs from a partial read deletes what the caller cannot see, so compare the scoped read
+        against the unscoped one instead of trusting the name check.
+
+        Args:
+            devices: The devices whose VLAN scope the caller reads.
+            user: The requesting user, or None when no request is bound.
+            scoped_groups: The groups already resolved for *user*, if available.
+            unscoped_groups: The groups already resolved without a user, if available.
+
+        Returns:
+            bool: True when any group or VLAN in the unscoped scope is hidden from *user*.
+
+        """
+        from ipam.models import VLAN
+
+        if user is None:
+            return False
+        if unscoped_groups is None:
+            unscoped_groups = self.get_vlan_groups_for_devices(devices)
+        if scoped_groups is None:
+            scoped_groups = self.get_vlan_groups_for_devices(devices, user=user)
+        if len(scoped_groups) != len(unscoped_groups):
+            return True
+        group_pks = [group.pk for group in unscoped_groups]
+
+        def visible_count(scope_user):
+            queryset = self._vlan_visible_queryset(VLAN, scope_user)
+            in_groups = queryset.filter(group__pk__in=group_pks).count()
+            # The lookup maps read global VLANs too, so a hidden global VLAN is just as partial.
+            return in_groups + queryset.filter(group__isnull=True).count()
+
+        return visible_count(user) != visible_count(None)
 
     def get_vlan_groups_for_devices(self, devices, user=None):
         """

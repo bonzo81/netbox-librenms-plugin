@@ -9,12 +9,6 @@ Tests cover:
 
 import pytest
 
-from netbox_librenms_plugin.tests import test_librenms_api_helpers
-
-# Bind the helper's autouse fixture into this module so it patches the config here only.
-# `pytest_plugins` would register it session-wide and shadow PLUGINS_CONFIG for later tests.
-mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
-
 
 @pytest.mark.django_db
 class TestVlanAssignmentMixin:
@@ -169,7 +163,7 @@ class TestPortVlanEnrichment:
 
         configure_librenms_servers(
             settings,
-            {"default": {"librenms_url": "http://default.librenms.test", "api_token": "token-default"}},
+            {"default": {"librenms_url": "https://default.librenms.test", "api_token": "token-default"}},
         )
         return LibreNMSAPI(server_key="default")
 

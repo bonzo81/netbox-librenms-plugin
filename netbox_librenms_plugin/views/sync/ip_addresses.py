@@ -13,7 +13,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.constants import is_supported_interface_name_field
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
@@ -91,6 +91,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Returns:
             dict: The ``required_object_permissions`` mapping for this request.
+
         """
         if object_type == "device":
             owner_model = Device
@@ -202,7 +203,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # rows came from. The key comes from request POST, so a stale/tampered request could
         # carry an unknown key — surface a user-facing error instead of a 500. (Uses the
         # shared mixin helper, which also resolves/normalizes the key.)
-        post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        post_server_key = self.rebind_api_for_posted_server(request.POST)
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self.redirect_to_ip_tab(request, obj)
@@ -362,6 +363,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Raises:
             LibreNMSIDConflictError: If discovery finds an ID owned by another object.
+
         """
         try:
             librenms_id, lookup_error = self.resolve_librenms_id(obj)
@@ -396,7 +398,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     @staticmethod
     def _same_host(a, b):
-        """True if two address strings refer to the same host IP."""
+        """Report whether two address strings refer to the same host IP."""
         return same_host(a, b)
 
     def _build_interface_maps(self, obj, server_key):
@@ -422,6 +424,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             tuple[dict, dict, dict]: The (by_librenms_id, by_name, by_pk) maps; an ambiguous
                 id/name key maps to None. ``by_pk`` keys the same interface set by string PK so a
                 cached ``interface_url`` (which survives a rename) can still resolve the target.
+
         """
         if isinstance(obj, Device):
             # Route member expansion through the shared helper (returns [obj] when not in a VC)
@@ -459,6 +462,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Returns:
             Interface | VMInterface | None: The matched interface, or None if none resolves.
+
         """
         return resolve_ip_source_interface(ip_data, by_librenms_id, by_name, by_pk)
 
@@ -542,7 +546,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if not is_supported_interface_name_field(interface_name_field):
             raise ValueError("The cached interface naming field is missing or invalid. Refresh the IP data.")
         port = self._cached_port(cached_ports_by_id, ip_data.get("port_id"))
-        if port is None or port.get("_source") == "oob":
+        if port is None or port.get("_source") == OOB_INVENTORY_SOURCE:
             raise ValueError("The cached LibreNMS port is missing or ambiguous. Refresh the IP data.")
         if normalize_librenms_port_id(port.get("port_id")) != normalize_librenms_port_id(ip_data.get("port_id")):
             raise ValueError("The cached LibreNMS port identity changed. Refresh the IP data.")
@@ -650,6 +654,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Returns:
             bool: True if the primary IP changed, False if it was already set.
+
         """
         # ip_family(), not ip_obj.family: NetBox 4.4's property raises AttributeError on the
         # in-memory str address of a freshly created IPAddress, failing the whole IP sync row.
@@ -682,6 +687,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Returns:
             set[str]: The acquired advisory lock identities.
+
         """
         lock_entries = {}
         for selected_ip in selected_ips:
@@ -1039,6 +1045,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Returns:
             dict: The per-outcome row lists, errors, conflicts, and batch mutation state.
+
         """
         results = {
             "created": [],

@@ -7,6 +7,13 @@ PERM_CHANGE_PLUGIN = "netbox_librenms_plugin.change_librenmssettings"
 # LibreNMS VLAN state values
 LIBRENMS_VLAN_STATE_ACTIVE = 1
 
+# Columns every /devices/{id}/ports read requests. The live reader and the data-shape capture
+# share this one string, so a captured ports payload can never carry fewer fields than the sync
+# logic reads. ifVrf is the per-port VRF id the IP tab joins against /routing/vrf.
+LIBRENMS_PORTS_COLUMNS = (
+    "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk,ifVrf"
+)
+
 # LibreNMS port fields the plugin can display as the interface name. The preference resolver,
 # the snapshot writers, and the snapshot readers all validate against this one set, so a value
 # one side accepts can never be rejected by the other.
@@ -15,7 +22,8 @@ INTERFACE_NAME_FIELDS = frozenset({DEFAULT_INTERFACE_NAME_FIELD, "ifDescr"})
 
 
 def is_supported_interface_name_field(value):
-    """Return whether *value* names a LibreNMS port field usable as the interface name.
+    """
+    Return whether *value* names a LibreNMS port field usable as the interface name.
 
     The set membership alone raises TypeError on an unhashable value, and a preference can
     arrive from a JSON body or a cache entry. Every site tests through this one predicate so
@@ -30,6 +38,13 @@ def is_supported_interface_name_field(value):
 # — can't misclassify a normal device as an OOB controller.
 OOB_TYPE_PATTERN = re.compile(r"\b(idrac|ilo|ipmi|bmc|drac|cimc|oob)\d*\b", re.IGNORECASE)
 OOB_TYPES = ("idrac", "ilo", "ipmi", "bmc", "drac", "cimc", "oob")
+
+# Marker the interface/cable/module views stamp on rows merged in from an OOB controller. The
+# rows are display-only, so every reader gates on this one value; a bare literal at each site
+# meant a typo silently turned a read-only row into an actionable one.
+OOB_INVENTORY_SOURCE = "oob"
+MAIN_INVENTORY_SOURCE = "main"
+SERIAL_INVENTORY_SOURCE = "serial"
 
 # Shared "From OOB controller" badge markup (the bare <span>; callers add any leading space).
 # Centralised so a restyle (color/title/text) happens in one place instead of drifting across the
@@ -59,6 +74,7 @@ def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:
         normalize_oob_type("oob", "iDRAC9")   → "idrac"
         normalize_oob_type("ilo", "")         → "ilo"
         normalize_oob_type("ubuntu", "")      → None
+
     """
     generic = None
     for text in (os_str or "", hardware_str or ""):

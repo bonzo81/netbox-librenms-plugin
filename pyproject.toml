@@ -25,6 +25,7 @@ classifiers=[
 ]
 
 requires-python = ">=3.12.0"
+dependencies = ["google-re2>=1.1.20251105"]
 
 [project.urls]
 "Homepage" = "https://github.com/bonzo81/netbox-librenms-plugin/"
@@ -49,6 +50,11 @@ exclude = ["site*", "netbox_librenms_plugin.tests*"]
 
 [tool.setuptools.package-data]
 netbox_librenms_plugin = ["templates/**"]
+# Only the novelty manifest ships at runtime: the in-plugin "Capture data shape" view reads
+# manifest.json (signatures only) to classify novelty. The full recordings are test fixtures — they
+# grow with every contribution and are needed only by the test suite (run from a source checkout),
+# so they are deliberately NOT bundled in the wheel.
+"netbox_librenms_plugin.data_shapes" = ["recordings/manifest.json"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "netbox_librenms_plugin.tests.isolated_settings"
