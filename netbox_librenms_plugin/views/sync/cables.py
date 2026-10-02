@@ -1213,7 +1213,7 @@ class CableRemoteCreateView(SyncCablesView):
             return denied
         context, error = self._resolve_proposal(request, pk, request.POST)
         if error is not None:
-            if request.headers.get("HX-Request") != "true":
+            if not request.htmx:
                 return error
             messages.error(request, error.content.decode(error.charset))
             obj = self.restrict_object_or_404(Device, pk=pk)
