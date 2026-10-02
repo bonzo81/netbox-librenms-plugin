@@ -252,13 +252,11 @@ def test_capture_view_errors_when_device_not_linked(recording_server):
 
 
 @pytest.mark.django_db
-def test_capture_view_reports_a_discovered_id_conflict(recording_server):
-    """A conflicting discovery renders its owner instead of raising from the HTMX request."""
-    from html import unescape
-
+def test_capture_view_does_not_discover_a_conflicting_id(recording_server):
+    """An unlinked device stays unlinked even when discovery would find another owner."""
     recording = load_recording("cisco-stackwise-3member")
     server, api = recording_server(recording)
-    owner = make_device("capture-conflict-owner", librenms_cf={"test": {"id": 1000}})
+    make_device("capture-conflict-owner", librenms_cf={"test": {"id": 1000}})
     target = make_device("capture-conflict-target.example.com", librenms_cf={"test": None})
     server.register(
         f"/api/v0/devices/{target.name}",
@@ -268,10 +266,100 @@ def test_capture_view_reports_a_discovered_id_conflict(recording_server):
     view = _view_with_api(api)
 
     response = _run_capture(view, server, target)
-    html = unescape(response.content.decode())
+    html = response.content.decode()
 
     assert response.status_code == 200
-    assert f"LibreNMS ID 1000 is already assigned to device '{owner.name}'" in html
+    assert "not linked to LibreNMS" in html
+    assert "Anonymized recording" not in html
+    assert not any(request["path"] == f"/api/v0/devices/{target.name}" for request in server.requests)
+
+
+@pytest.mark.django_db
+def test_capture_get_with_view_permission_does_not_store_a_discovered_id(client, settings, recording_server):
+    """A view-only HTTP request must leave an unlinked device unchanged."""
+    from copy import deepcopy
+
+    from core.models import ObjectType
+    from dcim.models import Device
+    from django.urls import reverse
+    from users.models import ObjectPermission
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    server, _api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("capture-unlinked.example.com", librenms_cf={"test": None})
+    before = deepcopy(device.custom_field_data)
+    server.register(
+        f"/api/v0/devices/{device.name}",
+        {"status": "ok", "devices": [{"device_id": 1000}]},
+        method="GET",
+    )
+    config = deepcopy(settings.PLUGINS_CONFIG)
+    config["netbox_librenms_plugin"]["servers"] = {
+        "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
+    }
+    settings.PLUGINS_CONFIG = config
+    user = get_user_model().objects.create_user(username="capture-read-only", password="x")
+    permission = ObjectPermission.objects.create(name="capture-view-only", actions=["view"])
+    permission.object_types.set(
+        [ObjectType.objects.get_for_model(Device), ObjectType.objects.get_for_model(LibreNMSSettings)]
+    )
+    permission.users.set([user])
+    assert not user.has_perm("dcim.change_device")
+    client.force_login(user)
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": device.pk}),
+        {"server_key": "test"},
+    )
+
+    assert response.status_code == 200
+    device.refresh_from_db()
+    assert device.custom_field_data == before
+    assert b"not linked to LibreNMS" in response.content
+    assert b"Anonymized recording" not in response.content
+    assert not any(request["path"] == f"/api/v0/devices/{device.name}" for request in server.requests)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("suffix", ["ip", "links", "transceivers"])
+def test_capture_view_rejects_missing_http_responses(recording_server, suffix):
+    """A broken collection connection must not produce an incomplete recording."""
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("capture-incomplete", librenms_cf={"test": {"id": 1000}})
+
+    def refuse_request(**_request):
+        raise ConnectionResetError("simulated connection reset")
+
+    server.register(f"/api/v0/devices/1000/{suffix}", refuse_request, method="GET")
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "no HTTP response" in html
+    assert f"devices/1000/{suffix}" in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("failure", ["not-found", "transport"])
+def test_capture_view_names_the_failed_oob_controller(recording_server, failure):
+    """An incomplete OOB capture must identify the linked controller in its error."""
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("capture-stale-oob", librenms_cf={"test": {"id": 1000, "oob": {"id": 2500}}})
+    if failure == "transport":
+
+        def refuse_request(**_request):
+            raise ConnectionResetError("simulated connection reset")
+
+        server.register("/api/v0/devices/2500/ports", refuse_request, method="GET")
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "linked OOB controller 2500" in html
     assert "Anonymized recording" not in html
 
 

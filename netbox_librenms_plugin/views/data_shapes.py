@@ -56,9 +56,7 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
         sync_device = get_librenms_sync_device(device, server_key=server_key) or device
         sync_device = self.restrict_object_or_404(Device, pk=sync_device.pk)
-        librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
-        if lookup_error is not None:
-            return self._error(request, device, self.scoped_lookup_message(lookup_error))
+        librenms_id = self.librenms_api.get_stored_librenms_id(sync_device, server_key=server_key)
         if not librenms_id:
             return self._error(
                 request, device, "This device is not linked to LibreNMS, so there is no data shape to capture."

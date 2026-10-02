@@ -902,7 +902,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 parent_context = context_for(parent, resolving | {item_key})
                 # A generic stack/container root can only fall back to the page device. It has not
                 # established ownership, so let a chassis child use its own position or name hint.
-                if parent_context["resolution_source"] != "default":
+                parent_class = _normalize_librenms_text(parent.get("entPhysicalClass"))
+                parent_model = _normalize_librenms_text(parent.get("entPhysicalModelName")).lower()
+                generic_root = parent_context["resolution_source"] == "default" and (
+                    parent_class == "stack"
+                    or (parent_class == "container" and parent_model in _GENERIC_CONTAINER_MODELS)
+                )
+                if not generic_root:
                     inherited_member = parent_context["selected_device"]
 
             selected_device, resolution_source = cls._infer_vc_member_for_item(

@@ -510,21 +510,17 @@ def test_capture_raises_when_filtered_inventory_request_has_transport_error():
         capture_device_recording(api, 1000)
 
 
-def test_capture_omits_transceivers_when_optional_request_has_transport_error():
-    """A failed optional transceiver fetch must not abort an otherwise complete capture."""
-    routes = {
-        "devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
-        "inventory/1000": {"status": "ok", "inventory": []},
-        "inventory/1000/all": {"status": "ok", "inventory": []},
-        "devices/1000/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
-        "devices/1000/port_stack": {"status": "ok", "mappings": []},
-    }
-    api = _StubApi({k: (200, v) for k, v in routes.items()})
-    api.routes["devices/1000/transceivers"] = (0, None)  # transport error on this route
+def test_capture_rejects_transceivers_when_request_has_transport_error(recording_server):
+    """A failed transceiver connection must not produce a recording with no optics."""
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
 
-    captured = capture_device_recording(api, 1000)
+    def refuse_request(**_request):
+        raise ConnectionResetError("simulated connection reset")
 
-    assert "GET /api/v0/devices/1000/transceivers" not in captured["responses"]
+    server.register("/api/v0/devices/1000/transceivers", refuse_request, method="GET")
+
+    with pytest.raises(RuntimeError, match="transceivers.*no HTTP response"):
+        capture_device_recording(api, 1000)
 
 
 def test_capture_rejects_transceiver_server_error():

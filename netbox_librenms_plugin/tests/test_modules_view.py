@@ -6245,6 +6245,55 @@ def test_vc_descendants_use_their_own_member_context():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("parent_class", ["module", "fan", "chassis", "container"])
+def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings, parent_class):
+    """A local child slot must not change its hardware parent's default member."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    page, _member, _manufacturer = _make_mixed_manufacturer_chassis("default-parent")
+    inventory = [
+        {
+            "entPhysicalIndex": 120,
+            "entPhysicalClass": parent_class,
+            "entPhysicalName": "Fan tray",
+            "entPhysicalModelName": "FAN-TRAY",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 121,
+            "entPhysicalClass": "fan",
+            "entPhysicalName": "Fan 2",
+            "entPhysicalModelName": "FAN",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 120,
+        },
+    ]
+    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
+    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
+    client.force_login(make_superuser("default-parent-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    rows = list(response.context["module_sync"]["table"].data)
+    child = next(row for row in rows if row["ent_physical_index"] == 121)
+    assert child["selected_device_id"] == page.pk
+    assert child["member_resolution_source"] == "parent-context"
+
+
+@pytest.mark.django_db
 def test_vc_descendant_local_position_does_not_override_parent_member():
     """A hardware-local child position must inherit its parent's VC member."""
     page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("descendant-position")
